@@ -79,10 +79,11 @@ def load_wide(filepath: Path) -> pd.DataFrame:
         engine = attempt["engine"]
         sep = attempt["sep"]
         kwargs = {
-            "low_memory": False,
             "encoding": encoding,
             "engine": engine,
         }
+        if engine == "c":
+            kwargs["low_memory"] = False
         if sep is not None:
             kwargs["sep"] = sep
 
