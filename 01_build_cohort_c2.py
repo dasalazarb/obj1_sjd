@@ -61,19 +61,49 @@ SJD_CLASS_EXCLUDE = {
 def load_wide(filepath: Path) -> pd.DataFrame:
     """Carga el CSV y convierte tipos en columnas clave.
 
-    Intenta UTF-8 primero y, si falla por codificación, prueba Latin-1 para
-    archivos exportados con codificaciones legacy.
+    Estrategia robusta de lectura:
+      1) UTF-8 con parser C (rápido).
+      2) Latin-1 con parser C (archivos legacy).
+      3) Si hay ParserError (p. ej., separador no estándar), reintenta con
+         `engine="python"` y `sep=None` para autodetectar delimitador.
     """
-    try:
-        df = pd.read_csv(filepath, low_memory=False, encoding="utf-8")
-        encoding_used = "utf-8"
-    except UnicodeDecodeError as exc:
-        warnings.warn(
-            "[load_wide] No se pudo leer con UTF-8; se reintenta con latin-1. "
-            f"Detalle: {exc}"
-        )
-        df = pd.read_csv(filepath, low_memory=False, encoding="latin-1")
-        encoding_used = "latin-1"
+    read_attempts = [
+        {"encoding": "utf-8", "engine": "c", "sep": ","},
+        {"encoding": "latin-1", "engine": "c", "sep": ","},
+        {"encoding": "utf-8", "engine": "python", "sep": None},
+        {"encoding": "latin-1", "engine": "python", "sep": None},
+    ]
+    last_exc = None
+    for attempt in read_attempts:
+        encoding = attempt["encoding"]
+        engine = attempt["engine"]
+        sep = attempt["sep"]
+        kwargs = {
+            "low_memory": False,
+            "encoding": encoding,
+            "engine": engine,
+        }
+        if sep is not None:
+            kwargs["sep"] = sep
+
+        try:
+            df = pd.read_csv(filepath, **kwargs)
+            encoding_used = encoding
+            engine_used = engine
+            sep_used = sep if sep is not None else "auto"
+            break
+        except (UnicodeDecodeError, pd.errors.ParserError) as exc:
+            last_exc = exc
+            warnings.warn(
+                "[load_wide] Falló lectura CSV con "
+                f"encoding={encoding}, engine={engine}, sep={sep!r}. "
+                f"Detalle: {exc}"
+            )
+    else:
+        raise RuntimeError(
+            "[load_wide] No se pudo cargar el CSV tras múltiples intentos de "
+            "encoding/separador."
+        ) from last_exc
 
     # Fechas
     df[VISIT_DATE]  = pd.to_datetime(df[VISIT_DATE],  errors="coerce")
@@ -105,7 +135,10 @@ def load_wide(filepath: Path) -> pd.DataFrame:
                 if c in df.columns]
     null_pct = df[key_cols].isna().mean().mul(100).round(1)
 
-    print(f"\n[load_wide] Encoding usado: {encoding_used}")
+    print(
+        f"\n[load_wide] Lectura CSV -> encoding={encoding_used}, "
+        f"engine={engine_used}, sep={sep_used}"
+    )
     print(f"[load_wide] Shape: {df.shape}")
     print(f"[load_wide] Pacientes únicos: {df[PATIENT_ID].nunique()}")
     print(f"[load_wide] Fases únicas:\n  " +
