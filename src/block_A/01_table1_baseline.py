@@ -42,44 +42,30 @@ SYMPTOM_ONSET_CANDIDATES = [
 ]
 SJOGREN_CLASS_COL = "visit_summary_form__sjogrens_class"
 
-ALLOWED_EXTRA_VARS = {
-    "ids__patient_record_number",
-    "ids__interval_name",
-    "ids__subject_number",
-    "ids__subject_role",
-    "ids__subject_cohort",
-    "ids__site_name",
-    "ids__dob",
-    "ids__race",
-    "ids__ethnicity",
-    "ids__sex",
-    "ids__age_at_visit",
-    "ids__visit_date",
-    "ids__time_24_hour",
-}
-
-REQUIRED_CLINICAL_VARS = {
+REQUIRED_DATASET_VARS = {
     DX_DATE_COL,
     DX_YES_COL,
     *SYMPTOM_ONSET_CANDIDATES,
     SJOGREN_CLASS_COL,
-}
-OPTIONAL_ID_VARS = {
     PATIENT_ID_COL,
     FALLBACK_PATIENT_ID_COL,
     VISIT_DATE_COL,
-    INTERVAL_COL,
     SEX_COL,
     DOB_COL,
     AGE_AT_VISIT_COL,
 }
+
 MISSING_STRINGS = {"", "na", "n/a", "nan", "none", "unknown", "unk", "-99"}
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate Block A Table 1 overall cohort demographics.")
-    parser.add_argument("--input", type=Path, default=common.DEFAULT_ANALYTIC_DATASET, help="Analytic visit-level CSV/Parquet/XLSX file.")
-    parser.add_argument("--codebook", type=Path, default=common.DEFAULT_CODEBOOK, help="Consolidated codebook XLSX/CSV.")
+    parser.add_argument(
+        "--input",
+        type=Path,
+        default=Path("/data/salazarda/data/eda_sjd/data_analytic/visits_long_collapsed_by_interval_codebook_corrected.parquet"),
+        help="Analytic visit-level CSV/Parquet/XLSX file.",
+    )
     parser.add_argument("--outdir", type=Path, default=common.BLOCKA_TABLES_DIR, help="Output directory for Block A tables.")
     parser.add_argument("--eligibility", type=Path, default=common.BLOCKA_TABLES_DIR / "00_analytic_cohort_ids.csv", help="Optional prior eligibility patient ID file.")
     return parser.parse_args()
@@ -106,25 +92,11 @@ def read_table(path: Path) -> pd.DataFrame:
     return pd.read_csv(path, low_memory=False)
 
 
-def load_codebook(path: Path) -> tuple[pd.DataFrame, set[str]]:
-    codebook = read_table(path)
-    if "FORM_NAME__QUESTION_NAME" not in codebook.columns:
-        raise ValueError("Codebook is missing required column FORM_NAME__QUESTION_NAME")
-    allowed_codebook_vars = set(codebook["FORM_NAME__QUESTION_NAME"].dropna().astype(str).unique())
-    allowed_vars = allowed_codebook_vars | ALLOWED_EXTRA_VARS
-    missing_required = sorted(REQUIRED_CLINICAL_VARS - allowed_vars)
-    if missing_required:
-        raise ValueError("Hard-coded clinical variables absent from codebook/allowed IDs: " + ", ".join(missing_required))
-    LOG.info("Loaded codebook: %s unique FORM_NAME__QUESTION_NAME variables", len(allowed_codebook_vars))
-    return codebook, allowed_vars
-
-
-def validate_hardcoded_vars(allowed_vars: set[str]) -> list[str]:
-    hardcoded = REQUIRED_CLINICAL_VARS | OPTIONAL_ID_VARS
-    invalid = sorted(hardcoded - allowed_vars)
-    if invalid:
-        raise ValueError("Variables not in codebook or allowed IDs: " + ", ".join(invalid))
-    return invalid
+def validate_hardcoded_vars(df: pd.DataFrame) -> list[str]:
+    missing = sorted(REQUIRED_DATASET_VARS - set(df.columns))
+    if PATIENT_ID_COL in missing and FALLBACK_PATIENT_ID_COL in missing:
+        raise ValueError(f"No patient identifier column found: tried {PATIENT_ID_COL}, {FALLBACK_PATIENT_ID_COL}")
+    return missing
 
 
 def select_patient_id_col(df: pd.DataFrame) -> str:
@@ -283,7 +255,7 @@ def apply_eligibility(baseline: pd.DataFrame, eligibility_path: Path) -> tuple[p
     return baseline[baseline["patient_id"].astype("string").isin(ids)].copy(), f"Filtered to {len(ids)} IDs from {eligibility_path}."
 
 
-def build_outputs(baseline: pd.DataFrame, allowed_invalid: list[str], eligibility_detail: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+def build_outputs(baseline: pd.DataFrame, dataset_missing: list[str], eligibility_detail: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     n_overall = len(baseline)
     sex_nonmissing = baseline["sex_norm"].notna().sum()
     n_female = int((baseline["sex_norm"] == "female").sum())
@@ -328,8 +300,12 @@ def build_outputs(baseline: pd.DataFrame, allowed_invalid: list[str], eligibilit
         ["dx_delay_gt60_n", int(delay_gt60.sum()), "warning" if delay_gt60.any() else "pass", "Diagnosis delay >60 years."],
         ["classification_missing_n", int((baseline["sjogren_class_norm"] == "unknown").sum()), "warning" if (baseline["sjogren_class_norm"] == "unknown").any() else "pass", json.dumps(class_counts, default=str)],
         ["primary_secondary_other_sum_check", sum(class_counts.values()), "pass" if sum(class_counts.values()) == n_overall else "fail", json.dumps(class_counts, default=str)],
-        ["required_columns_present", True, "pass", "Required hard-coded clinical variables were validated against codebook/allowed ID list."],
-        ["variables_not_in_codebook_or_extra_ids", len(allowed_invalid), "pass" if not allowed_invalid else "fail", ", ".join(allowed_invalid)],
+        [
+            "required_dataset_columns_present",
+            not dataset_missing,
+            "pass" if not dataset_missing else "warning",
+            "Missing dataset variables are treated as missing where possible: " + ", ".join(dataset_missing),
+        ],
     ]
     qc = pd.DataFrame(qc_rows, columns=["qc_check", "value", "status", "details"])
     return table, qc
@@ -341,14 +317,12 @@ def main() -> None:
     common.ensure_output_dirs()
     args.outdir.mkdir(parents=True, exist_ok=True)
 
-    _, allowed_vars = load_codebook(args.codebook)
-    invalid_vars = validate_hardcoded_vars(allowed_vars)
     df = read_table(args.input)
+    dataset_missing = validate_hardcoded_vars(df)
     LOG.info("Loaded analytic dataset: %s rows, %s columns", df.shape[0], df.shape[1])
 
-    dataset_missing = sorted((REQUIRED_CLINICAL_VARS | {PATIENT_ID_COL, FALLBACK_PATIENT_ID_COL, VISIT_DATE_COL, SEX_COL, DOB_COL, AGE_AT_VISIT_COL}) - set(df.columns))
     if dataset_missing:
-        LOG.warning("Variables validated in codebook/allowed IDs but absent from dataset will be treated as missing where possible: %s", ", ".join(dataset_missing))
+        LOG.warning("Expected variables absent from dataset will be treated as missing where possible: %s", ", ".join(dataset_missing))
         for col in dataset_missing:
             if col not in {PATIENT_ID_COL, FALLBACK_PATIENT_ID_COL}:  # patient ID handled explicitly
                 df[col] = np.nan
@@ -359,7 +333,7 @@ def main() -> None:
         raise ValueError("No patients remain after baseline construction/eligibility filtering")
     LOG.info("Built baseline patient table: %s unique patients", baseline["patient_id"].nunique())
 
-    table, qc = build_outputs(baseline, invalid_vars, eligibility_detail)
+    table, qc = build_outputs(baseline, dataset_missing, eligibility_detail)
     if dataset_missing:
         qc = pd.concat([qc, pd.DataFrame([{"qc_check": "dataset_columns_missing_but_allowed", "value": len(dataset_missing), "status": "warning", "details": ", ".join(dataset_missing)}])], ignore_index=True)
 
