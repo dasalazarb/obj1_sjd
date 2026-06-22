@@ -21,15 +21,29 @@ en ESSDAI a lo largo del tiempo en la cohorte general de SjD.
 
 ```
 obj2_essdai_progression/
-├── README.md                ← este archivo
-├── config.py                ← rutas, constantes, encodings ESSDAI
-├── 01_build_cohort_c2.py    ← carga de datos y construcción de la cohorte C2
-├── 02_eda_descriptive.py    ← EDA, cobertura, spaghetti plots, descriptivos
-├── 03_lmm_primary.py        ← LMM random intercept (análisis primario)
-├── 04_domain_analysis.py    ← análisis por dominio ESSDAI (GLMM / descriptivo)
-├── 05_severity_strata.py    ← clasificación Pop 1-3, transiciones Sankey
-├── 06_output_tables.py      ← tablas listas para manuscrito
-└── outputs/                 ← figuras (.png/.svg) y tablas (.csv/.xlsx)
+├── README.md
+├── config.py
+├── data/
+│   ├── raw/                 ← datos originales sin modificar
+│   ├── intermediate/        ← artefactos intermedios de procesamiento
+│   └── analytic/            ← datasets analíticos listos para scripts
+├── scr/
+│   └── block_A/             ← placeholders de scripts del bloque A
+│       ├── 00_cohort_eligibility.py
+│       ├── 01_table1_baseline.py
+│       ├── 02_pop_distribution.py
+│       ├── 03_followup_summary.py
+│       ├── 04_essdai_trajectories.py
+│       ├── 05_domain_heatmap.py
+│       ├── 06_overlap_glandular.py
+│       ├── 07_comorbidities.py
+│       ├── 08_treatments_desc.py
+│       ├── 09_pros_longitudinal.py
+│       └── 10_pop_transitions.py
+└── outputs/
+    ├── tables/              ← tablas del manuscrito
+    ├── figures/             ← figuras del manuscrito
+    └── logs/                ← registros de ejecución
 ```
 
 ---
