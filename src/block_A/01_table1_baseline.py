@@ -158,6 +158,21 @@ def normalize_sjogren_class(x: object) -> str:
     return mapping.get(s, "unknown")
 
 
+def class_is_target_sjd(x: object) -> bool:
+    """Return True for Sjögren classification codes included in this cohort."""
+    return normalize_sjogren_class(x) in {"primary_sjd", "secondary_sjd", "incomplete"}
+
+
+def filter_to_target_sjogren_class_patients(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep patients with visit_summary_form__sjogrens_class equal to 1, 2, or 4 anywhere."""
+    patient_id_source = select_patient_id_col(df)
+    target_patient_ids = set(
+        df.loc[df[SJOGREN_CLASS_COL].map(class_is_target_sjd), patient_id_source]
+        .dropna()
+        .astype("string")
+    )
+    return df[df[patient_id_source].astype("string").isin(target_patient_ids)].copy()
+
 def coalesce_same_date(group: pd.DataFrame) -> pd.Series:
     return group.apply(first_nonmissing, axis=0)
 
@@ -326,6 +341,15 @@ def main() -> None:
         for col in dataset_missing:
             if col not in {PATIENT_ID_COL, FALLBACK_PATIENT_ID_COL}:  # patient ID handled explicitly
                 df[col] = np.nan
+
+    df = filter_to_target_sjogren_class_patients(df)
+    if df.empty:
+        raise ValueError(f"No patients have {SJOGREN_CLASS_COL} equal to 1, 2, or 4")
+    LOG.info(
+        "Filtered to patients with %s in {1, 2, 4}: %s rows",
+        SJOGREN_CLASS_COL,
+        df.shape[0],
+    )
 
     baseline = build_baseline_patient_table(df)
     baseline, eligibility_detail = apply_eligibility(baseline, args.eligibility)
