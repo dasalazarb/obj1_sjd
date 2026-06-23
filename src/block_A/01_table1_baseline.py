@@ -84,6 +84,13 @@ def first_nonmissing(values: Iterable[object]) -> object:
     return np.nan
 
 
+def earliest_nonmissing_date(values: Iterable[object]) -> pd.Timestamp:
+    """Return the earliest parseable date after ignoring missing diagnosis values."""
+    parsed_dates = [parse_partial_date(value) for value in values if not is_missing_value(value)]
+    parsed_dates = [date for date in parsed_dates if pd.notna(date)]
+    return min(parsed_dates) if parsed_dates else pd.NaT
+
+
 def read_table(path: Path) -> pd.DataFrame:
     if path.suffix.lower() in {".xlsx", ".xls"}:
         return pd.read_excel(path)
@@ -194,8 +201,7 @@ def build_baseline_patient_table(df: pd.DataFrame) -> pd.DataFrame:
             baseline_rows = g.head(1)
         baseline = coalesce_same_date(baseline_rows)
 
-        dx_raw = first_nonmissing(g[DX_DATE_COL]) if DX_DATE_COL in g else np.nan
-        dx_date = parse_partial_date(dx_raw)
+        dx_date = earliest_nonmissing_date(g[DX_DATE_COL]) if DX_DATE_COL in g else pd.NaT
         symptom_dates = [parse_partial_date(first_nonmissing(g[c])) for c in SYMPTOM_ONSET_CANDIDATES if c in g]
         symptom_dates = [d for d in symptom_dates if pd.notna(d)]
         symptom_onset = min(symptom_dates) if symptom_dates else pd.NaT
