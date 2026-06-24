@@ -29,8 +29,8 @@ import common  # noqa: E402
 LOG = logging.getLogger(__name__)
 
 INPUT_FILES = {
-    "11D": Path("/data/salazarda/data/data_analytic/BTRIS/11D/lab_records.parquet"),
-    "15D": Path("/data/salazarda/data/data_analytic/BTRIS/15D/lab_records.parquet"),
+    "11D": Path("/data/salazarda/data/eda_sjd/data_analytic/BTRIS/11D/lab_records.parquet"),
+    "15D": Path("/data/salazarda/data/eda_sjd/data_analytic/BTRIS/15D/lab_records.parquet"),
 }
 PATIENT_ID_CANDIDATES = ["ids__patient_record_number"]
 DATE_CANDIDATES = [
@@ -39,7 +39,7 @@ DATE_CANDIDATES = [
     "Date", "date",
 ]
 OPTIONAL_COLS = [
-    "Unit", "Units", "Reference Range", "Reference Low", "Reference High",
+    "Unit", "Units", "Unit of Measure", "Reference Range", "Normal Range", "Reference Low", "Reference High",
     "Abnormal Flag", "Flag", "Result Status", "Observation Note", "Comment",
 ]
 LAB_MARKER_MAP = {
@@ -105,7 +105,13 @@ def _ref_low_high(reference_range: Any, low: Any = None, high: Any = None) -> tu
         return (None if pd.isna(lo) else float(lo), None if pd.isna(hi) else float(hi))
     if _missing(reference_range):
         return None, None
-    nums = re.findall(r"-?\d+(?:\.\d+)?", str(reference_range))
+    text = str(reference_range).replace("–", "-").replace("—", "-")
+    if re.search(r"\d+(?:\.\d+)?\s*:\s*\d+(?:\.\d+)?", text):
+        return None, None
+    range_match = re.search(r"(-?\d+(?:\.\d+)?)\s*(?:-|to|a)\s*(-?\d+(?:\.\d+)?)", text, re.I)
+    if range_match:
+        return float(range_match.group(1)), float(range_match.group(2))
+    nums = re.findall(r"-?\d+(?:\.\d+)?", text)
     if len(nums) >= 2:
         return float(nums[0]), float(nums[1])
     return None, None
@@ -131,12 +137,12 @@ def parse_observation_value(value: Any, marker: str, unit: Any = None, reference
     out: dict[str, Any] = {
         "raw_value": raw, "clean_value": clean, "numeric_value": np.nan, "operator": "",
         "is_numeric": False, "is_text_free": False, "qualitative_status": "",
-        "classification": "unclassified", "classification_reason": "no recognizable result", "plot_shape": "x",
+        "classification": "unclassified", "classification_reason": "no recognizable result", "plot_value_type": "text",
     }
     titer = TITER_RE.search(clean)
     num = NUM_RE.search(clean.replace(",", ""))
     if titer:
-        out.update(numeric_value=float(titer.group(1)), operator="titer", is_numeric=True, plot_shape="circle")
+        out.update(numeric_value=float(titer.group(1)), operator="titer", is_numeric=True, plot_value_type="real number")
         if marker == "ana_titer" and ANA_POSITIVE_TITER_MIN is not None and float(titer.group(1)) >= ANA_POSITIVE_TITER_MIN:
             out.update(qualitative_status="positive", classification="positive", classification_reason=f"ANA titer >= configured threshold {ANA_POSITIVE_TITER_MIN}")
         else:
@@ -144,13 +150,13 @@ def parse_observation_value(value: Any, marker: str, unit: Any = None, reference
         return out
     if num:
         op = num.group(1) or ""
-        out.update(numeric_value=float(num.group(2)), operator=op, is_numeric=True, plot_shape="diamond" if op else "circle")
+        out.update(numeric_value=float(num.group(2)), operator=op, is_numeric=True, plot_value_type="Limit value" if op else "real number")
     flag_low = str(flag).strip().lower() in {"l", "low", "lo", "below low normal"}
     flag_high = str(flag).strip().lower() in {"h", "high", "hi", "above high normal", "abnormal", "a"}
     if AMB_RE.search(low_clean) or (len(clean) > 80 and not POS_RE.search(low_clean) and not NEG_RE.search(low_clean)):
         reason = "ambiguous/free-text result requires manual review"
         status = "free text" if "comment" in low_clean or "note" in low_clean else "ambiguous"
-        out.update(is_text_free=True, qualitative_status=status, classification="ambiguous", classification_reason=reason, plot_shape="x")
+        out.update(is_text_free=True, qualitative_status=status, classification="ambiguous", classification_reason=reason, plot_value_type="text")
         return out
     if NEG_RE.search(low_clean):
         out.update(qualitative_status="negative", classification="negative", classification_reason="negative keyword")
@@ -212,11 +218,12 @@ def prepare_long(df: pd.DataFrame, pid_col: str, date_col: str) -> tuple[pd.Data
     work["patient_id"] = work[pid_col].astype("string")
     work["lab_date"] = pd.to_datetime(work[date_col], errors="coerce")
     work["serology_marker"] = work["Cluster Name"].map(LAB_MARKER_MAP)
-    unit_col = _first_existing(work, ["Unit", "Units"]); flag_col = _first_existing(work, ["Abnormal Flag", "Flag"])
-    rr_col = _first_existing(work, ["Reference Range"]); rlo_col = _first_existing(work, ["Reference Low"]); rhi_col = _first_existing(work, ["Reference High"])
+    unit_col = _first_existing(work, ["Unit of Measure", "Unit", "Units"]); flag_col = _first_existing(work, ["Abnormal Flag", "Flag"])
+    rr_col = _first_existing(work, ["Normal Range", "Reference Range"]); rlo_col = _first_existing(work, ["Reference Low"]); rhi_col = _first_existing(work, ["Reference High"])
     parsed = [parse_observation_value(r["Observation Value"], r["serology_marker"], r.get(unit_col) if unit_col else None, r.get(rr_col) if rr_col else None, r.get(flag_col) if flag_col else None, r.get(rlo_col) if rlo_col else None, r.get(rhi_col) if rhi_col else None) for _, r in work.iterrows()]
     work = pd.concat([work.reset_index(drop=True), pd.DataFrame(parsed)], axis=1)
     work["unit"] = work[unit_col] if unit_col else ""
+    work["normal_range"] = work[rr_col] if rr_col else ""
     work["needs_manual_review"] = work["classification"].astype(str).str.contains("unclassified|ambiguous", na=False) | work["is_text_free"].fillna(False)
     qc = {"invalid_or_future_dates": int(work["lab_date"].isna().sum() + (work["lab_date"] > TODAY).sum())}
     return work, possible, qc
@@ -282,7 +289,7 @@ def write_qc(long: pd.DataFrame, patient: pd.DataFrame, possible: pd.DataFrame, 
     long.to_csv(qc_dir / "01_serology_long_clean.csv", index=False)
     patient.to_csv(qc_dir / "01_serology_patient_level.csv", index=False)
     possible.to_csv(qc_dir / "01_serology_possible_unmapped_cluster_names.csv", index=False)
-    keys = ["serology_marker","Cluster Name","Observation Value","clean_value","unit","numeric_value","operator","qualitative_status","classification","classification_reason","is_text_free","needs_manual_review"]
+    keys = ["serology_marker","Cluster Name","Observation Value","clean_value","unit","normal_range","numeric_value","operator","qualitative_status","classification","classification_reason","is_text_free","needs_manual_review"]
     unique = long.groupby(keys, dropna=False).agg(n_records=("patient_id","size"), n_patients=("patient_id","nunique"), example_patient_id=("patient_id","first"), first_date=("lab_date","min"), last_date=("lab_date","max")).reset_index()
     unique.to_csv(qc_dir / "01_serology_unique_values.csv", index=False)
     long[long["needs_manual_review"]].to_csv(qc_dir / "01_serology_unclassified_values.csv", index=False)
@@ -290,27 +297,89 @@ def write_qc(long: pd.DataFrame, patient: pd.DataFrame, possible: pd.DataFrame, 
     (qc_dir / "01_serology_summary_qc.json").write_text(json.dumps(summary, indent=2, default=str))
 
 
+def _metadata_label(g: pd.DataFrame) -> str:
+    """Return compact unit/range metadata for plot titles."""
+    unit_values = [v for v in g.get("unit", pd.Series(dtype=object)).dropna().astype(str).str.strip().unique() if v]
+    range_values = [v for v in g.get("normal_range", pd.Series(dtype=object)).dropna().astype(str).str.strip().unique() if v]
+    parts = []
+    if unit_values:
+        parts.append("Unit of Measure: " + "; ".join(unit_values[:3]) + ("; ..." if len(unit_values) > 3 else ""))
+    if range_values:
+        parts.append("Normal Range: " + "; ".join(range_values[:3]) + ("; ..." if len(range_values) > 3 else ""))
+    return " | ".join(parts)
+
+
+def _add_reference_lines(ax: plt.Axes, g: pd.DataFrame) -> None:
+    """Add horizontal normal-range dividers when one stable range is available."""
+    ranges = [v for v in g.get("normal_range", pd.Series(dtype=object)).dropna().astype(str).unique() if str(v).strip()]
+    lows_highs = [_ref_low_high(r) for r in ranges]
+    lows = sorted({lo for lo, _ in lows_highs if lo is not None})
+    highs = sorted({hi for _, hi in lows_highs if hi is not None})
+    for lo in lows[:3]:
+        ax.axhline(lo, color="tab:green", linestyle="--", linewidth=.8, alpha=.6, label="_nolegend_")
+    for hi in highs[:3]:
+        ax.axhline(hi, color="tab:red", linestyle="--", linewidth=.8, alpha=.6, label="_nolegend_")
+
+
+def _continuous_markers(long: pd.DataFrame, threshold: float = 0.5) -> set[str]:
+    """Markers with a majority of numeric records should be plotted as continuous."""
+    valid = long[long["serology_marker"].notna()].copy()
+    if valid.empty:
+        return set()
+    numeric_share = valid.groupby("serology_marker")["is_numeric"].mean(numeric_only=False)
+    return set(numeric_share[numeric_share > threshold].index.astype(str))
+
+
 def make_plots(long: pd.DataFrame) -> None:
     out = common.BLOCKA_TABLES_DIR; out.mkdir(parents=True, exist_ok=True)
-    panels = {"anti_ro_ssa":"Anti-Ro/SSA", "anti_la_ssb":"Anti-La/SSB", "ana_titer":"ANA titer", "rf":"RF", "c4":"C4", "wbc":"WBC"}
-    if long[(long.serology_marker == "cryoglobulins") & long.numeric_value.notna()].shape[0]: panels["cryoglobulins"] = "Cryoglobulins"
+    marker_titles = {"anti_ro_ssa":"Anti-Ro/SSA", "anti_la_ssb":"Anti-La/SSB", "ana":"ANA", "ana_titer":"ANA titer", "ana_pattern":"ANA pattern", "rf":"RF", "c4":"C4", "wbc":"WBC", "cryoglobulins":"Cryoglobulins"}
+    continuous_markers = _continuous_markers(long)
+    default_continuous = ["anti_ro_ssa", "anti_la_ssb", "ana_titer", "rf", "c4", "wbc"]
+    panel_markers = [m for m in default_continuous if m in set(long.serology_marker.dropna())]
+    panel_markers.extend(sorted(continuous_markers - set(panel_markers)))
+    panels = {marker: marker_titles.get(marker, marker.replace("_", " ").title()) for marker in panel_markers}
     fig, axes = plt.subplots(len(panels), 1, figsize=(10, 3*len(panels)), sharex=False)
     if len(panels) == 1: axes = [axes]
+    marker_styles = {"Limit value": "D", "real number": "o", "text": "x"}
     for ax, (marker, title) in zip(axes, panels.items()):
         g = long[long.serology_marker == marker].copy(); g["y"] = g["numeric_value"].fillna(-0.05)
-        for shape, mk in [("circle","o"),("diamond","D"),("x","x")]:
-            s = g[g.plot_shape == shape]; ax.scatter(s.lab_date, s.y, marker=mk, alpha=.7, label=shape)
+        for value_type, mk in marker_styles.items():
+            s = g[g.plot_value_type == value_type]
+            ax.scatter(s.lab_date, s.y, marker=mk, alpha=.7, label=value_type)
             for _, r in s.head(60).iterrows():
                 if r["operator"] or pd.isna(r["numeric_value"]): ax.annotate((str(r["operator"])+str(r["clean_value"]))[:30], (r.lab_date, r.y), fontsize=6)
-        ax.set_title(title); ax.set_ylabel("value\nfree text / see note at bottom"); ax.legend(loc="best", fontsize=7)
+        _add_reference_lines(ax, g)
+        metadata = _metadata_label(g)
+        ax.set_title(title + (f" ({metadata})" if metadata else "")); ax.set_ylabel("value\ntext / see note at bottom"); ax.legend(loc="best", fontsize=7)
     fig.tight_layout(); fig.savefig(out / "01_dotplot_serological_profile.pdf"); shutil.copyfile(out / "01_dotplot_serological_profile.pdf", out / "01_dotplot_serological profile.pdf"); plt.close(fig)
-    cat = long[long.serology_marker.isin(["anti_ro_ssa","anti_la_ssb","ana","rf","cryoglobulins"])].copy()
-    cat["period"] = cat.lab_date.dt.to_period("M").dt.to_timestamp(); agg = cat.groupby(["serology_marker","period","classification"]).size().reset_index(name="n")
-    total = agg.groupby(["serology_marker","period"])["n"].transform("sum"); agg["prop"] = agg.n / total
-    fig, ax = plt.subplots(figsize=(11,6))
-    for cls, g in agg.groupby("classification"):
-        ax.scatter(g.period, g.prop, s=g.n.clip(1,200), label=cls, alpha=.7)
-    ax.set_ylabel("Proportion of monthly results"); ax.set_title("Serology categorical timeline (aggregated by month)"); ax.legend(fontsize=7); fig.tight_layout(); fig.savefig(out / "01_serology_categorical_timeline.pdf"); plt.close(fig)
+
+    categorical_markers = ["anti_ro_ssa", "anti_la_ssb", "ana", "ana_pattern", "rf", "cryoglobulins"]
+    categorical_markers = [m for m in categorical_markers if m not in continuous_markers]
+    cat = long[long.serology_marker.isin(categorical_markers)].copy()
+    cat = cat[cat.lab_date.notna()].copy()
+    cat["observed_category"] = cat["clean_value"].where(~cat["clean_value"].astype(str).str.strip().eq(""), cat["classification"])
+    cat["observed_category"] = cat["observed_category"].astype(str).str.slice(0, 60)
+    cat_agg = cat.groupby(["serology_marker", "lab_date", "observed_category", "classification"], dropna=False).size().reset_index(name="n")
+    cat_panels = list(cat_agg["serology_marker"].dropna().unique())
+    if cat_panels:
+        fig, axes = plt.subplots(len(cat_panels), 1, figsize=(12, max(3, 2.8*len(cat_panels))), sharex=False)
+        if len(cat_panels) == 1: axes = [axes]
+        for ax, marker in zip(axes, cat_panels):
+            g = cat_agg[cat_agg.serology_marker == marker].copy()
+            categories = sorted(g["observed_category"].dropna().unique())
+            y_map = {cat_value: idx for idx, cat_value in enumerate(categories)}
+            for cls, s in g.groupby("classification", dropna=False):
+                ax.scatter(s.lab_date, s["observed_category"].map(y_map), s=(s.n.clip(1, 50) * 12), label=str(cls), alpha=.7)
+            for y in np.arange(.5, len(categories), 1):
+                ax.axhline(y, color="0.9", linewidth=.6, zorder=0)
+            source = cat[cat.serology_marker == marker]
+            title = marker_titles.get(marker, marker.replace("_", " ").title())
+            metadata = _metadata_label(source)
+            ax.set_title(title + (f" ({metadata})" if metadata else ""))
+            ax.set_yticks(range(len(categories))); ax.set_yticklabels(categories, fontsize=7)
+            ax.set_xlabel("Time"); ax.set_ylabel("Observed category")
+            ax.legend(fontsize=7, loc="best")
+        fig.tight_layout(); fig.savefig(out / "01_serology_categorical_timeline.pdf"); plt.close(fig)
 
 
 def main() -> None:
