@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import runpy
 import sys
 from pathlib import Path
 from typing import Iterable
@@ -376,6 +377,13 @@ def main() -> None:
     LOG.info("Wrote %s", xlsx_path.relative_to(common.PROJECT_ROOT) if xlsx_path.is_relative_to(common.PROJECT_ROOT) else xlsx_path)
     LOG.info("Wrote %s", qc_path.relative_to(common.PROJECT_ROOT) if qc_path.is_relative_to(common.PROJECT_ROOT) else qc_path)
     LOG.info("QC warnings: %s", int((qc["status"] == "warning").sum()))
+
+    serology_script = Path(__file__).with_name("01_serological_profile.py")
+    if serology_script.exists():
+        LOG.info("Running ITEM 1.2 serological profile: %s", serology_script)
+        runpy.run_path(str(serology_script), run_name="__main__")
+    else:
+        LOG.warning("Serological profile script not found: %s", serology_script)
 
 
 if __name__ == "__main__":
