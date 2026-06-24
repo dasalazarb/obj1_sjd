@@ -105,7 +105,11 @@ def _ref_low_high(reference_range: Any, low: Any = None, high: Any = None) -> tu
         return (None if pd.isna(lo) else float(lo), None if pd.isna(hi) else float(hi))
     if _missing(reference_range):
         return None, None
-    nums = re.findall(r"-?\d+(?:\.\d+)?", str(reference_range))
+    text = str(reference_range).replace("–", "-").replace("—", "-")
+    range_match = re.search(r"(-?\d+(?:\.\d+)?)\s*(?:-|to|a)\s*(-?\d+(?:\.\d+)?)", text, re.I)
+    if range_match:
+        return float(range_match.group(1)), float(range_match.group(2))
+    nums = re.findall(r"-?\d+(?:\.\d+)?", text)
     if len(nums) >= 2:
         return float(nums[0]), float(nums[1])
     return None, None
@@ -310,15 +314,28 @@ def _add_reference_lines(ax: plt.Axes, g: pd.DataFrame) -> None:
     lows = sorted({lo for lo, _ in lows_highs if lo is not None})
     highs = sorted({hi for _, hi in lows_highs if hi is not None})
     for lo in lows[:3]:
-        ax.axhline(lo, color="tab:green", linestyle="--", linewidth=.8, alpha=.6, label="Normal Range low")
+        ax.axhline(lo, color="tab:green", linestyle="--", linewidth=.8, alpha=.6, label="_nolegend_")
     for hi in highs[:3]:
-        ax.axhline(hi, color="tab:red", linestyle="--", linewidth=.8, alpha=.6, label="Normal Range high")
+        ax.axhline(hi, color="tab:red", linestyle="--", linewidth=.8, alpha=.6, label="_nolegend_")
+
+
+def _continuous_markers(long: pd.DataFrame, threshold: float = 0.5) -> set[str]:
+    """Markers with a majority of numeric records should be plotted as continuous."""
+    valid = long[long["serology_marker"].notna()].copy()
+    if valid.empty:
+        return set()
+    numeric_share = valid.groupby("serology_marker")["is_numeric"].mean(numeric_only=False)
+    return set(numeric_share[numeric_share > threshold].index.astype(str))
 
 
 def make_plots(long: pd.DataFrame) -> None:
     out = common.BLOCKA_TABLES_DIR; out.mkdir(parents=True, exist_ok=True)
-    panels = {"anti_ro_ssa":"Anti-Ro/SSA", "anti_la_ssb":"Anti-La/SSB", "ana_titer":"ANA titer", "rf":"RF", "c4":"C4", "wbc":"WBC"}
-    if long[(long.serology_marker == "cryoglobulins") & long.numeric_value.notna()].shape[0]: panels["cryoglobulins"] = "Cryoglobulins"
+    marker_titles = {"anti_ro_ssa":"Anti-Ro/SSA", "anti_la_ssb":"Anti-La/SSB", "ana":"ANA", "ana_titer":"ANA titer", "ana_pattern":"ANA pattern", "rf":"RF", "c4":"C4", "wbc":"WBC", "cryoglobulins":"Cryoglobulins"}
+    continuous_markers = _continuous_markers(long)
+    default_continuous = ["anti_ro_ssa", "anti_la_ssb", "ana_titer", "rf", "c4", "wbc"]
+    panel_markers = [m for m in default_continuous if m in set(long.serology_marker.dropna())]
+    panel_markers.extend(sorted(continuous_markers - set(panel_markers)))
+    panels = {marker: marker_titles.get(marker, marker.replace("_", " ").title()) for marker in panel_markers}
     fig, axes = plt.subplots(len(panels), 1, figsize=(10, 3*len(panels)), sharex=False)
     if len(panels) == 1: axes = [axes]
     marker_styles = {"Limit value": "D", "real number": "o", "text": "x"}
@@ -334,7 +351,9 @@ def make_plots(long: pd.DataFrame) -> None:
         ax.set_title(title + (f" ({metadata})" if metadata else "")); ax.set_ylabel("value\ntext / see note at bottom"); ax.legend(loc="best", fontsize=7)
     fig.tight_layout(); fig.savefig(out / "01_dotplot_serological_profile.pdf"); shutil.copyfile(out / "01_dotplot_serological_profile.pdf", out / "01_dotplot_serological profile.pdf"); plt.close(fig)
 
-    cat = long[long.serology_marker.isin(["anti_ro_ssa","anti_la_ssb","ana","ana_pattern","rf","cryoglobulins"])].copy()
+    categorical_markers = ["anti_ro_ssa", "anti_la_ssb", "ana", "ana_pattern", "rf", "cryoglobulins"]
+    categorical_markers = [m for m in categorical_markers if m not in continuous_markers]
+    cat = long[long.serology_marker.isin(categorical_markers)].copy()
     cat = cat[cat.lab_date.notna()].copy()
     cat["observed_category"] = cat["clean_value"].where(~cat["clean_value"].astype(str).str.strip().eq(""), cat["classification"])
     cat["observed_category"] = cat["observed_category"].astype(str).str.slice(0, 60)
@@ -352,7 +371,7 @@ def make_plots(long: pd.DataFrame) -> None:
             for y in np.arange(.5, len(categories), 1):
                 ax.axhline(y, color="0.9", linewidth=.6, zorder=0)
             source = cat[cat.serology_marker == marker]
-            title = marker.replace("_", " ").title()
+            title = marker_titles.get(marker, marker.replace("_", " ").title())
             metadata = _metadata_label(source)
             ax.set_title(title + (f" ({metadata})" if metadata else ""))
             ax.set_yticks(range(len(categories))); ax.set_yticklabels(categories, fontsize=7)
