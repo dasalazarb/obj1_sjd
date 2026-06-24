@@ -335,6 +335,225 @@ def build_outputs(baseline: pd.DataFrame, allowed_invalid: list[str], eligibilit
     return table, qc
 
 
+# -----------------------------
+# ITEM 1.2 — Serological profile
+# -----------------------------
+import re
+import shutil
+
+LAB_PATHS = {"11D": Path("/data/salazarda/data/data_analytic/BTRIS/11D/lab_records.parquet"), "15D": Path("/data/salazarda/data/data_analytic/BTRIS/15D/lab_records.parquet")}
+DATE_CANDIDATES = ["Observation Date", "observation_date", "Result Date", "result_date", "Specimen Date", "specimen_date", "Collection Date", "collection_date", "Date", "date"]
+OPTIONAL_LAB_COLS = ["Unit", "Units", "Reference Range", "Reference Low", "Reference High", "Abnormal Flag", "Flag", "Result Status", "Observation Note", "Comment"]
+LAB_MARKER_MAP = {
+    "SS-A/Ro Ab, IgG (Blood)": "anti_ro_ssa", "SS-Ro60 Ab, IgG (Blood)": "anti_ro_ssa", "SS-Ro52 Ab, IgG (Blood)": "anti_ro_ssa",
+    "SS-B/La Ab, IgG (Blood)": "anti_la_ssb",
+    "Antinuclear Antibody (ANA) (Blood)": "ana", "Antinuclear Antibody (ANA) HEp-2 Substrate (Blood)": "ana", "Antinuclear Antibody (ANA) HEp-2 Substrate Titer (Blood)": "ana_titer", "Antinuclear Antibody (ANA) HEp-2 Substrate Pattern (Blood)": "ana_pattern",
+    "Rheumatoid Factor (Blood)": "rf", "Cryoglobulins (Blood)": "cryoglobulins", "Complement C4 (Blood)": "c4", "WBC (Blood)": "wbc",
+}
+ANA_POSITIVE_TITER_MIN = 80
+C4_LOW_THRESHOLD = None
+WBC_LOW_THRESHOLD_X10E9_L = 4.0
+POSITIVE_TERMS = ["positive", "reactive", "detected", "present", "abnormal", "high"]
+NEGATIVE_TERMS = ["negative", "non-reactive", "nonreactive", "not detected", "absent", "none detected"]
+AMBIG_TERMS = ["see note", "see comment", "comment", "borderline", "equivocal", "indeterminate", "inconclusive"]
+
+def _lab_date_col(df: pd.DataFrame) -> str:
+    for c in DATE_CANDIDATES:
+        if c in df.columns:
+            return c
+    for c in df.columns:
+        if "date" in c.lower() or "datetime" in c.lower():
+            return c
+    raise ValueError("No lab date column found. Tried configured date columns and columns containing date/datetime.")
+
+def _unit_col(df: pd.DataFrame) -> str | None:
+    return "Unit" if "Unit" in df.columns else ("Units" if "Units" in df.columns else None)
+
+def _first_existing(df: pd.DataFrame, cols: list[str]) -> str | None:
+    return next((c for c in cols if c in df.columns), None)
+
+def load_serology_labs() -> tuple[pd.DataFrame, dict]:
+    frames, qc = [], {"input_files": {}, "warnings": []}
+    for src, path in LAB_PATHS.items():
+        if not path.exists():
+            raise FileNotFoundError(f"Required lab file not found: {path}")
+        df = read_table(path)
+        missing = [c for c in ["Cluster Name", "Observation Value", PATIENT_ID_COL] if c not in df.columns]
+        if "Cluster Name" in missing or "Observation Value" in missing:
+            raise ValueError(f"{path} is missing required columns: {missing}")
+        if PATIENT_ID_COL not in df.columns:
+            raise ValueError(f"{path} is missing required patient identifier column: {PATIENT_ID_COL}")
+        date_col = _lab_date_col(df)
+        keep = [PATIENT_ID_COL, "Cluster Name", "Observation Value", date_col] + [c for c in OPTIONAL_LAB_COLS if c in df.columns]
+        x = df[keep].copy().rename(columns={PATIENT_ID_COL: "patient_id", date_col: "lab_date_raw"})
+        x["source_folder"] = src
+        qc["input_files"][src] = {"path": str(path), "rows": int(len(df)), "date_column": date_col, "columns": list(df.columns)}
+        frames.append(x)
+    labs = pd.concat(frames, ignore_index=True)
+    dup_n = int(labs.duplicated().sum())
+    qc["exact_duplicate_records"] = dup_n
+    return labs, qc
+
+def parse_ref_low(ref: object) -> float | None:
+    if is_missing_value(ref): return None
+    nums = re.findall(r"[-+]?\d*\.?\d+", str(ref))
+    return float(nums[0]) if nums else None
+
+def parse_observation_value(value, marker, unit=None, reference_range=None, flag=None):
+    raw = value
+    clean = "" if pd.isna(value) else str(value).strip()
+    low = clean.lower()
+    out = {"raw_value": raw, "clean_value": clean, "numeric_value": np.nan, "operator": "", "is_numeric": False, "is_text_free": False, "qualitative_status": "", "classification": "unclassified", "classification_reason": "no rule matched", "plot_shape": "x"}
+    if clean == "":
+        out["classification_reason"] = "missing value"; return out
+    if any(t in low for t in AMBIG_TERMS) or len(clean) > 80 or "|" in clean:
+        out.update(is_text_free=True, qualitative_status="free text", classification="unclassified", classification_reason="ambiguous/free text term", plot_shape="x"); return out
+    if re.search(r"(^|\W)(neg|negative)(\W|$)", low) or any(t in low for t in NEGATIVE_TERMS):
+        out.update(qualitative_status="negative", classification="negative", classification_reason="negative text", plot_shape="x"); return out
+    if re.search(r"(^|\W)(pos|positive)(\W|$)", low) or any(t in low for t in POSITIVE_TERMS):
+        out.update(qualitative_status="positive", classification="positive", classification_reason="positive text", plot_shape="x"); return out
+    mt = re.search(r"1\s*:\s*(\d+(?:\.\d+)?)", clean)
+    if mt:
+        val = float(mt.group(1)); cls = "positive" if marker in {"ana_titer", "ana"} and ANA_POSITIVE_TITER_MIN is not None and val >= ANA_POSITIVE_TITER_MIN else "unclassified_numeric_titer"
+        out.update(numeric_value=val, operator="titer", is_numeric=True, classification=cls, classification_reason=(f"ANA titer >= {ANA_POSITIVE_TITER_MIN}" if cls=="positive" else "numeric titer without/under threshold"), plot_shape="diamond"); return out
+    mn = re.search(r"(<=|>=|<|>)?\s*([-+]?\d*\.?\d+)", clean)
+    if mn:
+        op = mn.group(1) or ""; val = float(mn.group(2)); shape = "diamond" if op else "circle"
+        out.update(numeric_value=val, operator=op, is_numeric=True, classification="unclassified_numeric", classification_reason="numeric requires marker-specific flag/reference rule", plot_shape=shape)
+        fl = "" if flag is None or pd.isna(flag) else str(flag).strip().lower()
+        ref_low = parse_ref_low(reference_range)
+        if marker == "wbc":
+            v = convert_wbc_to_x10e9_l(val, unit)
+            out["numeric_value"] = v
+            if fl in {"l", "low"} or "low" in fl: out.update(classification="positive", classification_reason="low flag")
+            elif ref_low is not None and v < ref_low: out.update(classification="positive", classification_reason="below reference lower limit")
+            elif ref_low is None and v < WBC_LOW_THRESHOLD_X10E9_L: out.update(classification="positive", classification_reason=f"below configurable WBC threshold {WBC_LOW_THRESHOLD_X10E9_L}")
+            else: out.update(classification="negative", classification_reason="not low by flag/reference/threshold")
+        elif marker == "c4":
+            if fl in {"l", "low"} or "low" in fl: out.update(classification="positive", classification_reason="low flag")
+            elif ref_low is not None and val < ref_low: out.update(classification="positive", classification_reason="below reference lower limit")
+            elif C4_LOW_THRESHOLD is not None and val < C4_LOW_THRESHOLD: out.update(classification="positive", classification_reason=f"below configurable C4 threshold {C4_LOW_THRESHOLD}")
+            elif ref_low is not None or C4_LOW_THRESHOLD is not None: out.update(classification="negative", classification_reason="not low by reference/threshold")
+        elif marker == "rf":
+            if fl in {"h", "high", "a", "abnormal"} or "high" in fl: out.update(classification="positive", classification_reason="high/abnormal flag")
+            elif ref_low is not None: out.update(classification="negative", classification_reason="numeric RF with reference range but no high flag")
+            else: out.update(classification="unclassified_numeric_no_ref", classification_reason="numeric RF without reference or flag")
+        return out
+    out.update(is_text_free=True, classification="unclassified", classification_reason="non-numeric text not mapped", plot_shape="x")
+    return out
+
+def convert_wbc_to_x10e9_l(v: float, unit: object) -> float:
+    u = "" if unit is None or pd.isna(unit) else str(unit).lower().replace(" ", "")
+    if "cells/ul" in u or "cells/µl" in u: return v / 1000.0
+    return v
+
+def write_empty_pdf(path: Path, title: str) -> None:
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(8, 4)); ax.text(.5,.5,title,ha="center",va="center"); ax.axis("off"); fig.tight_layout(); fig.savefig(path); plt.close(fig)
+
+
+def build_serology_outputs(cohort_ids: set[str]) -> None:
+    qc_dir = common.OUTPUTS_DIR / "qc" / "blockA"; tbl_dir = common.BLOCKA_TABLES_DIR
+    qc_dir.mkdir(parents=True, exist_ok=True); tbl_dir.mkdir(parents=True, exist_ok=True)
+    labs, qc = load_serology_labs()
+    labs["patient_id"] = labs["patient_id"].astype("string")
+    if cohort_ids:
+        labs = labs[labs["patient_id"].isin(cohort_ids)].copy()
+    labs["lab_date"] = pd.to_datetime(labs["lab_date_raw"], errors="coerce")
+    today = pd.Timestamp.today().normalize()
+    qc["invalid_or_future_dates"] = int(labs["lab_date"].isna().sum() + (labs["lab_date"] > today).sum())
+    similar_re = re.compile("ro|ssa|ss-a|la|ssb|ana|rheumatoid|cryoglobulin|c4|wbc", re.I)
+    possible = labs[~labs["Cluster Name"].isin(LAB_MARKER_MAP) & labs["Cluster Name"].astype(str).str.contains(similar_re, na=False)]
+    possible[["Cluster Name"]].drop_duplicates().sort_values("Cluster Name").to_csv(qc_dir/"01_serology_possible_unmapped_cluster_names.csv", index=False)
+    labs = labs[labs["Cluster Name"].isin(LAB_MARKER_MAP)].drop_duplicates().copy()
+    labs["serology_marker"] = labs["Cluster Name"].map(LAB_MARKER_MAP)
+    unit_col = _unit_col(labs); flag_col = _first_existing(labs, ["Abnormal Flag", "Flag"]); ref_col = _first_existing(labs, ["Reference Range", "Reference Low"])
+    labs["unit"] = labs[unit_col] if unit_col else ""
+    parsed = labs.apply(lambda r: parse_observation_value(r["Observation Value"], r["serology_marker"], r.get("unit"), r.get(ref_col) if ref_col else None, r.get(flag_col) if flag_col else None), axis=1, result_type="expand")
+    clean = pd.concat([labs.reset_index(drop=True), parsed.reset_index(drop=True)], axis=1)
+    clean.to_csv(qc_dir/"01_serology_long_clean.csv", index=False)
+    clean[~clean["classification"].isin(["positive","negative"])].to_csv(qc_dir/"01_serology_unclassified_values.csv", index=False)
+    group_cols=["serology_marker","Cluster Name","Observation Value","clean_value","unit","numeric_value","operator","qualitative_status","classification","classification_reason","is_text_free"]
+    uniq=(clean.groupby(group_cols, dropna=False).agg(n_records=("patient_id","size"), n_patients=("patient_id","nunique"), example_patient_id=("patient_id","first"), first_date=("lab_date","min"), last_date=("lab_date","max")).reset_index())
+    uniq["needs_manual_review"] = ~uniq["classification"].isin(["positive","negative"])
+    uniq.to_csv(qc_dir/"01_serology_unique_values.csv", index=False)
+    marker_map = {"anti_ro":"anti_ro_ssa", "anti_la":"anti_la_ssb", "ana":"ana", "rf":"rf", "cryo":"cryoglobulins", "c4":"c4", "wbc":"wbc"}
+    patients = sorted(set(cohort_ids) if cohort_ids else set(clean["patient_id"].dropna().astype(str)))
+    rows=[]
+    for pid in patients:
+        prow={"patient_id":pid}
+        pg=clean[clean["patient_id"].astype(str)==str(pid)]
+        for prefix, marker in marker_map.items():
+            mg = pg[pg["serology_marker"].eq(marker) | ((prefix=="ana") & pg["serology_marker"].isin(["ana","ana_titer","ana_pattern"]))]
+            interp=mg["classification"].isin(["positive","negative"])
+            prow[f"{prefix}_tested"] = bool(len(mg)); prow[f"{prefix}_interpretable"] = bool(interp.any())
+            pos=bool((mg["classification"]=="positive").any()) if interp.any() else np.nan
+            outcol = {"anti_ro":"anti_ro_pos","anti_la":"anti_la_pos","cryo":"cryo_pos","c4":"low_c4","wbc":"leukopenia"}.get(prefix, f"{prefix}_pos")
+            prow[outcol]=pos; prow[f"{prefix}_first_date"] = mg["lab_date"].min(); prow[f"{prefix}_first_positive_date"] = mg.loc[mg["classification"].eq("positive"),"lab_date"].min(); prow[f"{prefix}_n_records"] = int(len(mg))
+            if prefix=="anti_ro": prow["anti_ro_positive_source_lab"] = "; ".join(sorted(mg.loc[mg["classification"].eq("positive"),"Cluster Name"].dropna().unique()))
+            if prefix=="ana": prow["ana_titer_max"] = mg.loc[mg["serology_marker"].eq("ana_titer"),"numeric_value"].max(); prow["ana_pattern_values"] = "; ".join(mg.loc[mg["serology_marker"].eq("ana_pattern"),"clean_value"].dropna().astype(str).unique())
+            if prefix in {"rf","c4","wbc"}: prow[f"{prefix}_max_value" if prefix=="rf" else f"{prefix}_min_value"] = (mg["numeric_value"].max() if prefix=="rf" else mg["numeric_value"].min()); prow[f"{prefix}_units"] = "; ".join(mg["unit"].dropna().astype(str).unique())
+        prow["double_ro_la_pos"] = bool(prow.get("anti_ro_pos") is True and prow.get("anti_la_pos") is True)
+        rows.append(prow)
+    patient = pd.DataFrame(rows); patient.to_csv(qc_dir/"01_serology_patient_level.csv", index=False)
+    specs=[("Anti-Ro/SSA positive","anti_ro_pos","anti_ro_interpretable","Anti-Ro/SSA exact mapped labs; positive if any interpretable positive."),("Anti-La/SSB positive","anti_la_pos","anti_la_interpretable","Anti-La/SSB exact mapped lab; positive if any interpretable positive."),("Anti-Ro/SSA and Anti-La/SSB double-positive","double_ro_la_pos",None,"Both Anti-Ro/SSA and Anti-La/SSB positive; denominator requires both interpretable."),("ANA positive","ana_pos","ana_interpretable","Qualitative ANA or ANA titer >= configured threshold."),("Rheumatoid factor positive","rf_pos","rf_interpretable","Positive text/high flag; numeric without reference/flag unclassified."),("Cryoglobulinemia documented","cryo_pos","cryo_interpretable","Positive/detected/present cryoglobulin result."),("Low C4","low_c4","c4_interpretable","Low flag, below reference, or configured threshold if set."),("Leukopenia","leukopenia","wbc_interpretable","Low flag, below reference, or WBC < configured threshold.")]
+    out=[]; n_total=len(patient)
+    pcts={}
+    for var,pos,interp,definition in specs:
+        denom_mask = (patient["anti_ro_interpretable"] & patient["anti_la_interpretable"]) if pos=="double_ro_la_pos" else patient[interp]
+        denom=int(denom_mask.sum()); n=int((patient.loc[denom_mask,pos] == True).sum()); pct=(n/denom*100) if denom else np.nan; pcts[pos]=pct
+        tested_col = pos.replace("_pos", "_tested").replace("low_c4","c4_tested").replace("leukopenia","wbc_tested")
+        unclass=int(((patient.get(tested_col, False)==True) & ~denom_mask).sum()) if tested_col in patient else 0
+        out.append({"section":"Serologic characteristics","variable":var,"n":n,"denominator":denom,"percent":round(pct,1) if not pd.isna(pct) else np.nan,"formatted":f"{n}/{denom} ({pct:.1f}%)" if denom else f"{n}/0 (NA%)","n_total_cohort":n_total,"n_tested":int(patient.get(tested_col, pd.Series(False,index=patient.index)).sum()) if tested_col in patient else denom,"n_interpretable":denom,"missing_n":n_total-denom,"unclassified_n":unclass,"denominator_type":"n_interpretable","definition":definition,"qc_flag":""})
+    serotab=pd.DataFrame(out)
+    table_path=tbl_dir/"01_table1_overall.csv"
+    existing=pd.read_csv(table_path) if table_path.exists() else pd.DataFrame()
+    if not existing.empty and "section" in existing.columns:
+        existing=existing[existing["section"]!="Serologic characteristics"]
+    pd.concat([existing, serotab], ignore_index=True, sort=False).to_csv(table_path, index=False)
+    warnings=[]
+    if pcts.get("anti_ro_pos",0) < pcts.get("anti_la_pos",0): warnings.append("pct_anti_ro_pos < pct_anti_la_pos")
+    if pcts.get("double_ro_la_pos",0) > pcts.get("anti_ro_pos",0): warnings.append("pct_double_pos > pct_anti_ro_pos")
+    if pcts.get("double_ro_la_pos",0) > pcts.get("anti_la_pos",0): warnings.append("pct_double_pos > pct_anti_la_pos")
+    for r in out:
+        if r["missing_n"] / max(n_total,1) > .5: warnings.append(f"missingness >50% for {r['variable']}")
+        if r["n_interpretable"] < 20: warnings.append(f"interpretable denominator <20 for {r['variable']}")
+    if clean["is_text_free"].any(): warnings.append("see note/comment/free text values present")
+    for m in ["c4","rf","wbc"]:
+        if clean.loc[clean["serology_marker"].eq(m),"unit"].nunique(dropna=True)>1: warnings.append(f"multiple units for {m}")
+    if qc["invalid_or_future_dates"]: warnings.append("invalid or future lab dates")
+    if qc["exact_duplicate_records"]: warnings.append("exact duplicates across inputs")
+    if len(possible): warnings.append("similar but unmapped Cluster Names present")
+    qc["warnings"] = warnings; qc["metrics"] = {"pct_anti_ro_pos":pcts.get("anti_ro_pos"),"pct_double_pos":pcts.get("double_ro_la_pos"),"pct_cryo":pcts.get("cryo_pos")}
+    (qc_dir/"01_serology_summary_qc.json").write_text(json.dumps(qc, indent=2, default=str))
+    make_serology_plots(clean, tbl_dir)
+    en=f"Anti-Ro/SSA positivity was present in {pcts.get('anti_ro_pos',np.nan):.1f}% of patients with interpretable testing; {pcts.get('double_ro_la_pos',np.nan):.1f}% were double-positive for Anti-Ro/SSA and Anti-La/SSB. Cryoglobulinemia was documented in {pcts.get('cryo_pos',np.nan):.1f}% of patients with interpretable cryoglobulin testing."
+    es=f"La positividad para Anti-Ro/SSA estuvo presente en {pcts.get('anti_ro_pos',np.nan):.1f}% de los pacientes con prueba interpretable; {pcts.get('double_ro_la_pos',np.nan):.1f}% fueron doble positivos para Anti-Ro/SSA y Anti-La/SSB. La crioglobulinemia fue documentada en {pcts.get('cryo_pos',np.nan):.1f}% de los pacientes con prueba interpretable."
+    print(en); print(es)
+
+def make_serology_plots(clean: pd.DataFrame, tbl_dir: Path) -> None:
+    import matplotlib.pyplot as plt
+    if clean.empty:
+        write_empty_pdf(tbl_dir/"01_dotplot_serological profile.pdf", "No serology records"); shutil.copyfile(tbl_dir/"01_dotplot_serological profile.pdf", tbl_dir/"01_dotplot_serological_profile.pdf"); write_empty_pdf(tbl_dir/"01_serology_categorical_timeline.pdf", "No serology records"); return
+    panels={"anti_ro_ssa":"Anti-Ro/SSA","anti_la_ssb":"Anti-La/SSB","ana_titer":"ANA titer","rf":"RF","c4":"C4","wbc":"WBC","cryoglobulins":"Cryoglobulins"}
+    plot=clean[clean["serology_marker"].isin(panels)].copy(); plot["y"] = plot["numeric_value"].fillna(-0.05)
+    fig, axes=plt.subplots(len(panels),1,figsize=(11,14),sharex=True)
+    for ax,(m,title) in zip(axes,panels.items()):
+        g=plot[plot["serology_marker"].eq(m)]
+        for shape, marker in [("circle","o"),("diamond","D"),("x","x")]:
+            h=g[g["plot_shape"].eq(shape)]; ax.scatter(h["lab_date"], h["y"], marker=marker, alpha=.65, s=18)
+        ax.set_title(title); ax.set_ylabel("value")
+    fig.autofmt_xdate(); fig.tight_layout(); fig.savefig(tbl_dir/"01_dotplot_serological profile.pdf"); plt.close(fig)
+    shutil.copyfile(tbl_dir/"01_dotplot_serological profile.pdf", tbl_dir/"01_dotplot_serological_profile.pdf")
+    cats=clean[clean["serology_marker"].isin(["anti_ro_ssa","anti_la_ssb","ana","rf","cryoglobulins"])].copy()
+    cats["month"]=cats["lab_date"].dt.to_period("M").dt.to_timestamp(); cats["cat"]=np.where(cats["classification"].isin(["positive","negative"]),cats["classification"],np.where(cats["qualitative_status"].isin(["equivocal","borderline","indeterminate"]),cats["qualitative_status"],"unclassified/free text"))
+    agg=cats.groupby(["serology_marker","month","cat"]).size().groupby(level=[0,1]).apply(lambda s:s/s.sum()).reset_index(name="proportion") if not cats.empty else pd.DataFrame()
+    if agg.empty: write_empty_pdf(tbl_dir/"01_serology_categorical_timeline.pdf", "No categorical serology records"); return
+    fig, ax=plt.subplots(figsize=(11,6))
+    for (m,c),g in agg.groupby(["serology_marker","cat"]): ax.plot(g["month"], g["proportion"], label=f"{m}: {c}")
+    ax.legend(fontsize=6, ncol=2); ax.set_ylabel("proportion"); fig.autofmt_xdate(); fig.tight_layout(); fig.savefig(tbl_dir/"01_serology_categorical_timeline.pdf"); plt.close(fig)
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
     args = parse_args()
@@ -376,6 +595,8 @@ def main() -> None:
     LOG.info("Wrote %s", xlsx_path.relative_to(common.PROJECT_ROOT) if xlsx_path.is_relative_to(common.PROJECT_ROOT) else xlsx_path)
     LOG.info("Wrote %s", qc_path.relative_to(common.PROJECT_ROOT) if qc_path.is_relative_to(common.PROJECT_ROOT) else qc_path)
     LOG.info("QC warnings: %s", int((qc["status"] == "warning").sum()))
+
+    build_serology_outputs(set(baseline["patient_id"].astype("string")))
 
 
 if __name__ == "__main__":
