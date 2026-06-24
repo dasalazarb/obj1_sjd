@@ -106,6 +106,8 @@ def _ref_low_high(reference_range: Any, low: Any = None, high: Any = None) -> tu
     if _missing(reference_range):
         return None, None
     text = str(reference_range).replace("–", "-").replace("—", "-")
+    if re.search(r"\d+(?:\.\d+)?\s*:\s*\d+(?:\.\d+)?", text):
+        return None, None
     range_match = re.search(r"(-?\d+(?:\.\d+)?)\s*(?:-|to|a)\s*(-?\d+(?:\.\d+)?)", text, re.I)
     if range_match:
         return float(range_match.group(1)), float(range_match.group(2))
