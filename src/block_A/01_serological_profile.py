@@ -79,6 +79,7 @@ DEFAULT_NEGATIVE_UPPER_LIMITS = {
 INCLUSIVE_NEGATIVE_UPPER_LIMIT_LABS = {"Antinuclear Antibody (ANA) (Blood)"}
 RF_DEFAULT_NEGATIVE_UPPER_LIMITS = (13.0, 15.0)
 TODAY = pd.Timestamp.today().normalize()
+SEROLOGY_INTERMEDIATE_DIR = common.PROJECT_ROOT / "data_intermediate" / "block_A"
 
 POS_RE = re.compile(r"\b(positive|pos|reactive|detected|present|abnormal|high)\b", re.I)
 NEG_RE = re.compile(r"\b(negative|neg|non[- ]?reactive|not detected|absent|none detected)\b", re.I)
@@ -408,6 +409,15 @@ def add_table_block(patient: pd.DataFrame, qc_warnings: list[str]) -> pd.DataFra
     return serology_rows
 
 
+def write_intermediate_lab_dfs(long: pd.DataFrame, patient: pd.DataFrame, serology_rows: pd.DataFrame, possible: pd.DataFrame) -> None:
+    """Persist the data frames used to derive the serology Table 1 lab rows."""
+    SEROLOGY_INTERMEDIATE_DIR.mkdir(parents=True, exist_ok=True)
+    long.to_csv(SEROLOGY_INTERMEDIATE_DIR / "01_serology_labs_long_clean_used_for_lab_classification.csv", index=False)
+    patient.to_csv(SEROLOGY_INTERMEDIATE_DIR / "01_serology_patient_level_lab_flags_used_for_table1.csv", index=False)
+    serology_rows.to_csv(SEROLOGY_INTERMEDIATE_DIR / "01_serology_table1_serologic_characteristics_rows.csv", index=False)
+    possible.to_csv(SEROLOGY_INTERMEDIATE_DIR / "01_serology_possible_unmapped_lab_names_for_review.csv", index=False)
+
+
 def write_qc(long: pd.DataFrame, patient: pd.DataFrame, possible: pd.DataFrame, summary: dict[str, Any], warnings: list[str]) -> None:
     qc_dir = common.OUTPUTS_DIR / "qc" / "blockA"; qc_dir.mkdir(parents=True, exist_ok=True)
     long.to_csv(qc_dir / "01_serology_long_clean.csv", index=False)
@@ -528,7 +538,10 @@ def main() -> None:
     if summary.get("invalid_or_future_dates", 0): warnings.append("invalid or future dates present")
     if summary.get("exact_duplicate_rows", 0): warnings.append("exact duplicate rows between/within sources present")
     if not possible.empty: warnings.append("similar but unmapped Cluster Name values present")
-    add_table_block(patient, warnings); write_qc(long, patient, possible, summary, warnings); make_plots(long)
+    serology_rows = add_table_block(patient, warnings)
+    write_intermediate_lab_dfs(long, patient, serology_rows, possible)
+    write_qc(long, patient, possible, summary, warnings)
+    make_plots(long)
     print(f"Anti-Ro/SSA positivity was present in {ro:.1f}% of patients with interpretable testing; {dbl:.1f}% were double-positive for Anti-Ro/SSA and Anti-La/SSB. Cryoglobulinemia was documented in {cryo:.1f}% of patients with interpretable cryoglobulin testing.")
     print(f"La positividad para Anti-Ro/SSA estuvo presente en {ro:.1f}% de los pacientes con prueba interpretable; {dbl:.1f}% fueron doble positivos para Anti-Ro/SSA y Anti-La/SSB. La crioglobulinemia fue documentada en {cryo:.1f}% de los pacientes con prueba interpretable.")
 
