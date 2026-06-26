@@ -79,6 +79,7 @@ DEFAULT_NEGATIVE_UPPER_LIMITS = {
 INCLUSIVE_NEGATIVE_UPPER_LIMIT_LABS = {"Antinuclear Antibody (ANA) (Blood)"}
 RF_DEFAULT_NEGATIVE_UPPER_LIMITS = (13.0, 15.0)
 TODAY = pd.Timestamp.today().normalize()
+SEROLOGY_INTERMEDIATE_DIR = common.PROJECT_ROOT / "data_intermediate" / "block_A"
 
 POS_RE = re.compile(r"\b(positive|pos|reactive|detected|present|abnormal|high)\b", re.I)
 NEG_RE = re.compile(r"\b(negative|neg|non[- ]?reactive|not detected|absent|none detected)\b", re.I)
@@ -314,27 +315,107 @@ def build_patient_level(long: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+TABLE1_COLUMNS = [
+    "section", "variable", "n", "missing", "overall", "raw_value", "denominator", "percent",
+    "formatted", "n_total_cohort", "n_tested", "n_interpretable", "missing_n",
+    "unclassified_n", "denominator_type", "definition", "qc_flag",
+]
+
+
+def _load_total_cohort_n(patient: pd.DataFrame) -> int:
+    """Use the Table 1/eligibility cohort size when available, otherwise lab patients."""
+    table_path = common.BLOCKA_TABLES_DIR / "01_table1_overall.csv"
+    if table_path.exists():
+        try:
+            table = pd.read_csv(table_path)
+            mask = (table.get("section") == "Overall cohort") & (table.get("variable") == "N patients")
+            if mask.any():
+                n = pd.to_numeric(table.loc[mask, "n"], errors="coerce").dropna()
+                if not n.empty:
+                    return int(n.iloc[0])
+        except Exception as exc:  # pragma: no cover - non-critical fallback for malformed prior outputs
+            LOG.warning("Could not read existing Table 1 cohort size from %s: %s", table_path, exc)
+    eligibility_path = common.BLOCKA_TABLES_DIR / "00_analytic_cohort_ids.csv"
+    if eligibility_path.exists():
+        try:
+            elig = pd.read_csv(eligibility_path)
+            id_col = next((c for c in ["patient_id", *PATIENT_ID_CANDIDATES] if c in elig.columns), None)
+            if id_col is not None:
+                return int(elig[id_col].dropna().astype("string").nunique())
+        except Exception as exc:  # pragma: no cover
+            LOG.warning("Could not read eligibility cohort size from %s: %s", eligibility_path, exc)
+    return len(patient)
+
+
+def _write_table1_outputs(table: pd.DataFrame, serology_rows: pd.DataFrame) -> None:
+    csv_path = common.BLOCKA_TABLES_DIR / "01_table1_overall.csv"
+    xlsx_path = common.BLOCKA_TABLES_DIR / "01_table1_overall.xlsx"
+    table.to_csv(csv_path, index=False)
+
+    sheets: dict[str, pd.DataFrame] = {}
+    if xlsx_path.exists():
+        try:
+            sheets = pd.read_excel(xlsx_path, sheet_name=None)
+        except Exception as exc:  # pragma: no cover - rewrite workbook if unreadable
+            LOG.warning("Could not read existing workbook %s; rewriting it: %s", xlsx_path, exc)
+    sheets["Table1_Overall"] = table
+    sheets["Serology"] = serology_rows
+    with pd.ExcelWriter(xlsx_path) as writer:
+        for sheet_name, sheet_df in sheets.items():
+            sheet_df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
+
+
 def add_table_block(patient: pd.DataFrame, qc_warnings: list[str]) -> pd.DataFrame:
-    n_total = len(patient); rows = []
+    n_total = _load_total_cohort_n(patient)
+    rows = []
     for col, label, definition in FINAL_ROWS:
         if col == "double_ro_la_pos":
             denom_mask = patient["anti_ro_interpretable"].fillna(False) & patient["anti_la_interpretable"].fillna(False)
+            tested_mask = patient["anti_ro_tested"].fillna(False) & patient["anti_la_tested"].fillna(False)
         else:
             prefix = {"anti_ro_pos":"anti_ro", "anti_la_pos":"anti_la", "ana_pos":"ana", "rf_pos":"rf", "cryo_pos":"cryo", "low_c4":"c4", "leukopenia":"wbc"}[col]
             denom_mask = patient[f"{prefix}_interpretable"].fillna(False)
-        tested_col = {"anti_ro_pos":"anti_ro_tested", "anti_la_pos":"anti_la_tested", "ana_pos":"ana_tested", "rf_pos":"rf_tested", "cryo_pos":"cryo_tested", "low_c4":"c4_tested", "leukopenia":"wbc_tested"}.get(col)
-        n_tested = int(patient[tested_col].fillna(False).sum()) if tested_col else int((patient["anti_ro_tested"].fillna(False)&patient["anti_la_tested"].fillna(False)).sum())
-        denom = int(denom_mask.sum()); n = int((patient.loc[denom_mask, col] == True).sum())
+            tested_mask = patient[f"{prefix}_tested"].fillna(False)
+        n_tested = int(tested_mask.sum())
+        denom = int(denom_mask.sum())
+        n = int((patient.loc[denom_mask, col] == True).sum())
         pct = None if denom == 0 else round(n / denom * 100, 1)
-        rows.append({"section":"Serologic characteristics", "variable":label, "n":n, "denominator":denom, "percent":pct, "formatted":f"{n}/{denom} ({pct:.1f}%)" if pct is not None else f"{n}/{denom} (NA)", "n_total_cohort":n_total, "n_tested":n_tested, "n_interpretable":denom, "missing_n":n_total-n_tested, "unclassified_n":max(n_tested-denom,0), "denominator_type":"n_interpretable", "definition":definition, "qc_flag":"; ".join(qc_warnings)})
+        formatted = f"{n}/{denom} ({pct:.1f}%)" if pct is not None else f"{n}/{denom} (NA)"
+        missing_n = max(n_total - n_tested, 0)
+        unclassified_n = max(n_tested - denom, 0)
+        raw = {
+            "n": n, "denominator": denom, "percent": pct, "n_total_cohort": n_total,
+            "n_tested": n_tested, "n_interpretable": denom, "missing_n": missing_n,
+            "unclassified_n": unclassified_n, "denominator_type": "n_interpretable",
+        }
+        rows.append({
+            "section":"Serologic characteristics", "variable":label, "n":n, "missing":missing_n,
+            "overall":formatted, "raw_value":json.dumps(raw), "denominator":denom, "percent":pct,
+            "formatted":formatted, "n_total_cohort":n_total, "n_tested":n_tested,
+            "n_interpretable":denom, "missing_n":missing_n, "unclassified_n":unclassified_n,
+            "denominator_type":"n_interpretable", "definition":definition, "qc_flag":"; ".join(qc_warnings),
+        })
+    serology_rows = pd.DataFrame(rows).reindex(columns=TABLE1_COLUMNS)
     table_path = common.BLOCKA_TABLES_DIR / "01_table1_overall.csv"
-    new = pd.DataFrame(rows)
     if table_path.exists():
         old = pd.read_csv(table_path)
         old = old[old["section"] != "Serologic characteristics"] if "section" in old.columns else old
-        new = pd.concat([old, new], ignore_index=True, sort=False)
-    new.to_csv(table_path, index=False)
-    return pd.DataFrame(rows)
+        table = pd.concat([old, serology_rows], ignore_index=True, sort=False)
+    else:
+        table = serology_rows.copy()
+    leading = [c for c in TABLE1_COLUMNS if c in table.columns]
+    table = table.reindex(columns=leading + [c for c in table.columns if c not in leading])
+    _write_table1_outputs(table, serology_rows)
+    return serology_rows
+
+
+def write_intermediate_lab_dfs(long: pd.DataFrame, patient: pd.DataFrame, serology_rows: pd.DataFrame, possible: pd.DataFrame) -> None:
+    """Persist the data frames used to derive the serology Table 1 lab rows."""
+    SEROLOGY_INTERMEDIATE_DIR.mkdir(parents=True, exist_ok=True)
+    long.to_csv(SEROLOGY_INTERMEDIATE_DIR / "01_serology_labs_long_clean_used_for_lab_classification.csv", index=False)
+    patient.to_csv(SEROLOGY_INTERMEDIATE_DIR / "01_serology_patient_level_lab_flags_used_for_table1.csv", index=False)
+    serology_rows.to_csv(SEROLOGY_INTERMEDIATE_DIR / "01_serology_table1_serologic_characteristics_rows.csv", index=False)
+    possible.to_csv(SEROLOGY_INTERMEDIATE_DIR / "01_serology_possible_unmapped_lab_names_for_review.csv", index=False)
 
 
 def write_qc(long: pd.DataFrame, patient: pd.DataFrame, possible: pd.DataFrame, summary: dict[str, Any], warnings: list[str]) -> None:
@@ -457,7 +538,10 @@ def main() -> None:
     if summary.get("invalid_or_future_dates", 0): warnings.append("invalid or future dates present")
     if summary.get("exact_duplicate_rows", 0): warnings.append("exact duplicate rows between/within sources present")
     if not possible.empty: warnings.append("similar but unmapped Cluster Name values present")
-    add_table_block(patient, warnings); write_qc(long, patient, possible, summary, warnings); make_plots(long)
+    serology_rows = add_table_block(patient, warnings)
+    write_intermediate_lab_dfs(long, patient, serology_rows, possible)
+    write_qc(long, patient, possible, summary, warnings)
+    make_plots(long)
     print(f"Anti-Ro/SSA positivity was present in {ro:.1f}% of patients with interpretable testing; {dbl:.1f}% were double-positive for Anti-Ro/SSA and Anti-La/SSB. Cryoglobulinemia was documented in {cryo:.1f}% of patients with interpretable cryoglobulin testing.")
     print(f"La positividad para Anti-Ro/SSA estuvo presente en {ro:.1f}% de los pacientes con prueba interpretable; {dbl:.1f}% fueron doble positivos para Anti-Ro/SSA y Anti-La/SSB. La crioglobulinemia fue documentada en {cryo:.1f}% de los pacientes con prueba interpretable.")
 
