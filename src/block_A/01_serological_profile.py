@@ -557,8 +557,8 @@ def main() -> None:
     write_intermediate_lab_dfs(long, patient, serology_rows, possible)
     write_qc(long, patient, possible, summary, warnings)
     make_plots(long)
-    print(f"Anti-SS-A positivity was present in {ro:.1f}% of patients with interpretable testing; {dbl:.1f}% were double-positive for Anti-SS-A and Anti-SS-B. Cryoglobulinemia was documented in {cryo:.1f}% of patients with interpretable cryoglobulin testing.")
-    print(f"La positividad para Anti-SS-A estuvo presente en {ro:.1f}% de los pacientes con prueba interpretable; {dbl:.1f}% fueron doble positivos para Anti-SS-A y Anti-SS-B. La crioglobulinemia fue documentada en {cryo:.1f}% de los pacientes con prueba interpretable.")
+    print(f"Anti-Ro/SSA positivity was present in {ro:.1f}% of patients with interpretable testing; {dbl:.1f}% were double-positive for Anti-Ro/SSA and Anti-La/SSB. Cryoglobulinemia was documented in {cryo:.1f}% of patients with interpretable cryoglobulin testing.")
+    print(f"La positividad para Anti-Ro/SSA estuvo presente en {ro:.1f}% de los pacientes con prueba interpretable; {dbl:.1f}% fueron doble positivos para Anti-Ro/SSA y Anti-La/SSB. La crioglobulinemia fue documentada en {cryo:.1f}% de los pacientes con prueba interpretable.")
 
 
 if __name__ == "__main__":
