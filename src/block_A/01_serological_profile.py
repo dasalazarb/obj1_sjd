@@ -44,7 +44,11 @@ OPTIONAL_COLS = [
 ]
 LAB_MARKER_MAP = {
     "Anti-SS-A Ab (Blood)": "anti_ro_ssa",
+    "SS-A/Ro Ab, IgG (Blood)": "anti_ro_ssa",
+    "SS-Ro60 Ab, IgG (Blood)": "anti_ro_ssa",
+    "SS-Ro52 Ab, IgG (Blood)": "anti_ro_ssa",
     "Anti-SS-B Ab (Blood)": "anti_la_ssb",
+    "SS-B/La Ab, IgG (Blood)": "anti_la_ssb",
     "Antinuclear Antibody (ANA) (Blood)": "ana",
     "Antinuclear Antibody (ANA) HEp-2 Substrate (Blood)": "ana",
     "Antinuclear Antibody (ANA) HEp-2 Substrate Titer (Blood)": "ana_titer",
@@ -69,10 +73,18 @@ C4_DEFAULT_REFERENCE_RANGES = [(15.0, 57.0), (10.0, 40.0), (15.0, 53.0)]
 WBC_DEFAULT_REFERENCE_RANGES_X10E9_L = [(3.98, 10.04), (4.23, 9.07)]
 DEFAULT_NEGATIVE_UPPER_LIMITS = {
     "Anti-SS-A Ab (Blood)": 19.0,
+    "SS-A/Ro Ab, IgG (Blood)": 19.0,
+    "SS-Ro60 Ab, IgG (Blood)": 19.0,
+    "SS-Ro52 Ab, IgG (Blood)": 19.0,
     "Anti-SS-B Ab (Blood)": 19.0,
+    "SS-B/La Ab, IgG (Blood)": 19.0,
     "Antinuclear Antibody (ANA) (Blood)": 1.0,
 }
-INCLUSIVE_NEGATIVE_UPPER_LIMIT_LABS = {"Anti-SS-A Ab (Blood)", "Anti-SS-B Ab (Blood)", "Antinuclear Antibody (ANA) (Blood)"}
+INCLUSIVE_NEGATIVE_UPPER_LIMIT_LABS = {
+    "Anti-SS-A Ab (Blood)", "SS-A/Ro Ab, IgG (Blood)", "SS-Ro60 Ab, IgG (Blood)",
+    "SS-Ro52 Ab, IgG (Blood)", "Anti-SS-B Ab (Blood)", "SS-B/La Ab, IgG (Blood)",
+    "Antinuclear Antibody (ANA) (Blood)",
+}
 RF_DEFAULT_NEGATIVE_UPPER_LIMITS = (13.0, 15.0)
 TODAY = pd.Timestamp.today().normalize()
 SEROLOGY_INTERMEDIATE_DIR = common.PROJECT_ROOT / "data_intermediate" / "block_A"
@@ -281,6 +293,11 @@ def prepare_long(df: pd.DataFrame, pid_col: str, date_col: str) -> tuple[pd.Data
     return work, possible, qc
 
 
+
+def _true_mask(series: pd.Series) -> pd.Series:
+    """Return a nullable-safe boolean mask for positive patient-level flags."""
+    return series.map(lambda x: bool(x) if pd.notna(x) else False).astype(bool)
+
 def _patient_marker(g: pd.DataFrame, positive_class: str = "positive") -> dict[str, Any]:
     interp = g[g["classification"].isin([positive_class, "positive", "negative", "low"])]
     pos = interp["classification"].isin([positive_class, "positive", "low"]).any()
@@ -303,7 +320,7 @@ def build_patient_level(long: pd.DataFrame) -> pd.DataFrame:
             row[out_col] = d["pos"]; row[f"{name}_first_date"] = d["first_date"]; row[f"{name}_first_positive_date"] = d["first_positive_date"]; row[f"{name}_n_records"] = d["n_records"]
         ro_pos_labs = pg[(pg["serology_marker"] == "anti_ro_ssa") & (pg["classification"] == "positive")]["Cluster Name"].dropna().unique()
         row["anti_ro_positive_source_lab"] = "; ".join(map(str, ro_pos_labs))
-        row["double_ro_la_pos"] = bool(row["anti_ro_pos"] is True and row["anti_la_pos"] is True) if row["anti_ro_interpretable"] and row["anti_la_interpretable"] else pd.NA
+        row["double_ro_la_pos"] = bool(row["anti_ro_pos"] and row["anti_la_pos"]) if row["anti_ro_interpretable"] and row["anti_la_interpretable"] else pd.NA
         at = pg[pg["serology_marker"] == "ana_titer"]["numeric_value"].dropna(); row["ana_titer_max"] = at.max() if not at.empty else np.nan
         row["ana_pattern_values"] = "; ".join(pg.loc[pg["serology_marker"] == "ana_pattern", "clean_value"].dropna().astype(str).unique())
         row["rf_max_value"] = pg.loc[pg["serology_marker"] == "rf", "numeric_value"].max()
@@ -376,7 +393,7 @@ def add_table_block(patient: pd.DataFrame, qc_warnings: list[str]) -> pd.DataFra
             tested_mask = patient[f"{prefix}_tested"].fillna(False)
         n_tested = int(tested_mask.sum())
         denom = int(denom_mask.sum())
-        n = int((patient.loc[denom_mask, col] == True).sum())
+        n = int(_true_mask(patient.loc[denom_mask, col]).sum())
         pct = None if denom == 0 else round(n / denom * 100, 1)
         formatted = f"{n}/{denom} ({pct:.1f}%)" if pct is not None else f"{n}/{denom} (NA)"
         missing_n = max(n_total - n_tested, 0)
@@ -521,7 +538,7 @@ def main() -> None:
     long, possible, q2 = prepare_long(df, pid_col, date_col); summary.update(q2)
     patient = build_patient_level(long)
     warnings: list[str] = []
-    def pct(col: str, mask: pd.Series) -> float: return float((patient.loc[mask, col] == True).mean()*100) if mask.any() else np.nan
+    def pct(col: str, mask: pd.Series) -> float: return float(_true_mask(patient.loc[mask, col]).mean()*100) if mask.any() else np.nan
     ro = pct("anti_ro_pos", patient.anti_ro_interpretable.fillna(False)); la = pct("anti_la_pos", patient.anti_la_interpretable.fillna(False)); dbl = pct("double_ro_la_pos", patient.anti_ro_interpretable.fillna(False)&patient.anti_la_interpretable.fillna(False)); cryo = pct("cryo_pos", patient.cryo_interpretable.fillna(False))
     if pd.notna(ro) and pd.notna(la) and ro < la: warnings.append("pct_anti_ro_pos < pct_anti_la_pos")
     if pd.notna(dbl) and pd.notna(ro) and dbl > ro: warnings.append("pct_double_pos > pct_anti_ro_pos")
