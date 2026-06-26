@@ -43,10 +43,8 @@ OPTIONAL_COLS = [
     "Abnormal Flag", "Flag", "Result Status", "Observation Note", "Comment",
 ]
 LAB_MARKER_MAP = {
-    "SS-A/Ro Ab, IgG (Blood)": "anti_ro_ssa",
-    "SS-Ro60 Ab, IgG (Blood)": "anti_ro_ssa",
-    "SS-Ro52 Ab, IgG (Blood)": "anti_ro_ssa",
-    "SS-B/La Ab, IgG (Blood)": "anti_la_ssb",
+    "Anti-SS-A Ab (Blood)": "anti_ro_ssa",
+    "Anti-SS-B Ab (Blood)": "anti_la_ssb",
     "Antinuclear Antibody (ANA) (Blood)": "ana",
     "Antinuclear Antibody (ANA) HEp-2 Substrate (Blood)": "ana",
     "Antinuclear Antibody (ANA) HEp-2 Substrate Titer (Blood)": "ana_titer",
@@ -57,9 +55,9 @@ LAB_MARKER_MAP = {
     "WBC (Blood)": "wbc",
 }
 FINAL_ROWS = [
-    ("anti_ro_pos", "Anti-Ro/SSA positive", "Positive if any exact mapped SS-A/Ro, Ro60, or Ro52 result is interpretable positive using assay-specific cutoffs."),
-    ("anti_la_pos", "Anti-La/SSB positive", "Positive if any exact mapped SS-B/La result is interpretable positive using assay-specific cutoffs."),
-    ("double_ro_la_pos", "Anti-Ro/SSA and Anti-La/SSB double-positive", "Positive among patients interpretable for both Anti-Ro/SSA and Anti-La/SSB."),
+    ("anti_ro_pos", "Anti-SS-A positive", "Positive if exact mapped Anti-SS-A Ab (Blood) result says positive or is above the 0-19 reference range."),
+    ("anti_la_pos", "Anti-SS-B positive", "Positive if exact mapped Anti-SS-B Ab (Blood) result says positive or is above the 0-19 reference range."),
+    ("double_ro_la_pos", "Anti-SS-A and Anti-SS-B double-positive", "Positive among patients interpretable for both Anti-SS-A Ab (Blood) and Anti-SS-B Ab (Blood)."),
     ("ana_pos", "ANA positive", "Positive by qualitative ANA, numeric ANA above the negative cutoff, or ANA titer >= configured threshold 80; ANA pattern alone does not define positivity."),
     ("rf_pos", "Rheumatoid factor positive", "Positive by qualitative RF, high flag, value above reference high, or numeric value at/above the configured negative cutoff."),
     ("cryo_pos", "Cryoglobulinemia documented", "Positive if cryoglobulin result says positive, detected, or present; negative if it says negative."),
@@ -70,13 +68,11 @@ ANA_POSITIVE_TITER_MIN = 80
 C4_DEFAULT_REFERENCE_RANGES = [(15.0, 57.0), (10.0, 40.0), (15.0, 53.0)]
 WBC_DEFAULT_REFERENCE_RANGES_X10E9_L = [(3.98, 10.04), (4.23, 9.07)]
 DEFAULT_NEGATIVE_UPPER_LIMITS = {
-    "SS-A/Ro Ab, IgG (Blood)": 1.0,
-    "SS-Ro60 Ab, IgG (Blood)": 20.0,
-    "SS-Ro52 Ab, IgG (Blood)": 20.0,
-    "SS-B/La Ab, IgG (Blood)": 1.0,
+    "Anti-SS-A Ab (Blood)": 19.0,
+    "Anti-SS-B Ab (Blood)": 19.0,
     "Antinuclear Antibody (ANA) (Blood)": 1.0,
 }
-INCLUSIVE_NEGATIVE_UPPER_LIMIT_LABS = {"Antinuclear Antibody (ANA) (Blood)"}
+INCLUSIVE_NEGATIVE_UPPER_LIMIT_LABS = {"Anti-SS-A Ab (Blood)", "Anti-SS-B Ab (Blood)", "Antinuclear Antibody (ANA) (Blood)"}
 RF_DEFAULT_NEGATIVE_UPPER_LIMITS = (13.0, 15.0)
 TODAY = pd.Timestamp.today().normalize()
 SEROLOGY_INTERMEDIATE_DIR = common.PROJECT_ROOT / "data_intermediate" / "block_A"
@@ -207,9 +203,11 @@ def parse_observation_value(value: Any, marker: str, unit: Any = None, reference
         if lab_key in INCLUSIVE_NEGATIVE_UPPER_LIMIT_LABS and out["operator"] == "":
             is_negative = val <= negative_limit
         if is_negative:
-            out.update(qualitative_status="negative", classification="negative", classification_reason=f"numeric value below assay negative cutoff <{negative_limit:g}")
+            comparator = "<=" if lab_key in INCLUSIVE_NEGATIVE_UPPER_LIMIT_LABS and out["operator"] == "" else "<"
+            out.update(qualitative_status="negative", classification="negative", classification_reason=f"numeric value at negative/reference cutoff {comparator}{negative_limit:g}")
         elif _positive_limit_match(val, out["operator"], negative_limit):
-            out.update(qualitative_status="positive", classification="positive", classification_reason=f"numeric value at/above assay negative cutoff {negative_limit:g}")
+            comparator = ">" if lab_key in INCLUSIVE_NEGATIVE_UPPER_LIMIT_LABS and out["operator"] == "" else ">="
+            out.update(qualitative_status="positive", classification="positive", classification_reason=f"numeric value above assay/reference cutoff {comparator}{negative_limit:g}")
         return out
     if marker in {"c4", "wbc"}:
         val2 = _wbc_to_x10e9(val, unit) if marker == "wbc" else val
@@ -466,7 +464,7 @@ def _continuous_markers(long: pd.DataFrame, threshold: float = 0.5) -> set[str]:
 
 def make_plots(long: pd.DataFrame) -> None:
     out = common.BLOCKA_TABLES_DIR; out.mkdir(parents=True, exist_ok=True)
-    marker_titles = {"anti_ro_ssa":"Anti-Ro/SSA", "anti_la_ssb":"Anti-La/SSB", "ana":"ANA", "ana_titer":"ANA titer", "ana_pattern":"ANA pattern", "rf":"RF", "c4":"C4", "wbc":"WBC", "cryoglobulins":"Cryoglobulins"}
+    marker_titles = {"anti_ro_ssa":"Anti-SS-A", "anti_la_ssb":"Anti-SS-B", "ana":"ANA", "ana_titer":"ANA titer", "ana_pattern":"ANA pattern", "rf":"RF", "c4":"C4", "wbc":"WBC", "cryoglobulins":"Cryoglobulins"}
     continuous_markers = _continuous_markers(long)
     default_continuous = ["anti_ro_ssa", "anti_la_ssb", "ana_titer", "rf", "c4", "wbc"]
     panel_markers = [m for m in default_continuous if m in set(long.serology_marker.dropna())]
@@ -542,8 +540,8 @@ def main() -> None:
     write_intermediate_lab_dfs(long, patient, serology_rows, possible)
     write_qc(long, patient, possible, summary, warnings)
     make_plots(long)
-    print(f"Anti-Ro/SSA positivity was present in {ro:.1f}% of patients with interpretable testing; {dbl:.1f}% were double-positive for Anti-Ro/SSA and Anti-La/SSB. Cryoglobulinemia was documented in {cryo:.1f}% of patients with interpretable cryoglobulin testing.")
-    print(f"La positividad para Anti-Ro/SSA estuvo presente en {ro:.1f}% de los pacientes con prueba interpretable; {dbl:.1f}% fueron doble positivos para Anti-Ro/SSA y Anti-La/SSB. La crioglobulinemia fue documentada en {cryo:.1f}% de los pacientes con prueba interpretable.")
+    print(f"Anti-SS-A positivity was present in {ro:.1f}% of patients with interpretable testing; {dbl:.1f}% were double-positive for Anti-SS-A and Anti-SS-B. Cryoglobulinemia was documented in {cryo:.1f}% of patients with interpretable cryoglobulin testing.")
+    print(f"La positividad para Anti-SS-A estuvo presente en {ro:.1f}% de los pacientes con prueba interpretable; {dbl:.1f}% fueron doble positivos para Anti-SS-A y Anti-SS-B. La crioglobulinemia fue documentada en {cryo:.1f}% de los pacientes con prueba interpretable.")
 
 
 if __name__ == "__main__":
