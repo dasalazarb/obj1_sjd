@@ -57,18 +57,27 @@ LAB_MARKER_MAP = {
     "WBC (Blood)": "wbc",
 }
 FINAL_ROWS = [
-    ("anti_ro_pos", "Anti-Ro/SSA positive", "Positive if any exact mapped SS-A/Ro, Ro60, or Ro52 result is interpretable positive."),
-    ("anti_la_pos", "Anti-La/SSB positive", "Positive if any exact mapped SS-B/La result is interpretable positive."),
+    ("anti_ro_pos", "Anti-Ro/SSA positive", "Positive if any exact mapped SS-A/Ro, Ro60, or Ro52 result is interpretable positive using assay-specific cutoffs."),
+    ("anti_la_pos", "Anti-La/SSB positive", "Positive if any exact mapped SS-B/La result is interpretable positive using assay-specific cutoffs."),
     ("double_ro_la_pos", "Anti-Ro/SSA and Anti-La/SSB double-positive", "Positive among patients interpretable for both Anti-Ro/SSA and Anti-La/SSB."),
-    ("ana_pos", "ANA positive", "Positive by qualitative ANA or ANA titer >= configured threshold 80; ANA pattern alone does not define positivity."),
-    ("rf_pos", "Rheumatoid factor positive", "Positive by qualitative RF, high flag, or value above reference high when available."),
-    ("cryo_pos", "Cryoglobulinemia documented", "Positive if cryoglobulin result says positive, detected, or present."),
-    ("low_c4", "Low C4", "Low by low flag or value below reference low; no hardcoded C4 threshold used."),
-    ("leukopenia", "Leukopenia", "Low by WBC low flag/reference range, otherwise configurable threshold <4.0 x10^9/L."),
+    ("ana_pos", "ANA positive", "Positive by qualitative ANA, numeric ANA above the negative cutoff, or ANA titer >= configured threshold 80; ANA pattern alone does not define positivity."),
+    ("rf_pos", "Rheumatoid factor positive", "Positive by qualitative RF, high flag, value above reference high, or numeric value at/above the configured negative cutoff."),
+    ("cryo_pos", "Cryoglobulinemia documented", "Positive if cryoglobulin result says positive, detected, or present; negative if it says negative."),
+    ("low_c4", "Low C4", "Low by low flag, value below reference low, or value below the configured C4 lower limit when no reference is available."),
+    ("leukopenia", "Leukopenia", "Low by WBC low flag/reference range, otherwise configured WBC lower limit."),
 ]
 ANA_POSITIVE_TITER_MIN = 80
-C4_LOW_THRESHOLD = None
-WBC_LOW_THRESHOLD_X10E9_L = 4.0
+C4_DEFAULT_REFERENCE_RANGES = [(15.0, 57.0), (10.0, 40.0), (15.0, 53.0)]
+WBC_DEFAULT_REFERENCE_RANGES_X10E9_L = [(3.98, 10.04), (4.23, 9.07)]
+DEFAULT_NEGATIVE_UPPER_LIMITS = {
+    "SS-A/Ro Ab, IgG (Blood)": 1.0,
+    "SS-Ro60 Ab, IgG (Blood)": 20.0,
+    "SS-Ro52 Ab, IgG (Blood)": 20.0,
+    "SS-B/La Ab, IgG (Blood)": 1.0,
+    "Antinuclear Antibody (ANA) (Blood)": 1.0,
+}
+INCLUSIVE_NEGATIVE_UPPER_LIMIT_LABS = {"Antinuclear Antibody (ANA) (Blood)"}
+RF_DEFAULT_NEGATIVE_UPPER_LIMITS = (13.0, 15.0)
 TODAY = pd.Timestamp.today().normalize()
 
 POS_RE = re.compile(r"\b(positive|pos|reactive|detected|present|abnormal|high)\b", re.I)
@@ -130,7 +139,31 @@ def _wbc_to_x10e9(value: float | None, unit: Any) -> float | None:
     return float(value)
 
 
-def parse_observation_value(value: Any, marker: str, unit: Any = None, reference_range: Any = None, flag: Any = None, reference_low: Any = None, reference_high: Any = None) -> dict[str, Any]:
+def _negative_limit_match(value: float, operator: str, limit: float) -> bool:
+    if operator == "<":
+        return value <= limit
+    if operator == "<=":
+        return value <= limit
+    return value < limit
+
+
+def _positive_limit_match(value: float, operator: str, limit: float) -> bool:
+    if operator == "<":
+        return False
+    if operator == "<=":
+        return False
+    if operator == ">":
+        return value >= limit
+    if operator == ">=":
+        return value >= limit
+    return value >= limit
+
+
+def _range_low_high_from_defaults(ranges: list[tuple[float, float]]) -> tuple[float, float]:
+    return min(lo for lo, _ in ranges), max(hi for _, hi in ranges)
+
+
+def parse_observation_value(value: Any, marker: str, unit: Any = None, reference_range: Any = None, flag: Any = None, reference_low: Any = None, reference_high: Any = None, lab_name: Any = None) -> dict[str, Any]:
     raw = None if pd.isna(value) else value
     clean = "" if raw is None else re.sub(r"\s+", " ", str(raw).strip())
     low_clean = clean.lower()
@@ -166,18 +199,32 @@ def parse_observation_value(value: Any, marker: str, unit: Any = None, reference
         return out
     lo, hi = _ref_low_high(reference_range, reference_low, reference_high)
     val = None if pd.isna(out["numeric_value"]) else float(out["numeric_value"])
+    lab_key = "" if _missing(lab_name) else str(lab_name).strip()
+    negative_limit = DEFAULT_NEGATIVE_UPPER_LIMITS.get(lab_key)
+    if val is not None and negative_limit is not None and marker in {"anti_ro_ssa", "anti_la_ssb", "ana"}:
+        is_negative = _negative_limit_match(val, out["operator"], negative_limit)
+        if lab_key in INCLUSIVE_NEGATIVE_UPPER_LIMIT_LABS and out["operator"] == "":
+            is_negative = val <= negative_limit
+        if is_negative:
+            out.update(qualitative_status="negative", classification="negative", classification_reason=f"numeric value below assay negative cutoff <{negative_limit:g}")
+        elif _positive_limit_match(val, out["operator"], negative_limit):
+            out.update(qualitative_status="positive", classification="positive", classification_reason=f"numeric value at/above assay negative cutoff {negative_limit:g}")
+        return out
     if marker in {"c4", "wbc"}:
         val2 = _wbc_to_x10e9(val, unit) if marker == "wbc" else val
         if flag_low:
             out.update(qualitative_status="low", classification="low", classification_reason="low flag")
         elif val2 is not None and lo is not None and val2 < lo:
             out.update(qualitative_status="low", classification="low", classification_reason="numeric value below reference low")
-        elif marker == "c4" and val2 is not None and C4_LOW_THRESHOLD is not None and val2 < C4_LOW_THRESHOLD:
-            out.update(qualitative_status="low", classification="low", classification_reason="numeric value below configurable C4 threshold")
-        elif marker == "wbc" and val2 is not None and lo is None and WBC_LOW_THRESHOLD_X10E9_L is not None and val2 < WBC_LOW_THRESHOLD_X10E9_L:
-            out.update(qualitative_status="low", classification="low", classification_reason=f"numeric value below configurable WBC threshold {WBC_LOW_THRESHOLD_X10E9_L} x10^9/L")
-        elif val2 is not None and (lo is not None or marker == "wbc"):
-            out.update(qualitative_status="normal_or_not_low", classification="negative", classification_reason="numeric value not below low criterion")
+        else:
+            if marker == "c4" and lo is None and hi is None:
+                lo, hi = _range_low_high_from_defaults(C4_DEFAULT_REFERENCE_RANGES)
+            elif marker == "wbc" and lo is None and hi is None:
+                lo, hi = _range_low_high_from_defaults(WBC_DEFAULT_REFERENCE_RANGES_X10E9_L)
+            if val2 is not None and lo is not None and val2 < lo:
+                out.update(qualitative_status="low", classification="low", classification_reason="numeric value below configured/reference low")
+            elif val2 is not None and lo is not None:
+                out.update(qualitative_status="normal_or_not_low", classification="negative", classification_reason="numeric value not below low criterion")
     elif marker == "rf":
         if flag_high:
             out.update(qualitative_status="positive", classification="positive", classification_reason="high/abnormal flag")
@@ -186,7 +233,13 @@ def parse_observation_value(value: Any, marker: str, unit: Any = None, reference
         elif val is not None and hi is not None:
             out.update(qualitative_status="negative", classification="negative", classification_reason="numeric value not above reference high")
         elif val is not None:
-            out.update(classification="unclassified_numeric_no_ref", classification_reason="numeric RF without reference range or flag")
+            rf_limit = max(RF_DEFAULT_NEGATIVE_UPPER_LIMITS)
+            if _negative_limit_match(val, out["operator"], rf_limit):
+                out.update(qualitative_status="negative", classification="negative", classification_reason=f"numeric value below RF negative cutoff <{rf_limit:g}")
+            elif _positive_limit_match(val, out["operator"], rf_limit):
+                out.update(qualitative_status="positive", classification="positive", classification_reason=f"numeric value at/above RF negative cutoff {rf_limit:g}")
+            else:
+                out.update(classification="unclassified_numeric_no_ref", classification_reason="numeric RF without reference range or flag")
     elif val is not None:
         out.update(classification="unclassified_numeric", classification_reason="numeric value without marker-specific rule")
     return out
@@ -220,7 +273,7 @@ def prepare_long(df: pd.DataFrame, pid_col: str, date_col: str) -> tuple[pd.Data
     work["serology_marker"] = work["Cluster Name"].map(LAB_MARKER_MAP)
     unit_col = _first_existing(work, ["Unit of Measure", "Unit", "Units"]); flag_col = _first_existing(work, ["Abnormal Flag", "Flag"])
     rr_col = _first_existing(work, ["Normal Range", "Reference Range"]); rlo_col = _first_existing(work, ["Reference Low"]); rhi_col = _first_existing(work, ["Reference High"])
-    parsed = [parse_observation_value(r["Observation Value"], r["serology_marker"], r.get(unit_col) if unit_col else None, r.get(rr_col) if rr_col else None, r.get(flag_col) if flag_col else None, r.get(rlo_col) if rlo_col else None, r.get(rhi_col) if rhi_col else None) for _, r in work.iterrows()]
+    parsed = [parse_observation_value(r["Observation Value"], r["serology_marker"], r.get(unit_col) if unit_col else None, r.get(rr_col) if rr_col else None, r.get(flag_col) if flag_col else None, r.get(rlo_col) if rlo_col else None, r.get(rhi_col) if rhi_col else None, r.get("Cluster Name")) for _, r in work.iterrows()]
     work = pd.concat([work.reset_index(drop=True), pd.DataFrame(parsed)], axis=1)
     work["unit"] = work[unit_col] if unit_col else ""
     work["normal_range"] = work[rr_col] if rr_col else ""
