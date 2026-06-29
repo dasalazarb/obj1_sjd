@@ -333,8 +333,8 @@ def safe_file_stem(path: Path) -> str:
 def add_metric_audit_flags(baseline: pd.DataFrame) -> pd.DataFrame:
     """Add explicit inclusion/exclusion flags for Table 1 manual metric audits."""
     audit = baseline.copy()
-    audit["age_dx_excluded_from_stats"] = audit["age_dx"].notna() & ((audit["age_dx"] < 0) | (audit["age_dx"] < 18) | (audit["age_dx"] > 100))
-    audit["age_dx_included_in_stats"] = audit["age_dx"].notna() & ~audit["age_dx_excluded_from_stats"]
+    audit["age_dx_excluded_from_stats"] = False
+    audit["age_dx_included_in_stats"] = audit["age_dx"].notna()
     audit["dx_delay_negative"] = audit["dx_delay_yrs"].notna() & (audit["dx_delay_yrs"] < 0)
     audit["dx_delay_gt60"] = audit["dx_delay_yrs"].notna() & (audit["dx_delay_yrs"] > 60)
     audit["dx_delay_excluded_from_stats"] = audit["dx_delay_negative"] | audit["dx_delay_gt60"]
@@ -404,7 +404,7 @@ def build_outputs(baseline: pd.DataFrame, allowed_invalid: list[str], eligibilit
     race_counts = baseline["race"].dropna().astype(str).value_counts().sort_index()
 
     age_out = baseline["age_dx"].notna() & ((baseline["age_dx"] < 0) | (baseline["age_dx"] < 18) | (baseline["age_dx"] > 100))
-    age_for_stats = baseline.loc[~age_out, "age_dx"]
+    age_for_stats = baseline["age_dx"]
     age_text, age_raw = median_iqr(age_for_stats)
 
     delay_negative = baseline["dx_delay_yrs"].notna() & (baseline["dx_delay_yrs"] < 0)
@@ -453,7 +453,7 @@ def build_outputs(baseline: pd.DataFrame, allowed_invalid: list[str], eligibilit
         ["race_missing_n", n_missing_race, "warning" if n_missing_race else "pass", "Missing/unknown race."],
         ["female_pct_plausibility", None if pd.isna(female_pct) else round(female_pct, 1), "warning" if pd.isna(female_pct) or female_pct < 70 or female_pct > 98 else "pass", "Warning if female percentage is outside 70–98%."],
         ["age_dx_missing_n", int(baseline["age_dx"].isna().sum()), "warning" if baseline["age_dx"].isna().any() else "pass", "Age at diagnosis missing after DOB or age-at-visit fallback."],
-        ["age_dx_out_of_range_n", int(age_out.sum()), "warning" if age_out.any() else "pass", "Excluded from median if <18, <0, or >100 years."],
+        ["age_dx_out_of_range_n", int(age_out.sum()), "warning" if age_out.any() else "pass", "Flagged if <18, <0, or >100 years; included in median/IQR."],
         ["dx_date_missing_n", int(baseline["dx_date"].isna().sum()), "warning" if baseline["dx_date"].isna().any() else "pass", "Missing/unparseable diagnosis date."],
         ["symptom_onset_missing_n", int(baseline["symptom_onset_date"].isna().sum()), "warning" if baseline["symptom_onset_date"].isna().any() else "pass", "No parseable symptom onset candidate date."],
         ["dx_delay_negative_n", int(delay_negative.sum()), "warning" if delay_negative.any() else "pass", "Diagnosis delay <0; onset after diagnosis."],
