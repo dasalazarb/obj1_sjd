@@ -331,14 +331,15 @@ def make_pop_swimmer_plot(longitudinal: pd.DataFrame, baseline: pd.DataFrame, ou
     y_map = pd.concat(grouped_summaries.values(), ignore_index=True).set_index("patient_id")["y"].to_dict()
     plot_df["y"] = plot_df["patient_id"].map(y_map)
     plot_df["baseline_pop"] = plot_df["patient_id"].map(base_status).fillna("Unclassifiable")
-    height = min(28, max(10, len(summary) * 0.045 + 5))
-    fig, axes = plt.subplots(4, 1, figsize=(13, height), sharex=True, gridspec_kw={"hspace": 0.28})
     x_ticks = [(0, "baseline"), (0.5, "6 mo"), (1, "1y"), (2, "2y"), (4, "4y"), (6, "6y"), (8, "8y"), (10, "10y")]
-    for ax, baseline_pop in zip(axes, POP_ORDER):
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    for baseline_pop in POP_ORDER:
         group = grouped_summaries[baseline_pop]
+        panel_df = plot_df[plot_df["baseline_pop"] == baseline_pop]
+        height = min(18, max(6, len(group) * 0.07 + 3))
+        fig, ax = plt.subplots(figsize=(13, height))
         for _, row in group.iterrows():
             ax.hlines(row["y"], row["first"], row["last"], color="#d0d0d0", linewidth=0.8, zorder=1)
-        panel_df = plot_df[plot_df["baseline_pop"] == baseline_pop]
         for pop in POP_ORDER:
             sub = panel_df[panel_df["pop_status"] == pop]
             ax.scatter(sub["time_years"], sub["y"], s=12, color=POP_COLORS[pop], label=pop, alpha=0.9, zorder=2)
@@ -350,18 +351,37 @@ def make_pop_swimmer_plot(longitudinal: pd.DataFrame, baseline: pd.DataFrame, ou
         ax.set_ylim(0, max(len(group), 1) + 1)
         ax.set_yticks([])
         ax.set_ylabel("Patients")
-        ax.set_title(f"Baseline {baseline_pop} (n={len(group)})", loc="left", fontsize=10, color=POP_COLORS[baseline_pop])
+        ax.set_xlabel("Time since baseline (years)")
+        ax.set_title(
+            f"Longitudinal classification for baseline {baseline_pop} patients (n={len(group)})\n"
+            "Time since first recorded visit; points colored by ESSDAI/ESSPRI-defined population",
+            loc="left",
+            fontsize=11,
+            color=POP_COLORS[baseline_pop],
+            pad=18,
+        )
         if group.empty:
             ax.text(0.5, 0.5, "No patients", transform=ax.transAxes, ha="center", va="center", color="#777777")
-    axes[-1].set_xlabel("Time since baseline (years)")
-    fig.suptitle("Longitudinal Pop1/Pop2/Pop3 classification by patient\nSeparate panels by baseline population; points colored by ESSDAI/ESSPRI-defined population", y=0.995)
-    fig.text(0.01, 0.01, "Pop1 = ESSDAI ≥5; Pop2 = ESSDAI <5 and ESSPRI ≥5; Pop3 = ESSDAI <5 and ESSPRI <5; grey = insufficient data.", fontsize=9)
-    handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper right", frameon=False, ncol=4, bbox_to_anchor=(0.98, 0.99))
-    fig.tight_layout()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, bbox_inches="tight")
-    plt.close(fig)
+        ax.legend(
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.18),
+            frameon=False,
+            ncol=4,
+            columnspacing=2.5,
+            handletextpad=0.8,
+            borderaxespad=1.2,
+        )
+        fig.text(
+            0.01,
+            0.01,
+            "Pop1 = ESSDAI ≥5; Pop2 = ESSDAI <5 and ESSPRI ≥5; Pop3 = ESSDAI <5 and ESSPRI <5; grey = insufficient data.",
+            fontsize=9,
+        )
+        fig.tight_layout(rect=(0, 0.08, 1, 1))
+        suffix = baseline_pop.lower()
+        panel_path = output_path.with_name(f"{output_path.stem}_{suffix}{output_path.suffix}")
+        fig.savefig(panel_path, bbox_inches="tight")
+        plt.close(fig)
     return outside
 
 
