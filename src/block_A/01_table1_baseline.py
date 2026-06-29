@@ -31,6 +31,7 @@ FALLBACK_PATIENT_ID_COL = "ids__subject_number"
 VISIT_DATE_COL = "ids__visit_date"
 INTERVAL_COL = "ids__interval_name"
 SEX_COL = "ids__sex"
+RACE_COL = "ids__race"
 DOB_COL = "ids__dob"
 AGE_AT_VISIT_COL = "ids__age_at_visit"
 DX_DATE_COL = "sjogren's_syndrome_history__sjogrens_dx_date"
@@ -51,6 +52,7 @@ REQUIRED_DATASET_VARS = {
     FALLBACK_PATIENT_ID_COL,
     VISIT_DATE_COL,
     SEX_COL,
+    RACE_COL,
     DOB_COL,
     AGE_AT_VISIT_COL,
 }
@@ -228,11 +230,16 @@ def build_baseline_patient_table(df: pd.DataFrame) -> pd.DataFrame:
         if is_missing_value(sex_raw) and SEX_COL in g:
             sex_raw = first_nonmissing(g[SEX_COL])
 
+        race_raw = first_nonmissing([baseline.get(RACE_COL, np.nan)])
+        if is_missing_value(race_raw) and RACE_COL in g:
+            race_raw = first_nonmissing(g[RACE_COL])
+
         rows.append({
             "patient_id": patient_id,
             "baseline_visit_date": baseline_date,
             "sex_raw": sex_raw,
             "sex_norm": normalize_sex(sex_raw),
+            "race": np.nan if is_missing_value(race_raw) else str(race_raw).strip(),
             "dob": dob,
             "dx_date": dx_date,
             "symptom_onset_date": symptom_onset,
@@ -282,6 +289,9 @@ def build_outputs(baseline: pd.DataFrame, dataset_missing: list[str], eligibilit
     n_female = int((baseline["sex_norm"] == "female").sum())
     n_male = int((baseline["sex_norm"] == "male").sum())
     n_missing_sex = int(baseline["sex_norm"].isna().sum())
+    race_nonmissing = int(baseline["race"].notna().sum())
+    n_missing_race = int(baseline["race"].isna().sum())
+    race_counts = baseline["race"].dropna().astype(str).value_counts().sort_index()
 
     age_out = baseline["age_dx"].notna() & ((baseline["age_dx"] < 0) | (baseline["age_dx"] < 18) | (baseline["age_dx"] > 100))
     age_for_stats = baseline.loc[~age_out, "age_dx"]
@@ -304,6 +314,22 @@ def build_outputs(baseline: pd.DataFrame, dataset_missing: list[str], eligibilit
         ["Classification", "Primary SjD, n (%)", n_primary, int((baseline["sjogren_class_norm"] == "unknown").sum()), n_pct(n_primary, n_overall), json.dumps({"n": n_primary, "denom": n_overall, "pct": round(n_primary / n_overall * 100, 1) if n_overall else None})],
         ["Classification", "Secondary SjD, n (%)", n_secondary, int((baseline["sjogren_class_norm"] == "unknown").sum()), n_pct(n_secondary, n_overall), json.dumps({"n": n_secondary, "denom": n_overall, "pct": round(n_secondary / n_overall * 100, 1) if n_overall else None})],
     ]
+    rows.extend(
+        [
+            "Demographics",
+            f"Race, {race_level}, n (%)",
+            int(race_n),
+            n_missing_race,
+            n_pct(int(race_n), race_nonmissing),
+            json.dumps({
+                "n": int(race_n),
+                "denom": race_nonmissing,
+                "pct": None if race_nonmissing == 0 else round(int(race_n) / race_nonmissing * 100, 1),
+            }),
+        ]
+        for race_level, race_n in race_counts.items()
+    )
+
     table = pd.DataFrame(rows, columns=["section", "variable", "n", "missing", "overall", "raw_value"])
 
     female_pct = np.nan if sex_nonmissing == 0 else n_female / sex_nonmissing * 100
@@ -312,6 +338,7 @@ def build_outputs(baseline: pd.DataFrame, dataset_missing: list[str], eligibilit
         ["n_unique_patients", n_overall, "pass", eligibility_detail],
         ["n_duplicate_patient_rows_after_baseline", int(baseline["patient_id"].duplicated().sum()), "pass" if not baseline["patient_id"].duplicated().any() else "fail", "Baseline table should be one row per patient."],
         ["sex_missing_n", n_missing_sex, "warning" if n_missing_sex else "pass", "Missing/unknown sex after normalization."],
+        ["race_missing_n", n_missing_race, "warning" if n_missing_race else "pass", "Missing/unknown race."],
         ["female_pct_plausibility", None if pd.isna(female_pct) else round(female_pct, 1), "warning" if pd.isna(female_pct) or female_pct < 70 or female_pct > 98 else "pass", "Warning if female percentage is outside 70–98%."],
         ["age_dx_missing_n", int(baseline["age_dx"].isna().sum()), "warning" if baseline["age_dx"].isna().any() else "pass", "Age at diagnosis missing after DOB or age-at-visit fallback."],
         ["age_dx_out_of_range_n", int(age_out.sum()), "warning" if age_out.any() else "pass", "Excluded from median if <18, <0, or >100 years."],
