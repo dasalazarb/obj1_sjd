@@ -179,14 +179,44 @@ def class_is_target_sjd(x: object) -> bool:
 
 
 def filter_to_target_sjogren_class_patients(df: pd.DataFrame) -> pd.DataFrame:
-    """Keep patients with visit_summary_form__sjogrens_class equal to 1, 2, or 4 anywhere."""
+    """Keep patients whose modal Sjögren class is primary, secondary, or incomplete."""
     patient_id_source = select_patient_id_col(df)
-    target_patient_ids = set(
-        df.loc[df[SJOGREN_CLASS_COL].map(class_is_target_sjd), patient_id_source]
-        .dropna()
-        .astype("string")
-    )
-    return df[df[patient_id_source].astype("string").isin(target_patient_ids)].copy()
+    work = df.copy()
+    work["patient_id"] = work[patient_id_source].astype("string")
+    target_patient_ids = set()
+    work["_visit_date_parsed"] = work[VISIT_DATE_COL].map(parse_partial_date) if VISIT_DATE_COL in work else pd.NaT
+    for patient_id, g in work.groupby("patient_id", sort=True, dropna=True):
+        g = g.sort_values("_visit_date_parsed", na_position="last")
+        _, class_norm = modal_sjogren_class_value(g[SJOGREN_CLASS_COL])
+        if class_norm in {"primary_sjd", "secondary_sjd", "incomplete"}:
+            target_patient_ids.add(patient_id)
+    return work[work["patient_id"].isin(target_patient_ids)].drop(columns=["patient_id", "_visit_date_parsed"]).copy()
+
+
+def modal_sjogren_class_value(values: Iterable[object]) -> tuple[object, str]:
+    """Return the modal non-missing Sjögren classification raw value and normalized label.
+
+    When there is a tie, keep the first tied class observed in the patient's
+    visit order so the result is deterministic without inventing a priority.
+    """
+    counts: dict[str, int] = {}
+    first_raw_by_norm: dict[str, object] = {}
+    first_order_by_norm: dict[str, int] = {}
+    for order, value in enumerate(values):
+        if is_missing_value(value):
+            continue
+        norm = normalize_sjogren_class(value)
+        if norm == "unknown":
+            continue
+        counts[norm] = counts.get(norm, 0) + 1
+        if norm not in first_raw_by_norm:
+            first_raw_by_norm[norm] = value
+            first_order_by_norm[norm] = order
+    if not counts:
+        return np.nan, "unknown"
+    modal_norm = max(counts, key=lambda norm: (counts[norm], -first_order_by_norm[norm]))
+    return first_raw_by_norm[modal_norm], modal_norm
+
 
 def coalesce_same_date(group: pd.DataFrame) -> pd.Series:
     return group.apply(first_nonmissing, axis=0)
@@ -227,10 +257,10 @@ def build_baseline_patient_table(df: pd.DataFrame) -> pd.DataFrame:
         if pd.notna(dx_date) and pd.notna(symptom_onset):
             dx_delay = (dx_date - symptom_onset).days / 365.25
 
-        class_raw = first_nonmissing([baseline.get(SJOGREN_CLASS_COL, np.nan)])
-        if is_missing_value(class_raw) and SJOGREN_CLASS_COL in g:
-            class_raw = first_nonmissing(g[SJOGREN_CLASS_COL])
-        class_norm = normalize_sjogren_class(class_raw)
+        if SJOGREN_CLASS_COL in g:
+            class_raw, class_norm = modal_sjogren_class_value(g[SJOGREN_CLASS_COL])
+        else:
+            class_raw, class_norm = np.nan, "unknown"
 
         sex_raw = first_nonmissing([baseline.get(SEX_COL, np.nan)])
         if is_missing_value(sex_raw) and SEX_COL in g:
@@ -300,8 +330,8 @@ def safe_file_stem(path: Path) -> str:
 def add_metric_audit_flags(baseline: pd.DataFrame) -> pd.DataFrame:
     """Add explicit inclusion/exclusion flags for Table 1 manual metric audits."""
     audit = baseline.copy()
-    audit["age_dx_excluded_from_stats"] = audit["age_dx"].notna() & ((audit["age_dx"] < 0) | (audit["age_dx"] < 18) | (audit["age_dx"] > 100))
-    audit["age_dx_included_in_stats"] = audit["age_dx"].notna() & ~audit["age_dx_excluded_from_stats"]
+    audit["age_dx_excluded_from_stats"] = False
+    audit["age_dx_included_in_stats"] = audit["age_dx"].notna()
     audit["dx_delay_negative"] = audit["dx_delay_yrs"].notna() & (audit["dx_delay_yrs"] < 0)
     audit["dx_delay_gt60"] = audit["dx_delay_yrs"].notna() & (audit["dx_delay_yrs"] > 60)
     audit["dx_delay_excluded_from_stats"] = audit["dx_delay_negative"] | audit["dx_delay_gt60"]
@@ -371,7 +401,7 @@ def build_outputs(baseline: pd.DataFrame, dataset_missing: list[str], eligibilit
     race_counts = baseline["race"].dropna().astype(str).value_counts().sort_index()
 
     age_out = baseline["age_dx"].notna() & ((baseline["age_dx"] < 0) | (baseline["age_dx"] < 18) | (baseline["age_dx"] > 100))
-    age_for_stats = baseline.loc[~age_out, "age_dx"]
+    age_for_stats = baseline["age_dx"]
     age_text, age_raw = median_iqr(age_for_stats)
 
     delay_negative = baseline["dx_delay_yrs"].notna() & (baseline["dx_delay_yrs"] < 0)
@@ -420,7 +450,7 @@ def build_outputs(baseline: pd.DataFrame, dataset_missing: list[str], eligibilit
         ["race_missing_n", n_missing_race, "warning" if n_missing_race else "pass", "Missing/unknown race."],
         ["female_pct_plausibility", None if pd.isna(female_pct) else round(female_pct, 1), "warning" if pd.isna(female_pct) or female_pct < 70 or female_pct > 98 else "pass", "Warning if female percentage is outside 70–98%."],
         ["age_dx_missing_n", int(baseline["age_dx"].isna().sum()), "warning" if baseline["age_dx"].isna().any() else "pass", "Age at diagnosis missing after DOB or age-at-visit fallback."],
-        ["age_dx_out_of_range_n", int(age_out.sum()), "warning" if age_out.any() else "pass", "Excluded from median if <18, <0, or >100 years."],
+        ["age_dx_out_of_range_n", int(age_out.sum()), "warning" if age_out.any() else "pass", "Flagged if <18, <0, or >100 years; included in median/IQR."],
         ["dx_date_missing_n", int(baseline["dx_date"].isna().sum()), "warning" if baseline["dx_date"].isna().any() else "pass", "Missing/unparseable diagnosis date."],
         ["symptom_onset_missing_n", int(baseline["symptom_onset_date"].isna().sum()), "warning" if baseline["symptom_onset_date"].isna().any() else "pass", "No parseable symptom onset candidate date."],
         ["dx_delay_negative_n", int(delay_negative.sum()), "warning" if delay_negative.any() else "pass", "Diagnosis delay <0; onset after diagnosis."],
