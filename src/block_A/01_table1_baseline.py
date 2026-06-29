@@ -69,6 +69,12 @@ def parse_args() -> argparse.Namespace:
         help="Analytic visit-level CSV/Parquet/XLSX file.",
     )
     parser.add_argument("--outdir", type=Path, default=common.BLOCKA_TABLES_DIR, help="Output directory for Block A tables.")
+    parser.add_argument(
+        "--intermediate-dir",
+        type=Path,
+        default=common.PROJECT_ROOT / "data_intermediate" / "block_A",
+        help="Directory for patient-level intermediate files used to manually audit Table 1 metrics.",
+    )
     parser.add_argument("--eligibility", type=Path, default=common.BLOCKA_TABLES_DIR / "00_analytic_cohort_ids.csv", help="Optional prior eligibility patient ID file.")
     return parser.parse_args()
 
@@ -284,6 +290,76 @@ def apply_eligibility(baseline: pd.DataFrame, eligibility_path: Path) -> tuple[p
     return baseline[baseline["patient_id"].astype("string").isin(ids)].copy(), f"Filtered to {len(ids)} IDs from {eligibility_path}."
 
 
+def safe_file_stem(path: Path) -> str:
+    """Return a compact filesystem-safe stem that identifies the input source."""
+    stem = path.stem or "input"
+    safe = "".join(ch if ch.isalnum() else "_" for ch in stem.lower()).strip("_")
+    return safe[:80] or "input"
+
+
+def add_metric_audit_flags(baseline: pd.DataFrame) -> pd.DataFrame:
+    """Add explicit inclusion/exclusion flags for Table 1 manual metric audits."""
+    audit = baseline.copy()
+    audit["age_dx_excluded_from_stats"] = audit["age_dx"].notna() & ((audit["age_dx"] < 0) | (audit["age_dx"] < 18) | (audit["age_dx"] > 100))
+    audit["age_dx_included_in_stats"] = audit["age_dx"].notna() & ~audit["age_dx_excluded_from_stats"]
+    audit["dx_delay_negative"] = audit["dx_delay_yrs"].notna() & (audit["dx_delay_yrs"] < 0)
+    audit["dx_delay_gt60"] = audit["dx_delay_yrs"].notna() & (audit["dx_delay_yrs"] > 60)
+    audit["dx_delay_excluded_from_stats"] = audit["dx_delay_negative"] | audit["dx_delay_gt60"]
+    audit["dx_delay_included_in_stats"] = audit["dx_delay_yrs"].notna() & ~audit["dx_delay_excluded_from_stats"]
+    audit["sex_included_in_denominator"] = audit["sex_norm"].notna()
+    audit["race_included_in_denominator"] = audit["race"].notna()
+    audit["classification_known"] = audit["sjogren_class_norm"] != "unknown"
+    return audit
+
+
+def write_metric_intermediates(
+    baseline_pre_eligibility: pd.DataFrame,
+    baseline_eligible: pd.DataFrame,
+    input_path: Path,
+    intermediate_dir: Path,
+) -> list[Path]:
+    """Save patient-level files used to calculate Table 1 metrics for manual review."""
+    intermediate_dir.mkdir(parents=True, exist_ok=True)
+    source_stem = safe_file_stem(input_path)
+    columns_for_audit = [
+        "patient_id",
+        "baseline_visit_date",
+        "sex_raw",
+        "sex_norm",
+        "race",
+        "dx_date",
+        "symptom_onset_date",
+        "age_dx",
+        "dx_delay_yrs",
+        "sjogren_class_raw",
+        "sjogren_class_norm",
+        "is_primary_sjd",
+        "is_secondary_sjd",
+        "is_incomplete_sjd",
+        "age_dx_excluded_from_stats",
+        "age_dx_included_in_stats",
+        "dx_delay_negative",
+        "dx_delay_gt60",
+        "dx_delay_excluded_from_stats",
+        "dx_delay_included_in_stats",
+        "sex_included_in_denominator",
+        "race_included_in_denominator",
+        "classification_known",
+    ]
+    outputs = []
+    for label, data in (
+        ("baseline_patient_metrics_before_eligibility", baseline_pre_eligibility),
+        ("baseline_patient_metrics_after_eligibility", baseline_eligible),
+    ):
+        audit = add_metric_audit_flags(data)
+        audit = audit[[col for col in columns_for_audit if col in audit.columns]].copy()
+        audit.insert(0, "source_file", str(input_path))
+        path = intermediate_dir / f"01_table1_from_{source_stem}__{label}.csv"
+        audit.to_csv(path, index=False)
+        outputs.append(path)
+    return outputs
+
+
 def build_outputs(baseline: pd.DataFrame, dataset_missing: list[str], eligibility_detail: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     n_overall = len(baseline)
     sex_nonmissing = baseline["sex_norm"].notna().sum()
@@ -367,6 +443,7 @@ def main() -> None:
     args = parse_args()
     common.ensure_output_dirs()
     args.outdir.mkdir(parents=True, exist_ok=True)
+    args.intermediate_dir.mkdir(parents=True, exist_ok=True)
 
     df = read_table(args.input)
     dataset_missing = validate_hardcoded_vars(df)
@@ -388,10 +465,15 @@ def main() -> None:
     )
 
     baseline = build_baseline_patient_table(df)
+    baseline_pre_eligibility = baseline.copy()
     baseline, eligibility_detail = apply_eligibility(baseline, args.eligibility)
     if baseline.empty:
         raise ValueError("No patients remain after baseline construction/eligibility filtering")
     LOG.info("Built baseline patient table: %s unique patients", baseline["patient_id"].nunique())
+
+    intermediate_paths = write_metric_intermediates(baseline_pre_eligibility, baseline, args.input, args.intermediate_dir)
+    for intermediate_path in intermediate_paths:
+        LOG.info("Wrote %s", intermediate_path.relative_to(common.PROJECT_ROOT) if intermediate_path.is_relative_to(common.PROJECT_ROOT) else intermediate_path)
 
     table, qc = build_outputs(baseline, dataset_missing, eligibility_detail)
     if dataset_missing:
