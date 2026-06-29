@@ -32,10 +32,7 @@ VISIT_DATE_COL = "ids__visit_date"
 CODEBOOK_COLUMN = "FORM_NAME__QUESTION_NAME"
 DEFAULT_INPUT = Path("/data/salazarda/data/eda_sjd/data_analytic/visits_long_collapsed_by_interval_codebook_corrected.parquet")
 
-ESSDAI_TOTAL_CANDIDATES = [
-    "essdai__essdai_total_score",
-    "essdai-_r__essdai_total_score",
-]
+ESSDAI_TOTAL_CANDIDATES = ["essdai__essdai_total_score"]
 ESSPRI_COMPONENTS = [
     "esspri_questionnaire__dryness",
     "esspri_questionnaire__fatigue",
@@ -328,27 +325,39 @@ def make_pop_swimmer_plot(longitudinal: pd.DataFrame, baseline: pd.DataFrame, ou
     summary["baseline_pop"] = summary["patient_id"].map(base_status).fillna("Unclassifiable")
     summary["pop_rank"] = summary["baseline_pop"].map({p: i for i, p in enumerate(POP_ORDER)}).fillna(99)
     summary = summary.sort_values(["pop_rank", "last", "visits"], ascending=[True, False, False]).reset_index(drop=True)
-    summary["y"] = np.arange(len(summary), 0, -1)
-    y_map = dict(zip(summary["patient_id"], summary["y"]))
+    grouped_summaries = {pop: summary[summary["baseline_pop"] == pop].copy() for pop in POP_ORDER}
+    for pop, group in grouped_summaries.items():
+        grouped_summaries[pop]["y"] = np.arange(len(group), 0, -1)
+    y_map = pd.concat(grouped_summaries.values(), ignore_index=True).set_index("patient_id")["y"].to_dict()
     plot_df["y"] = plot_df["patient_id"].map(y_map)
-    height = min(24, max(6, len(summary) * 0.06 + 3))
-    fig, ax = plt.subplots(figsize=(12, height))
-    for _, row in summary.iterrows():
-        ax.hlines(row["y"], row["first"], row["last"], color="#d0d0d0", linewidth=0.8, zorder=1)
-    for pop in POP_ORDER:
-        sub = plot_df[plot_df["pop_status"] == pop]
-        ax.scatter(sub["time_years"], sub["y"], s=12, color=POP_COLORS[pop], label=pop, alpha=0.9, zorder=2)
-    for x, label in [(0, "baseline"), (0.5, "6 mo"), (1, "1y"), (2, "2y"), (4, "4y"), (6, "6y"), (8, "8y"), (10, "10y")]:
-        ax.axvline(x, color="#777777", linestyle="--", linewidth=0.7, alpha=0.6)
-        if x <= max(x_limit, 10):
-            ax.text(x, 1.01, label, transform=ax.get_xaxis_transform(), ha="center", va="bottom", fontsize=7, color="#555555")
-    ax.set_xlim(left=-0.05, right=max(x_limit, 10) * 1.02)
-    ax.set_xlabel("Time since baseline (years)")
-    ax.set_ylabel("Patients sorted by baseline population and follow-up")
-    ax.set_yticks([])
-    ax.set_title("Longitudinal Pop1/Pop2/Pop3 classification by patient\nTime since first recorded visit; points colored by ESSDAI/ESSPRI-defined population")
-    ax.text(0.0, -0.12, "Pop1 = ESSDAI ≥5; Pop2 = ESSDAI <5 and ESSPRI ≥5; Pop3 = ESSDAI <5 and ESSPRI <5; grey = insufficient data.", transform=ax.transAxes, fontsize=9)
-    ax.legend(loc="upper right", frameon=False, ncol=4)
+    plot_df["baseline_pop"] = plot_df["patient_id"].map(base_status).fillna("Unclassifiable")
+    height = min(28, max(10, len(summary) * 0.045 + 5))
+    fig, axes = plt.subplots(4, 1, figsize=(13, height), sharex=True, gridspec_kw={"hspace": 0.28})
+    x_ticks = [(0, "baseline"), (0.5, "6 mo"), (1, "1y"), (2, "2y"), (4, "4y"), (6, "6y"), (8, "8y"), (10, "10y")]
+    for ax, baseline_pop in zip(axes, POP_ORDER):
+        group = grouped_summaries[baseline_pop]
+        for _, row in group.iterrows():
+            ax.hlines(row["y"], row["first"], row["last"], color="#d0d0d0", linewidth=0.8, zorder=1)
+        panel_df = plot_df[plot_df["baseline_pop"] == baseline_pop]
+        for pop in POP_ORDER:
+            sub = panel_df[panel_df["pop_status"] == pop]
+            ax.scatter(sub["time_years"], sub["y"], s=12, color=POP_COLORS[pop], label=pop, alpha=0.9, zorder=2)
+        for x, label in x_ticks:
+            ax.axvline(x, color="#777777", linestyle="--", linewidth=0.7, alpha=0.6)
+            if x <= max(x_limit, 10):
+                ax.text(x, 1.01, label, transform=ax.get_xaxis_transform(), ha="center", va="bottom", fontsize=7, color="#555555")
+        ax.set_xlim(left=-0.05, right=max(x_limit, 10) * 1.02)
+        ax.set_ylim(0, max(len(group), 1) + 1)
+        ax.set_yticks([])
+        ax.set_ylabel("Patients")
+        ax.set_title(f"Baseline {baseline_pop} (n={len(group)})", loc="left", fontsize=10, color=POP_COLORS[baseline_pop])
+        if group.empty:
+            ax.text(0.5, 0.5, "No patients", transform=ax.transAxes, ha="center", va="center", color="#777777")
+    axes[-1].set_xlabel("Time since baseline (years)")
+    fig.suptitle("Longitudinal Pop1/Pop2/Pop3 classification by patient\nSeparate panels by baseline population; points colored by ESSDAI/ESSPRI-defined population", y=0.995)
+    fig.text(0.01, 0.01, "Pop1 = ESSDAI ≥5; Pop2 = ESSDAI <5 and ESSPRI ≥5; Pop3 = ESSDAI <5 and ESSPRI <5; grey = insufficient data.", fontsize=9)
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper right", frameon=False, ncol=4, bbox_to_anchor=(0.98, 0.99))
     fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
