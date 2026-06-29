@@ -249,6 +249,7 @@ def build_baseline_patient_table(df: pd.DataFrame) -> pd.DataFrame:
             "sjogren_class_norm": class_norm,
             "is_primary_sjd": class_norm == "primary_sjd",
             "is_secondary_sjd": class_norm == "secondary_sjd",
+            "is_incomplete_sjd": class_norm == "incomplete",
         })
     baseline_df = pd.DataFrame(rows)
     if baseline_df.empty:
@@ -304,6 +305,7 @@ def build_outputs(baseline: pd.DataFrame, dataset_missing: list[str], eligibilit
 
     n_primary = int(baseline["is_primary_sjd"].sum())
     n_secondary = int(baseline["is_secondary_sjd"].sum())
+    n_incomplete = int(baseline["is_incomplete_sjd"].sum())
 
     rows = [
         ["Overall cohort", "N patients", n_overall, 0, str(n_overall), json.dumps({"n": n_overall})],
@@ -313,6 +315,7 @@ def build_outputs(baseline: pd.DataFrame, dataset_missing: list[str], eligibilit
         ["Clinical history", "Disease duration from symptom onset to diagnosis, years, median (IQR)", int(baseline.loc[~delay_excluded, "dx_delay_yrs"].notna().sum()), int(baseline["dx_delay_yrs"].isna().sum()), delay_text, json.dumps(delay_raw)],
         ["Classification", "Primary SjD, n (%)", n_primary, int((baseline["sjogren_class_norm"] == "unknown").sum()), n_pct(n_primary, n_overall), json.dumps({"n": n_primary, "denom": n_overall, "pct": round(n_primary / n_overall * 100, 1) if n_overall else None})],
         ["Classification", "Secondary SjD, n (%)", n_secondary, int((baseline["sjogren_class_norm"] == "unknown").sum()), n_pct(n_secondary, n_overall), json.dumps({"n": n_secondary, "denom": n_overall, "pct": round(n_secondary / n_overall * 100, 1) if n_overall else None})],
+        ["Classification", "Incomplete SjD, n (%)", n_incomplete, int((baseline["sjogren_class_norm"] == "unknown").sum()), n_pct(n_incomplete, n_overall), json.dumps({"n": n_incomplete, "denom": n_overall, "pct": round(n_incomplete / n_overall * 100, 1) if n_overall else None})],
     ]
     rows.extend(
         [
