@@ -195,6 +195,31 @@ def normalize_sjogren_class(x: object) -> str:
     return mapping.get(s, "unknown")
 
 
+def modal_sjogren_class_value(values: Iterable[object]) -> tuple[object, str]:
+    """Return the modal non-missing Sjögren classification raw value and normalized label.
+
+    When there is a tie, keep the first tied class observed in the patient's
+    visit order so the result is deterministic without inventing a priority.
+    """
+    counts: dict[str, int] = {}
+    first_raw_by_norm: dict[str, object] = {}
+    first_order_by_norm: dict[str, int] = {}
+    for order, value in enumerate(values):
+        if is_missing_value(value):
+            continue
+        norm = normalize_sjogren_class(value)
+        if norm == "unknown":
+            continue
+        counts[norm] = counts.get(norm, 0) + 1
+        if norm not in first_raw_by_norm:
+            first_raw_by_norm[norm] = value
+            first_order_by_norm[norm] = order
+    if not counts:
+        return np.nan, "unknown"
+    modal_norm = max(counts, key=lambda norm: (counts[norm], -first_order_by_norm[norm]))
+    return first_raw_by_norm[modal_norm], modal_norm
+
+
 def coalesce_same_date(group: pd.DataFrame) -> pd.Series:
     return group.apply(first_nonmissing, axis=0)
 
@@ -235,10 +260,10 @@ def build_baseline_patient_table(df: pd.DataFrame) -> pd.DataFrame:
         if pd.notna(dx_date) and pd.notna(symptom_onset):
             dx_delay = (dx_date - symptom_onset).days / 365.25
 
-        class_raw = first_nonmissing([baseline.get(SJOGREN_CLASS_COL, np.nan)])
-        if is_missing_value(class_raw) and SJOGREN_CLASS_COL in g:
-            class_raw = first_nonmissing(g[SJOGREN_CLASS_COL])
-        class_norm = normalize_sjogren_class(class_raw)
+        if SJOGREN_CLASS_COL in g:
+            class_raw, class_norm = modal_sjogren_class_value(g[SJOGREN_CLASS_COL])
+        else:
+            class_raw, class_norm = np.nan, "unknown"
 
         sex_raw = first_nonmissing([baseline.get(SEX_COL, np.nan)])
         if is_missing_value(sex_raw) and SEX_COL in g:
