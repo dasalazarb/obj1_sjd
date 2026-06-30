@@ -54,7 +54,19 @@ DOMAIN_LABELS = {
     **{v: v.replace("visit_summary_-_2016_classification_criteria__ic_", "").replace("_domain", "") for v in EXTRAGLANDULAR_VARS},
 }
 MISSING_STRINGS = {"", "na", "n/a", "nan", "none", "null", "unknown", "unk", ".", "-99"}
-NEGATIVE_STRINGS = {"0", "no", "false", "absent", "not present", "negative", "unchecked", "unselected"}
+NEGATIVE_STRINGS = {
+    "0",
+    "no",
+    "false",
+    "absent",
+    "not present",
+    "negative",
+    "unchecked",
+    "unselected",
+    "not selected",
+    "no activity",
+    "none selected",
+}
 POSITIVE_STRINGS = {"1", "yes", "true", "present", "positive", "checked", "selected"}
 
 
@@ -62,7 +74,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Calculate baseline IC glandular/extraglandular overlap.")
     parser.add_argument("--input", type=Path, default=Path(common.DEFAULT_ANALYTIC_DATASET))
     parser.add_argument("--intermediate-dir", type=Path, default=Path(common.INTERMEDIATE_DATA_DIR))
-    parser.add_argument("--tables-dir", type=Path, default=Path(common.OUTPUTS_DIR) / "tables" / "blockA")
+    parser.add_argument("--tables-dir", type=Path, default=Path(common.BLOCKA_TABLES_DIR))
     parser.add_argument("--figures-dir", type=Path, default=Path(common.OUTPUTS_DIR) / "figures" / "blockA")
     return parser.parse_args()
 
@@ -126,24 +138,39 @@ def load_baseline_wide(df: pd.DataFrame, patient_col: str) -> tuple[pd.DataFrame
 
     if set(DOMAIN_VARS).issubset(df.columns):
         columns = [patient_col, "visit_date_parsed", *DOMAIN_VARS]
-        longish = baseline[columns]
+        longish = baseline[columns].copy()
+        for var in DOMAIN_VARS:
+            bin_col = f"{DOMAIN_LABELS[var]}_binary"
+            longish[bin_col] = longish[var].map(lambda x, label=DOMAIN_LABELS[var]: domain_binary(x, label))
+        grouped = longish.groupby(patient_col)[[f"{DOMAIN_LABELS[var]}_binary" for var in DOMAIN_VARS]].max(min_count=1)
     else:
         variable_col = choose_existing(df, VARIABLE_CANDIDATES, "variable-name column")
         value_col = choose_existing(df, VALUE_CANDIDATES, "observation-value column")
         needed = [patient_col, "visit_date_parsed", variable_col, value_col]
         longish = baseline.loc[baseline[variable_col].astype(str).isin(DOMAIN_VARS), needed]
-        longish = longish.pivot_table(
-            index=[patient_col, "visit_date_parsed"], columns=variable_col, values=value_col,
-            aggfunc=lambda x: next((v for v in x if not is_missing(v)), np.nan)
-        ).reset_index()
+        longish = longish.copy()
+        longish["domain_label"] = longish[variable_col].map(DOMAIN_LABELS)
+        longish["binary_value"] = longish.apply(
+            lambda row: domain_binary(row[value_col], row["domain_label"]),
+            axis=1,
+        )
+        grouped = (
+            longish.pivot_table(
+                index=patient_col,
+                columns="domain_label",
+                values="binary_value",
+                aggfunc=lambda x: x.max(skipna=True) if x.notna().any() else np.nan,
+            )
+            .rename(columns=lambda label: f"{label}_binary")
+        )
 
     # Keep all rows tied at baseline date but collapse to one patient profile by maximum binary evidence.
     for var in DOMAIN_VARS:
-        if var not in longish.columns:
-            longish[var] = np.nan
         bin_col = f"{DOMAIN_LABELS[var]}_binary"
-        longish[bin_col] = longish[var].map(lambda x, label=DOMAIN_LABELS[var]: domain_binary(x, label))
-        records[bin_col] = longish.groupby(patient_col)[bin_col].max(min_count=1).reindex(records[patient_col]).to_numpy()
+        if bin_col not in grouped.columns:
+            records[bin_col] = np.nan
+        else:
+            records[bin_col] = grouped[bin_col].reindex(records[patient_col]).to_numpy()
     source_min_dates = valid.groupby(patient_col)["visit_date_parsed"].min()
     baseline_is_minimum = records.set_index(patient_col)["visit_date_parsed"].eq(source_min_dates).all()
     return records, invalid_patient_count, bool(baseline_is_minimum)
@@ -249,20 +276,34 @@ def main() -> None:
         col = f"{DOMAIN_LABELS[var]}_binary"
         co.loc["glandular", DOMAIN_LABELS[var]] = int(glandular_present[col].eq(1).sum())
 
+    figure_path = args.figures_dir / "06_overlap_baseline_upset_or_heatmap.pdf"
     import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots(figsize=(13, 3.2))
-    im = ax.imshow(co.values, cmap="Blues")
-    ax.set_xticks(range(co.shape[1]), co.columns, rotation=45, ha="right")
-    ax.set_yticks(range(co.shape[0]), co.index)
-    ax.set_title("Baseline co-occurrence with glandular involvement (n)")
-    for i in range(co.shape[0]):
-        for j in range(co.shape[1]):
-            ax.text(j, i, str(co.iloc[i, j]), ha="center", va="center")
-    fig.colorbar(im, ax=ax, label="n")
-    fig.tight_layout()
-    fig.savefig(args.figures_dir / "06_overlap_baseline_upset_or_heatmap.pdf")
-    plt.close(fig)
+    try:
+        from upsetplot import UpSet, from_indicators
+
+        plot_data = evaluable[[gland_col, *extra_cols]].fillna(0).astype(bool)
+        plot_data = plot_data.rename(
+            columns={gland_col: "glandular", **{f"{DOMAIN_LABELS[v]}_binary": DOMAIN_LABELS[v] for v in EXTRAGLANDULAR_VARS}}
+        )
+        fig = plt.figure(figsize=(13, 7))
+        UpSet(from_indicators(plot_data.columns, data=plot_data), subset_size="count", show_counts=True).plot(fig=fig)
+        fig.suptitle("Baseline glandular/extraglandular IC domain overlap")
+        fig.savefig(figure_path, bbox_inches="tight")
+        plt.close(fig)
+    except ImportError:
+        fig, ax = plt.subplots(figsize=(13, 3.2))
+        im = ax.imshow(co.values, cmap="Blues")
+        ax.set_xticks(range(co.shape[1]), co.columns, rotation=45, ha="right")
+        ax.set_yticks(range(co.shape[0]), co.index)
+        ax.set_title("Baseline co-occurrence with glandular involvement (n)")
+        for i in range(co.shape[0]):
+            for j in range(co.shape[1]):
+                ax.text(j, i, str(co.iloc[i, j]), ha="center", va="center")
+        fig.colorbar(im, ax=ax, label="n")
+        fig.tight_layout()
+        fig.savefig(figure_path)
+        plt.close(fig)
 
 
 if __name__ == "__main__":
