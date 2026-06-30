@@ -30,7 +30,7 @@ import common  # noqa: E402
 PATIENT_ID_COL = "ids__patient_record_number"
 VISIT_DATE_COL = "ids__visit_date"
 CODEBOOK_COLUMN = "FORM_NAME__QUESTION_NAME"
-DEFAULT_INPUT = Path("/data/salazarda/data/eda_sjd/data_analytic/visits_long_collapsed_by_interval_codebook_corrected.parquet")
+DEFAULT_INPUT = Path("/data/raw/visits_long_collapsed_by_interval_codebook_corrected.parquet")
 
 ESSDAI_TOTAL_CANDIDATES = ["essdai__essdai_total_score"]
 ESSPRI_COMPONENTS = [

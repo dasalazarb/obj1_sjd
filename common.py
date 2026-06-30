@@ -19,7 +19,8 @@ OUTPUTS_DIR = PROJECT_ROOT / "outputs"
 ANALYSIS_DIR = PROJECT_ROOT / "analysis"
 
 # Canonical input defaults. CLI arguments in scripts may override these.
-DEFAULT_ANALYTIC_DATASET = RAW_DATA_DIR / "visits_long_collapsed_by_interval_codebook_type_recode-3.csv"
+DEFAULT_ANALYTIC_DATASET = Path("/data/raw/visits_long_collapsed_by_interval_codebook_corrected.parquet")
+DEFAULT_POP_DISTRIBUTION_INPUT = DEFAULT_ANALYTIC_DATASET
 DEFAULT_CODEBOOK = METADATA_DIR / "Consolidated_Codebook_all_columns.xlsx"
 
 # Block A outputs.
