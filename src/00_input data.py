@@ -5,7 +5,7 @@
 Carga el archivo parquet fuente, filtra la cohorte para conservar solamente
 registros cuyo campo ``visit_summary_form__sjogrens_class`` incluya al menos
 una de las categorías 1, 2 o 4, y exporta el resultado en parquet y CSV bajo
-``data_raw/``.
+``data/raw/``.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ SOURCE_FILE = Path(
     "/data/salazarda/data/eda_sjd/data_analytic/"
     "visits_long_collapsed_by_interval_codebook_corrected.parquet"
 )
-OUTPUT_DIR = Path("data_raw")
+OUTPUT_DIR = Path("data/raw")
 OUTPUT_BASENAME = "visits_long_collapsed_by_interval_codebook_corrected"
 OUTPUT_PARQUET = OUTPUT_DIR / f"{OUTPUT_BASENAME}.parquet"
 OUTPUT_CSV = OUTPUT_DIR / f"{OUTPUT_BASENAME}.csv"
