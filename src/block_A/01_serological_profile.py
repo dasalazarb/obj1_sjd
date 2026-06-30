@@ -43,10 +43,10 @@ OPTIONAL_COLS = [
     "Abnormal Flag", "Flag", "Result Status", "Observation Note", "Comment",
 ]
 LAB_MARKER_MAP = {
-    "SS-A/Ro Ab, IgG (Blood)": "anti_ro_ssa",
-    "SS-Ro60 Ab, IgG (Blood)": "anti_ro_ssa",
-    "SS-Ro52 Ab, IgG (Blood)": "anti_ro_ssa",
-    "SS-B/La Ab, IgG (Blood)": "anti_la_ssb",
+    "SS-A/Ro Ab, IgG (Blood)": "ro_ssa_igg",
+    "SS-Ro60 Ab, IgG (Blood)": "ro_ssa_igg",
+    "SS-Ro52 Ab, IgG (Blood)": "ro_ssa_igg",
+    "SS-B/La Ab, IgG (Blood)": "la_ssb_igg",
     "Antinuclear Antibody (ANA) (Blood)": "ana",
     "Antinuclear Antibody (ANA) HEp-2 Substrate (Blood)": "ana",
     "Antinuclear Antibody (ANA) HEp-2 Substrate Titer (Blood)": "ana_titer",
@@ -57,9 +57,9 @@ LAB_MARKER_MAP = {
     "WBC (Blood)": "wbc",
 }
 FINAL_ROWS = [
-    ("anti_ro_pos", "Anti-Ro/SSA positive", "Positive if any exact mapped SS-A/Ro, Ro60, or Ro52 result is interpretable positive using assay-specific cutoffs."),
-    ("anti_la_pos", "Anti-La/SSB positive", "Positive if any exact mapped SS-B/La result is interpretable positive using assay-specific cutoffs."),
-    ("double_ro_la_pos", "Anti-Ro/SSA and Anti-La/SSB double-positive", "Positive among patients interpretable for both Anti-Ro/SSA and Anti-La/SSB."),
+    ("anti_ro_pos", "SS-A/Ro IgG positive", "Positive if any exact mapped SS-A/Ro IgG, SS-Ro60 IgG, or SS-Ro52 IgG result is interpretable positive using assay-specific cutoffs; these exact labs are not treated as the broader Anti-SS-A screening label."),
+    ("anti_la_pos", "SS-B/La IgG positive", "Positive if any exact mapped SS-B/La IgG result is interpretable positive using assay-specific cutoffs; this exact lab is not treated as the broader Anti-SS-B screening label."),
+    ("double_ro_la_pos", "SS-A/Ro IgG and SS-B/La IgG double-positive", "Positive among patients interpretable for both exact SS-A/Ro IgG and SS-B/La IgG testing."),
     ("ana_pos", "ANA positive", "Positive by qualitative ANA, numeric ANA above the negative cutoff, or ANA titer >= configured threshold 80; ANA pattern alone does not define positivity."),
     ("rf_pos", "Rheumatoid factor positive", "Positive by qualitative RF, high flag, value above reference high, or numeric value at/above the configured negative cutoff."),
     ("cryo_pos", "Cryoglobulinemia documented", "Positive if cryoglobulin result says positive, detected, or present; negative if it says negative."),
@@ -201,7 +201,7 @@ def parse_observation_value(value: Any, marker: str, unit: Any = None, reference
     val = None if pd.isna(out["numeric_value"]) else float(out["numeric_value"])
     lab_key = "" if _missing(lab_name) else str(lab_name).strip()
     negative_limit = DEFAULT_NEGATIVE_UPPER_LIMITS.get(lab_key)
-    if val is not None and negative_limit is not None and marker in {"anti_ro_ssa", "anti_la_ssb", "ana"}:
+    if val is not None and negative_limit is not None and marker in {"ro_ssa_igg", "la_ssb_igg", "ana"}:
         is_negative = _negative_limit_match(val, out["operator"], negative_limit)
         if lab_key in INCLUSIVE_NEGATIVE_UPPER_LIMIT_LABS and out["operator"] == "":
             is_negative = val <= negative_limit
@@ -295,14 +295,14 @@ def build_patient_level(long: pd.DataFrame) -> pd.DataFrame:
     for pid in patients:
         row: dict[str, Any] = {"patient_id": pid}
         pg = long[long["patient_id"].astype(str) == pid]
-        specs = {"anti_ro": ["anti_ro_ssa"], "anti_la": ["anti_la_ssb"], "ana": ["ana", "ana_titer"], "rf": ["rf"], "cryo": ["cryoglobulins"], "c4": ["c4"], "wbc": ["wbc"]}
+        specs = {"anti_ro": ["ro_ssa_igg"], "anti_la": ["la_ssb_igg"], "ana": ["ana", "ana_titer"], "rf": ["rf"], "cryo": ["cryoglobulins"], "c4": ["c4"], "wbc": ["wbc"]}
         for name, markers in specs.items():
             mg = pg[pg["serology_marker"].isin(markers)]
             d = _patient_marker(mg)
             row[f"{name}_tested"] = d["tested"]; row[f"{name}_interpretable"] = d["interpretable"]
             out_col = {"anti_ro":"anti_ro_pos","anti_la":"anti_la_pos","cryo":"cryo_pos","c4":"low_c4","wbc":"leukopenia"}.get(name, f"{name}_pos")
             row[out_col] = d["pos"]; row[f"{name}_first_date"] = d["first_date"]; row[f"{name}_first_positive_date"] = d["first_positive_date"]; row[f"{name}_n_records"] = d["n_records"]
-        ro_pos_labs = pg[(pg["serology_marker"] == "anti_ro_ssa") & (pg["classification"] == "positive")]["Cluster Name"].dropna().unique()
+        ro_pos_labs = pg[(pg["serology_marker"] == "ro_ssa_igg") & (pg["classification"] == "positive")]["Cluster Name"].dropna().unique()
         row["anti_ro_positive_source_lab"] = "; ".join(map(str, ro_pos_labs))
         row["double_ro_la_pos"] = bool(row["anti_ro_pos"] is True and row["anti_la_pos"] is True) if row["anti_ro_interpretable"] and row["anti_la_interpretable"] else pd.NA
         at = pg[pg["serology_marker"] == "ana_titer"]["numeric_value"].dropna(); row["ana_titer_max"] = at.max() if not at.empty else np.nan
@@ -385,9 +385,9 @@ def _continuous_markers(long: pd.DataFrame, threshold: float = 0.5) -> set[str]:
 
 def make_plots(long: pd.DataFrame) -> None:
     out = common.BLOCKA_TABLES_DIR; out.mkdir(parents=True, exist_ok=True)
-    marker_titles = {"anti_ro_ssa":"Anti-Ro/SSA", "anti_la_ssb":"Anti-La/SSB", "ana":"ANA", "ana_titer":"ANA titer", "ana_pattern":"ANA pattern", "rf":"RF", "c4":"C4", "wbc":"WBC", "cryoglobulins":"Cryoglobulins"}
+    marker_titles = {"ro_ssa_igg":"SS-A/Ro IgG", "la_ssb_igg":"SS-B/La IgG", "ana":"ANA", "ana_titer":"ANA titer", "ana_pattern":"ANA pattern", "rf":"RF", "c4":"C4", "wbc":"WBC", "cryoglobulins":"Cryoglobulins"}
     continuous_markers = _continuous_markers(long)
-    default_continuous = ["anti_ro_ssa", "anti_la_ssb", "ana_titer", "rf", "c4", "wbc"]
+    default_continuous = ["ro_ssa_igg", "la_ssb_igg", "ana_titer", "rf", "c4", "wbc"]
     panel_markers = [m for m in default_continuous if m in set(long.serology_marker.dropna())]
     panel_markers.extend(sorted(continuous_markers - set(panel_markers)))
     panels = {marker: marker_titles.get(marker, marker.replace("_", " ").title()) for marker in panel_markers}
@@ -406,7 +406,7 @@ def make_plots(long: pd.DataFrame) -> None:
         ax.set_title(title + (f" ({metadata})" if metadata else "")); ax.set_ylabel("value\ntext / see note at bottom"); ax.legend(loc="best", fontsize=7)
     fig.tight_layout(); fig.savefig(out / "01_dotplot_serological_profile.pdf"); shutil.copyfile(out / "01_dotplot_serological_profile.pdf", out / "01_dotplot_serological profile.pdf"); plt.close(fig)
 
-    categorical_markers = ["anti_ro_ssa", "anti_la_ssb", "ana", "ana_pattern", "rf", "cryoglobulins"]
+    categorical_markers = ["ro_ssa_igg", "la_ssb_igg", "ana", "ana_pattern", "rf", "cryoglobulins"]
     categorical_markers = [m for m in categorical_markers if m not in continuous_markers]
     cat = long[long.serology_marker.isin(categorical_markers)].copy()
     cat = cat[cat.lab_date.notna()].copy()
@@ -458,8 +458,8 @@ def main() -> None:
     if summary.get("exact_duplicate_rows", 0): warnings.append("exact duplicate rows between/within sources present")
     if not possible.empty: warnings.append("similar but unmapped Cluster Name values present")
     add_table_block(patient, warnings); write_qc(long, patient, possible, summary, warnings); make_plots(long)
-    print(f"Anti-Ro/SSA positivity was present in {ro:.1f}% of patients with interpretable testing; {dbl:.1f}% were double-positive for Anti-Ro/SSA and Anti-La/SSB. Cryoglobulinemia was documented in {cryo:.1f}% of patients with interpretable cryoglobulin testing.")
-    print(f"La positividad para Anti-Ro/SSA estuvo presente en {ro:.1f}% de los pacientes con prueba interpretable; {dbl:.1f}% fueron doble positivos para Anti-Ro/SSA y Anti-La/SSB. La crioglobulinemia fue documentada en {cryo:.1f}% de los pacientes con prueba interpretable.")
+    print(f"SS-A/Ro IgG positivity was present in {ro:.1f}% of patients with interpretable testing; {dbl:.1f}% were double-positive for SS-A/Ro IgG and SS-B/La IgG. Cryoglobulinemia was documented in {cryo:.1f}% of patients with interpretable cryoglobulin testing.")
+    print(f"La positividad para SS-A/Ro IgG estuvo presente en {ro:.1f}% de los pacientes con prueba interpretable; {dbl:.1f}% fueron doble positivos para SS-A/Ro IgG y SS-B/La IgG. La crioglobulinemia fue documentada en {cryo:.1f}% de los pacientes con prueba interpretable.")
 
 
 if __name__ == "__main__":
