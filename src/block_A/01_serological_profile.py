@@ -384,7 +384,7 @@ def _continuous_markers(long: pd.DataFrame, threshold: float = 0.5) -> set[str]:
 
 
 def make_plots(long: pd.DataFrame) -> None:
-    out = common.BLOCKA_TABLES_DIR; out.mkdir(parents=True, exist_ok=True)
+    out = common.OUTPUTS_DIR / "figures" / "blockA"; out.mkdir(parents=True, exist_ok=True)
     marker_titles = {"ro_ssa_igg":"SS-A/Ro IgG", "la_ssb_igg":"SS-B/La IgG", "ana":"ANA", "ana_titer":"ANA titer", "ana_pattern":"ANA pattern", "rf":"RF", "c4":"C4", "wbc":"WBC", "cryoglobulins":"Cryoglobulins"}
     continuous_markers = _continuous_markers(long)
     default_continuous = ["ro_ssa_igg", "la_ssb_igg", "ana_titer", "rf", "c4", "wbc"]
