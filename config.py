@@ -29,7 +29,7 @@ OUT_DIR  = Path("outputs")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # Archivo fuente principal (CSV wide: paciente × fase, 2057 columnas)
-VISITS_FILE = DATA_DIR / "visits_long_collapsed_by_interval_codebook_type_recode-3.csv"
+VISITS_FILE = Path("/data/salazarda/data/eda_sjd/data/raw") / "visits_long_collapsed_by_interval_codebook_corrected.parquet"
 
 # Variable-summary (métricas de cobertura — para triaje, no para análisis)
 VAR_SUMMARY_FILE = DATA_DIR / "longitudinal_variable_summary-12.csv"

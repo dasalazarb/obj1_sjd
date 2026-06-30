@@ -65,7 +65,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--input",
         type=Path,
-        default=Path("/data/salazarda/data/eda_sjd/data_analytic/visits_long_collapsed_by_interval_codebook_corrected.parquet"),
+        default=Path("/data/salazarda/data/eda_sjd/data/raw") / "visits_long_collapsed_by_interval_codebook_corrected.parquet",
         help="Analytic visit-level CSV/Parquet/XLSX file.",
     )
     parser.add_argument("--outdir", type=Path, default=common.BLOCKA_TABLES_DIR, help="Output directory for Block A tables.")

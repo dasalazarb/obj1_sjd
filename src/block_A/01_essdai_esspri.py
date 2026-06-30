@@ -23,7 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import common  # noqa: E402
 
-INPUT_PATH = Path("/data/salazarda/data/eda_sjd/data_analytic/visits_long_collapsed_by_interval_codebook_corrected.parquet")
+INPUT_PATH = Path("/data/salazarda/data/eda_sjd/data/raw") / "visits_long_collapsed_by_interval_codebook_corrected.parquet"
 ID_COL = "ids__patient_record_number"
 INTERVAL_COL = "ids__interval_name"
 VISIT_DATE_COL = "ids__visit_date"
