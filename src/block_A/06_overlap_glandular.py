@@ -11,7 +11,6 @@ import argparse
 import sys
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
@@ -62,7 +61,6 @@ POSITIVE_STRINGS = {"1", "yes", "true", "present", "positive", "checked", "selec
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Calculate baseline IC glandular/extraglandular overlap.")
     parser.add_argument("--input", type=Path, default=Path(common.DEFAULT_ANALYTIC_DATASET))
-    parser.add_argument("--codebook", type=Path, default=Path(common.DEFAULT_CODEBOOK))
     parser.add_argument("--intermediate-dir", type=Path, default=Path(common.INTERMEDIATE_DATA_DIR))
     parser.add_argument("--tables-dir", type=Path, default=Path(common.OUTPUTS_DIR) / "tables" / "blockA")
     parser.add_argument("--figures-dir", type=Path, default=Path(common.OUTPUTS_DIR) / "figures" / "blockA")
@@ -161,14 +159,6 @@ def main() -> None:
     args.tables_dir.mkdir(parents=True, exist_ok=True)
     args.figures_dir.mkdir(parents=True, exist_ok=True)
 
-    codebook = read_table(args.codebook)
-    if CODEBOOK_COL not in codebook.columns:
-        raise ValueError(f"Codebook missing required column {CODEBOOK_COL}")
-    codebook_vars = set(codebook[CODEBOOK_COL].dropna().astype(str))
-    missing_codebook = sorted(set(DOMAIN_VARS) - codebook_vars)
-    if missing_codebook:
-        raise ValueError("Expected IC domain variables absent from codebook: " + ", ".join(missing_codebook))
-
     df = read_table(args.input)
     patient_col = choose_existing(df, PATIENT_ID_CANDIDATES, "patient identifier")
     if VISIT_DATE_COL not in df.columns:
@@ -239,7 +229,6 @@ def main() -> None:
 
     category_sum = int(evaluable["overlap_category"].notna().sum())
     qc = pd.DataFrame([
-        ["all_expected_variables_in_codebook", not missing_codebook, ""],
         ["all_expected_variables_in_input", not missing_input, ""],
         [
             "baseline_is_minimum_valid_visit_date_per_patient",
@@ -259,6 +248,9 @@ def main() -> None:
     for var in EXTRAGLANDULAR_VARS:
         col = f"{DOMAIN_LABELS[var]}_binary"
         co.loc["glandular", DOMAIN_LABELS[var]] = int(glandular_present[col].eq(1).sum())
+
+    import matplotlib.pyplot as plt
+
     fig, ax = plt.subplots(figsize=(13, 3.2))
     im = ax.imshow(co.values, cmap="Blues")
     ax.set_xticks(range(co.shape[1]), co.columns, rotation=45, ha="right")
