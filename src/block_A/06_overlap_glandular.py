@@ -46,6 +46,7 @@ QC_OUTPUT = common.INTERMEDIATE_DATA_DIR / "06_overlap_baseline_qc.json"
 MISSING_STRINGS = {"", "na", "n/a", "nan", "none", "unknown", "unk", "missing", ".", "-99"}
 POSITIVE_STRINGS = {"1", "1.0", "yes", "y", "true", "t", "positive", "pos", "present", "checked", "x"}
 NEGATIVE_STRINGS = {"0", "0.0", "no", "n", "false", "f", "negative", "neg", "absent", "unchecked"}
+SOURCE_VARIABLE_KEY = {"preferred": "preferred", "essdai_fallback": "fallback"}
 
 DOMAINS = [
     {
@@ -152,7 +153,11 @@ def build_baseline(df: pd.DataFrame, source_by_domain: dict[str, str | None]) ->
     work["visit_date_min"] = work[VISIT_DATE_COL].map(parse_visit_date_min)
     work = work[work["patient_id"].notna() & work["visit_date_min"].notna()].copy()
 
-    selected_raw_vars = [d[source_by_domain[d["domain"]]] for d in DOMAINS if source_by_domain[d["domain"]] in {"preferred", "essdai_fallback"}]
+    selected_raw_vars = [
+        d[SOURCE_VARIABLE_KEY[source_by_domain[d["domain"]]]]
+        for d in DOMAINS
+        if source_by_domain[d["domain"]] in SOURCE_VARIABLE_KEY
+    ]
     for d in DOMAINS:
         source = source_by_domain[d["domain"]]
         if source == "preferred":
@@ -238,7 +243,7 @@ def make_manifest_and_qc(df: pd.DataFrame, baseline: pd.DataFrame, source_by_dom
     return pd.DataFrame(manifest_rows), qc
 
 
-def pct(n: int | float, denominator: int | float) -> float | pd._libs.missing.NAType:
+def pct(n: int | float, denominator: int | float) -> float | Any:
     return round(100 * n / denominator, 1) if denominator else pd.NA
 
 
@@ -347,7 +352,11 @@ def main() -> None:
 
     output_table = build_output_table(baseline, source_by_domain)
     patient_cols = [PATIENT_ID_COL, SUBJECT_ID_COL, "visit_date_min"]
-    patient_cols += [d[source_by_domain[d["domain"]]] for d in DOMAINS if source_by_domain[d["domain"]] in {"preferred", "essdai_fallback"}]
+    patient_cols += [
+        d[SOURCE_VARIABLE_KEY[source_by_domain[d["domain"]]]]
+        for d in DOMAINS
+        if source_by_domain[d["domain"]] in SOURCE_VARIABLE_KEY
+    ]
     patient_cols += [d["indicator"] for d in DOMAINS] + ["any_extraglandular_baseline", "overlap_category"]
     patient_cols = [c for c in dict.fromkeys(patient_cols) if c in baseline.columns]
 
