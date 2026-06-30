@@ -151,6 +151,7 @@ def build_baseline(df: pd.DataFrame, source_by_domain: dict[str, str | None]) ->
     work = df.copy()
     work["patient_id"] = work[PATIENT_ID_COL].astype("string")
     work["visit_date_min"] = work[VISIT_DATE_COL].map(parse_visit_date_min)
+    work["_had_piped_date"] = work[VISIT_DATE_COL].apply(lambda v: isinstance(v, str) and "|" in v)
     work = work[work["patient_id"].notna() & work["visit_date_min"].notna()].copy()
 
     selected_raw_vars = [
@@ -172,7 +173,7 @@ def build_baseline(df: pd.DataFrame, source_by_domain: dict[str, str | None]) ->
     candidates["_domain_completeness"] = candidates[[d["indicator"] for d in DOMAINS]].notna().sum(axis=1)
     candidates = candidates.sort_values(["patient_id", "visit_date_min", "_domain_completeness"], ascending=[True, True, False])
 
-    keep_cols = [PATIENT_ID_COL, SUBJECT_ID_COL, INTERVAL_COL, "visit_date_min", AGE_COL, SEX_COL, RACE_COL, ETHNICITY_COL]
+    keep_cols = [PATIENT_ID_COL, SUBJECT_ID_COL, INTERVAL_COL, "visit_date_min", "_had_piped_date", AGE_COL, SEX_COL, RACE_COL, ETHNICITY_COL]
     keep_cols = [c for c in keep_cols if c in candidates.columns]
     baseline = candidates.groupby("patient_id", sort=True, as_index=False).first()
 
@@ -235,6 +236,16 @@ def make_manifest_and_qc(df: pd.DataFrame, baseline: pd.DataFrame, source_by_dom
         "category_counts": {k: int(v) for k, v in category_counts.items()},
         "warnings": [],
     }
+    qc["n_piped_visit_dates_resolved"] = int(baseline.get("_had_piped_date", pd.Series(dtype=bool)).sum())
+    ex_cols = [d["indicator"] for d in DOMAINS if not d["is_glandular"]]
+    n_high_missingness = int(baseline[ex_cols].isna().mean(axis=1).ge(0.5).sum())
+    qc["n_patients_extraglandular_derived_ge50pct_domains_missing"] = n_high_missingness
+    if n_high_missingness > 0:
+        qc["warnings"].append(
+            f"{n_high_missingness} patients had any_extraglandular_baseline derived "
+            f"with ≥50% of extraglandular domains missing (missing treated as 0)."
+        )
+
     overlap_pct = 100 * category_counts.get("overlap", 0) / len(classifiable) if len(classifiable) else pd.NA
     if not pd.isna(overlap_pct) and (overlap_pct < 1 or overlap_pct > 90):
         qc["warnings"].append(f"Overlap prevalence is unexpectedly low/high: {overlap_pct:.1f}%")
@@ -258,7 +269,7 @@ def build_output_table(baseline: pd.DataFrame, source_by_domain: dict[str, str |
     category_labels = ["overlap", "glandular_only", "extraglandular_only", "neither"]
     for cat in category_labels:
         n = int((classifiable["overlap_category"] == cat).sum())
-        rows.append({"section": "overlap_categories", "measure": f"n_pct_{cat}_baseline", "domain": cat, "n": n, "denominator": denom, "pct": pct(n, denom), "rank": pd.NA, "variable_source": "mixed_by_domain"})
+        rows.append({"section": "overlap_categories", "measure": f"n_pct_{cat}_baseline", "domain": cat, "n": n, "denominator": denom, "denominator_label": "classifiable_patients", "pct": pct(n, denom), "rank": pd.NA, "variable_source": "mixed_by_domain"})
 
     glandular_positive = classifiable[classifiable["glandular_baseline"] == 1]
     g_denom = len(glandular_positive)
@@ -269,8 +280,8 @@ def build_output_table(baseline: pd.DataFrame, source_by_domain: dict[str, str |
         col = d["indicator"]
         n_overall = int((classifiable[col] == 1).sum())
         n_glandular = int((glandular_positive[col] == 1).sum())
-        rows.append({"section": "domain_prevalence_overall", "measure": "n_pct_domain_positive", "domain": d["label"], "n": n_overall, "denominator": denom, "pct": pct(n_overall, denom), "rank": pd.NA, "variable_source": source_by_domain[d["domain"]] or "none"})
-        cooccur_rows.append({"section": "domain_prevalence_among_glandular_positive", "measure": "n_pct_domain_positive_among_glandular", "domain": d["label"], "n": n_glandular, "denominator": g_denom, "pct": pct(n_glandular, g_denom), "rank": pd.NA, "variable_source": source_by_domain[d["domain"]] or "none"})
+        rows.append({"section": "domain_prevalence_overall", "measure": "n_pct_domain_positive", "domain": d["label"], "n": n_overall, "denominator": denom, "denominator_label": "classifiable_patients", "pct": pct(n_overall, denom), "rank": pd.NA, "variable_source": source_by_domain[d["domain"]] or "none"})
+        cooccur_rows.append({"section": "domain_prevalence_among_glandular_positive", "measure": "n_pct_domain_positive_among_glandular", "domain": d["label"], "n": n_glandular, "denominator": g_denom, "denominator_label": "glandular_positive_patients", "pct": pct(n_glandular, g_denom), "rank": pd.NA, "variable_source": source_by_domain[d["domain"]] or "none"})
     cooccur_rows = sorted(cooccur_rows, key=lambda r: (-r["n"], str(r["domain"])))
     for rank, row in enumerate(cooccur_rows, start=1):
         row["rank"] = rank
@@ -278,6 +289,7 @@ def build_output_table(baseline: pd.DataFrame, source_by_domain: dict[str, str |
     for row in cooccur_rows[:2]:
         top = row.copy()
         top["section"] = "top_cooccurring_domains"
+        top["denominator_label"] = "glandular_positive_patients"
         top["measure"] = "top_domain_among_glandular_positive"
         rows.append(top)
     return pd.DataFrame(rows)
@@ -288,7 +300,14 @@ def _pdf_escape(text: str) -> str:
 
 
 def make_heatmap_figure(baseline: pd.DataFrame) -> None:
-    """Write a lightweight one-page PDF heatmap without optional plotting deps."""
+    """Write a lightweight one-page PDF bar chart of extraglandular domain prevalence
+    among glandular-positive baseline patients.
+
+    NOTE: This is a proxy figure (bar chart) generated without matplotlib/upsetplot.
+    The final manuscript figure (UpSet plot or co-occurrence heatmap) should be
+    produced with the full plotting environment once available on Biowulf.
+    Target: outputs/figures/blockA/06_overlap_baseline_upset_or_heatmap.pdf
+    """
     classifiable = baseline[baseline["overlap_category"] != "unclassifiable"].copy()
     glandular_positive = classifiable[classifiable["glandular_baseline"] == 1]
     labels = [d["label"] for d in DOMAINS if not d["is_glandular"]]
@@ -345,7 +364,32 @@ def main() -> None:
 
     df = read_input()
     source_by_domain = {d["domain"]: choose_source(df, d["preferred"], d["fallback"]) for d in DOMAINS}
+
+    # QC: warn if preferred variable has >80% NA at first visits.
+    _first_visit_work = df.copy()
+    _first_visit_work["visit_date_min"] = _first_visit_work[VISIT_DATE_COL].map(parse_visit_date_min)
+    _first_visits = (
+        _first_visit_work.sort_values([PATIENT_ID_COL, "visit_date_min"], na_position="last")
+        .groupby(PATIENT_ID_COL, sort=False)
+        .first()
+    )
+    for d in DOMAINS:
+        if source_by_domain[d["domain"]] == "preferred":
+            na_rate = _first_visits[d["preferred"]].map(preferred_flag_to_binary).isna().mean()
+            if na_rate > 0.80:
+                warnings.warn(
+                    f"Domain '{d['domain']}': preferred variable '{d['preferred']}' "
+                    f"is {na_rate*100:.1f}% missing at first visits — "
+                    f"consider switching to ESSDAI fallback.",
+                    RuntimeWarning, stacklevel=2,
+                )
+
     baseline = build_baseline(df, source_by_domain)
+    _subj_per_patient = baseline.groupby(PATIENT_ID_COL)[SUBJECT_ID_COL].nunique()
+    assert _subj_per_patient.le(1).all(), (
+        "patient_record_number maps to multiple subject_numbers — "
+        f"review: {_subj_per_patient[_subj_per_patient > 1].index.tolist()}"
+    )
     manifest, qc = make_manifest_and_qc(df, baseline, source_by_domain)
     for warning_msg in qc["warnings"]:
         warnings.warn(warning_msg, RuntimeWarning, stacklevel=2)
