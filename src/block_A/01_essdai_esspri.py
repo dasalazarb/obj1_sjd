@@ -55,12 +55,21 @@ BASELINE_PATTERNS = re.compile(r"baseline|screening|\bbl\b|initial", flags=re.IG
 TABLE_DIR = common.OUTPUTS_DIR / "tables" / "blockA"
 FIGURE_DIR = common.OUTPUTS_DIR / "figures" / "blockA"
 QC_DIR = TABLE_DIR / "qc"
+INTERMEDIATE_DIR = common.PROJECT_ROOT / "data_intermediate" / "block_A"
 
 
 def ensure_dirs():
     TABLE_DIR.mkdir(parents=True, exist_ok=True)
     FIGURE_DIR.mkdir(parents=True, exist_ok=True)
     QC_DIR.mkdir(parents=True, exist_ok=True)
+    INTERMEDIATE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def safe_file_stem(path: Path):
+    """Return a compact filesystem-safe stem that identifies the input source."""
+    stem = path.stem or "input"
+    safe = "".join(ch if ch.isalnum() else "_" for ch in stem.lower()).strip("_")
+    return safe[:80] or "input"
 
 
 def _date_fragments(value):
@@ -295,6 +304,44 @@ def make_qc_report(df, baseline_df, duplicates_before, essdai_oor, esspri_oor, d
     return pd.DataFrame(rows, columns=["metric", "value"])
 
 
+def write_metric_intermediates(df, baseline_df, input_path):
+    """Save row-level files used to calculate ESSDAI/ESSPRI metrics for review."""
+    INTERMEDIATE_DIR.mkdir(parents=True, exist_ok=True)
+    source_stem = safe_file_stem(input_path)
+    metric_columns = [
+        ID_COL,
+        INTERVAL_COL,
+        VISIT_DATE_COL,
+        "visit_date_parsed",
+        "visit_year",
+        *ESSDAI_TOTAL_CANDIDATES,
+        *ESSPRI_COMPONENTS,
+        "essdai_total",
+        "esspri_dryness",
+        "esspri_fatigue",
+        "esspri_pain",
+        "esspri_n_components",
+        "esspri_total",
+    ]
+    for domain in ESSDAI_DOMAIN_VARS:
+        metric_columns.extend([f"essdai_domain_{domain}_score", f"essdai_domain_{domain}_active"])
+    metric_columns.extend(ESSDAI_DOMAIN_VARS.values())
+    metric_columns = list(dict.fromkeys(metric_columns))
+    available_columns = [col for col in metric_columns if col in df.columns]
+
+    outputs = []
+    for label, data in (
+        ("all_visits_metric_inputs", df),
+        ("baseline_patient_metric_inputs", baseline_df),
+    ):
+        audit = data[available_columns].copy()
+        audit.insert(0, "source_file", str(input_path))
+        path = INTERMEDIATE_DIR / f"01_essdai_esspri_from_{source_stem}__{label}.csv"
+        audit.to_csv(path, index=False)
+        outputs.append(path)
+    return outputs
+
+
 def write_outputs(baseline_df, activity_summary, domain_summary, by_visit, domain_by_visit, qc_report):
     baseline_df.to_csv(QC_DIR / "01_item1_3_baseline_dataset.csv", index=False)
     activity_summary.to_csv(TABLE_DIR / "01_item1_3_disease_activity_summary.csv", index=False)
@@ -331,6 +378,7 @@ def main():
     domain_summary = summarize_domains_baseline(baseline_df)
     by_visit, domain_by_visit, interval_order = summarize_by_visit(df)
     qc_report = make_qc_report(df, baseline_df, duplicates_before, essdai_oor, esspri_oor, domain_summary)
+    intermediate_paths = write_metric_intermediates(df, baseline_df, INPUT_PATH)
     write_outputs(baseline_df, activity_summary, domain_summary, by_visit, domain_by_visit, qc_report)
     make_baseline_domain_bar(domain_summary)
     make_distribution_plots(df, interval_order, domain_by_visit)
@@ -339,6 +387,8 @@ def main():
     top3 = domain_summary.head(3)
     domains = ", ".join(f"{row.domain} ({_fmt(row.pct_active)}%)" for row in top3.itertuples(index=False))
     print(f"Most common active ESSDAI domains at baseline were: {domains}.")
+    for intermediate_path in intermediate_paths:
+        print(f"Saved metric intermediate: {intermediate_path}")
 
 
 if __name__ == "__main__":
