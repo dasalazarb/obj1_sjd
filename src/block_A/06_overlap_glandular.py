@@ -46,7 +46,11 @@ QC_OUTPUT = common.INTERMEDIATE_DATA_DIR / "06_overlap_baseline_qc.json"
 MISSING_STRINGS = {"", "na", "n/a", "nan", "none", "unknown", "unk", "missing", ".", "-99"}
 POSITIVE_STRINGS = {"1", "1.0", "yes", "y", "true", "t", "positive", "pos", "present", "checked", "x"}
 NEGATIVE_STRINGS = {"0", "0.0", "no", "n", "false", "f", "negative", "neg", "absent", "unchecked"}
-SOURCE_VARIABLE_KEY = {"preferred": "preferred", "essdai_fallback": "fallback"}
+SOURCE_VARIABLE_KEY = {
+    "preferred": "preferred",
+    "essdai_fallback": "fallback",
+    "composite_fallback": "fallback_composite",
+}
 
 DOMAINS = [
     {
@@ -54,6 +58,14 @@ DOMAINS = [
         "label": "Glandular",
         "preferred": "visit_summary_-_2016_classification_criteria__ic_glandular_domain",
         "fallback": "essdai__gland_swell",
+        "fallback_composite": [
+            "visit_summary_-_2016_classification_criteria__ic_symptom_dry_eye_or_dry_mouth",
+            "visit_summary_-_2016_classification_criteria__ic_dry_mouth_3month",
+            "visit_summary_-_2016_classification_criteria__ic_dry_eye_3month",
+            "visit_summary_-_2016_classification_criteria__salivary_gland_movement",
+            "visit_summary_-_2016_classification_criteria__lacrimal_dysfunction",
+            "essdai__gland_swell",
+        ],
         "indicator": "glandular_baseline",
         "is_glandular": True,
     },
@@ -123,11 +135,32 @@ def essdai_to_binary(value: Any) -> float:
     return pd.NA if pd.isna(numeric) else float(numeric > 0)
 
 
-def choose_source(df: pd.DataFrame, preferred: str, fallback: str) -> str | None:
+def any_positive_composite(row: pd.Series, cols: list[str]) -> float:
+    """Return 1.0 if any col in cols is positive, 0.0 if all are 0/missing
+    but at least one is non-missing, pd.NA if all are missing."""
+    values = [preferred_flag_to_binary(row[c]) for c in cols if c in row.index]
+    non_missing = [v for v in values if pd.notna(v)]
+    if not non_missing:
+        return pd.NA
+    return 1.0 if any(v == 1.0 for v in non_missing) else 0.0
+
+
+def choose_source(
+    df: pd.DataFrame,
+    preferred: str,
+    fallback: str,
+    fallback_composite: list[str] | None = None,
+) -> str | None:
     if preferred in df.columns:
         converted = df[preferred].map(preferred_flag_to_binary)
         if converted.notna().any():
             return "preferred"
+    if fallback_composite:
+        available = [c for c in fallback_composite if c in df.columns]
+        if available:
+            test = df[available].apply(lambda row: any_positive_composite(row, available), axis=1)
+            if test.notna().any():
+                return "composite_fallback"
     if fallback in df.columns:
         converted = df[fallback].map(essdai_to_binary)
         if converted.notna().any():
@@ -154,15 +187,20 @@ def build_baseline(df: pd.DataFrame, source_by_domain: dict[str, str | None]) ->
     work["_had_piped_date"] = work[VISIT_DATE_COL].apply(lambda v: isinstance(v, str) and "|" in v)
     work = work[work["patient_id"].notna() & work["visit_date_min"].notna()].copy()
 
-    selected_raw_vars = [
-        d[SOURCE_VARIABLE_KEY[source_by_domain[d["domain"]]]]
-        for d in DOMAINS
-        if source_by_domain[d["domain"]] in SOURCE_VARIABLE_KEY
-    ]
+    selected_raw_vars = []
+    for d in DOMAINS:
+        source = source_by_domain[d["domain"]]
+        if source == "composite_fallback":
+            selected_raw_vars.extend(c for c in d.get("fallback_composite", []) if c in work.columns)
+        elif source in SOURCE_VARIABLE_KEY:
+            selected_raw_vars.append(d[SOURCE_VARIABLE_KEY[source]])
     for d in DOMAINS:
         source = source_by_domain[d["domain"]]
         if source == "preferred":
             work[d["indicator"]] = work[d["preferred"]].map(preferred_flag_to_binary)
+        elif source == "composite_fallback":
+            cols = [c for c in d.get("fallback_composite", []) if c in work.columns]
+            work[d["indicator"]] = work.apply(lambda row, c=cols: any_positive_composite(row, c), axis=1)
         elif source == "essdai_fallback":
             work[d["indicator"]] = work[d["fallback"]].map(essdai_to_binary)
         else:
@@ -213,10 +251,12 @@ def make_manifest_and_qc(df: pd.DataFrame, baseline: pd.DataFrame, source_by_dom
         fallback_found = d["fallback"] in df.columns
         for var in (d["preferred"], d["fallback"]):
             missingness[var] = None if var not in df.columns else int(df[var].map(is_missing_value).sum())
+        composite_vars = d.get("fallback_composite", [])
         manifest_rows.append({
             "domain_name": d["domain"],
             "preferred_variable": d["preferred"],
             "essdai_fallback_variable": d["fallback"],
+            "composite_fallback_variables": "|".join(composite_vars) if composite_vars else "",
             "preferred_found": preferred_found,
             "essdai_fallback_found": fallback_found,
             "source_used": source_by_domain[d["domain"]] or "none",
@@ -363,7 +403,15 @@ def main() -> None:
     OUTPUT_FIGURE.parent.mkdir(parents=True, exist_ok=True)
 
     df = read_input()
-    source_by_domain = {d["domain"]: choose_source(df, d["preferred"], d["fallback"]) for d in DOMAINS}
+    source_by_domain = {
+        d["domain"]: choose_source(
+            df,
+            d["preferred"],
+            d["fallback"],
+            d.get("fallback_composite"),
+        )
+        for d in DOMAINS
+    }
 
     # QC: warn if preferred variable has >80% NA at first visits.
     _first_visit_work = df.copy()
@@ -396,11 +444,12 @@ def main() -> None:
 
     output_table = build_output_table(baseline, source_by_domain)
     patient_cols = [PATIENT_ID_COL, SUBJECT_ID_COL, "visit_date_min"]
-    patient_cols += [
-        d[SOURCE_VARIABLE_KEY[source_by_domain[d["domain"]]]]
-        for d in DOMAINS
-        if source_by_domain[d["domain"]] in SOURCE_VARIABLE_KEY
-    ]
+    for d in DOMAINS:
+        source = source_by_domain[d["domain"]]
+        if source == "composite_fallback":
+            patient_cols += [c for c in d.get("fallback_composite", []) if c in baseline.columns]
+        elif source in SOURCE_VARIABLE_KEY:
+            patient_cols.append(d[SOURCE_VARIABLE_KEY[source]])
     patient_cols += [d["indicator"] for d in DOMAINS] + ["any_extraglandular_baseline", "overlap_category"]
     patient_cols = [c for c in dict.fromkeys(patient_cols) if c in baseline.columns]
 
