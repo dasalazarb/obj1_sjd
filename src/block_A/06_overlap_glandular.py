@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""ITEM 4.1 — Baseline prevalence of glandular/extraglandular overlap.
+"""ITEM 4.1A — Baseline prevalence of glandular/extraglandular overlap.
+
+This script estimates baseline-only overlap prevalence. Follow-up prevalent
+overlap, incident overlap, and treatment-response analyses are not handled here.
 
 Builds a first-valid-visit patient-level baseline dataset, classifies baseline
-patients by glandular/extraglandular overlap, exports manuscript-ready summary
-values, and writes QC/manifest intermediate files.
+patients by glandular/extraglandular overlap with patient-specific source
+coalescence, exports manuscript-ready summary values, and writes QC/manifest
+intermediate files.
 """
 
 from __future__ import annotations
@@ -145,28 +149,48 @@ def any_positive_composite(row: pd.Series, cols: list[str]) -> float:
     return 1.0 if any(v == 1.0 for v in non_missing) else 0.0
 
 
-def choose_source(
-    df: pd.DataFrame,
-    preferred: str,
-    fallback: str,
-    fallback_composite: list[str] | None = None,
-) -> str | None:
-    if preferred in df.columns:
-        converted = df[preferred].map(preferred_flag_to_binary)
-        if converted.notna().any():
-            return "preferred"
-    if fallback_composite:
-        available = [c for c in fallback_composite if c in df.columns]
-        if available:
-            test = df[available].apply(lambda row: any_positive_composite(row, available), axis=1)
-            if test.notna().any():
-                return "composite_fallback"
-    if fallback in df.columns:
-        converted = df[fallback].map(essdai_to_binary)
-        if converted.notna().any():
-            return "essdai_fallback"
-    return None
+def aggregate_binary(values: pd.Series, converter) -> Any:
+    """Collapse tied baseline rows: any positive > any explicit negative > missing."""
+    converted = [converter(value) for value in values]
+    non_missing = [value for value in converted if pd.notna(value)]
+    if not non_missing:
+        return pd.NA
+    return 1.0 if any(value == 1.0 for value in non_missing) else 0.0
 
+
+def aggregate_composite(group: pd.DataFrame, cols: list[str]) -> Any:
+    """Collapse composite variables across all tied baseline rows."""
+    values: list[Any] = []
+    for col in cols:
+        if col in group.columns:
+            converter = essdai_to_binary if col.startswith("essdai__") else preferred_flag_to_binary
+            values.extend(converter(value) for value in group[col])
+    non_missing = [value for value in values if pd.notna(value)]
+    if not non_missing:
+        return pd.NA
+    return 1.0 if any(value == 1.0 for value in non_missing) else 0.0
+
+
+def classify_domain_for_group(group: pd.DataFrame, domain: dict[str, Any]) -> tuple[Any, str]:
+    """Return patient-specific baseline domain indicator and source."""
+    preferred = domain["preferred"]
+    fallback = domain["fallback"]
+    if preferred in group.columns:
+        preferred_value = aggregate_binary(group[preferred], preferred_flag_to_binary)
+        if pd.notna(preferred_value):
+            return preferred_value, "preferred"
+
+    if domain["is_glandular"]:
+        composite_cols = [c for c in domain.get("fallback_composite", []) if c in group.columns]
+        composite_value = aggregate_composite(group, composite_cols)
+        if pd.notna(composite_value):
+            return composite_value, "composite_fallback"
+    elif fallback in group.columns:
+        fallback_value = aggregate_binary(group[fallback], essdai_to_binary)
+        if pd.notna(fallback_value):
+            return fallback_value, "essdai_fallback"
+
+    return pd.NA, "missing"
 
 def first_nonmissing(values: pd.Series) -> Any:
     for value in values:
@@ -175,7 +199,7 @@ def first_nonmissing(values: pd.Series) -> Any:
     return pd.NA
 
 
-def build_baseline(df: pd.DataFrame, source_by_domain: dict[str, str | None]) -> pd.DataFrame:
+def build_baseline(df: pd.DataFrame, strict_missingness: bool = True) -> pd.DataFrame:
     if PATIENT_ID_COL not in df.columns:
         raise ValueError(f"Required patient identifier missing: {PATIENT_ID_COL}")
     if VISIT_DATE_COL not in df.columns:
@@ -187,112 +211,127 @@ def build_baseline(df: pd.DataFrame, source_by_domain: dict[str, str | None]) ->
     work["_had_piped_date"] = work[VISIT_DATE_COL].apply(lambda v: isinstance(v, str) and "|" in v)
     work = work[work["patient_id"].notna() & work["visit_date_min"].notna()].copy()
 
-    selected_raw_vars = []
-    for d in DOMAINS:
-        source = source_by_domain[d["domain"]]
-        if source == "composite_fallback":
-            selected_raw_vars.extend(c for c in d.get("fallback_composite", []) if c in work.columns)
-        elif source in SOURCE_VARIABLE_KEY:
-            selected_raw_vars.append(d[SOURCE_VARIABLE_KEY[source]])
-    for d in DOMAINS:
-        source = source_by_domain[d["domain"]]
-        if source == "preferred":
-            work[d["indicator"]] = work[d["preferred"]].map(preferred_flag_to_binary)
-        elif source == "composite_fallback":
-            cols = [c for c in d.get("fallback_composite", []) if c in work.columns]
-            work[d["indicator"]] = work.apply(lambda row, c=cols: any_positive_composite(row, c), axis=1)
-        elif source == "essdai_fallback":
-            work[d["indicator"]] = work[d["fallback"]].map(essdai_to_binary)
-        else:
-            work[d["indicator"]] = pd.NA
-
     earliest = work.groupby("patient_id", dropna=True)["visit_date_min"].transform("min")
     candidates = work[work["visit_date_min"].eq(earliest)].copy()
-    candidates["_domain_completeness"] = candidates[[d["indicator"] for d in DOMAINS]].notna().sum(axis=1)
-    candidates = candidates.sort_values(["patient_id", "visit_date_min", "_domain_completeness"], ascending=[True, True, False])
+
+    raw_vars = []
+    for d in DOMAINS:
+        raw_vars.extend([d["preferred"], d["fallback"]])
+        raw_vars.extend(d.get("fallback_composite", []))
+    raw_vars = [c for c in dict.fromkeys(raw_vars) if c in candidates.columns]
 
     keep_cols = [PATIENT_ID_COL, SUBJECT_ID_COL, INTERVAL_COL, "visit_date_min", "_had_piped_date", AGE_COL, SEX_COL, RACE_COL, ETHNICITY_COL]
     keep_cols = [c for c in keep_cols if c in candidates.columns]
-    baseline = candidates.groupby("patient_id", sort=True, as_index=False).first()
-
-    # Recompute identifiers/demographics with first non-missing values among tied earliest visits.
     consolidated_rows = []
-    for patient_id, group in candidates.groupby("patient_id", sort=True):
-        best = group.iloc[0].copy()
+    for _patient_id, group in candidates.groupby("patient_id", sort=True):
+        row: dict[str, Any] = {"patient_id": _patient_id}
         for col in keep_cols:
-            best[col] = first_nonmissing(group[col])
-        for col in selected_raw_vars:
-            if col in group:
-                best[col] = first_nonmissing(group[col])
-        consolidated_rows.append(best)
-    baseline = pd.DataFrame(consolidated_rows).drop(columns=["_domain_completeness"], errors="ignore")
+            row[col] = first_nonmissing(group[col])
+        row["n_tied_baseline_rows"] = int(len(group))
+        row["_had_piped_date"] = bool(group["_had_piped_date"].any())
+        for col in raw_vars:
+            row[col] = first_nonmissing(group[col])
+        for d in DOMAINS:
+            value, source = classify_domain_for_group(group, d)
+            row[d["indicator"]] = value
+            row[f"{d['domain']}_baseline_source"] = source
+        consolidated_rows.append(row)
+    baseline = pd.DataFrame(consolidated_rows)
 
     ex_cols = [d["indicator"] for d in DOMAINS if not d["is_glandular"]]
-    all_domain_cols = [d["indicator"] for d in DOMAINS]
-    baseline["all_domains_missing_baseline"] = baseline[all_domain_cols].isna().all(axis=1)
-    baseline["any_extraglandular_baseline"] = pd.NA
-    has_any_ex_domain_data = baseline[ex_cols].notna().any(axis=1)
-    baseline.loc[has_any_ex_domain_data, "any_extraglandular_baseline"] = baseline.loc[has_any_ex_domain_data, ex_cols].fillna(0).max(axis=1)
-    g = baseline["glandular_baseline"]
-    e = baseline["any_extraglandular_baseline"]
-    baseline["overlap_category"] = "unclassifiable"
-    baseline.loc[g.eq(1) & e.eq(1), "overlap_category"] = "overlap"
-    baseline.loc[g.eq(1) & e.eq(0), "overlap_category"] = "glandular_only"
-    baseline.loc[g.eq(0) & e.eq(1), "overlap_category"] = "extraglandular_only"
-    baseline.loc[g.eq(0) & e.eq(0), "overlap_category"] = "neither"
+    baseline["n_extraglandular_domains_available_baseline"] = baseline[ex_cols].notna().sum(axis=1)
+    n_ex_domains = len(ex_cols)
+    baseline["pct_extraglandular_domains_missing_baseline"] = (n_ex_domains - baseline["n_extraglandular_domains_available_baseline"]) / n_ex_domains
+    baseline["all_extraglandular_domains_missing_baseline"] = baseline["n_extraglandular_domains_available_baseline"].eq(0)
+    no_positive = baseline[ex_cols].eq(1).sum(axis=1).eq(0)
+    baseline["extraglandular_insufficient_data"] = no_positive & baseline["pct_extraglandular_domains_missing_baseline"].gt(0.50)
+
+    any_positive = baseline[ex_cols].eq(1).any(axis=1)
+    any_available = baseline[ex_cols].notna().any(axis=1)
+    baseline["any_extraglandular_baseline_lenient"] = pd.NA
+    baseline.loc[any_positive, "any_extraglandular_baseline_lenient"] = 1.0
+    baseline.loc[~any_positive & any_available, "any_extraglandular_baseline_lenient"] = 0.0
+
+    baseline["any_extraglandular_baseline"] = baseline["any_extraglandular_baseline_lenient"]
+    if strict_missingness:
+        baseline.loc[baseline["extraglandular_insufficient_data"], "any_extraglandular_baseline"] = pd.NA
+    baseline.loc[baseline["all_extraglandular_domains_missing_baseline"], "any_extraglandular_baseline"] = pd.NA
+
+    for e_col, category_col in [
+        ("any_extraglandular_baseline", "overlap_category"),
+        ("any_extraglandular_baseline_lenient", "overlap_category_lenient"),
+    ]:
+        g = baseline["glandular_baseline"]
+        e = baseline[e_col]
+        baseline[category_col] = "unclassifiable"
+        baseline.loc[g.eq(1) & e.eq(1), category_col] = "overlap"
+        baseline.loc[g.eq(1) & e.eq(0), category_col] = "glandular_only"
+        baseline.loc[g.eq(0) & e.eq(1), category_col] = "extraglandular_only"
+        baseline.loc[g.eq(0) & e.eq(0), category_col] = "neither"
     return baseline
 
-
-def make_manifest_and_qc(df: pd.DataFrame, baseline: pd.DataFrame, source_by_domain: dict[str, str | None]) -> tuple[pd.DataFrame, dict[str, Any]]:
+def make_manifest_and_qc(df: pd.DataFrame, baseline: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
     manifest_rows = []
     missingness = {}
+    n_baseline = len(baseline)
     for d in DOMAINS:
-        preferred_found = d["preferred"] in df.columns
-        fallback_found = d["fallback"] in df.columns
-        for var in (d["preferred"], d["fallback"]):
-            missingness[var] = None if var not in df.columns else int(df[var].map(is_missing_value).sum())
         composite_vars = d.get("fallback_composite", [])
+        raw_for_missingness = [d["preferred"], d["fallback"], *composite_vars]
+        for var in raw_for_missingness:
+            missingness[var] = None if var not in df.columns else int(df[var].map(is_missing_value).sum())
+        source_counts = baseline[f"{d['domain']}_baseline_source"].value_counts(dropna=False).to_dict()
+        n_missing = int(source_counts.get("missing", 0))
         manifest_rows.append({
             "domain_name": d["domain"],
             "preferred_variable": d["preferred"],
             "essdai_fallback_variable": d["fallback"],
             "composite_fallback_variables": "|".join(composite_vars) if composite_vars else "",
-            "preferred_found": preferred_found,
-            "essdai_fallback_found": fallback_found,
-            "source_used": source_by_domain[d["domain"]] or "none",
+            "preferred_found": d["preferred"] in df.columns,
+            "essdai_fallback_found": d["fallback"] in df.columns,
+            "n_patients_used_preferred": int(source_counts.get("preferred", 0)),
+            "n_patients_used_composite_fallback": int(source_counts.get("composite_fallback", 0)),
+            "n_patients_used_essdai_fallback": int(source_counts.get("essdai_fallback", 0)),
+            "n_patients_missing_domain": n_missing,
+            "pct_missing_baseline": pct(n_missing, n_baseline),
         })
+
     classifiable = baseline[baseline["overlap_category"] != "unclassifiable"]
     category_counts = classifiable["overlap_category"].value_counts().to_dict()
-    preferred_fallback_domains = [d["domain"] for d in DOMAINS if source_by_domain[d["domain"]] == "essdai_fallback"]
+    lenient_classifiable = baseline[baseline["overlap_category_lenient"] != "unclassifiable"]
+    lenient_counts = lenient_classifiable["overlap_category_lenient"].value_counts().to_dict()
+    classifiable_pct = len(classifiable) / len(baseline) if len(baseline) else 0
     qc = {
         "n_raw_rows": int(len(df)),
         "n_unique_patients": int(df[PATIENT_ID_COL].nunique(dropna=True)),
         "n_baseline_patients": int(len(baseline)),
         "n_classifiable_patients": int(len(classifiable)),
         "n_unclassifiable_patients": int((baseline["overlap_category"] == "unclassifiable").sum()),
+        "pct_classifiable_patients": round(100 * classifiable_pct, 1) if len(baseline) else None,
+        "n_patients_all_extraglandular_domains_missing": int(baseline["all_extraglandular_domains_missing_baseline"].sum()),
+        "n_patients_gt50pct_extraglandular_domains_missing": int(baseline["pct_extraglandular_domains_missing_baseline"].gt(0.50).sum()),
+        "n_patients_extraglandular_insufficient_data": int(baseline["extraglandular_insufficient_data"].sum()),
         "domain_variable_missingness_raw_rows": missingness,
+        "source_used_by_patient_and_domain_counts": {
+            d["domain"]: {str(k): int(v) for k, v in baseline[f"{d['domain']}_baseline_source"].value_counts(dropna=False).to_dict().items()}
+            for d in DOMAINS
+        },
         "overlap_categories_sum_to_classifiable_denominator": int(sum(category_counts.values())) == int(len(classifiable)),
         "each_patient_one_baseline_row": bool(baseline[PATIENT_ID_COL].is_unique),
         "category_counts": {k: int(v) for k, v in category_counts.items()},
+        "lenient_sensitivity": {
+            "n_classifiable_patients": int(len(lenient_classifiable)),
+            "n_unclassifiable_patients": int((baseline["overlap_category_lenient"] == "unclassifiable").sum()),
+            "category_counts": {k: int(v) for k, v in lenient_counts.items()},
+        },
         "warnings": [],
     }
     qc["n_piped_visit_dates_resolved"] = int(baseline.get("_had_piped_date", pd.Series(dtype=bool)).sum())
-    ex_cols = [d["indicator"] for d in DOMAINS if not d["is_glandular"]]
-    n_high_missingness = int(baseline[ex_cols].isna().mean(axis=1).ge(0.5).sum())
-    qc["n_patients_extraglandular_derived_ge50pct_domains_missing"] = n_high_missingness
-    if n_high_missingness > 0:
+    if classifiable_pct < 0.80:
         qc["warnings"].append(
-            f"{n_high_missingness} patients had any_extraglandular_baseline derived "
-            f"with ≥50% of extraglandular domains missing (missing treated as 0)."
+            "STRONG WARNING: fewer than 80% of baseline patients are classifiable; "
+            "overlap prevalence should not be reported as a definitive result."
         )
-
-    overlap_pct = 100 * category_counts.get("overlap", 0) / len(classifiable) if len(classifiable) else pd.NA
-    if not pd.isna(overlap_pct) and (overlap_pct < 1 or overlap_pct > 90):
-        qc["warnings"].append(f"Overlap prevalence is unexpectedly low/high: {overlap_pct:.1f}%")
-    if preferred_fallback_domains:
-        qc["warnings"].append("ESSDAI fallback used for domains with absent/non-informative preferred flags: " + ", ".join(preferred_fallback_domains))
     return pd.DataFrame(manifest_rows), qc
-
 
 def pct(n: int | float, denominator: int | float) -> float | Any:
     return round(100 * n / denominator, 1) if denominator else pd.NA
@@ -302,38 +341,45 @@ def format_pct_value(value: Any) -> str:
     return "NA" if pd.isna(value) else f"{float(value):.1f}"
 
 
-def build_output_table(baseline: pd.DataFrame, source_by_domain: dict[str, str | None]) -> pd.DataFrame:
-    classifiable = baseline[baseline["overlap_category"] != "unclassifiable"].copy()
-    denom = len(classifiable)
+def build_output_table(baseline: pd.DataFrame) -> pd.DataFrame:
     rows = []
     category_labels = ["overlap", "glandular_only", "extraglandular_only", "neither"]
-    for cat in category_labels:
-        n = int((classifiable["overlap_category"] == cat).sum())
-        rows.append({"section": "overlap_categories", "measure": f"n_pct_{cat}_baseline", "domain": cat, "n": n, "denominator": denom, "denominator_label": "classifiable_patients", "pct": pct(n, denom), "rank": pd.NA, "variable_source": "mixed_by_domain"})
 
-    glandular_positive = classifiable[classifiable["glandular_baseline"] == 1]
-    g_denom = len(glandular_positive)
-    cooccur_rows = []
-    for d in DOMAINS:
-        if d["is_glandular"]:
-            continue
-        col = d["indicator"]
-        n_overall = int((classifiable[col] == 1).sum())
-        n_glandular = int((glandular_positive[col] == 1).sum())
-        rows.append({"section": "domain_prevalence_overall", "measure": "n_pct_domain_positive", "domain": d["label"], "n": n_overall, "denominator": denom, "denominator_label": "classifiable_patients", "pct": pct(n_overall, denom), "rank": pd.NA, "variable_source": source_by_domain[d["domain"]] or "none"})
-        cooccur_rows.append({"section": "domain_prevalence_among_glandular_positive", "measure": "n_pct_domain_positive_among_glandular", "domain": d["label"], "n": n_glandular, "denominator": g_denom, "denominator_label": "glandular_positive_patients", "pct": pct(n_glandular, g_denom), "rank": pd.NA, "variable_source": source_by_domain[d["domain"]] or "none"})
-    cooccur_rows = sorted(cooccur_rows, key=lambda r: (-r["n"], str(r["domain"])))
-    for rank, row in enumerate(cooccur_rows, start=1):
-        row["rank"] = rank
-        rows.append(row)
-    for row in cooccur_rows[:2]:
-        top = row.copy()
-        top["section"] = "top_cooccurring_domains"
-        top["denominator_label"] = "glandular_positive_patients"
-        top["measure"] = "top_domain_among_glandular_positive"
-        rows.append(top)
+    for analysis_label, category_col in [
+        ("main_strict_missingness", "overlap_category"),
+        ("lenient_sensitivity", "overlap_category_lenient"),
+    ]:
+        classifiable = baseline[baseline[category_col] != "unclassifiable"].copy()
+        denom = len(classifiable)
+        for cat in category_labels:
+            n = int((classifiable[category_col] == cat).sum())
+            rows.append({"analysis": analysis_label, "section": "overlap_categories", "measure": f"n_{cat}_baseline", "domain": cat, "n": n, "denominator": denom, "denominator_label": "classifiable_patients", "pct": pct(n, denom), "rank": pd.NA, "variable_source": "patient_specific_coalesced"})
+            rows.append({"analysis": analysis_label, "section": "overlap_categories_sensitivity_denominator", "measure": f"n_{cat}_baseline_all_baseline", "domain": cat, "n": n, "denominator": len(baseline), "denominator_label": "baseline_patients", "pct": pct(n, len(baseline)), "rank": pd.NA, "variable_source": "patient_specific_coalesced"})
+
+        glandular_positive = classifiable[classifiable["glandular_baseline"] == 1]
+        g_denom = len(glandular_positive)
+        cooccur_rows = []
+        for d in DOMAINS:
+            if d["is_glandular"]:
+                continue
+            col = d["indicator"]
+            n_overall = int((classifiable[col] == 1).sum())
+            n_glandular = int((glandular_positive[col] == 1).sum())
+            source_counts = classifiable[f"{d['domain']}_baseline_source"].value_counts().to_dict()
+            variable_source = ";".join(f"{k}:{int(v)}" for k, v in sorted(source_counts.items()))
+            rows.append({"analysis": analysis_label, "section": "domain_prevalence_overall", "measure": "n_pct_domain_positive", "domain": d["label"], "n": n_overall, "denominator": denom, "denominator_label": "classifiable_patients", "pct": pct(n_overall, denom), "rank": pd.NA, "variable_source": variable_source})
+            cooccur_rows.append({"analysis": analysis_label, "section": "domain_prevalence_among_glandular_positive", "measure": "n_pct_domain_positive_among_glandular", "domain": d["label"], "n": n_glandular, "denominator": g_denom, "denominator_label": "glandular_positive_patients", "pct": pct(n_glandular, g_denom), "rank": pd.NA, "variable_source": variable_source})
+        cooccur_rows = sorted(cooccur_rows, key=lambda r: (-r["n"], str(r["domain"])))
+        for rank, row in enumerate(cooccur_rows, start=1):
+            row["rank"] = rank
+            rows.append(row)
+        for row in cooccur_rows[:2]:
+            top = row.copy()
+            top["section"] = "top_cooccurring_domains"
+            top["denominator_label"] = "glandular_positive_patients"
+            top["measure"] = "top_domain_among_glandular_positive"
+            rows.append(top)
     return pd.DataFrame(rows)
-
 
 def _pdf_escape(text: str) -> str:
     return str(text).replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
@@ -403,54 +449,32 @@ def main() -> None:
     OUTPUT_FIGURE.parent.mkdir(parents=True, exist_ok=True)
 
     df = read_input()
-    source_by_domain = {
-        d["domain"]: choose_source(
-            df,
-            d["preferred"],
-            d["fallback"],
-            d.get("fallback_composite"),
-        )
-        for d in DOMAINS
-    }
-
-    # QC: warn if preferred variable has >80% NA at first visits.
-    _first_visit_work = df.copy()
-    _first_visit_work["visit_date_min"] = _first_visit_work[VISIT_DATE_COL].map(parse_visit_date_min)
-    _first_visits = (
-        _first_visit_work.sort_values([PATIENT_ID_COL, "visit_date_min"], na_position="last")
-        .groupby(PATIENT_ID_COL, sort=False)
-        .first()
-    )
-    for d in DOMAINS:
-        if source_by_domain[d["domain"]] == "preferred":
-            na_rate = _first_visits[d["preferred"]].map(preferred_flag_to_binary).isna().mean()
-            if na_rate > 0.80:
-                warnings.warn(
-                    f"Domain '{d['domain']}': preferred variable '{d['preferred']}' "
-                    f"is {na_rate*100:.1f}% missing at first visits — "
-                    f"consider switching to ESSDAI fallback.",
-                    RuntimeWarning, stacklevel=2,
-                )
-
-    baseline = build_baseline(df, source_by_domain)
+    baseline = build_baseline(df)
     _subj_per_patient = baseline.groupby(PATIENT_ID_COL)[SUBJECT_ID_COL].nunique()
     assert _subj_per_patient.le(1).all(), (
         "patient_record_number maps to multiple subject_numbers — "
         f"review: {_subj_per_patient[_subj_per_patient > 1].index.tolist()}"
     )
-    manifest, qc = make_manifest_and_qc(df, baseline, source_by_domain)
+    manifest, qc = make_manifest_and_qc(df, baseline)
     for warning_msg in qc["warnings"]:
         warnings.warn(warning_msg, RuntimeWarning, stacklevel=2)
 
-    output_table = build_output_table(baseline, source_by_domain)
-    patient_cols = [PATIENT_ID_COL, SUBJECT_ID_COL, "visit_date_min"]
+    output_table = build_output_table(baseline)
+    patient_cols = [PATIENT_ID_COL, SUBJECT_ID_COL, "visit_date_min", "n_tied_baseline_rows"]
     for d in DOMAINS:
-        source = source_by_domain[d["domain"]]
-        if source == "composite_fallback":
-            patient_cols += [c for c in d.get("fallback_composite", []) if c in baseline.columns]
-        elif source in SOURCE_VARIABLE_KEY:
-            patient_cols.append(d[SOURCE_VARIABLE_KEY[source]])
-    patient_cols += [d["indicator"] for d in DOMAINS] + ["any_extraglandular_baseline", "overlap_category"]
+        patient_cols += [d["preferred"], d["fallback"], *d.get("fallback_composite", [])]
+    patient_cols += [d["indicator"] for d in DOMAINS]
+    patient_cols += [f"{d['domain']}_baseline_source" for d in DOMAINS]
+    patient_cols += [
+        "n_extraglandular_domains_available_baseline",
+        "pct_extraglandular_domains_missing_baseline",
+        "all_extraglandular_domains_missing_baseline",
+        "extraglandular_insufficient_data",
+        "any_extraglandular_baseline",
+        "any_extraglandular_baseline_lenient",
+        "overlap_category",
+        "overlap_category_lenient",
+    ]
     patient_cols = [c for c in dict.fromkeys(patient_cols) if c in baseline.columns]
 
     baseline[patient_cols].to_parquet(PATIENT_LEVEL_OUTPUT, index=False)
@@ -462,7 +486,10 @@ def main() -> None:
 
     classifiable_n = int(qc["n_classifiable_patients"])
     category_counts = qc["category_counts"]
-    top2 = output_table[output_table["section"] == "top_cooccurring_domains"].sort_values("rank")
+    top2 = output_table[
+        (output_table["analysis"] == "main_strict_missingness")
+        & (output_table["section"] == "top_cooccurring_domains")
+    ].sort_values("rank")
     print("N_baseline_classifiable:", classifiable_n)
     for cat in ["overlap", "glandular_only", "extraglandular_only", "neither"]:
         n = int(category_counts.get(cat, 0))
