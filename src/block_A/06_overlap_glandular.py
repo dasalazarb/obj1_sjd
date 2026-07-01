@@ -157,6 +157,39 @@ def aggregate_binary(values: pd.Series, converter) -> Any:
         return pd.NA
     return 1.0 if any(value == 1.0 for value in non_missing) else 0.0
 
+def aggregate_composite(group: pd.DataFrame, cols: list[str]) -> Any:
+    """Collapse composite variables across all tied baseline rows."""
+    values: list[Any] = []
+    for col in cols:
+        if col in group.columns:
+            converter = essdai_to_binary if col.startswith("essdai__") else preferred_flag_to_binary
+            values.extend(converter(value) for value in group[col])
+    non_missing = [value for value in values if pd.notna(value)]
+    if not non_missing:
+        return pd.NA
+    return 1.0 if any(value == 1.0 for value in non_missing) else 0.0
+
+
+def classify_domain_for_group(group: pd.DataFrame, domain: dict[str, Any]) -> tuple[Any, str]:
+    """Return patient-specific baseline domain indicator and source."""
+    preferred = domain["preferred"]
+    fallback = domain["fallback"]
+    if preferred in group.columns:
+        preferred_value = aggregate_binary(group[preferred], preferred_flag_to_binary)
+        if pd.notna(preferred_value):
+            return preferred_value, "preferred"
+
+    if domain["is_glandular"]:
+        composite_cols = [c for c in domain.get("fallback_composite", []) if c in group.columns]
+        composite_value = aggregate_composite(group, composite_cols)
+        if pd.notna(composite_value):
+            return composite_value, "composite_fallback"
+    elif fallback in group.columns:
+        fallback_value = aggregate_binary(group[fallback], essdai_to_binary)
+        if pd.notna(fallback_value):
+            return fallback_value, "essdai_fallback"
+
+    return pd.NA, "missing"
 
 def aggregate_composite(group: pd.DataFrame, cols: list[str]) -> Any:
     """Collapse composite variables across all tied baseline rows."""
