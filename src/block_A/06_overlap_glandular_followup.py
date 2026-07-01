@@ -15,7 +15,10 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+import matplotlib as mpl
 import matplotlib.pyplot as plt
+from matplotlib.cm import ScalarMappable
+from matplotlib.colors import Normalize
 from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
@@ -30,6 +33,19 @@ PATIENT_ID_COL = "ids__patient_record_number"
 VISIT_DATE_COL = "ids__visit_date"
 EXPECTED_INPUT_NAME = "visits_long_collapsed_by_interval_codebook_corrected.parquet"
 MAX_PATIENTS_FOR_LABELS = 120
+
+plt.rcParams.update({
+    "figure.dpi": 300,
+    "savefig.dpi": 300,
+    "font.size": 9,
+    "axes.titlesize": 12,
+    "axes.labelsize": 10,
+    "xtick.labelsize": 8,
+    "ytick.labelsize": 7,
+    "legend.fontsize": 8,
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
+})
 
 RAW_DIR = common.RAW_DATA_DIR
 INTERMEDIATE_DIR = common.INTERMEDIATE_DATA_DIR
@@ -256,66 +272,173 @@ def make_incident_table(patient: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["section", "domain", "n_incident_first_event", "denominator_incident_patients", "pct_among_incident_patients", "notes"])
 
 
-def ordered_patients(long_df: pd.DataFrame) -> list[Any]:
-    def key(g: pd.DataFrame) -> tuple[int, float, float]:
-        base_overlap = bool(g.loc[g["visit_order"].eq(1), "overlap_active"].any())
-        any_overlap = bool(g["overlap_active"].any())
-        any_eval = bool(g["overlap_evaluable"].any())
-        first = g.loc[g["overlap_active"], "time_from_baseline_yrs"].min()
-        maxfu = g["time_from_baseline_yrs"].max()
-        group = 0 if base_overlap else 1 if any_overlap else 2 if any_eval else 3
-        return (group, float(first) if pd.notna(first) else float(maxfu or 0), -float(maxfu or 0))
-    return sorted(long_df[PATIENT_ID_COL].dropna().unique(), key=lambda p: key(long_df[long_df[PATIENT_ID_COL] == p]))
+
+def assign_plot_group(row: pd.Series) -> int:
+    if row.get("baseline_status") == "overlap":
+        return 0
+    if bool(row.get("incident_extraglandular", False)):
+        return 1
+    if bool(row.get("fu_overlap_ever", False)):
+        return 2
+    if row.get("fu_n_evaluable_visits", 0) > 0:
+        return 3
+    return 4
+
+
+def prepare_timeline_plot_data(long_df: pd.DataFrame, patient_summary: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, np.ndarray, float]:
+    patient_order_df = patient_summary.copy()
+    if "max_time_from_baseline_yrs" not in patient_order_df.columns:
+        max_followup = long_df.groupby(PATIENT_ID_COL)["time_from_baseline_yrs"].max().rename("max_time_from_baseline_yrs")
+        patient_order_df = patient_order_df.merge(max_followup, on=PATIENT_ID_COL, how="left")
+    patient_order_df["plot_group"] = patient_order_df.apply(assign_plot_group, axis=1)
+    patient_order_df["first_event_sort"] = patient_order_df["time_to_new_domain_yrs"].fillna(999)
+    patient_order_df["followup_sort"] = patient_order_df["max_time_from_baseline_yrs"].fillna(0)
+    patient_order_df = patient_order_df.sort_values(
+        ["plot_group", "first_event_sort", "followup_sort", "n_visits"],
+        ascending=[True, True, False, False],
+    ).reset_index(drop=True)
+    patient_order_df["patient_plot_id"] = [f"P{i+1:03d}" for i in range(len(patient_order_df))]
+    patient_order_df["y"] = np.arange(len(patient_order_df))[::-1]
+    plot_df = long_df.merge(
+        patient_order_df[[PATIENT_ID_COL, "patient_plot_id", "y", "plot_group"]],
+        on=PATIENT_ID_COL,
+        how="inner",
+    )
+    patient_ranges = (
+        plot_df.groupby(["patient_plot_id", "y"], as_index=False)
+        .agg(xmin=("time_from_baseline_yrs", "min"), xmax=("time_from_baseline_yrs", "max"), n_visits=("visit_order", "max"))
+    )
+    group_breaks = patient_order_df.groupby("plot_group")["y"].min().sort_values().values
+    xmax = np.nanmax(plot_df["time_from_baseline_yrs"]) if len(plot_df) else 1
+    xmax_plot = max(1, min(float(np.ceil(xmax)), 15))
+    return patient_order_df, plot_df, patient_ranges, group_breaks, xmax_plot
+
+
+def add_time_references(ax: plt.Axes, xmax_plot: float, *, label: bool = True, linewidth: float = 1.2, alpha: float = 0.85) -> None:
+    time_refs = [
+        (1/52.1775, "1 wk", "#F4A340"),
+        (1/12, "1 mo", "#E6C229"),
+        (0.5, "6 mo", "#2ECC71"),
+        (2, "2 yr", "#3498DB"),
+        (4, "4 yr", "#2ECC71"),
+        (6, "6 yr", "#9B59B6"),
+        (8, "8 yr", "#E74C3C"),
+        (10, "10 yr", "#1ABC9C"),
+    ]
+    for x, text, color in time_refs:
+        if x <= xmax_plot:
+            ax.axvline(x, color=color, linestyle="--", linewidth=linewidth, alpha=alpha, zorder=0)
+            if label:
+                ymin, ymax = ax.get_ylim()
+                ax.text(x + 0.03, ymax - 0.02 * (ymax - ymin), text, color=color, fontsize=8, fontweight="bold", ha="left", va="top")
 
 
 def make_overlap_timeline_plot(long_df: pd.DataFrame, patient: pd.DataFrame, path: Path) -> None:
-    pats = ordered_patients(long_df)
-    anon = {p: f"P{i+1:03d}" for i, p in enumerate(pats)}
-    ymap = {p: i for i, p in enumerate(pats)}
-    h = max(6, min(80, 1.2 + 0.18 * len(pats)))
-    fig, ax = plt.subplots(figsize=(12, h))
-    d = long_df.copy(); d["y"] = d[PATIENT_ID_COL].map(ymap)
-    insuff = d["overlap_status"].eq("insufficient_info")
-    no = d["overlap_evaluable"] & ~d["overlap_active"]
-    ov = d["overlap_active"]
-    ax.scatter(d.loc[insuff, "time_from_baseline_yrs"], d.loc[insuff, "y"], c="#eeeeee", edgecolors="#cccccc", s=20, label="insufficient info")
-    ax.scatter(d.loc[no, "time_from_baseline_yrs"], d.loc[no, "y"], c="#888888", s=22, label="no overlap")
-    sc = ax.scatter(d.loc[ov, "time_from_baseline_yrs"], d.loc[ov, "y"], c=d.loc[ov, "overlap_intensity_count"], cmap="viridis", marker="s", s=36, label="overlap")
-    if ov.any():
-        fig.colorbar(sc, ax=ax, label="Active glandular + extraglandular count")
-    ax.set_yticks(range(len(pats)))
-    ax.set_yticklabels([anon[p] for p in pats] if len(pats) <= MAX_PATIENTS_FOR_LABELS else [], fontsize=6)
-    ax.invert_yaxis(); ax.set_xlabel("Time from baseline (years)"); ax.set_ylabel("Patients")
-    n_eval = int(patient["fu_has_evaluable_overlap"].sum()); n_ov = int(patient["fu_overlap_ever"].sum())
-    ax.set_title(f"Glandular/extraglandular overlap timeline\nTotal patients: {len(patient)} | Evaluable follow-up: {n_eval} | Overlap during follow-up: {n_ov}")
-    ax.legend(handles=[Line2D([0],[0], marker='o', color='w', markerfacecolor='#888888', label='no overlap', markersize=6), Line2D([0],[0], marker='o', color='w', markerfacecolor='#eeeeee', markeredgecolor='#cccccc', label='insufficient info', markersize=6), Line2D([0],[0], marker='s', color='w', markerfacecolor='#440154', label='overlap', markersize=6)], loc="best")
-    fig.tight_layout(); fig.savefig(path); plt.close(fig)
+    patient_order_df, plot_df, patient_ranges, group_breaks, xmax_plot = prepare_timeline_plot_data(long_df, patient)
+    n_patients = patient_order_df.shape[0]
+    fig_width = 14
+    fig_height = max(7, min(18, 0.075 * n_patients + 4))
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height), constrained_layout=False)
+    ax.set_ylim(-1, n_patients)
+
+    for _, r in patient_ranges.iterrows():
+        ax.hlines(y=r["y"], xmin=0, xmax=max(r["xmax"], 0.05), color="#C8CDD2", linewidth=0.55, alpha=0.8, zorder=1)
+
+    d_insuff = plot_df[plot_df["overlap_status"].eq("insufficient_info")]
+    ax.scatter(d_insuff["time_from_baseline_yrs"], d_insuff["y"], s=16, marker="o", facecolors="#F4F4F4", edgecolors="#BDBDBD", linewidths=0.35, alpha=0.95, zorder=2, label="Insufficient info")
+
+    d_no = plot_df[plot_df["overlap_evaluable"].eq(True) & plot_df["overlap_active"].eq(False)]
+    ax.scatter(d_no["time_from_baseline_yrs"], d_no["y"], s=18, marker="o", color="#8E8E8E", alpha=0.75, zorder=3, label="No overlap")
+
+    d_ov = plot_df[plot_df["overlap_active"].eq(True)]
+    norm = Normalize(vmin=max(2, np.nanmin(d_ov["overlap_intensity_count"])) if len(d_ov) else 2, vmax=max(3, np.nanmax(d_ov["overlap_intensity_count"])) if len(d_ov) else 3)
+    sc = ax.scatter(d_ov["time_from_baseline_yrs"], d_ov["y"], s=34, marker="s", c=d_ov["overlap_intensity_count"], cmap="viridis", norm=norm, edgecolors="white", linewidths=0.25, alpha=0.95, zorder=4, label="Overlap")
+
+    add_time_references(ax, xmax_plot, label=True)
+    ax.grid(axis="x", linestyle=":", linewidth=0.5, alpha=0.35)
+    ax.grid(axis="y", visible=False)
+
+    tick_every = 1 if n_patients <= 60 else 5 if n_patients <= 120 else 10
+    ytick_df = patient_order_df.iloc[::tick_every]
+    ax.set_yticks(ytick_df["y"])
+    ax.set_yticklabels(ytick_df["patient_plot_id"])
+    for yb in group_breaks[:-1]:
+        ax.axhline(y=yb - 0.5, color="#555555", linewidth=0.8, alpha=0.35, zorder=0)
+
+    n_eval = int(patient["fu_has_evaluable_overlap"].sum())
+    n_ov = int(patient["fu_overlap_ever"].sum())
+    ax.set_title(f"Glandular/extraglandular overlap timeline\nTotal patients: {len(patient)} | Evaluable follow-up: {n_eval} | Overlap during follow-up: {n_ov}", pad=12)
+    legend_elements = [
+        Line2D([0], [0], marker="o", color="none", label="No overlap", markerfacecolor="#8E8E8E", markeredgecolor="#8E8E8E", markersize=5),
+        Line2D([0], [0], marker="o", color="none", label="Insufficient info", markerfacecolor="#F4F4F4", markeredgecolor="#BDBDBD", markersize=5),
+        Line2D([0], [0], marker="s", color="none", label="Overlap", markerfacecolor="#3B528B", markeredgecolor="white", markersize=6),
+    ]
+    ax.legend(handles=legend_elements, loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=3, frameon=True, title="Visit status")
+    if len(d_ov) > 0:
+        cbar = fig.colorbar(sc, ax=ax, pad=0.012, fraction=0.035)
+        cbar.set_label("Active glandular + extraglandular count")
+    ax.set_xlabel("Time from baseline (years)"); ax.set_ylabel("Patients")
+    ax.set_xlim(-0.05, xmax_plot + 0.1)
+    for spine in ["top", "right"]:
+        ax.spines[spine].set_visible(False)
+    fig.subplots_adjust(left=0.08, right=0.90, top=0.90, bottom=0.18)
+    fig.savefig(path, bbox_inches="tight"); plt.close(fig)
+    assert path.exists(); assert path.stat().st_size > 10_000
+    print(f"[FIGURE SAVED] {path}"); print(f"Patients plotted: {n_patients}"); print(f"X-axis max years: {xmax_plot}")
 
 
-def make_domain_timeline_plot(long_df: pd.DataFrame, path: Path) -> None:
-    pats = ordered_patients(long_df); domains = list(EXTRAGLANDULAR_DOMAINS.items())
-    nrows = max(1, len(pats) * len(domains)); h = max(8, min(120, 0.09 * nrows + 2))
-    fig, ax = plt.subplots(figsize=(14, h))
-    colors = plt.cm.tab20(np.linspace(0, 1, len(domains)))
-    for pi, p in enumerate(pats):
-        g = long_df[long_df[PATIENT_ID_COL] == p]
-        base = pi * len(domains)
-        for di, (key, meta) in enumerate(domains):
-            y = base + di
-            ev = g[f"eg_{key}_evaluable"]
-            ac = g[meta["active_col"]]
-            ax.scatter(g.loc[ev & ~ac, "time_from_baseline_yrs"], [y] * int((ev & ~ac).sum()), c="#eeeeee", s=5, marker="o")
-            ax.scatter(g.loc[ac, "time_from_baseline_yrs"], [y] * int(ac.sum()), c=[colors[di]], s=18, marker="x", label=meta["label"] if pi == 0 else None)
-        ax.axhline(base - 0.5, color="#dddddd", lw=0.5)
-    ticks = [i * len(domains) + len(domains)/2 - 0.5 for i in range(len(pats))]
-    ax.set_yticks(ticks)
-    ax.set_yticklabels([f"P{i+1:03d}" for i in range(len(pats))] if len(pats) <= MAX_PATIENTS_FOR_LABELS else [], fontsize=5)
-    ax.invert_yaxis(); ax.set_xlabel("Time from baseline (years)"); ax.set_ylabel("Patients / extraglandular domains")
-    ax.set_title("ESSDAI extraglandular domain activity timeline")
-    ax.legend(ncol=3, fontsize=7, loc="upper right")
-    fig.text(0.01, 0.01, "X marks active ESSDAI extraglandular domain at a recorded visit.", fontsize=8)
-    fig.tight_layout(rect=[0, 0.02, 1, 1]); fig.savefig(path); plt.close(fig)
+def make_domain_timeline_plot(long_df: pd.DataFrame, patient: pd.DataFrame, path: Path) -> None:
+    patient_order_df, plot_df, patient_ranges, group_breaks, xmax_plot = prepare_timeline_plot_data(long_df, patient)
+    n_patients = patient_order_df.shape[0]
+    domain_order = ["Constitutional", "Lymphadenopathy", "Articular", "Cutaneous", "Pulmonary", "Renal", "Muscular", "PNS", "CNS", "Hematologic", "Biological"]
+    domain_active_cols = {meta["label"]: meta["active_col"] for meta in EXTRAGLANDULAR_DOMAINS.values()}
+    domain_eval_cols = {meta["label"]: f"eg_{key}_evaluable" for key, meta in EXTRAGLANDULAR_DOMAINS.items()}
+    domain_colors = {"Constitutional": "#1F77B4", "Lymphadenopathy": "#FF7F0E", "Articular": "#2CA02C", "Cutaneous": "#D62728", "Pulmonary": "#9467BD", "Renal": "#8C564B", "Muscular": "#E377C2", "PNS": "#7F7F7F", "CNS": "#BCBD22", "Hematologic": "#17BECF", "Biological": "#004D40"}
+    n_domains = len(domain_order)
+    n_patient_domain_rows = n_patients * n_domains
+    fig_height = max(12, min(24, max(1.25 * n_domains + 5, 0.035 * n_patient_domain_rows + 5)))
+    fig, axes = plt.subplots(n_domains, 1, figsize=(16, fig_height), sharex=True, sharey=True, constrained_layout=False)
+    if n_domains == 1:
+        axes = [axes]
 
+    for ax, domain in zip(axes, domain_order):
+        active_col = domain_active_cols[domain]
+        eval_col = domain_eval_cols.get(domain)
+        for _, r in patient_ranges.iterrows():
+            ax.hlines(y=r["y"], xmin=0, xmax=max(r["xmax"], 0.05), color="#D3D7DB", linewidth=0.35, alpha=0.55, zorder=1)
+        if eval_col in plot_df.columns:
+            d_inactive = plot_df[plot_df[eval_col].eq(True) & plot_df[active_col].eq(False)]
+        else:
+            d_inactive = plot_df[plot_df[active_col].notna() & plot_df[active_col].eq(False)]
+        ax.scatter(d_inactive["time_from_baseline_yrs"], d_inactive["y"], s=5, marker="o", color="#DADADA", alpha=0.35, zorder=2)
+        d_active = plot_df[plot_df[active_col].eq(True)]
+        ax.scatter(d_active["time_from_baseline_yrs"], d_active["y"], s=24, marker="x", color=domain_colors[domain], linewidths=0.95, alpha=0.95, zorder=3)
+        ax.text(0.005, 0.82, domain, transform=ax.transAxes, ha="left", va="center", fontsize=9, fontweight="bold", color=domain_colors[domain], bbox=dict(boxstyle="round,pad=0.18", facecolor="white", edgecolor="#DDDDDD", alpha=0.9))
+        ax.grid(axis="x", linestyle=":", linewidth=0.45, alpha=0.30); ax.grid(axis="y", visible=False)
+        add_time_references(ax, xmax_plot, label=False, linewidth=0.8, alpha=0.45)
+        for yb in group_breaks[:-1]:
+            ax.axhline(y=yb - 0.5, color="#555555", linewidth=0.6, alpha=0.25, zorder=0)
+        for spine in ["top", "right"]:
+            ax.spines[spine].set_visible(False)
+        ax.spines["left"].set_color("#CCCCCC"); ax.spines["bottom"].set_color("#CCCCCC")
+
+    top_ax = axes[0]
+    for x, label, color in [(1/52.1775, "1 wk", "#F4A340"), (1/12, "1 mo", "#E6C229"), (0.5, "6 mo", "#2ECC71"), (2, "2 yr", "#3498DB"), (4, "4 yr", "#2ECC71"), (6, "6 yr", "#9B59B6"), (8, "8 yr", "#E74C3C"), (10, "10 yr", "#1ABC9C")]:
+        if x <= xmax_plot:
+            top_ax.text(x + 0.03, n_patients - 1, label, color=color, fontsize=7, fontweight="bold", ha="left", va="top")
+
+    tick_every = 5 if n_patients <= 60 else 10 if n_patients <= 120 else 20
+    ytick_df = patient_order_df.iloc[::tick_every]
+    for ax in axes:
+        ax.set_yticks(ytick_df["y"]); ax.set_yticklabels(ytick_df["patient_plot_id"])
+        ax.set_xlim(-0.05, xmax_plot + 0.1); ax.set_ylim(-1, n_patients)
+    fig.suptitle("ESSDAI extraglandular domain activity timeline\nX marks active ESSDAI extraglandular domain at a recorded visit", fontsize=13, fontweight="bold", y=0.985)
+    axes[-1].set_xlabel("Time from baseline (years)")
+    fig.text(0.015, 0.5, "Patients", va="center", rotation="vertical", fontsize=10)
+    fig.subplots_adjust(left=0.075, right=0.985, top=0.945, bottom=0.07, hspace=0.16)
+    fig.savefig(path, bbox_inches="tight"); plt.close(fig)
+    assert path.exists(); assert path.stat().st_size > 10_000
+    print(f"[FIGURE SAVED] {path}"); print(f"Patients plotted: {n_patients}"); print(f"X-axis max years: {xmax_plot}")
 
 def build_patient_summary(long_df: pd.DataFrame) -> pd.DataFrame:
     rows = []
@@ -411,7 +534,7 @@ def main() -> None:
     follow = make_followup_table(patient); incident = make_incident_table(patient)
     long_df.to_parquet(LONGITUDINAL_OUT, index=False); patient.to_parquet(PATIENT_SUMMARY_OUT, index=False)
     follow.to_csv(FOLLOWUP_TABLE, index=False); incident.to_csv(INCIDENT_TABLE, index=False)
-    make_overlap_timeline_plot(long_df, patient, TIMELINE_FIG); make_domain_timeline_plot(long_df, DOMAIN_TIMELINE_FIG)
+    make_overlap_timeline_plot(long_df, patient, TIMELINE_FIG); make_domain_timeline_plot(long_df, patient, DOMAIN_TIMELINE_FIG)
     qc = run_qc(raw, long_df, patient, missing_optional, [FOLLOWUP_TABLE, INCIDENT_TABLE, LONGITUDINAL_OUT, PATIENT_SUMMARY_OUT, TIMELINE_FIG, DOMAIN_TIMELINE_FIG], invalid_visit_dates)
     qc.to_csv(QC_OUT, index=False)
     run_qc(raw, long_df, patient, missing_optional, [FOLLOWUP_TABLE, INCIDENT_TABLE, LONGITUDINAL_OUT, PATIENT_SUMMARY_OUT, QC_OUT, TIMELINE_FIG, DOMAIN_TIMELINE_FIG], invalid_visit_dates)
