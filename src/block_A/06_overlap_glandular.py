@@ -157,6 +157,39 @@ def aggregate_binary(values: pd.Series, converter) -> Any:
         return pd.NA
     return 1.0 if any(value == 1.0 for value in non_missing) else 0.0
 
+def aggregate_composite(group: pd.DataFrame, cols: list[str]) -> Any:
+    """Collapse composite variables across all tied baseline rows."""
+    values: list[Any] = []
+    for col in cols:
+        if col in group.columns:
+            converter = essdai_to_binary if col.startswith("essdai__") else preferred_flag_to_binary
+            values.extend(converter(value) for value in group[col])
+    non_missing = [value for value in values if pd.notna(value)]
+    if not non_missing:
+        return pd.NA
+    return 1.0 if any(value == 1.0 for value in non_missing) else 0.0
+
+
+def classify_domain_for_group(group: pd.DataFrame, domain: dict[str, Any]) -> tuple[Any, str]:
+    """Return patient-specific baseline domain indicator and source."""
+    preferred = domain["preferred"]
+    fallback = domain["fallback"]
+    if preferred in group.columns:
+        preferred_value = aggregate_binary(group[preferred], preferred_flag_to_binary)
+        if pd.notna(preferred_value):
+            return preferred_value, "preferred"
+
+    if domain["is_glandular"]:
+        composite_cols = [c for c in domain.get("fallback_composite", []) if c in group.columns]
+        composite_value = aggregate_composite(group, composite_cols)
+        if pd.notna(composite_value):
+            return composite_value, "composite_fallback"
+    elif fallback in group.columns:
+        fallback_value = aggregate_binary(group[fallback], essdai_to_binary)
+        if pd.notna(fallback_value):
+            return fallback_value, "essdai_fallback"
+
+    return pd.NA, "missing"
 
 def aggregate_composite(group: pd.DataFrame, cols: list[str]) -> Any:
     """Collapse composite variables across all tied baseline rows."""
@@ -199,6 +232,64 @@ def first_nonmissing(values: pd.Series) -> Any:
     return pd.NA
 
 
+def extraglandular_indicator_columns(include_biological: bool = True) -> list[str]:
+    return [
+        d["indicator"]
+        for d in DOMAINS
+        if not d["is_glandular"] and (include_biological or d["domain"] != "biological")
+    ]
+
+
+def assign_overlap_category(baseline: pd.DataFrame, extraglandular_col: str, category_col: str) -> None:
+    g = baseline["glandular_baseline"]
+    e = baseline[extraglandular_col]
+    baseline[category_col] = "unclassifiable"
+    baseline.loc[g.eq(1) & e.eq(1), category_col] = "overlap"
+    baseline.loc[g.eq(1) & e.eq(0), category_col] = "glandular_only"
+    baseline.loc[g.eq(0) & e.eq(1), category_col] = "extraglandular_only"
+    baseline.loc[g.eq(0) & e.eq(0), category_col] = "neither"
+
+
+def add_extraglandular_rollup(
+    baseline: pd.DataFrame,
+    *,
+    include_biological: bool,
+    suffix: str = "",
+) -> None:
+    """Add strict and lenient extraglandular rollups for a domain set."""
+    ex_cols = extraglandular_indicator_columns(include_biological=include_biological)
+    n_available_col = f"n_extraglandular_domains_available_baseline{suffix}"
+    pct_missing_col = f"pct_extraglandular_domains_missing_baseline{suffix}"
+    all_missing_col = f"all_extraglandular_domains_missing_baseline{suffix}"
+    insufficient_col = f"extraglandular_insufficient_data{suffix}"
+    lenient_col = f"any_extraglandular_baseline_lenient{suffix}"
+    strict_col = f"any_extraglandular_baseline{suffix}"
+    strict_category_col = f"overlap_category{suffix}"
+    lenient_category_col = f"overlap_category_lenient{suffix}"
+    biological_flag_col = f"biological_included_in_extraglandular_definition{suffix}"
+
+    baseline[biological_flag_col] = bool(include_biological)
+    baseline[n_available_col] = baseline[ex_cols].notna().sum(axis=1)
+    n_ex_domains = len(ex_cols)
+    baseline[pct_missing_col] = (n_ex_domains - baseline[n_available_col]) / n_ex_domains
+    baseline[all_missing_col] = baseline[n_available_col].eq(0)
+    no_positive = baseline[ex_cols].eq(1).sum(axis=1).eq(0)
+    baseline[insufficient_col] = no_positive & baseline[pct_missing_col].gt(0.50)
+
+    any_positive = baseline[ex_cols].eq(1).any(axis=1)
+    any_available = baseline[ex_cols].notna().any(axis=1)
+    baseline[lenient_col] = pd.NA
+    baseline.loc[any_positive, lenient_col] = 1.0
+    baseline.loc[~any_positive & any_available, lenient_col] = 0.0
+
+    baseline[strict_col] = baseline[lenient_col]
+    baseline.loc[baseline[insufficient_col], strict_col] = pd.NA
+    baseline.loc[baseline[all_missing_col], strict_col] = pd.NA
+
+    assign_overlap_category(baseline, strict_col, strict_category_col)
+    assign_overlap_category(baseline, lenient_col, lenient_category_col)
+
+
 def build_baseline(df: pd.DataFrame, strict_missingness: bool = True) -> pd.DataFrame:
     if PATIENT_ID_COL not in df.columns:
         raise ValueError(f"Required patient identifier missing: {PATIENT_ID_COL}")
@@ -238,36 +329,8 @@ def build_baseline(df: pd.DataFrame, strict_missingness: bool = True) -> pd.Data
         consolidated_rows.append(row)
     baseline = pd.DataFrame(consolidated_rows)
 
-    ex_cols = [d["indicator"] for d in DOMAINS if not d["is_glandular"]]
-    baseline["n_extraglandular_domains_available_baseline"] = baseline[ex_cols].notna().sum(axis=1)
-    n_ex_domains = len(ex_cols)
-    baseline["pct_extraglandular_domains_missing_baseline"] = (n_ex_domains - baseline["n_extraglandular_domains_available_baseline"]) / n_ex_domains
-    baseline["all_extraglandular_domains_missing_baseline"] = baseline["n_extraglandular_domains_available_baseline"].eq(0)
-    no_positive = baseline[ex_cols].eq(1).sum(axis=1).eq(0)
-    baseline["extraglandular_insufficient_data"] = no_positive & baseline["pct_extraglandular_domains_missing_baseline"].gt(0.50)
-
-    any_positive = baseline[ex_cols].eq(1).any(axis=1)
-    any_available = baseline[ex_cols].notna().any(axis=1)
-    baseline["any_extraglandular_baseline_lenient"] = pd.NA
-    baseline.loc[any_positive, "any_extraglandular_baseline_lenient"] = 1.0
-    baseline.loc[~any_positive & any_available, "any_extraglandular_baseline_lenient"] = 0.0
-
-    baseline["any_extraglandular_baseline"] = baseline["any_extraglandular_baseline_lenient"]
-    if strict_missingness:
-        baseline.loc[baseline["extraglandular_insufficient_data"], "any_extraglandular_baseline"] = pd.NA
-    baseline.loc[baseline["all_extraglandular_domains_missing_baseline"], "any_extraglandular_baseline"] = pd.NA
-
-    for e_col, category_col in [
-        ("any_extraglandular_baseline", "overlap_category"),
-        ("any_extraglandular_baseline_lenient", "overlap_category_lenient"),
-    ]:
-        g = baseline["glandular_baseline"]
-        e = baseline[e_col]
-        baseline[category_col] = "unclassifiable"
-        baseline.loc[g.eq(1) & e.eq(1), category_col] = "overlap"
-        baseline.loc[g.eq(1) & e.eq(0), category_col] = "glandular_only"
-        baseline.loc[g.eq(0) & e.eq(1), category_col] = "extraglandular_only"
-        baseline.loc[g.eq(0) & e.eq(0), category_col] = "neither"
+    add_extraglandular_rollup(baseline, include_biological=True)
+    add_extraglandular_rollup(baseline, include_biological=False, suffix="_no_biological")
     return baseline
 
 def make_manifest_and_qc(df: pd.DataFrame, baseline: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
@@ -299,6 +362,10 @@ def make_manifest_and_qc(df: pd.DataFrame, baseline: pd.DataFrame) -> tuple[pd.D
     category_counts = classifiable["overlap_category"].value_counts().to_dict()
     lenient_classifiable = baseline[baseline["overlap_category_lenient"] != "unclassifiable"]
     lenient_counts = lenient_classifiable["overlap_category_lenient"].value_counts().to_dict()
+    no_bio_classifiable = baseline[baseline["overlap_category_no_biological"] != "unclassifiable"]
+    no_bio_counts = no_bio_classifiable["overlap_category_no_biological"].value_counts().to_dict()
+    no_bio_lenient_classifiable = baseline[baseline["overlap_category_lenient_no_biological"] != "unclassifiable"]
+    no_bio_lenient_counts = no_bio_lenient_classifiable["overlap_category_lenient_no_biological"].value_counts().to_dict()
     classifiable_pct = len(classifiable) / len(baseline) if len(baseline) else 0
     qc = {
         "n_raw_rows": int(len(df)),
@@ -319,13 +386,32 @@ def make_manifest_and_qc(df: pd.DataFrame, baseline: pd.DataFrame) -> tuple[pd.D
         "each_patient_one_baseline_row": bool(baseline[PATIENT_ID_COL].is_unique),
         "category_counts": {k: int(v) for k, v in category_counts.items()},
         "lenient_sensitivity": {
+            "biological_included_in_extraglandular_definition": True,
             "n_classifiable_patients": int(len(lenient_classifiable)),
             "n_unclassifiable_patients": int((baseline["overlap_category_lenient"] == "unclassifiable").sum()),
             "category_counts": {k: int(v) for k, v in lenient_counts.items()},
         },
+        "exclude_biological_sensitivity": {
+            "biological_included_in_extraglandular_definition": False,
+            "main_strict_missingness": {
+                "n_classifiable_patients": int(len(no_bio_classifiable)),
+                "n_unclassifiable_patients": int((baseline["overlap_category_no_biological"] == "unclassifiable").sum()),
+                "category_counts": {k: int(v) for k, v in no_bio_counts.items()},
+            },
+            "lenient_sensitivity": {
+                "n_classifiable_patients": int(len(no_bio_lenient_classifiable)),
+                "n_unclassifiable_patients": int((baseline["overlap_category_lenient_no_biological"] == "unclassifiable").sum()),
+                "category_counts": {k: int(v) for k, v in no_bio_lenient_counts.items()},
+            },
+        },
         "warnings": [],
     }
     qc["n_piped_visit_dates_resolved"] = int(baseline.get("_had_piped_date", pd.Series(dtype=bool)).sum())
+    qc["notes"] = []
+    if baseline["overlap_category"].equals(baseline["overlap_category_lenient"]):
+        qc["notes"].append(
+            "Strict and lenient sensitivity analyses yielded identical overlap classification."
+        )
     if classifiable_pct < 0.80:
         qc["warnings"].append(
             "STRONG WARNING: fewer than 80% of baseline patients are classifiable; "
@@ -344,31 +430,99 @@ def format_pct_value(value: Any) -> str:
 def build_output_table(baseline: pd.DataFrame) -> pd.DataFrame:
     rows = []
     category_labels = ["overlap", "glandular_only", "extraglandular_only", "neither"]
+    analysis_specs = [
+        ("main_strict_missingness", "overlap_category", True),
+        ("lenient_sensitivity", "overlap_category_lenient", True),
+        ("main_strict_missingness_no_biological", "overlap_category_no_biological", False),
+        ("lenient_sensitivity_no_biological", "overlap_category_lenient_no_biological", False),
+    ]
 
-    for analysis_label, category_col in [
-        ("main_strict_missingness", "overlap_category"),
-        ("lenient_sensitivity", "overlap_category_lenient"),
-    ]:
+    for analysis_label, category_col, biological_included in analysis_specs:
         classifiable = baseline[baseline[category_col] != "unclassifiable"].copy()
-        denom = len(classifiable)
+        n_classifiable = len(classifiable)
+        n_baseline = len(baseline)
+        n_unclassifiable = n_baseline - n_classifiable
+        biological_flag = "included" if biological_included else "excluded"
+        common_fields = {
+            "analysis": analysis_label,
+            "biological_included_in_extraglandular_definition": biological_included,
+            "extraglandular_definition_note": f"biological domain {biological_flag}",
+            "rank": pd.NA,
+            "variable_source": "patient_specific_coalesced",
+        }
+        for measure, n, denominator, denominator_label in [
+            ("n_classifiable_baseline", n_classifiable, n_baseline, "baseline_patients"),
+            ("pct_classifiable_baseline", n_classifiable, n_baseline, "baseline_patients"),
+            ("n_unclassifiable_baseline", n_unclassifiable, n_baseline, "baseline_patients"),
+            ("pct_unclassifiable_baseline", n_unclassifiable, n_baseline, "baseline_patients"),
+        ]:
+            rows.append({
+                **common_fields,
+                "section": "classification_denominators",
+                "measure": measure,
+                "domain": "all_domains",
+                "n": int(n),
+                "denominator": int(denominator),
+                "denominator_label": denominator_label,
+                "pct": pct(n, denominator),
+            })
+
         for cat in category_labels:
             n = int((classifiable[category_col] == cat).sum())
-            rows.append({"analysis": analysis_label, "section": "overlap_categories", "measure": f"n_{cat}_baseline", "domain": cat, "n": n, "denominator": denom, "denominator_label": "classifiable_patients", "pct": pct(n, denom), "rank": pd.NA, "variable_source": "patient_specific_coalesced"})
-            rows.append({"analysis": analysis_label, "section": "overlap_categories_sensitivity_denominator", "measure": f"n_{cat}_baseline_all_baseline", "domain": cat, "n": n, "denominator": len(baseline), "denominator_label": "baseline_patients", "pct": pct(n, len(baseline)), "rank": pd.NA, "variable_source": "patient_specific_coalesced"})
+            rows.append({
+                **common_fields,
+                "section": "overlap_categories",
+                "measure": f"n_{cat}_baseline",
+                "domain": cat,
+                "n": n,
+                "denominator": n_classifiable,
+                "denominator_label": "classifiable_patients_primary",
+                "pct": pct(n, n_classifiable),
+            })
+            rows.append({
+                **common_fields,
+                "section": "overlap_categories_secondary_denominator",
+                "measure": f"n_{cat}_baseline_all_baseline",
+                "domain": cat,
+                "n": n,
+                "denominator": n_baseline,
+                "denominator_label": "baseline_patients_secondary",
+                "pct": pct(n, n_baseline),
+            })
 
         glandular_positive = classifiable[classifiable["glandular_baseline"] == 1]
         g_denom = len(glandular_positive)
         cooccur_rows = []
         for d in DOMAINS:
-            if d["is_glandular"]:
+            if d["is_glandular"] or (d["domain"] == "biological" and not biological_included):
                 continue
             col = d["indicator"]
             n_overall = int((classifiable[col] == 1).sum())
             n_glandular = int((glandular_positive[col] == 1).sum())
             source_counts = classifiable[f"{d['domain']}_baseline_source"].value_counts().to_dict()
             variable_source = ";".join(f"{k}:{int(v)}" for k, v in sorted(source_counts.items()))
-            rows.append({"analysis": analysis_label, "section": "domain_prevalence_overall", "measure": "n_pct_domain_positive", "domain": d["label"], "n": n_overall, "denominator": denom, "denominator_label": "classifiable_patients", "pct": pct(n_overall, denom), "rank": pd.NA, "variable_source": variable_source})
-            cooccur_rows.append({"analysis": analysis_label, "section": "domain_prevalence_among_glandular_positive", "measure": "n_pct_domain_positive_among_glandular", "domain": d["label"], "n": n_glandular, "denominator": g_denom, "denominator_label": "glandular_positive_patients", "pct": pct(n_glandular, g_denom), "rank": pd.NA, "variable_source": variable_source})
+            rows.append({
+                **common_fields,
+                "section": "domain_prevalence_overall",
+                "measure": "n_pct_domain_positive",
+                "domain": d["label"],
+                "n": n_overall,
+                "denominator": n_classifiable,
+                "denominator_label": "classifiable_patients_primary",
+                "pct": pct(n_overall, n_classifiable),
+                "variable_source": variable_source,
+            })
+            cooccur_rows.append({
+                **common_fields,
+                "section": "domain_prevalence_among_glandular_positive",
+                "measure": "n_pct_domain_positive_among_glandular",
+                "domain": d["label"],
+                "n": n_glandular,
+                "denominator": g_denom,
+                "denominator_label": "glandular_positive_patients",
+                "pct": pct(n_glandular, g_denom),
+                "variable_source": variable_source,
+            })
         cooccur_rows = sorted(cooccur_rows, key=lambda r: (-r["n"], str(r["domain"])))
         for rank, row in enumerate(cooccur_rows, start=1):
             row["rank"] = rank
@@ -470,10 +624,20 @@ def main() -> None:
         "pct_extraglandular_domains_missing_baseline",
         "all_extraglandular_domains_missing_baseline",
         "extraglandular_insufficient_data",
+        "biological_included_in_extraglandular_definition",
         "any_extraglandular_baseline",
         "any_extraglandular_baseline_lenient",
         "overlap_category",
         "overlap_category_lenient",
+        "biological_included_in_extraglandular_definition_no_biological",
+        "n_extraglandular_domains_available_baseline_no_biological",
+        "pct_extraglandular_domains_missing_baseline_no_biological",
+        "all_extraglandular_domains_missing_baseline_no_biological",
+        "extraglandular_insufficient_data_no_biological",
+        "any_extraglandular_baseline_no_biological",
+        "any_extraglandular_baseline_lenient_no_biological",
+        "overlap_category_no_biological",
+        "overlap_category_lenient_no_biological",
     ]
     patient_cols = [c for c in dict.fromkeys(patient_cols) if c in baseline.columns]
 
