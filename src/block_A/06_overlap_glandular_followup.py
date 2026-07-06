@@ -86,6 +86,9 @@ PAIRWISE_SENS_TABLE = TABLE_DIR / "06_pairwise_domain_associations_glandular_ess
 LONGITUDINAL_OUT = INTERMEDIATE_DIR / "06_overlap_longitudinal_dx_temporal_anchor_patient_visit.parquet"
 OBSERVED_BASELINE_OUT = INTERMEDIATE_DIR / "06_overlap_observed_baseline_patient_level.parquet"
 PATIENT_SUMMARY_OUT = INTERMEDIATE_DIR / "06_overlap_dx_temporal_anchor_patient_summary.parquet"
+LONGITUDINAL_CSV_OUT = LONGITUDINAL_OUT.with_suffix(".csv")
+OBSERVED_BASELINE_CSV_OUT = OBSERVED_BASELINE_OUT.with_suffix(".csv")
+PATIENT_SUMMARY_CSV_OUT = PATIENT_SUMMARY_OUT.with_suffix(".csv")
 
 QC_OUT = INTERMEDIATE_DIR / "06_overlap_dx_temporal_anchor_qc_summary.csv"
 BASELINE_AUDIT_OUT = INTERMEDIATE_DIR / "06_observed_baseline_audit.csv"
@@ -654,8 +657,11 @@ def main() -> None:
     pairwise_sens = make_pairwise_table(baseline_valid, "baseline_glandular_essdai_only_active", "baseline_glandular_essdai_only_evaluable")
 
     long_df.to_parquet(LONGITUDINAL_OUT, index=False)
+    long_df.to_csv(LONGITUDINAL_CSV_OUT, index=False)
     baseline_valid.to_parquet(OBSERVED_BASELINE_OUT, index=False)
+    baseline_valid.to_csv(OBSERVED_BASELINE_CSV_OUT, index=False)
     patient.to_parquet(PATIENT_SUMMARY_OUT, index=False)
+    patient.to_csv(PATIENT_SUMMARY_CSV_OUT, index=False)
     follow.to_csv(FOLLOWUP_TABLE, index=False)
     incident.to_csv(INCIDENT_TABLE, index=False)
     domain_incident.to_csv(DOMAIN_INCIDENT_TABLE, index=False)
