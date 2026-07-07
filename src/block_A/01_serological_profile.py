@@ -79,6 +79,13 @@ DEFAULT_NEGATIVE_UPPER_LIMITS = {
 INCLUSIVE_NEGATIVE_UPPER_LIMIT_LABS = {"Antinuclear Antibody (ANA) (Blood)"}
 RF_DEFAULT_NEGATIVE_UPPER_LIMITS = (13.0, 15.0)
 TODAY = pd.Timestamp.today().normalize()
+LAB_FALLBACK_WINDOW_DAYS = 10
+USE_LAB_FALLBACK_WINDOW = True
+WINDOWS = [0, 7, 10, 14, 30]
+INTERPRETABLE_CLASSES = {"positive", "negative", "low"}
+COHORT_INPUT = common.DEFAULT_ANALYTIC_DATASET
+COHORT_ID_FILE = common.BLOCKA_TABLES_DIR / "00_analytic_cohort_ids.csv"
+ANCHOR_DATE_CANDIDATES = ["target_date", "baseline_date", "diagnosis_date", "ids__visit_date"]
 
 POS_RE = re.compile(r"\b(positive|pos|reactive|detected|present|abnormal|high)\b", re.I)
 NEG_RE = re.compile(r"\b(negative|neg|non[- ]?reactive|not detected|absent|none detected)\b", re.I)
@@ -264,9 +271,9 @@ def load_labs() -> tuple[pd.DataFrame, dict[str, Any], str, str]:
 
 
 def prepare_long(df: pd.DataFrame, pid_col: str, date_col: str) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
-    terms = re.compile(r"ro|ssa|ss-a|la|ssb|ana|rheumatoid|cryoglobulin|c4|wbc", re.I)
-    possible = df.loc[df["Cluster Name"].astype(str).str.contains(terms, na=False) & ~df["Cluster Name"].isin(LAB_MARKER_MAP), ["Cluster Name"]].drop_duplicates().sort_values("Cluster Name")
-    possible["n_records"] = possible["Cluster Name"].map(df["Cluster Name"].value_counts())
+    terms = re.compile(r"ro|ssa|ss-a|la|ssb|ana|rheumatoid|cryoglobulin|c4|wbc|white blood cell|leukocyte|complement", re.I)
+    possible = df.loc[df["Cluster Name"].astype(str).str.contains(terms, na=False) & ~df["Cluster Name"].isin(LAB_MARKER_MAP), ["Cluster Name", pid_col]].copy()
+    possible = possible.groupby("Cluster Name", dropna=False).agg(n_records=("Cluster Name", "size"), n_patients=(pid_col, "nunique")).reset_index().sort_values("Cluster Name")
     work = df[df["Cluster Name"].isin(LAB_MARKER_MAP)].drop_duplicates().copy()
     work["patient_id"] = work[pid_col].astype("string")
     work["lab_date"] = pd.to_datetime(work[date_col], errors="coerce")
@@ -282,26 +289,108 @@ def prepare_long(df: pd.DataFrame, pid_col: str, date_col: str) -> tuple[pd.Data
     return work, possible, qc
 
 
+
+def _read_table(path: Path) -> pd.DataFrame:
+    if path.suffix.lower() in {".xlsx", ".xls"}:
+        return pd.read_excel(path)
+    if path.suffix.lower() == ".parquet":
+        return pd.read_parquet(path)
+    return pd.read_csv(path, low_memory=False)
+
+
+def load_cohort_patient_ids() -> pd.Series:
+    """Load the full analytic cohort patient IDs used for Table 1 / Block A."""
+    if COHORT_ID_FILE.exists():
+        cohort = _read_table(COHORT_ID_FILE)
+        col = _first_existing(cohort, ["patient_id", "ids__patient_record_number", "ids__subject_number"])
+        if col:
+            return cohort[col].dropna().astype("string")
+    cohort = _read_table(COHORT_INPUT)
+    col = _first_existing(cohort, ["ids__patient_record_number", "ids__subject_number", "patient_id"])
+    if not col:
+        raise ValueError(f"No patient identifier column found in cohort input: {COHORT_INPUT}")
+    return cohort[col].dropna().astype("string")
+
+
+def load_anchor_dates() -> pd.DataFrame | None:
+    """Load patient-level anchor dates when a cohort visit/baseline date is available."""
+    if not COHORT_INPUT.exists():
+        return None
+    cohort = _read_table(COHORT_INPUT)
+    pid_col = _first_existing(cohort, ["ids__patient_record_number", "ids__subject_number", "patient_id"])
+    date_col = _first_existing(cohort, ANCHOR_DATE_CANDIDATES)
+    if not pid_col or not date_col:
+        return None
+    anchors = cohort[[pid_col, date_col]].copy()
+    anchors["patient_id"] = anchors[pid_col].astype("string")
+    anchors["target_date"] = pd.to_datetime(anchors[date_col], errors="coerce")
+    anchors = anchors.dropna(subset=["patient_id", "target_date"]).sort_values(["patient_id", "target_date"])
+    return anchors.groupby("patient_id", as_index=False)["target_date"].first()
+
 def _patient_marker(g: pd.DataFrame, positive_class: str = "positive") -> dict[str, Any]:
-    interp = g[g["classification"].isin([positive_class, "positive", "negative", "low"])]
+    interp = g[g["classification"].isin(INTERPRETABLE_CLASSES)]
     pos = interp["classification"].isin([positive_class, "positive", "low"]).any()
     first_pos = interp.loc[interp["classification"].isin([positive_class, "positive", "low"]), "lab_date"].min()
     return {"tested": len(g) > 0, "interpretable": len(interp) > 0, "pos": bool(pos) if len(interp) else pd.NA, "first_date": g["lab_date"].min(), "first_positive_date": first_pos, "n_records": int(len(g))}
 
 
-def build_patient_level(long: pd.DataFrame) -> pd.DataFrame:
-    patients = sorted(long["patient_id"].dropna().astype(str).unique())
+def select_lab_near_date(
+    patient_labs: pd.DataFrame,
+    marker_list: list[str],
+    target_date: pd.Timestamp,
+    window_days: int = LAB_FALLBACK_WINDOW_DAYS,
+) -> pd.DataFrame:
+    """Select lab records for a patient/marker near a target date, preserving ties for QC."""
+    mg = patient_labs[patient_labs["serology_marker"].isin(marker_list) & patient_labs["lab_date"].notna()].copy()
+    if mg.empty or pd.isna(target_date):
+        return mg.iloc[0:0].copy()
+    mg["days_from_target"] = (mg["lab_date"] - pd.to_datetime(target_date)).dt.days
+    mg["abs_days_from_target"] = mg["days_from_target"].abs()
+    mg["within_window"] = mg["abs_days_from_target"] <= window_days
+    mg["is_exact_date"] = mg["days_from_target"] == 0
+    mg["is_interpretable"] = mg["classification"].isin(INTERPRETABLE_CLASSES)
+    candidates = mg[mg["is_exact_date"] & mg["is_interpretable"]].copy()
+    if candidates.empty and USE_LAB_FALLBACK_WINDOW:
+        candidates = mg[mg["within_window"] & mg["is_interpretable"]].copy()
+    if candidates.empty and USE_LAB_FALLBACK_WINDOW:
+        candidates = mg[mg["within_window"]].copy()
+    if candidates.empty:
+        return candidates
+    candidates["prefer_before"] = candidates["days_from_target"].le(0).astype(int)
+    candidates = candidates.sort_values(["abs_days_from_target", "is_exact_date", "prefer_before", "is_interpretable", "lab_date"], ascending=[True, False, False, False, True])
+    best_distance = candidates["abs_days_from_target"].iloc[0]
+    return candidates[candidates["abs_days_from_target"] == best_distance].copy()
+
+
+def build_patient_level(long: pd.DataFrame, cohort_patient_ids: pd.Series, anchor_dates: pd.DataFrame | None = None, window_days: int = LAB_FALLBACK_WINDOW_DAYS) -> pd.DataFrame:
+    patients = sorted(cohort_patient_ids.dropna().astype(str).unique())
     rows = []
     for pid in patients:
         row: dict[str, Any] = {"patient_id": pid}
         pg = long[long["patient_id"].astype(str) == pid]
         specs = {"anti_ro": ["ro_ssa_igg"], "anti_la": ["la_ssb_igg"], "ana": ["ana", "ana_titer"], "rf": ["rf"], "cryo": ["cryoglobulins"], "c4": ["c4"], "wbc": ["wbc"]}
         for name, markers in specs.items():
-            mg = pg[pg["serology_marker"].isin(markers)]
+            any_mg = pg[pg["serology_marker"].isin(markers)]
+            target_date = pd.NaT
+            if anchor_dates is not None:
+                target = anchor_dates.loc[anchor_dates["patient_id"].astype(str) == pid, "target_date"]
+                target_date = target.iloc[0] if not target.empty else pd.NaT
+                mg = select_lab_near_date(pg, markers, target_date, window_days)
+            else:
+                mg = any_mg.copy()
             d = _patient_marker(mg)
-            row[f"{name}_tested"] = d["tested"]; row[f"{name}_interpretable"] = d["interpretable"]
+            row[f"{name}_tested"] = bool(len(any_mg)); row[f"{name}_interpretable"] = d["interpretable"]
             out_col = {"anti_ro":"anti_ro_pos","anti_la":"anti_la_pos","cryo":"cryo_pos","c4":"low_c4","wbc":"leukopenia"}.get(name, f"{name}_pos")
             row[out_col] = d["pos"]; row[f"{name}_first_date"] = d["first_date"]; row[f"{name}_first_positive_date"] = d["first_positive_date"]; row[f"{name}_n_records"] = d["n_records"]
+            if anchor_dates is not None:
+                in_window_any = False if pd.isna(target_date) else bool(((any_mg["lab_date"] - pd.to_datetime(target_date)).dt.days.abs() <= window_days).any())
+                out_window = bool(len(any_mg) and not in_window_any)
+                days = mg["days_from_target"].min() if "days_from_target" in mg and not mg.empty else pd.NA
+                row[f"{name}_target_date"] = target_date; row[f"{name}_selected_lab_date"] = mg["lab_date"].min() if not mg.empty else pd.NaT
+                row[f"{name}_days_from_anchor"] = days; row[f"{name}_within_window"] = bool(not mg.empty and mg.get("within_window", pd.Series([False])).any())
+                row[f"{name}_fallback_used"] = bool(pd.notna(days) and abs(days) > 0); row[f"{name}_lab_outside_window"] = out_window
+                row[f"{name}_lab_in_window_uninterpretable"] = bool(in_window_any and not d["interpretable"]); row[f"{name}_no_lab_anywhere"] = not bool(len(any_mg))
+                row[f"{name}_match_type"] = ("exact_date" if bool(pd.notna(days) and days == 0 and d["interpretable"]) else ("fallback_window" if bool(pd.notna(days) and d["interpretable"]) else ("lab_in_window_uninterpretable" if bool(pd.notna(days)) else ("lab_outside_window" if out_window else ("no_lab_in_window" if len(any_mg) else "no_lab_anywhere")))))
         ro_pos_labs = pg[(pg["serology_marker"] == "ro_ssa_igg") & (pg["classification"] == "positive")]["Cluster Name"].dropna().unique()
         row["anti_ro_positive_source_lab"] = "; ".join(map(str, ro_pos_labs))
         row["double_ro_la_pos"] = bool(row["anti_ro_pos"] is True and row["anti_la_pos"] is True) if row["anti_ro_interpretable"] and row["anti_la_interpretable"] else pd.NA
@@ -326,7 +415,7 @@ def add_table_block(patient: pd.DataFrame, qc_warnings: list[str]) -> pd.DataFra
         n_tested = int(patient[tested_col].fillna(False).sum()) if tested_col else int((patient["anti_ro_tested"].fillna(False)&patient["anti_la_tested"].fillna(False)).sum())
         denom = int(denom_mask.sum()); n = int((patient.loc[denom_mask, col] == True).sum())
         pct = None if denom == 0 else round(n / denom * 100, 1)
-        rows.append({"section":"Serologic characteristics", "variable":label, "n":n, "denominator":denom, "percent":pct, "formatted":f"{n}/{denom} ({pct:.1f}%)" if pct is not None else f"{n}/{denom} (NA)", "n_total_cohort":n_total, "n_tested":n_tested, "n_interpretable":denom, "missing_n":n_total-n_tested, "unclassified_n":max(n_tested-denom,0), "denominator_type":"n_interpretable", "definition":definition, "qc_flag":"; ".join(qc_warnings)})
+        rows.append({"section":"Serologic characteristics", "variable":label, "n":n, "denominator":denom, "percent":pct, "formatted":f"{n}/{denom} ({pct:.1f}%)" if pct is not None else f"{n}/{denom} (NA)", "n_total_cohort":n_total, "n_tested":n_tested, "n_interpretable":denom, "missing_n":n_total-n_tested, "lab_outside_window_n": int(patient.get(f"{prefix}_lab_outside_window", pd.Series(False, index=patient.index)).fillna(False).sum()) if col != "double_ro_la_pos" else pd.NA, "fallback_recovered_n": int(patient.get(f"{prefix}_fallback_used", pd.Series(False, index=patient.index)).fillna(False).sum()) if col != "double_ro_la_pos" else pd.NA, "window_days": LAB_FALLBACK_WINDOW_DAYS, "unclassified_n":max(n_tested-denom,0), "denominator_type":"full analytic cohort; percent among n_interpretable", "definition":definition + " Laboratory values were first searched on the anchor date. If unavailable, the closest interpretable value within ±10 days was used. Percentages are calculated among patients with interpretable testing; missingness is reported against the full analytic cohort.", "qc_flag":"; ".join(qc_warnings)})
     table_path = common.BLOCKA_TABLES_DIR / "01_table1_overall.csv"
     new = pd.DataFrame(rows)
     if table_path.exists():
@@ -337,15 +426,94 @@ def add_table_block(patient: pd.DataFrame, qc_warnings: list[str]) -> pd.DataFra
     return pd.DataFrame(rows)
 
 
-def write_qc(long: pd.DataFrame, patient: pd.DataFrame, possible: pd.DataFrame, summary: dict[str, Any], warnings: list[str]) -> None:
+
+def suggest_unmapped_marker(cluster_name: Any) -> tuple[str, str]:
+    text = str(cluster_name).lower()
+    rules = [
+        ("ro_ssa_igg", ["ssa", "ss-a", " ro", "ro52", "ro60"], "SSA/Ro-like cluster name; requires manual confirmation before mapping."),
+        ("la_ssb_igg", ["ssb", "ss-b", " la"], "SSB/La-like cluster name; requires manual confirmation before mapping."),
+        ("ana", ["antinuclear", "ana"], "ANA-like cluster name; requires manual confirmation before mapping."),
+        ("rf", ["rheumatoid", " rf"], "Rheumatoid factor-like cluster name; requires manual confirmation before mapping."),
+        ("c4", ["complement c4", " c4"], "Complement C4-like cluster name; requires manual confirmation before mapping."),
+        ("wbc", ["white blood cell", "leukocyte", "wbc"], "WBC/leukocyte-like cluster name; requires manual confirmation before mapping."),
+        ("cryoglobulins", ["cryoglobulin"], "Cryoglobulin-like cluster name; requires manual confirmation before mapping."),
+    ]
+    padded = f" {text} "
+    for marker, terms, reason in rules:
+        if any(term in padded for term in terms):
+            return marker, reason
+    return "", "No predefined serology synonym matched; leave unmapped unless manual review supports inclusion."
+
+
+def add_unmapped_suggestions(possible: pd.DataFrame) -> pd.DataFrame:
+    out = possible.copy()
+    if out.empty:
+        for col in ["suggested_marker", "include_in_map_yes_no", "reason"]:
+            out[col] = []
+        return out
+    suggestions = out["Cluster Name"].map(suggest_unmapped_marker)
+    out["suggested_marker"] = suggestions.map(lambda x: x[0])
+    out["include_in_map_yes_no"] = "no"
+    out["reason"] = suggestions.map(lambda x: x[1])
+    return out
+
+
+def build_window_match_qc(long: pd.DataFrame, patient: pd.DataFrame, anchor_dates: pd.DataFrame | None, window_days: int) -> pd.DataFrame:
+    specs = {"anti_ro": ["ro_ssa_igg"], "anti_la": ["la_ssb_igg"], "ana": ["ana", "ana_titer"], "rf": ["rf"], "cryo": ["cryoglobulins"], "c4": ["c4"], "wbc": ["wbc"]}
+    rows = []
+    if anchor_dates is None:
+        return pd.DataFrame(columns=["patient_id", "marker", "target_date", "selected_lab_date", "days_from_target", "match_type", "classification", "Cluster Name", "Observation Value", "clean_value", "source_folder"])
+    for _, prow in patient.iterrows():
+        pid = str(prow["patient_id"]); pg = long[long["patient_id"].astype(str) == pid]
+        for marker, marker_list in specs.items():
+            selected_date = prow.get(f"{marker}_selected_lab_date", pd.NaT)
+            days = prow.get(f"{marker}_days_from_anchor", pd.NA)
+            selected = pg[pg["serology_marker"].isin(marker_list)].copy()
+            if pd.notna(selected_date) and pd.notna(days):
+                selected = selected[selected["lab_date"] == selected_date].copy()
+            else:
+                selected = selected.iloc[0:0].copy()
+            if selected.empty:
+                rows.append({"patient_id": pid, "marker": marker, "target_date": prow.get(f"{marker}_target_date", pd.NaT), "selected_lab_date": pd.NaT, "days_from_target": pd.NA, "match_type": prow.get(f"{marker}_match_type", "no_anchor"), "classification": pd.NA, "Cluster Name": pd.NA, "Observation Value": pd.NA, "clean_value": pd.NA, "source_folder": pd.NA})
+            else:
+                for _, lab in selected.iterrows():
+                    rows.append({"patient_id": pid, "marker": marker, "target_date": prow.get(f"{marker}_target_date", pd.NaT), "selected_lab_date": lab.get("lab_date"), "days_from_target": days, "match_type": prow.get(f"{marker}_match_type", pd.NA), "classification": lab.get("classification"), "Cluster Name": lab.get("Cluster Name"), "Observation Value": lab.get("Observation Value"), "clean_value": lab.get("clean_value"), "source_folder": lab.get("source_folder")})
+    return pd.DataFrame(rows)
+
+
+def build_window_sensitivity(long: pd.DataFrame, cohort_ids: pd.Series, anchor_dates: pd.DataFrame | None) -> pd.DataFrame:
+    rows = []
+    exact = build_patient_level(long, cohort_ids, anchor_dates, window_days=0) if anchor_dates is not None else None
+    col_map = {"anti_ro": "anti_ro_pos", "anti_la": "anti_la_pos", "ana": "ana_pos", "rf": "rf_pos", "cryo": "cryo_pos", "c4": "low_c4", "wbc": "leukopenia"}
+    for window in WINDOWS:
+        p = build_patient_level(long, cohort_ids, anchor_dates, window_days=window) if anchor_dates is not None else build_patient_level(long, cohort_ids, None, window_days=window)
+        for marker, pos_col in col_map.items():
+            interp = p[f"{marker}_interpretable"].fillna(False)
+            n_interp = int(interp.sum())
+            exact_interp = exact[f"{marker}_interpretable"].fillna(False) if exact is not None else interp
+            recovered = int((interp & ~exact_interp).sum()) if exact is not None else 0
+            n_pos = int((p.loc[interp, pos_col] == True).sum())
+            rows.append({"marker": marker, "window_days": window, "n_total_cohort": len(p), "n_tested": int(p[f"{marker}_tested"].fillna(False).sum()), "n_interpretable": n_interp, "n_positive": n_pos, "percent_positive_among_interpretable": None if n_interp == 0 else round(n_pos / n_interp * 100, 1), "n_recovered_vs_exact": recovered})
+    return pd.DataFrame(rows)
+
+def write_qc(long: pd.DataFrame, patient: pd.DataFrame, possible: pd.DataFrame, summary: dict[str, Any], warnings: list[str], anchor_dates: pd.DataFrame | None = None, cohort_ids: pd.Series | None = None) -> None:
     qc_dir = common.OUTPUTS_DIR / "qc" / "blockA"; qc_dir.mkdir(parents=True, exist_ok=True)
     long.to_csv(qc_dir / "01_serology_long_clean.csv", index=False)
     patient.to_csv(qc_dir / "01_serology_patient_level.csv", index=False)
-    possible.to_csv(qc_dir / "01_serology_possible_unmapped_cluster_names.csv", index=False)
+    possible_suggested = add_unmapped_suggestions(possible)
+    possible_suggested.to_csv(qc_dir / "01_serology_possible_unmapped_cluster_names.csv", index=False)
+    possible_suggested.to_csv(qc_dir / "01_serology_unmapped_cluster_name_candidates.csv", index=False)
     keys = ["serology_marker","Cluster Name","Observation Value","clean_value","unit","normal_range","numeric_value","operator","qualitative_status","classification","classification_reason","is_text_free","needs_manual_review"]
     unique = long.groupby(keys, dropna=False).agg(n_records=("patient_id","size"), n_patients=("patient_id","nunique"), example_patient_id=("patient_id","first"), first_date=("lab_date","min"), last_date=("lab_date","max")).reset_index()
     unique.to_csv(qc_dir / "01_serology_unique_values.csv", index=False)
     long[long["needs_manual_review"]].to_csv(qc_dir / "01_serology_unclassified_values.csv", index=False)
+    window_qc = build_window_match_qc(long, patient, anchor_dates, LAB_FALLBACK_WINDOW_DAYS)
+    window_qc.to_csv(qc_dir / "01_serology_window_match_qc.csv", index=False)
+    window_qc[window_qc["match_type"].isin(["no_lab_anywhere", "no_lab_in_window", "lab_outside_window"])].to_csv(qc_dir / "01_serology_missing_after_window.csv", index=False)
+    window_qc[window_qc["match_type"].eq("lab_outside_window")].to_csv(qc_dir / "01_serology_labs_outside_window.csv", index=False)
+    window_qc[window_qc["match_type"].eq("fallback_window")].to_csv(qc_dir / "01_serology_fallback_recovered_patients.csv", index=False)
+    if cohort_ids is not None:
+        build_window_sensitivity(long, cohort_ids, anchor_dates).to_csv(qc_dir / "01_serology_window_sensitivity.csv", index=False)
     summary["warnings"] = warnings
     (qc_dir / "01_serology_summary_qc.json").write_text(json.dumps(summary, indent=2, default=str))
 
@@ -440,7 +608,9 @@ def main() -> None:
     common.ensure_output_dirs(); (common.OUTPUTS_DIR / "qc" / "blockA").mkdir(parents=True, exist_ok=True)
     df, summary, pid_col, date_col = load_labs()
     long, possible, q2 = prepare_long(df, pid_col, date_col); summary.update(q2)
-    patient = build_patient_level(long)
+    cohort_patient_ids = load_cohort_patient_ids()
+    anchor_dates = load_anchor_dates()
+    patient = build_patient_level(long, cohort_patient_ids, anchor_dates, LAB_FALLBACK_WINDOW_DAYS)
     warnings: list[str] = []
     def pct(col: str, mask: pd.Series) -> float: return float((patient.loc[mask, col] == True).mean()*100) if mask.any() else np.nan
     ro = pct("anti_ro_pos", patient.anti_ro_interpretable.fillna(False)); la = pct("anti_la_pos", patient.anti_la_interpretable.fillna(False)); dbl = pct("double_ro_la_pos", patient.anti_ro_interpretable.fillna(False)&patient.anti_la_interpretable.fillna(False)); cryo = pct("cryo_pos", patient.cryo_interpretable.fillna(False))
@@ -457,7 +627,7 @@ def main() -> None:
     if summary.get("invalid_or_future_dates", 0): warnings.append("invalid or future dates present")
     if summary.get("exact_duplicate_rows", 0): warnings.append("exact duplicate rows between/within sources present")
     if not possible.empty: warnings.append("similar but unmapped Cluster Name values present")
-    add_table_block(patient, warnings); write_qc(long, patient, possible, summary, warnings); make_plots(long)
+    add_table_block(patient, warnings); write_qc(long, patient, possible, summary, warnings, anchor_dates, cohort_patient_ids); make_plots(long)
     print(f"SS-A/Ro IgG positivity was present in {ro:.1f}% of patients with interpretable testing; {dbl:.1f}% were double-positive for SS-A/Ro IgG and SS-B/La IgG. Cryoglobulinemia was documented in {cryo:.1f}% of patients with interpretable cryoglobulin testing.")
     print(f"La positividad para SS-A/Ro IgG estuvo presente en {ro:.1f}% de los pacientes con prueba interpretable; {dbl:.1f}% fueron doble positivos para SS-A/Ro IgG y SS-B/La IgG. La crioglobulinemia fue documentada en {cryo:.1f}% de los pacientes con prueba interpretable.")
 
