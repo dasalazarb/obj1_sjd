@@ -267,21 +267,22 @@ def _result_missing_or_unusable(row: pd.Series) -> bool:
     return _missing(raw_value) or str(row.get("classification", "")).startswith("unclassified")
 
 
-def _fill_nearest_results_within_window(work: pd.DataFrame, window_days: int = 10) -> tuple[pd.DataFrame, dict[str, Any]]:
+def _fill_nearest_results_same_year(work: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
     """
     For rows without a usable result, borrow the closest result for the same
-    patient and serology marker within +/- ``window_days`` calendar days.
+    patient and serology marker in the same calendar year.
 
     This keeps the original row/date in the longitudinal table while recording
     the donor date and value used for parsing. Ties are resolved deterministically
-    by preferring the earlier donor date, then the original input order.
+    by preferring the closest date, then the earlier donor date, then the
+    original input order.
     """
     if work.empty:
-        return work, {"nearest_window_days": window_days, "nearest_result_filled_n": 0}
+        return work, {"nearest_same_year_result_filled_n": 0}
 
     out = work.copy()
     out["_source_row_order"] = np.arange(len(out))
-    out["result_filled_from_nearest_within_10d"] = False
+    out["result_filled_from_nearest_same_year"] = False
     out["result_fill_source_lab_date"] = pd.NaT
     out["result_fill_day_delta"] = np.nan
     out["result_fill_source_value"] = pd.NA
@@ -310,12 +311,12 @@ def _fill_nearest_results_within_window(work: pd.DataFrame, window_days: int = 1
         ].copy()
         if candidates.empty:
             continue
-        candidates["_abs_day_delta"] = (candidates["lab_date"] - row["lab_date"]).dt.days.abs()
-        candidates = candidates[candidates["_abs_day_delta"] <= window_days]
+        candidates = candidates[candidates["lab_date"].dt.year == row["lab_date"].year].copy()
         if candidates.empty:
             continue
+        candidates["_abs_day_delta"] = (candidates["lab_date"] - row["lab_date"]).dt.days.abs()
         donor = candidates.sort_values(["_abs_day_delta", "lab_date", "_source_row_order"]).iloc[0]
-        out.at[idx, "result_filled_from_nearest_within_10d"] = True
+        out.at[idx, "result_filled_from_nearest_same_year"] = True
         out.at[idx, "result_fill_source_lab_date"] = donor["lab_date"]
         out.at[idx, "result_fill_day_delta"] = int((donor["lab_date"] - row["lab_date"]).days)
         out.at[idx, "result_fill_source_value"] = donor.get("Observation Value")
@@ -335,7 +336,7 @@ def _fill_nearest_results_within_window(work: pd.DataFrame, window_days: int = 1
         filled += 1
 
     out = out.drop(columns=["_source_row_order"])
-    qc = {"nearest_window_days": window_days, "nearest_result_filled_n": filled}
+    qc = {"nearest_same_year_result_filled_n": filled}
     return out, qc
 
 def load_labs() -> tuple[pd.DataFrame, dict[str, Any], str, list[str]]:
@@ -372,7 +373,7 @@ def prepare_long(df: pd.DataFrame, pid_col: str, date_cols: list[str]) -> tuple[
     work = pd.concat([work.reset_index(drop=True), pd.DataFrame(parsed)], axis=1)
     work["unit"] = work[unit_col] if unit_col else ""
     work["normal_range"] = work[rr_col] if rr_col else ""
-    work, nearest_qc = _fill_nearest_results_within_window(work, window_days=10)
+    work, nearest_qc = _fill_nearest_results_same_year(work)
     work["needs_manual_review"] = work["classification"].astype(str).str.contains("unclassified|ambiguous", na=False) | work["is_text_free"].fillna(False)
     qc = {"invalid_or_future_dates": int(work["lab_date"].isna().sum() + (work["lab_date"] > TODAY).sum())}
     qc.update(nearest_qc)
