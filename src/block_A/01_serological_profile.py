@@ -372,10 +372,12 @@ def build_patient_level(long: pd.DataFrame, cohort_patient_ids: pd.Series, ancho
         for name, markers in specs.items():
             any_mg = pg[pg["serology_marker"].isin(markers)]
             target_date = pd.NaT
+            has_anchor = False
             if anchor_dates is not None:
                 target = anchor_dates.loc[anchor_dates["patient_id"].astype(str) == pid, "target_date"]
                 target_date = target.iloc[0] if not target.empty else pd.NaT
-                mg = select_lab_near_date(pg, markers, target_date, window_days)
+                has_anchor = pd.notna(target_date)
+                mg = select_lab_near_date(pg, markers, target_date, window_days) if has_anchor else any_mg.copy()
             else:
                 mg = any_mg.copy()
             d = _patient_marker(mg)
@@ -384,13 +386,16 @@ def build_patient_level(long: pd.DataFrame, cohort_patient_ids: pd.Series, ancho
             row[out_col] = d["pos"]; row[f"{name}_first_date"] = d["first_date"]; row[f"{name}_first_positive_date"] = d["first_positive_date"]; row[f"{name}_n_records"] = d["n_records"]
             if anchor_dates is not None:
                 in_window_any = False if pd.isna(target_date) else bool(((any_mg["lab_date"] - pd.to_datetime(target_date)).dt.days.abs() <= window_days).any())
-                out_window = bool(len(any_mg) and not in_window_any)
+                out_window = bool(has_anchor and len(any_mg) and not in_window_any)
                 days = mg["days_from_target"].min() if "days_from_target" in mg and not mg.empty else pd.NA
                 row[f"{name}_target_date"] = target_date; row[f"{name}_selected_lab_date"] = mg["lab_date"].min() if not mg.empty else pd.NaT
-                row[f"{name}_days_from_anchor"] = days; row[f"{name}_within_window"] = bool(not mg.empty and mg.get("within_window", pd.Series([False])).any())
+                row[f"{name}_days_from_anchor"] = days; row[f"{name}_within_window"] = bool(has_anchor and not mg.empty and mg.get("within_window", pd.Series([False])).any())
                 row[f"{name}_fallback_used"] = bool(pd.notna(days) and abs(days) > 0); row[f"{name}_lab_outside_window"] = out_window
                 row[f"{name}_lab_in_window_uninterpretable"] = bool(in_window_any and not d["interpretable"]); row[f"{name}_no_lab_anywhere"] = not bool(len(any_mg))
-                row[f"{name}_match_type"] = ("exact_date" if bool(pd.notna(days) and days == 0 and d["interpretable"]) else ("fallback_window" if bool(pd.notna(days) and d["interpretable"]) else ("lab_in_window_uninterpretable" if bool(pd.notna(days)) else ("lab_outside_window" if out_window else ("no_lab_in_window" if len(any_mg) else "no_lab_anywhere")))))
+                if not has_anchor:
+                    row[f"{name}_match_type"] = "no_anchor" if len(any_mg) else "no_anchor_no_lab"
+                else:
+                    row[f"{name}_match_type"] = ("exact_date" if bool(pd.notna(days) and days == 0 and d["interpretable"]) else ("fallback_window" if bool(pd.notna(days) and d["interpretable"]) else ("lab_in_window_uninterpretable" if bool(pd.notna(days)) else ("lab_outside_window" if out_window else ("no_lab_in_window" if len(any_mg) else "no_lab_anywhere")))))
         ro_pos_labs = pg[(pg["serology_marker"] == "ro_ssa_igg") & (pg["classification"] == "positive")]["Cluster Name"].dropna().unique()
         row["anti_ro_positive_source_lab"] = "; ".join(map(str, ro_pos_labs))
         row["double_ro_la_pos"] = bool(row["anti_ro_pos"] is True and row["anti_la_pos"] is True) if row["anti_ro_interpretable"] and row["anti_la_interpretable"] else pd.NA
