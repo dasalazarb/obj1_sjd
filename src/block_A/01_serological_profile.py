@@ -107,6 +107,22 @@ def _first_existing(df: pd.DataFrame, names: list[str]) -> str | None:
     return next((c for c in names if c in df.columns), None)
 
 
+def _existing_date_candidates(df: pd.DataFrame) -> list[str]:
+    """Return all available date-like candidate columns, preserving priority order."""
+    cols = [col for col in DATE_CANDIDATES if col in df.columns]
+    if cols:
+        return cols
+    return [col for col in df.columns if "date" in col.lower() or "datetime" in col.lower()]
+
+
+def _coalesced_datetime(df: pd.DataFrame, date_cols: list[str]) -> pd.Series:
+    """Parse every candidate date column and keep the first valid date per row."""
+    if not date_cols:
+        raise ValueError(f"Missing required date column. Tried: {', '.join(DATE_CANDIDATES)}")
+    parsed = [pd.to_datetime(df[col], errors="coerce") for col in date_cols]
+    return pd.concat(parsed, axis=1).bfill(axis=1).iloc[:, 0]
+
+
 def _ref_low_high(reference_range: Any, low: Any = None, high: Any = None) -> tuple[float | None, float | None]:
     lo = pd.to_numeric(pd.Series([low]), errors="coerce").iloc[0] if not _missing(low) else np.nan
     hi = pd.to_numeric(pd.Series([high]), errors="coerce").iloc[0] if not _missing(high) else np.nan
@@ -322,7 +338,7 @@ def _fill_nearest_results_within_window(work: pd.DataFrame, window_days: int = 1
     qc = {"nearest_window_days": window_days, "nearest_result_filled_n": filled}
     return out, qc
 
-def load_labs() -> tuple[pd.DataFrame, dict[str, Any], str, str]:
+def load_labs() -> tuple[pd.DataFrame, dict[str, Any], str, list[str]]:
     frames = []
     for source, path in INPUT_FILES.items():
         df = pd.read_parquet(path)
@@ -330,23 +346,25 @@ def load_labs() -> tuple[pd.DataFrame, dict[str, Any], str, str]:
             if required not in df.columns:
                 raise ValueError(f"{path} is missing required column: {required}")
         pid_col = _detect_col(df, PATIENT_ID_CANDIDATES, "patient identifier")
-        date_col = _detect_col(df, DATE_CANDIDATES, "date")
+        date_cols = _existing_date_candidates(df)
+        if not date_cols:
+            raise ValueError(f"{path} is missing required date column. Tried: {', '.join(DATE_CANDIDATES)}")
         df = df.copy(); df["source_folder"] = source
         frames.append(df)
     combined = pd.concat(frames, ignore_index=True)
     pid_col = _detect_col(combined, PATIENT_ID_CANDIDATES, "patient identifier")
-    date_col = _detect_col(combined, DATE_CANDIDATES, "date")
-    qc = {"input_rows": int(len(combined)), "exact_duplicate_rows": int(combined.duplicated().sum())}
-    return combined, qc, pid_col, date_col
+    date_cols = _existing_date_candidates(combined)
+    qc = {"input_rows": int(len(combined)), "exact_duplicate_rows": int(combined.duplicated().sum()), "date_candidate_columns_evaluated": date_cols}
+    return combined, qc, pid_col, date_cols
 
 
-def prepare_long(df: pd.DataFrame, pid_col: str, date_col: str) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+def prepare_long(df: pd.DataFrame, pid_col: str, date_cols: list[str]) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
     terms = re.compile(r"ro|ssa|ss-a|la|ssb|ana|rheumatoid|cryoglobulin|c4|wbc", re.I)
     possible = df.loc[df["Cluster Name"].astype(str).str.contains(terms, na=False) & ~df["Cluster Name"].isin(LAB_MARKER_MAP), ["Cluster Name"]].drop_duplicates().sort_values("Cluster Name")
     possible["n_records"] = possible["Cluster Name"].map(df["Cluster Name"].value_counts())
     work = df[df["Cluster Name"].isin(LAB_MARKER_MAP)].drop_duplicates().copy()
     work["patient_id"] = work[pid_col].astype("string")
-    work["lab_date"] = pd.to_datetime(work[date_col], errors="coerce")
+    work["lab_date"] = _coalesced_datetime(work, date_cols)
     work["serology_marker"] = work["Cluster Name"].map(LAB_MARKER_MAP)
     unit_col = _first_existing(work, ["Unit of Measure", "Unit", "Units"]); flag_col = _first_existing(work, ["Abnormal Flag", "Flag"])
     rr_col = _first_existing(work, ["Normal Range", "Reference Range"]); rlo_col = _first_existing(work, ["Reference Low"]); rhi_col = _first_existing(work, ["Reference High"])
