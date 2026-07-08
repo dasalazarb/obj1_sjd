@@ -385,7 +385,70 @@ def make_pop_swimmer_plot(longitudinal: pd.DataFrame, baseline: pd.DataFrame, ou
     return outside
 
 
-def write_outputs(table1: pd.DataFrame, longitudinal: pd.DataFrame, baseline: pd.DataFrame, qc: dict, claim: str) -> None:
+
+def describe_baseline_unclassifiable(baseline: pd.DataFrame) -> pd.DataFrame:
+    """Summarize ESSDAI/ESSPRI availability for patients unclassifiable at baseline."""
+    unclassifiable = baseline[baseline["pop_status"] == "Unclassifiable"].copy()
+    if unclassifiable.empty:
+        return pd.DataFrame(
+            columns=[
+                "patient_id",
+                "baseline_date",
+                "essdai_total",
+                "esspri_total",
+                "essdai_baseline_status",
+                "esspri_baseline_status",
+                "unclassifiable_reason",
+            ]
+        )
+
+    unclassifiable["essdai_baseline_status"] = np.where(
+        unclassifiable["essdai_total"].notna(),
+        "available",
+        "missing",
+    )
+    unclassifiable["esspri_baseline_status"] = np.where(
+        unclassifiable["esspri_total"].notna(),
+        "available",
+        "missing",
+    )
+
+    conditions = [
+        unclassifiable["essdai_total"].isna() & unclassifiable["esspri_total"].isna(),
+        unclassifiable["essdai_total"].isna() & unclassifiable["esspri_total"].notna(),
+        unclassifiable["essdai_total"].notna() & unclassifiable["esspri_total"].isna(),
+    ]
+    reasons = [
+        "missing ESSDAI and ESSPRI at baseline",
+        "missing ESSDAI at baseline",
+        "missing ESSPRI at baseline with ESSDAI <5",
+    ]
+    unclassifiable["unclassifiable_reason"] = np.select(
+        conditions,
+        reasons,
+        default="not classifiable by ESSDAI/ESSPRI rule",
+    )
+    return unclassifiable[
+        [
+            "patient_id",
+            "baseline_date",
+            "essdai_total",
+            "esspri_total",
+            "essdai_baseline_status",
+            "esspri_baseline_status",
+            "unclassifiable_reason",
+        ]
+    ]
+
+
+def write_outputs(
+    table1: pd.DataFrame,
+    longitudinal: pd.DataFrame,
+    baseline: pd.DataFrame,
+    baseline_unclassifiable: pd.DataFrame,
+    qc: dict,
+    claim: str,
+) -> None:
     BLOCKA_TABLES_DIR.mkdir(parents=True, exist_ok=True)
     BLOCKA_FIGURES_DIR.mkdir(parents=True, exist_ok=True)
     BLOCKA_QC_DIR.mkdir(parents=True, exist_ok=True)
@@ -393,6 +456,14 @@ def write_outputs(table1: pd.DataFrame, longitudinal: pd.DataFrame, baseline: pd
     longitudinal[["patient_id", "baseline_date", "event_date", "time_years", "essdai_total", "esspri_total", "pop_status", "row_date_original", "row_date_min", "row_date_max"]].to_csv(BLOCKA_TABLES_DIR / "01_pop_longitudinal_status.csv", index=False)
     counts = longitudinal.groupby(["pop_status"]).size().reindex(POP_ORDER, fill_value=0).rename("n_visits").reset_index()
     baseline_counts = baseline["pop_status"].value_counts().reindex(POP_ORDER, fill_value=0).rename_axis("pop_status").reset_index(name="n_baseline_patients")
+    baseline_unclassifiable.to_csv(BLOCKA_TABLES_DIR / "01_pop_unclassifiable_baseline_essdai_esspri_status.csv", index=False)
+    (
+        baseline_unclassifiable["unclassifiable_reason"]
+        .value_counts()
+        .rename_axis("unclassifiable_reason")
+        .reset_index(name="n_baseline_patients")
+        .to_csv(BLOCKA_TABLES_DIR / "01_pop_unclassifiable_baseline_reason_counts.csv", index=False)
+    )
     counts.merge(baseline_counts, on="pop_status", how="outer").to_csv(BLOCKA_TABLES_DIR / "01_pop_distribution_counts.csv", index=False)
     (BLOCKA_TABLES_DIR / "01_pop_distribution_claim.txt").write_text(claim + "\n", encoding="utf-8")
     with (BLOCKA_QC_DIR / "01_pop_distribution_qc.json").open("w", encoding="utf-8") as f:
@@ -407,6 +478,7 @@ def main() -> None:
     longitudinal, row_qc, warnings = build_longitudinal_pop_dataset(df)
     baseline = build_baseline_dataset(longitudinal)
     table1, selected_demo = summarize_table1_by_pop(baseline, codebook, warnings)
+    baseline_unclassifiable = describe_baseline_unclassifiable(baseline)
     outside = make_pop_swimmer_plot(longitudinal, baseline, BLOCKA_FIGURES_DIR / "02_pop_distribution_plot.pdf", warnings)
     n_total_patients = int(baseline["patient_id"].nunique())
     baseline_counts = baseline["pop_status"].value_counts().reindex(POP_ORDER, fill_value=0)
@@ -430,6 +502,9 @@ def main() -> None:
         "n_pop2_baseline": int(baseline_counts["Pop2"]),
         "n_pop3_baseline": int(baseline_counts["Pop3"]),
         "n_unclassifiable_baseline": int(baseline_counts["Unclassifiable"]),
+        "unclassifiable_baseline_reason_counts": baseline_unclassifiable["unclassifiable_reason"]
+        .value_counts()
+        .to_dict(),
         "pct_pop1": pct["Pop1"],
         "pct_pop2": pct["Pop2"],
         "pct_pop3": pct["Pop3"],
@@ -442,7 +517,7 @@ def main() -> None:
         "warnings": warnings,
         "manuscript_claim": claim,
     }
-    write_outputs(table1, longitudinal, baseline, qc, claim)
+    write_outputs(table1, longitudinal, baseline, baseline_unclassifiable, qc, claim)
     print(claim)
 
 
