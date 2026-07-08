@@ -116,9 +116,9 @@ def _existing_date_candidates(df: pd.DataFrame) -> list[str]:
 
 
 def _coalesced_datetime(df: pd.DataFrame, date_cols: list[str]) -> pd.Series:
-    """Parse every candidate date column and keep the first valid date per row."""
+    """Parse available date columns, without requiring dates for lab inclusion."""
     if not date_cols:
-        raise ValueError(f"Missing required date column. Tried: {', '.join(DATE_CANDIDATES)}")
+        return pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
     parsed = [pd.to_datetime(df[col], errors="coerce") for col in date_cols]
     return pd.concat(parsed, axis=1).bfill(axis=1).iloc[:, 0]
 
@@ -269,13 +269,12 @@ def _result_missing_or_unusable(row: pd.Series) -> bool:
 
 def _fill_nearest_results_same_year(work: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
     """
-    For rows without a usable result, borrow the closest result for the same
-    patient and serology marker in the same calendar year.
+    For rows without a usable result, borrow another result for the same
+    patient and serology marker without excluding rows by calendar year/date.
 
-    This keeps the original row/date in the longitudinal table while recording
-    the donor date and value used for parsing. Ties are resolved deterministically
-    by preferring the closest date, then the earlier donor date, then the
-    original input order.
+    This keeps the original row/date in the longitudinal table when present.
+    Rows with dates prefer the closest dated donor; rows without dates still
+    remain eligible and use input order as a deterministic tie-breaker.
     """
     if work.empty:
         return work, {"nearest_same_year_result_filled_n": 0}
@@ -300,25 +299,24 @@ def _fill_nearest_results_same_year(work: pd.DataFrame) -> tuple[pd.DataFrame, d
     filled = 0
 
     for idx, row in out[unusable].iterrows():
-        if pd.isna(row.get("lab_date")) or _missing(row.get("patient_id")) or _missing(row.get("serology_marker")):
+        if _missing(row.get("patient_id")) or _missing(row.get("serology_marker")):
             continue
         candidates = out[
             (out["patient_id"].astype(str) == str(row["patient_id"]))
             & (out["serology_marker"] == row["serology_marker"])
-            & (out["lab_date"].notna())
             & (out.index != idx)
             & (~unusable)
         ].copy()
         if candidates.empty:
             continue
-        candidates = candidates[candidates["lab_date"].dt.year == row["lab_date"].year].copy()
-        if candidates.empty:
-            continue
-        candidates["_abs_day_delta"] = (candidates["lab_date"] - row["lab_date"]).dt.days.abs()
-        donor = candidates.sort_values(["_abs_day_delta", "lab_date", "_source_row_order"]).iloc[0]
+        if pd.notna(row.get("lab_date")) and candidates["lab_date"].notna().any():
+            candidates["_abs_day_delta"] = (candidates["lab_date"] - row["lab_date"]).dt.days.abs()
+        else:
+            candidates["_abs_day_delta"] = np.nan
+        donor = candidates.sort_values(["_abs_day_delta", "lab_date", "_source_row_order"], na_position="last").iloc[0]
         out.at[idx, "result_filled_from_nearest_same_year"] = True
         out.at[idx, "result_fill_source_lab_date"] = donor["lab_date"]
-        out.at[idx, "result_fill_day_delta"] = int((donor["lab_date"] - row["lab_date"]).days)
+        out.at[idx, "result_fill_day_delta"] = int((donor["lab_date"] - row["lab_date"]).days) if pd.notna(donor["lab_date"]) and pd.notna(row.get("lab_date")) else np.nan
         out.at[idx, "result_fill_source_value"] = donor.get("Observation Value")
         for col in optional_transfer_cols:
             out.at[idx, col] = donor.get(col)
@@ -347,9 +345,6 @@ def load_labs() -> tuple[pd.DataFrame, dict[str, Any], str, list[str]]:
             if required not in df.columns:
                 raise ValueError(f"{path} is missing required column: {required}")
         pid_col = _detect_col(df, PATIENT_ID_CANDIDATES, "patient identifier")
-        date_cols = _existing_date_candidates(df)
-        if not date_cols:
-            raise ValueError(f"{path} is missing required date column. Tried: {', '.join(DATE_CANDIDATES)}")
         df = df.copy(); df["source_folder"] = source
         frames.append(df)
     combined = pd.concat(frames, ignore_index=True)
@@ -375,7 +370,7 @@ def prepare_long(df: pd.DataFrame, pid_col: str, date_cols: list[str]) -> tuple[
     work["normal_range"] = work[rr_col] if rr_col else ""
     work, nearest_qc = _fill_nearest_results_same_year(work)
     work["needs_manual_review"] = work["classification"].astype(str).str.contains("unclassified|ambiguous", na=False) | work["is_text_free"].fillna(False)
-    qc = {"invalid_or_future_dates": int(work["lab_date"].isna().sum() + (work["lab_date"] > TODAY).sum())}
+    qc = {"missing_or_future_dates_not_filtered": int(work["lab_date"].isna().sum() + (work["lab_date"] > TODAY).sum())}
     qc.update(nearest_qc)
     return work, possible, qc
 
@@ -552,7 +547,7 @@ def main() -> None:
     if long["is_text_free"].any(): warnings.append("see note/comment/free-text values present")
     for m in ["c4","rf","wbc"]:
         if long.loc[long.serology_marker == m, "unit"].dropna().astype(str).nunique() > 1: warnings.append(f"multiple units for {m}")
-    if summary.get("invalid_or_future_dates", 0): warnings.append("invalid or future dates present")
+    if summary.get("missing_or_future_dates_not_filtered", 0): warnings.append("missing or future dates present (not filtered)")
     if summary.get("exact_duplicate_rows", 0): warnings.append("exact duplicate rows between/within sources present")
     if not possible.empty: warnings.append("similar but unmapped Cluster Name values present")
     add_table_block(patient, warnings); write_qc(long, patient, possible, summary, warnings); make_plots(long)
