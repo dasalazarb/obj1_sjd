@@ -14,7 +14,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -62,6 +62,8 @@ FIGURES_DIR = _common_path("FIGURES_DIR", OUTPUTS_DIR / "figures")
 BLOCKA_TABLES_DIR = _common_path("BLOCKA_TABLES_DIR", TABLES_DIR / "blockA")
 BLOCKA_FIGURES_DIR = _common_path("BLOCKA_FIGURES_DIR", FIGURES_DIR / "blockA")
 BLOCKA_QC_DIR = OUTPUTS_DIR / "qc" / "blockA"
+INTERMEDIATE_DIR = _common_path("INTERMEDIATE_DATA_DIR", PROJECT_ROOT / "data" / "intermediate")
+DISPLAY = {"Unclassifiable": "Unclassified", "Pop1": "Pop1", "Pop2": "Pop2", "Pop3": "Pop3", "Overall": "Overall"}
 DEFAULT_CODEBOOK = Path(getattr(common, "DEFAULT_CODEBOOK", PROJECT_ROOT / "metadata" / "Consolidated_Codebook_all_columns.xlsx"))
 
 
@@ -147,11 +149,19 @@ def coalesce_essdai(df: pd.DataFrame) -> pd.Series:
     return result
 
 
-def compute_esspri(df: pd.DataFrame) -> pd.Series:
-    comps = [numeric_from_first_number(df[col]) for col in ESSPRI_COMPONENTS]
-    comp_df = pd.concat(comps, axis=1)
+
+def first_nonmissing(s: pd.Series) -> Any:
+    values = s.dropna()
+    return values.iloc[0] if len(values) else np.nan
+
+
+def compute_esspri_from_components(dry: pd.Series, fatigue: pd.Series, pain: pd.Series) -> pd.Series:
+    comp_df = pd.concat([dry, fatigue, pain], axis=1)
     comp_df.columns = ["dryness", "fatigue", "pain"]
     return comp_df.mean(axis=1).where(comp_df.notna().all(axis=1), np.nan)
+
+def compute_esspri(df: pd.DataFrame) -> pd.Series:
+    return compute_esspri_from_components(*(numeric_from_first_number(df[col]) for col in ESSPRI_COMPONENTS))
 
 
 def classify_pop(essdai_total: object, esspri_total: object) -> str:
@@ -166,43 +176,123 @@ def classify_pop(essdai_total: object, esspri_total: object) -> str:
     return "Unclassifiable"
 
 
+def normalize_visit_level_dtypes(vis: pd.DataFrame) -> pd.DataFrame:
+    """Use concrete dtypes before writing visit-level parquet artifacts."""
+    out = vis.copy()
+    numeric_cols = [
+        "time_since_baseline_days",
+        "time_since_baseline_years",
+        "time_years",
+        "visit_number",
+        "essdai_total",
+        "esspri_dryness",
+        "esspri_fatigue",
+        "esspri_pain",
+        "esspri_total",
+    ]
+    datetime_cols = ["row_date_min", "row_date_max", "visit_date_clean", "baseline_date", "event_date"]
+    string_cols = [
+        "patient_id",
+        "row_date_original",
+        "pop_status",
+        "pop_status_display",
+        "baseline_pop_status",
+        "baseline_pop_status_display",
+    ]
+    for col in numeric_cols:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+    for col in datetime_cols:
+        if col in out.columns:
+            out[col] = pd.to_datetime(out[col], errors="coerce")
+    for col in string_cols:
+        if col in out.columns:
+            out[col] = out[col].astype("string")
+    return out
+
+
 def build_longitudinal_pop_dataset(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int], list[str]]:
     work = df.copy()
-    work["patient_id"] = work[PATIENT_ID_COL].astype("string")
+    qc_counts: dict[str, int] = {"n_input_rows": int(len(work))}
+    warnings: list[str] = []
+
+    work["patient_id"] = work[PATIENT_ID_COL].astype("string").str.strip()
+    valid_patient_id = ~work["patient_id"].map(is_missing)
+    qc_counts["n_rows_with_valid_patient_id"] = int(valid_patient_id.sum())
+    qc_counts["n_rows_excluded_missing_patient_id"] = int((~valid_patient_id).sum())
+
     work["row_date_original"] = work[VISIT_DATE_COL]
     parsed_lists = work[VISIT_DATE_COL].map(parse_visit_dates)
     work["row_date_min"] = parsed_lists.map(lambda x: min(x) if x else pd.NaT)
     work["row_date_max"] = parsed_lists.map(lambda x: max(x) if x else pd.NaT)
-    all_dates = pd.DataFrame({"patient_id": work["patient_id"], "dates": parsed_lists}).explode("dates").dropna()
-    baseline_dates = all_dates.groupby("patient_id")["dates"].min().rename("baseline_date")
-    work = work.merge(baseline_dates, on="patient_id", how="left")
-    work["event_date"] = work["row_date_max"]
+    work["visit_date_clean"] = work["row_date_min"]
+    valid_visit_date = work["visit_date_clean"].notna()
+    qc_counts["n_rows_with_valid_visit_date"] = int(valid_visit_date.sum())
+    qc_counts["n_rows_excluded_missing_visit_date"] = int((~valid_visit_date).sum())
+
     work["essdai_total"] = coalesce_essdai(work)
-    work["esspri_total"] = compute_esspri(work)
-    work["pop_status"] = [classify_pop(e, p) for e, p in zip(work["essdai_total"], work["esspri_total"])]
-    work["time_years"] = (work["event_date"] - work["baseline_date"]).dt.days / 365.25
-    negative = int((work["time_years"] < 0).sum())
-    warnings: list[str] = []
-    if negative:
-        warnings.append(f"Excluded {negative} rows with negative time_years.")
+    work["esspri_dryness"] = numeric_from_first_number(work[ESSPRI_COMPONENTS[0]])
+    work["esspri_fatigue"] = numeric_from_first_number(work[ESSPRI_COMPONENTS[1]])
+    work["esspri_pain"] = numeric_from_first_number(work[ESSPRI_COMPONENTS[2]])
+
     out_of_range_essdai = int(((work["essdai_total"] < 0) | (work["essdai_total"] > 123)).sum())
-    out_of_range_esspri = int(((work["esspri_total"] < 0) | (work["esspri_total"] > 10)).sum())
+    out_of_range_esspri_components = int(
+        ((work[["esspri_dryness", "esspri_fatigue", "esspri_pain"]] < 0) | (work[["esspri_dryness", "esspri_fatigue", "esspri_pain"]] > 10)).sum().sum()
+    )
+    qc_counts["n_invalid_essdai_values"] = out_of_range_essdai
+    qc_counts["n_invalid_esspri_component_values"] = out_of_range_esspri_components
     if out_of_range_essdai:
         raise ValueError(f"ESSDAI values outside plausible range 0-123: {out_of_range_essdai}")
+    if out_of_range_esspri_components:
+        raise ValueError(f"ESSPRI component values outside plausible range 0-10: {out_of_range_esspri_components}")
+
+    work = work[valid_patient_id & valid_visit_date].copy()
+    qc_counts["n_unique_patients"] = int(work["patient_id"].nunique())
+    qc_counts["n_patient_visit_rows_before_collapse"] = int(len(work))
+    qc_counts["n_duplicate_patient_event_dates"] = int(work.duplicated(["patient_id", "visit_date_clean"]).sum())
+    qc_counts["n_duplicate_patient_visit_rows_before_collapse"] = qc_counts["n_duplicate_patient_event_dates"]
+
+    work = (
+        work.groupby(["patient_id", "visit_date_clean"], as_index=False)
+        .agg(
+            row_date_original=("row_date_original", lambda s: " | ".join(pd.Series(s).dropna().astype(str).unique())),
+            row_date_min=("row_date_min", "min"),
+            row_date_max=("row_date_max", "max"),
+            essdai_total=("essdai_total", first_nonmissing),
+            esspri_dryness=("esspri_dryness", first_nonmissing),
+            esspri_fatigue=("esspri_fatigue", first_nonmissing),
+            esspri_pain=("esspri_pain", first_nonmissing),
+        )
+        .sort_values(["patient_id", "visit_date_clean"])
+        .reset_index(drop=True)
+    )
+    work["esspri_total"] = compute_esspri_from_components(work["esspri_dryness"], work["esspri_fatigue"], work["esspri_pain"])
+    out_of_range_esspri = int(((work["esspri_total"] < 0) | (work["esspri_total"] > 10)).sum())
     if out_of_range_esspri:
         raise ValueError(f"ESSPRI values outside range 0-10: {out_of_range_esspri}")
-    work = work[~(work["time_years"] < 0)].copy()
-    duplicate_dates = int(work.duplicated(["patient_id", "event_date"]).sum())
-    qc_counts = {
-        "n_rows_missing_visit_date": int(work["event_date"].isna().sum()),
-        "n_rows_missing_essdai": int(work["essdai_total"].isna().sum()),
-        "n_rows_missing_esspri": int(work["esspri_total"].isna().sum()),
-        "n_rows_negative_time": negative,
-        "n_duplicate_patient_event_dates": duplicate_dates,
-    }
-    cols = ["patient_id", "baseline_date", "event_date", "time_years", "essdai_total", "esspri_total", "pop_status", "row_date_original", "row_date_min", "row_date_max"]
-    return work, qc_counts, warnings
 
+    work["pop_status"] = [classify_pop(e, p) for e, p in zip(work["essdai_total"], work["esspri_total"])]
+    work["pop_status_display"] = work["pop_status"].map(DISPLAY)
+    work["baseline_date"] = work.groupby("patient_id")["visit_date_clean"].transform("min")
+    work["event_date"] = work["visit_date_clean"]
+    work["time_since_baseline_days"] = (work["event_date"] - work["baseline_date"]).dt.days
+    work["time_since_baseline_years"] = work["time_since_baseline_days"] / 365.25
+    work["time_years"] = work["time_since_baseline_years"]
+    work["visit_number"] = work.groupby("patient_id").cumcount()
+    baseline_status = work.loc[work["visit_number"].eq(0), ["patient_id", "pop_status", "pop_status_display"]].rename(
+        columns={"pop_status": "baseline_pop_status", "pop_status_display": "baseline_pop_status_display"}
+    )
+    work = work.merge(baseline_status, on="patient_id", how="left")
+    qc_counts["n_patient_visit_rows_after_collapse"] = int(len(work))
+    qc_counts["n_rows_missing_visit_date"] = int(work["event_date"].isna().sum())
+    qc_counts["n_rows_missing_essdai"] = int(work["essdai_total"].isna().sum())
+    qc_counts["n_rows_missing_esspri"] = int(work["esspri_total"].isna().sum())
+    qc_counts["n_rows_negative_time"] = int((work["time_years"] < 0).sum())
+    if qc_counts["n_rows_negative_time"]:
+        warnings.append(f"Excluded {qc_counts['n_rows_negative_time']} rows with negative time_years.")
+        work = work[~(work["time_years"] < 0)].copy()
+
+    return normalize_visit_level_dtypes(work), qc_counts, warnings
 
 def build_baseline_dataset(longitudinal: pd.DataFrame) -> pd.DataFrame:
     rows = []
@@ -441,19 +531,116 @@ def describe_baseline_unclassifiable(baseline: pd.DataFrame) -> pd.DataFrame:
     ]
 
 
+
+def label_visit(visit_number: int) -> str:
+    return "Baseline" if int(visit_number) == 0 else f"Visit {int(visit_number)}"
+
+
+def q(values: pd.Series, percentile: float) -> float:
+    vals = pd.to_numeric(values, errors="coerce").dropna()
+    return float(vals.quantile(percentile)) if len(vals) else np.nan
+
+
+def unclassifiable_reason(row: pd.Series, suffix: str = "") -> str:
+    essdai_missing = pd.isna(row["essdai_total"])
+    esspri_missing = pd.isna(row["esspri_total"])
+    if essdai_missing and esspri_missing:
+        return f"missing ESSDAI and ESSPRI{suffix}"
+    if essdai_missing:
+        return f"missing ESSDAI{suffix}"
+    if not essdai_missing and float(row["essdai_total"]) < 5 and esspri_missing:
+        return f"missing ESSPRI{suffix} with ESSDAI <5" if suffix else "missing ESSPRI with ESSDAI <5"
+    return "not classifiable by ESSDAI/ESSPRI rule"
+
+
+def distribution_by_visit(longitudinal: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for visit_number, group in longitudinal.groupby("visit_number", sort=True):
+        denom = len(group)
+        for pop in POP_ORDER:
+            pop_group = group[group["pop_status"].eq(pop)]
+            rows.append(
+                {
+                    "visit_number": int(visit_number),
+                    "time_point_label": label_visit(visit_number),
+                    "median_time_since_baseline_yrs": group["time_since_baseline_years"].median(),
+                    "q1_time_since_baseline_yrs": q(group["time_since_baseline_years"], 0.25),
+                    "q3_time_since_baseline_yrs": q(group["time_since_baseline_years"], 0.75),
+                    "pop_status": pop,
+                    "pop_status_display": DISPLAY[pop],
+                    "n_patients": len(pop_group),
+                    "n_patients_evaluable_at_visit": denom,
+                    "pct_patients_at_visit": (100 * len(pop_group) / denom if denom else np.nan),
+                    "n_essdai_available": int(pop_group["essdai_total"].notna().sum()),
+                    "n_esspri_available": int(pop_group["esspri_total"].notna().sum()),
+                    "n_essdai_esspri_available": int((pop_group["essdai_total"].notna() & pop_group["esspri_total"].notna()).sum()),
+                    "n_unclassifiable": int((group["pop_status"] == "Unclassifiable").sum()),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def describe_visit_unclassifiable(longitudinal: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    unclassifiable = longitudinal[longitudinal["pop_status"] == "Unclassifiable"].copy()
+    unclassifiable["unclassifiable_reason"] = unclassifiable.apply(unclassifiable_reason, axis=1) if not unclassifiable.empty else pd.Series(dtype="string")
+    if unclassifiable.empty:
+        reason_counts = pd.DataFrame(columns=["visit_number", "time_point_label", "unclassifiable_reason", "n_visits", "pct_unclassifiable_visits"])
+    else:
+        total_by_visit = unclassifiable.groupby("visit_number").size()
+        reason_counts = (
+            unclassifiable.groupby(["visit_number", "unclassifiable_reason"])
+            .size()
+            .rename("n_visits")
+            .reset_index()
+        )
+        reason_counts["time_point_label"] = reason_counts["visit_number"].map(label_visit)
+        reason_counts["pct_unclassifiable_visits"] = reason_counts.apply(
+            lambda row: 100 * row["n_visits"] / total_by_visit.loc[row["visit_number"]], axis=1
+        )
+        reason_counts = reason_counts[["visit_number", "time_point_label", "unclassifiable_reason", "n_visits", "pct_unclassifiable_visits"]]
+    return reason_counts, unclassifiable
+
+
+def build_by_visit_qc(longitudinal: pd.DataFrame, outside: int, warnings: list[str]) -> dict:
+    denom = longitudinal.groupby("visit_number")["patient_id"].count()
+    return {
+        "n_visits_max": int(longitudinal["visit_number"].max()) if not longitudinal.empty else 0,
+        "denominators_by_visit_number": {str(k): int(v) for k, v in denom.items()},
+        "pop_counts_by_visit_number": {str(k): v.value_counts().reindex(POP_ORDER, fill_value=0).to_dict() for k, v in longitudinal.groupby("visit_number")["pop_status"]},
+        "unclassifiable_counts_by_visit_number": {str(k): int((g["pop_status"] == "Unclassifiable").sum()) for k, g in longitudinal.groupby("visit_number")},
+        "essdai_missing_by_visit_number": {str(k): int(g["essdai_total"].isna().sum()) for k, g in longitudinal.groupby("visit_number")},
+        "esspri_missing_by_visit_number": {str(k): int(g["esspri_total"].isna().sum()) for k, g in longitudinal.groupby("visit_number")},
+        "late_followup_sparse_flags": {str(k): bool(v < 10) for k, v in denom.items()},
+        "n_plot_points_outside_xlim": outside,
+        "warnings": warnings,
+    }
+
+
+def write_parquet_with_csv(df: pd.DataFrame, parquet_path: Path) -> None:
+    parquet_path.parent.mkdir(parents=True, exist_ok=True)
+    normalize_visit_level_dtypes(df).to_parquet(parquet_path, index=False)
+    df.to_csv(parquet_path.with_suffix(".csv"), index=False)
+
 def write_outputs(
     table1: pd.DataFrame,
     longitudinal: pd.DataFrame,
     baseline: pd.DataFrame,
     baseline_unclassifiable: pd.DataFrame,
+    distribution_visit: pd.DataFrame,
+    visit_unclassifiable_counts: pd.DataFrame,
+    visit_unclassifiable_rows: pd.DataFrame,
+    by_visit_qc: dict,
     qc: dict,
     claim: str,
 ) -> None:
     BLOCKA_TABLES_DIR.mkdir(parents=True, exist_ok=True)
     BLOCKA_FIGURES_DIR.mkdir(parents=True, exist_ok=True)
     BLOCKA_QC_DIR.mkdir(parents=True, exist_ok=True)
+    INTERMEDIATE_DIR.mkdir(parents=True, exist_ok=True)
+    write_parquet_with_csv(longitudinal, INTERMEDIATE_DIR / "01_visit_level_classification.parquet")
+    write_parquet_with_csv(baseline, INTERMEDIATE_DIR / "01_baseline_classification.parquet")
     table1.to_csv(BLOCKA_TABLES_DIR / "01_table1_by_pop.csv", index=False)
-    longitudinal[["patient_id", "baseline_date", "event_date", "time_years", "essdai_total", "esspri_total", "pop_status", "row_date_original", "row_date_min", "row_date_max"]].to_csv(BLOCKA_TABLES_DIR / "01_pop_longitudinal_status.csv", index=False)
+    longitudinal[["patient_id", "baseline_date", "event_date", "visit_date_clean", "visit_number", "baseline_pop_status", "baseline_pop_status_display", "time_since_baseline_days", "time_since_baseline_years", "time_years", "essdai_total", "esspri_total", "pop_status", "pop_status_display", "row_date_original", "row_date_min", "row_date_max"]].to_csv(BLOCKA_TABLES_DIR / "01_pop_longitudinal_status.csv", index=False)
     counts = longitudinal.groupby(["pop_status"]).size().reindex(POP_ORDER, fill_value=0).rename("n_visits").reset_index()
     baseline_counts = baseline["pop_status"].value_counts().reindex(POP_ORDER, fill_value=0).rename_axis("pop_status").reset_index(name="n_baseline_patients")
     baseline_unclassifiable.to_csv(BLOCKA_TABLES_DIR / "01_pop_unclassifiable_baseline_essdai_esspri_status.csv", index=False)
@@ -465,9 +652,14 @@ def write_outputs(
         .to_csv(BLOCKA_TABLES_DIR / "01_pop_unclassifiable_baseline_reason_counts.csv", index=False)
     )
     counts.merge(baseline_counts, on="pop_status", how="outer").to_csv(BLOCKA_TABLES_DIR / "01_pop_distribution_counts.csv", index=False)
+    distribution_visit.to_csv(BLOCKA_TABLES_DIR / "01_pop_distribution_by_visit.csv", index=False)
+    visit_unclassifiable_counts.to_csv(BLOCKA_TABLES_DIR / "01_pop_unclassifiable_reason_counts_by_visit.csv", index=False)
+    write_parquet_with_csv(visit_unclassifiable_rows, INTERMEDIATE_DIR / "01_unclassifiable_reasons_visit_level.parquet")
     (BLOCKA_TABLES_DIR / "01_pop_distribution_claim.txt").write_text(claim + "\n", encoding="utf-8")
     with (BLOCKA_QC_DIR / "01_pop_distribution_qc.json").open("w", encoding="utf-8") as f:
         json.dump(qc, f, indent=2, default=str)
+    with (BLOCKA_QC_DIR / "01_pop_distribution_by_visit_qc.json").open("w", encoding="utf-8") as f:
+        json.dump(by_visit_qc, f, indent=2, default=str)
 
 
 def main() -> None:
@@ -480,6 +672,8 @@ def main() -> None:
     table1, selected_demo = summarize_table1_by_pop(baseline, codebook, warnings)
     baseline_unclassifiable = describe_baseline_unclassifiable(baseline)
     outside = make_pop_swimmer_plot(longitudinal, baseline, BLOCKA_FIGURES_DIR / "02_pop_distribution_plot.pdf", warnings)
+    distribution_visit = distribution_by_visit(longitudinal)
+    visit_unclassifiable_counts, visit_unclassifiable_rows = describe_visit_unclassifiable(longitudinal)
     n_total_patients = int(baseline["patient_id"].nunique())
     baseline_counts = baseline["pop_status"].value_counts().reindex(POP_ORDER, fill_value=0)
     n_classifiable = int(baseline_counts[["Pop1", "Pop2", "Pop3"]].sum())
@@ -517,7 +711,19 @@ def main() -> None:
         "warnings": warnings,
         "manuscript_claim": claim,
     }
-    write_outputs(table1, longitudinal, baseline, baseline_unclassifiable, qc, claim)
+    by_visit_qc = build_by_visit_qc(longitudinal, outside, warnings)
+    write_outputs(
+        table1,
+        longitudinal,
+        baseline,
+        baseline_unclassifiable,
+        distribution_visit,
+        visit_unclassifiable_counts,
+        visit_unclassifiable_rows,
+        by_visit_qc,
+        qc,
+        claim,
+    )
     print(claim)
 
 
