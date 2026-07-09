@@ -93,6 +93,42 @@ def reason(row: pd.Series) -> str:
 
 def q(s, p): return s.quantile(p) if len(s.dropna()) else np.nan
 
+def normalize_visit_level_dtypes(vis: pd.DataFrame) -> pd.DataFrame:
+    """Use concrete dtypes before writing with parquet engines.
+
+    Some pandas groupby aggregations that return a mix of floats and missing
+    values can leave numeric columns as ``object`` dtype.  CSV output tolerates
+    that, but fastparquet cannot infer an object encoding for columns such as
+    ``esspri_total`` when their values are actually numeric floats/NaNs.
+    """
+    out = vis.copy()
+    numeric_cols = [
+        'time_since_baseline_days',
+        'time_since_baseline_years',
+        'visit_number',
+        'essdai_total',
+        'esspri_dryness',
+        'esspri_fatigue',
+        'esspri_pain',
+        'esspri_total',
+    ]
+    datetime_cols = ['row_date_min', 'row_date_max', 'visit_date_clean', 'baseline_date', 'event_date']
+    string_cols = [
+        'patient_id',
+        'row_date_original',
+        'pop_status',
+        'pop_status_display',
+        'baseline_pop_status',
+        'baseline_pop_status_display',
+    ]
+    for col in numeric_cols:
+        if col in out.columns: out[col] = pd.to_numeric(out[col], errors='coerce')
+    for col in datetime_cols:
+        if col in out.columns: out[col] = pd.to_datetime(out[col], errors='coerce')
+    for col in string_cols:
+        if col in out.columns: out[col] = out[col].astype('string')
+    return out
+
 def build_visit_level(df: pd.DataFrame) -> tuple[pd.DataFrame, dict, dict]:
     validate_columns(df); qc={}; warnings=[]
     qc['n_input_rows']=len(df)
@@ -124,7 +160,7 @@ def build_visit_level(df: pd.DataFrame) -> tuple[pd.DataFrame, dict, dict]:
     if agg.patient_id.isna().any() or agg.visit_date_clean.isna().any() or (agg.time_since_baseline_years<0).any(): raise ValueError('Final visit-level validation failed')
     if not (agg.groupby('patient_id').visit_number.apply(lambda x:(x==0).sum()).eq(1).all()): raise ValueError('Each patient must have exactly one baseline visit')
     cols=['patient_id','row_date_original','row_date_min','row_date_max','visit_date_clean','baseline_date','event_date','time_since_baseline_days','time_since_baseline_years','visit_number','essdai_total','esspri_dryness','esspri_fatigue','esspri_pain','esspri_total','pop_status','pop_status_display','baseline_pop_status','baseline_pop_status_display']
-    return agg[cols], qc, {'warnings':warnings}
+    return normalize_visit_level_dtypes(agg[cols]), qc, {'warnings':warnings}
 
 def baseline_distribution(vis: pd.DataFrame) -> pd.DataFrame:
     base=vis[vis.visit_number.eq(0)].copy(); follow=vis.groupby('patient_id').agg(followup=('time_since_baseline_years','max'), n_visits=('visit_number','count')).reset_index(); base=base.merge(follow,on='patient_id')
