@@ -13,8 +13,8 @@ import common  # noqa:E402
 POP_ORDER=["Pop1","Pop2","Pop3","Unclassifiable"]
 DISPLAY={"Unclassifiable":"Unclassified","Pop1":"Pop1","Pop2":"Pop2","Pop3":"Pop3"}
 COLORS={"Pop1":"#d95f02","Pop2":"#7570b3","Pop3":"#1b9e77","Unclassifiable":"#9e9e9e"}
-INTERMEDIATE_DIR=Path('/data/salazarda/data/obj1_sjd/data/intermediate')
-MASTER=INTERMEDIATE_DIR/'02_pop_visit_level_classification.parquet'
+INTERMEDIATE_DIR=Path(getattr(common,'INTERMEDIATE_DATA_DIR',PROJECT_ROOT/'data'/'intermediate'))
+MASTER=INTERMEDIATE_DIR/'01_visit_level_classification.parquet'
 INTERVALS=INTERMEDIATE_DIR/'10_pop_transition_intervals.parquet'
 OUTPUTS_DIR=Path(getattr(common,'OUTPUTS_DIR',PROJECT_ROOT/'outputs'))
 TABLES_DIR=Path(getattr(common,'BLOCKA_TABLES_DIR',OUTPUTS_DIR/'tables'/'blockA'))
@@ -26,12 +26,12 @@ def pct(n,d): return n/d*100 if d else np.nan
 
 def load_classification(input_path: Path|None) -> tuple[pd.DataFrame,bool]:
     if MASTER.exists(): return pd.read_parquet(MASTER), False
-    # fallback: import and run exact builder from 02 script
-    spec=importlib.util.spec_from_file_location('popdist', Path(__file__).with_name('02_pop_distribution.py'))
+    # fallback: import and run exact builder from 01 script
+    spec=importlib.util.spec_from_file_location('popdist', Path(__file__).with_name('01_pop_distribution.py'))
     mod=importlib.util.module_from_spec(spec); assert spec.loader; spec.loader.exec_module(mod)
-    path=input_path or mod.INPUT_PATH
+    path=input_path or mod.DEFAULT_INPUT
     df=pd.read_parquet(path) if Path(path).suffix=='.parquet' else pd.read_csv(path, low_memory=False)
-    vis,_,_=mod.build_visit_level(df)
+    vis,_,_=mod.build_longitudinal_pop_dataset(df)
     INTERMEDIATE_DIR.mkdir(parents=True, exist_ok=True); vis.to_parquet(MASTER,index=False)
     return vis, True
 
