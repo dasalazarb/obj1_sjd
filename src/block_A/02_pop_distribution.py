@@ -28,14 +28,15 @@ REQUIRED_COLUMNS = [PATIENT_ID_COL, VISIT_DATE_COL, *ESSDAI_TOTAL_CANDIDATES, *E
 POP_ORDER = ["Pop1", "Pop2", "Pop3", "Unclassifiable"]
 POP_COLORS = {"Pop1":"#d95f02","Pop2":"#7570b3","Pop3":"#1b9e77","Unclassifiable":"#9e9e9e"}
 MISSING_STRINGS = {"", "na", "n/a", "nan", "none", "unknown", "unk", "-99"}
-INPUT_PATH = Path(getattr(common, "DEFAULT_POP_DISTRIBUTION_INPUT", Path('/data/salazarda/data/obj1_sjd/data/raw/visits_long_collapsed_by_interval_codebook_corrected.parquet')))
-INTERMEDIATE_DIR = Path('/data/salazarda/data/obj1_sjd/data/intermediate')
+INPUT_PATH = Path(getattr(common, "DEFAULT_POP_DISTRIBUTION_INPUT", common.DEFAULT_ANALYTIC_DATASET))
+INTERMEDIATE_DIR = Path(getattr(common, 'INTERMEDIATE_DATA_DIR', PROJECT_ROOT/'data'/'intermediate'))
 OUTPUTS_DIR = Path(getattr(common, 'OUTPUTS_DIR', PROJECT_ROOT/'outputs'))
 TABLES_DIR = Path(getattr(common, 'BLOCKA_TABLES_DIR', OUTPUTS_DIR/'tables'/'blockA'))
 FIGURES_DIR = Path(getattr(common, 'BLOCKA_FIGURES_DIR', OUTPUTS_DIR/'figures'/'blockA'))
 QC_DIR = OUTPUTS_DIR/'qc'/'blockA'
+SCRIPT_OUTPUT_PREFIX = Path(__file__).stem.replace('_distribution', '')
 DISPLAY = {"Unclassifiable":"Unclassified", "Pop1":"Pop1", "Pop2":"Pop2", "Pop3":"Pop3", "Overall":"Overall"}
-MASTER = INTERMEDIATE_DIR/'02_pop_visit_level_classification.parquet'
+MASTER = INTERMEDIATE_DIR/f'{SCRIPT_OUTPUT_PREFIX}_visit_level_classification.parquet'
 
 
 def is_missing(value: object) -> bool:
@@ -213,19 +214,19 @@ def main() -> None:
     for d in [INTERMEDIATE_DIR,TABLES_DIR,FIGURES_DIR,QC_DIR]: d.mkdir(parents=True, exist_ok=True)
     df=pd.read_parquet(args.input) if args.input.suffix=='.parquet' else pd.read_csv(args.input, low_memory=False)
     vis, qc0, extra=build_visit_level(df)
-    vis.to_parquet(MASTER,index=False); vis.to_csv(INTERMEDIATE_DIR/'02_pop_visit_level_classification.csv',index=False)
-    base=vis[vis.visit_number.eq(0)].copy(); base.to_parquet(INTERMEDIATE_DIR/'02_pop_baseline_classification.parquet',index=False)
-    bdist=baseline_distribution(vis); bdist.to_csv(TABLES_DIR/'02_pop_distribution_baseline.csv',index=False)
-    vdist=distribution_by_visit(vis); vdist.to_csv(TABLES_DIR/'02_pop_distribution_by_visit.csv',index=False); vdist.to_parquet(INTERMEDIATE_DIR/'02_pop_distribution_by_visit.parquet',index=False)
-    reasons,u=unclass_reasons(vis); reasons.to_csv(TABLES_DIR/'02_pop_unclassifiable_reason_counts_by_visit.csv',index=False); reasons[reasons.visit_number.eq(0)].to_csv(TABLES_DIR/'02_pop_unclassifiable_baseline_reason_counts.csv',index=False); u.to_parquet(INTERMEDIATE_DIR/'02_pop_unclassifiable_reasons_visit_level.parquet',index=False)
-    with PdfPages(FIGURES_DIR/'02_pop_trajectory_over_time.pdf') as pdf:
+    vis.to_parquet(MASTER,index=False); vis.to_csv(INTERMEDIATE_DIR/f'{SCRIPT_OUTPUT_PREFIX}_visit_level_classification.csv',index=False)
+    base=vis[vis.visit_number.eq(0)].copy(); base.to_parquet(INTERMEDIATE_DIR/f'{SCRIPT_OUTPUT_PREFIX}_baseline_classification.parquet',index=False)
+    bdist=baseline_distribution(vis); bdist.to_csv(TABLES_DIR/f'{SCRIPT_OUTPUT_PREFIX}_distribution_baseline.csv',index=False)
+    vdist=distribution_by_visit(vis); vdist.to_csv(TABLES_DIR/f'{SCRIPT_OUTPUT_PREFIX}_distribution_by_visit.csv',index=False); vdist.to_parquet(INTERMEDIATE_DIR/f'{SCRIPT_OUTPUT_PREFIX}_distribution_by_visit.parquet',index=False)
+    reasons,u=unclass_reasons(vis); reasons.to_csv(TABLES_DIR/f'{SCRIPT_OUTPUT_PREFIX}_unclassifiable_reason_counts_by_visit.csv',index=False); reasons[reasons.visit_number.eq(0)].to_csv(TABLES_DIR/f'{SCRIPT_OUTPUT_PREFIX}_unclassifiable_baseline_reason_counts.csv',index=False); u.to_parquet(INTERMEDIATE_DIR/f'{SCRIPT_OUTPUT_PREFIX}_unclassifiable_reasons_visit_level.parquet',index=False)
+    with PdfPages(FIGURES_DIR/f'{SCRIPT_OUTPUT_PREFIX}_trajectory_over_time.pdf') as pdf:
         for pop in POP_ORDER:
-            plot_one(vis,pop,FIGURES_DIR/f"02_pop_trajectory_over_time_baseline_{pop.lower()}.pdf",pdf)
+            plot_one(vis,pop,FIGURES_DIR/f'{SCRIPT_OUTPUT_PREFIX}_trajectory_over_time_baseline_{pop.lower()}.pdf',pdf)
     counts=base.pop_status.value_counts().reindex(POP_ORDER, fill_value=0); total=len(base)
-    qc={**qc0,'input_path':str(args.input),'classification_logic_source':'ITEM 1.4 baseline by subpopulation script','columns_used':{'patient_id':PATIENT_ID_COL,'visit_date':VISIT_DATE_COL,'essdai_total':ESSDAI_TOTAL_CANDIDATES,'esspri_components':ESSPRI_COMPONENTS},'missing_required_columns':[],'pop_labels_used':POP_ORDER,'pop1_rule':'ESSDAI >= 5 regardless of ESSPRI availability','pop2_rule':'ESSDAI < 5 and ESSPRI >= 5','pop3_rule':'ESSDAI < 5 and ESSPRI < 5','unclassifiable_rule':'Not classifiable by Pop1/Pop2/Pop3 rules','date_logic':{'row_date_original':'original ids__visit_date','row_date_min':'minimum parsed date from ids__visit_date','row_date_max':'maximum parsed date from ids__visit_date','visit_date_clean':'row_date_min','event_date':'row_date_min'},'n_baseline_patients':total,'baseline_pop_counts':counts.to_dict(),'baseline_pop_percentages_total':(counts/total*100).to_dict() if total else {},'baseline_sum_equals_total':bool(counts.sum()==total),'n_patients_with_baseline_unclassifiable':int(counts['Unclassifiable']),'unclassifiable_baseline_reason_counts':reasons[reasons.visit_number.eq(0)].set_index('unclassifiable_reason')['n_visits'].to_dict() if not reasons.empty else {},'traceability_intermediate_file':str(MASTER),'warnings':extra['warnings']}
+    qc={**qc0,'input_path':str(args.input),'classification_logic_source':Path(__file__).name,'columns_used':{'patient_id':PATIENT_ID_COL,'visit_date':VISIT_DATE_COL,'essdai_total':ESSDAI_TOTAL_CANDIDATES,'esspri_components':ESSPRI_COMPONENTS},'missing_required_columns':[],'pop_labels_used':POP_ORDER,'pop1_rule':'ESSDAI >= 5 regardless of ESSPRI availability','pop2_rule':'ESSDAI < 5 and ESSPRI >= 5','pop3_rule':'ESSDAI < 5 and ESSPRI < 5','unclassifiable_rule':'Not classifiable by Pop1/Pop2/Pop3 rules','date_logic':{'row_date_original':'original ids__visit_date','row_date_min':'minimum parsed date from ids__visit_date','row_date_max':'maximum parsed date from ids__visit_date','visit_date_clean':'row_date_min','event_date':'row_date_min'},'n_baseline_patients':total,'baseline_pop_counts':counts.to_dict(),'baseline_pop_percentages_total':(counts/total*100).to_dict() if total else {},'baseline_sum_equals_total':bool(counts.sum()==total),'n_patients_with_baseline_unclassifiable':int(counts['Unclassifiable']),'unclassifiable_baseline_reason_counts':reasons[reasons.visit_number.eq(0)].set_index('unclassifiable_reason')['n_visits'].to_dict() if not reasons.empty else {},'traceability_intermediate_file':str(MASTER),'warnings':extra['warnings']}
     if not qc['baseline_sum_equals_total']: raise ValueError('Baseline Pop counts do not sum to total')
-    write_json(qc, QC_DIR/'02_pop_distribution_qc.json')
+    write_json(qc, QC_DIR/f'{SCRIPT_OUTPUT_PREFIX}_distribution_qc.json')
     den=vis.groupby('visit_number').patient_id.count(); byvisit={'n_visits_max':int(vis.visit_number.max()),'denominators_by_visit_number':{str(k):int(v) for k,v in den.items()},'pop_counts_by_visit_number':{str(k):v.value_counts().reindex(POP_ORDER,fill_value=0).to_dict() for k,v in vis.groupby('visit_number').pop_status},'unclassifiable_counts_by_visit_number':{str(k):int((g.pop_status=='Unclassifiable').sum()) for k,g in vis.groupby('visit_number')},'essdai_missing_by_visit_number':{str(k):int(g.essdai_total.isna().sum()) for k,g in vis.groupby('visit_number')},'esspri_missing_by_visit_number':{str(k):int(g.esspri_total.isna().sum()) for k,g in vis.groupby('visit_number')},'late_followup_sparse_flags':{str(k):bool(v<10) for k,v in den.items()},'n_plot_points_outside_xlim':0,'warnings':[]}
-    write_json(byvisit, QC_DIR/'02_pop_distribution_by_visit_qc.json')
+    write_json(byvisit, QC_DIR/f'{SCRIPT_OUTPUT_PREFIX}_distribution_by_visit_qc.json')
     print(f'Wrote {MASTER} and Section 2 distribution outputs')
 if __name__=='__main__': main()
