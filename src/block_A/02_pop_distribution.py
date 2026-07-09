@@ -209,16 +209,22 @@ def plot_one(vis: pd.DataFrame, pop: str, path: Path|None=None, pdf: PdfPages|No
 
 def write_json(obj, path): path.write_text(json.dumps(obj, indent=2, default=str))
 
+def write_parquet_with_csv(df: pd.DataFrame, parquet_path: Path) -> None:
+    """Write a parquet artifact and a human-readable CSV beside it."""
+    df.to_parquet(parquet_path, index=False)
+    df.to_csv(parquet_path.with_suffix('.csv'), index=False)
+
+
 def main() -> None:
     ap=argparse.ArgumentParser(); ap.add_argument('--input', type=Path, default=INPUT_PATH); args=ap.parse_args()
     for d in [INTERMEDIATE_DIR,TABLES_DIR,FIGURES_DIR,QC_DIR]: d.mkdir(parents=True, exist_ok=True)
     df=pd.read_parquet(args.input) if args.input.suffix=='.parquet' else pd.read_csv(args.input, low_memory=False)
     vis, qc0, extra=build_visit_level(df)
-    vis.to_parquet(MASTER,index=False); vis.to_csv(INTERMEDIATE_DIR/f'{SCRIPT_OUTPUT_PREFIX}_visit_level_classification.csv',index=False)
-    base=vis[vis.visit_number.eq(0)].copy(); base.to_parquet(INTERMEDIATE_DIR/f'{SCRIPT_OUTPUT_PREFIX}_baseline_classification.parquet',index=False)
+    write_parquet_with_csv(vis, MASTER)
+    base=vis[vis.visit_number.eq(0)].copy(); write_parquet_with_csv(base, INTERMEDIATE_DIR/f'{SCRIPT_OUTPUT_PREFIX}_baseline_classification.parquet')
     bdist=baseline_distribution(vis); bdist.to_csv(TABLES_DIR/f'{SCRIPT_OUTPUT_PREFIX}_distribution_baseline.csv',index=False)
-    vdist=distribution_by_visit(vis); vdist.to_csv(TABLES_DIR/f'{SCRIPT_OUTPUT_PREFIX}_distribution_by_visit.csv',index=False); vdist.to_parquet(INTERMEDIATE_DIR/f'{SCRIPT_OUTPUT_PREFIX}_distribution_by_visit.parquet',index=False)
-    reasons,u=unclass_reasons(vis); reasons.to_csv(TABLES_DIR/f'{SCRIPT_OUTPUT_PREFIX}_unclassifiable_reason_counts_by_visit.csv',index=False); reasons[reasons.visit_number.eq(0)].to_csv(TABLES_DIR/f'{SCRIPT_OUTPUT_PREFIX}_unclassifiable_baseline_reason_counts.csv',index=False); u.to_parquet(INTERMEDIATE_DIR/f'{SCRIPT_OUTPUT_PREFIX}_unclassifiable_reasons_visit_level.parquet',index=False)
+    vdist=distribution_by_visit(vis); vdist.to_csv(TABLES_DIR/f'{SCRIPT_OUTPUT_PREFIX}_distribution_by_visit.csv',index=False); write_parquet_with_csv(vdist, INTERMEDIATE_DIR/f'{SCRIPT_OUTPUT_PREFIX}_distribution_by_visit.parquet')
+    reasons,u=unclass_reasons(vis); reasons.to_csv(TABLES_DIR/f'{SCRIPT_OUTPUT_PREFIX}_unclassifiable_reason_counts_by_visit.csv',index=False); reasons[reasons.visit_number.eq(0)].to_csv(TABLES_DIR/f'{SCRIPT_OUTPUT_PREFIX}_unclassifiable_baseline_reason_counts.csv',index=False); write_parquet_with_csv(u, INTERMEDIATE_DIR/f'{SCRIPT_OUTPUT_PREFIX}_unclassifiable_reasons_visit_level.parquet')
     with PdfPages(FIGURES_DIR/f'{SCRIPT_OUTPUT_PREFIX}_trajectory_over_time.pdf') as pdf:
         for pop in POP_ORDER:
             plot_one(vis,pop,FIGURES_DIR/f'{SCRIPT_OUTPUT_PREFIX}_trajectory_over_time_baseline_{pop.lower()}.pdf',pdf)
