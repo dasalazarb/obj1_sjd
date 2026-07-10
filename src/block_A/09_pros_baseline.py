@@ -56,6 +56,21 @@ SF36_MEASURES = {
     "sf36_mcs": "Mental Component Summary",
 }
 
+SF36_DOMAIN_ITEMS = {
+    "sf36_physical_functioning": [f"sf-36_health_survey__sf36_q{i}" for i in range(3, 13)],
+    "sf36_role_physical": [f"sf-36_health_survey__sf36_q{i}" for i in range(13, 17)],
+    "sf36_bodily_pain": ["sf-36_health_survey__sf36_q21", "sf-36_health_survey__sf36_q22"],
+    "sf36_general_health": ["sf-36_health_survey__sf36_q1", "sf-36_health_survey__sf36_q33", "sf-36_health_survey__sf36_q34", "sf-36_health_survey__sf36_q35", "sf-36_health_survey__sf36_q36"],
+    "sf36_vitality": ["sf-36_health_survey__sf36_q23", "sf-36_health_survey__sf36_q27", "sf-36_health_survey__sf36_q29", "sf-36_health_survey__sf36_q31"],
+    "sf36_social_functioning": ["sf-36_health_survey__sf36_q20", "sf-36_health_survey__sf36_q32"],
+    "sf36_role_emotional": [f"sf-36_health_survey__sf36_q{i}" for i in range(17, 20)],
+    "sf36_mental_health": ["sf-36_health_survey__sf36_q24", "sf-36_health_survey__sf_q26", "sf-36_health_survey__sf36_q25", "sf-36_health_survey__sf36_q28", "sf-36_health_survey__sf36_q30"],
+}
+SF36_NORM_MEANS = {"sf36_physical_functioning": 84.52404, "sf36_role_physical": 81.19907, "sf36_bodily_pain": 75.49196, "sf36_general_health": 72.21316, "sf36_vitality": 61.05453, "sf36_social_functioning": 83.59753, "sf36_role_emotional": 81.29467, "sf36_mental_health": 74.84212}
+SF36_NORM_SDS = {"sf36_physical_functioning": 22.89490, "sf36_role_physical": 33.79729, "sf36_bodily_pain": 23.55879, "sf36_general_health": 20.16964, "sf36_vitality": 20.86942, "sf36_social_functioning": 22.37642, "sf36_role_emotional": 33.02717, "sf36_mental_health": 18.01189}
+SF36_PCS_COEFF = {"sf36_physical_functioning": 0.42402, "sf36_role_physical": 0.35119, "sf36_bodily_pain": 0.31754, "sf36_general_health": 0.24954, "sf36_vitality": 0.02877, "sf36_social_functioning": -0.00753, "sf36_role_emotional": -0.19206, "sf36_mental_health": -0.22069}
+SF36_MCS_COEFF = {"sf36_physical_functioning": -0.22999, "sf36_role_physical": -0.12329, "sf36_bodily_pain": -0.09731, "sf36_general_health": -0.01571, "sf36_vitality": 0.23534, "sf36_social_functioning": 0.26876, "sf36_role_emotional": 0.43407, "sf36_mental_health": 0.48581}
+
 PROFAD_ITEMS = [
     "profile_of_fatigue_and_discomfort__profad_need_rest",
     "profile_of_fatigue_and_discomfort__profad_get_going",
@@ -281,37 +296,150 @@ def inspect_sf36_response_codes(df: pd.DataFrame) -> tuple[dict[str, list[str]],
     return inspect_response_codes(df, "SF-36", SF36_ITEMS)
 
 
-def score_sf36(df: pd.DataFrame) -> pd.DataFrame:
-    """Do not score SF-36 without validated version/coding/coefficient confirmation."""
+def numeric_in_range(
+    df: pd.DataFrame,
+    columns: list[str],
+    minimum: float,
+    maximum: float,
+    instrument: str,
+    baseline_date_col: str = "baseline_date",
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Convert columns to numeric, set out-of-range values missing, and return violations."""
+    out = pd.DataFrame(index=df.index)
+    violations = []
+    for col in columns:
+        raw = df[col] if col in df else pd.Series(np.nan, index=df.index)
+        numeric = pd.to_numeric(raw, errors="coerce")
+        bad = raw.notna() & (~raw.map(is_missing_value)) & (numeric.isna() | numeric.lt(minimum) | numeric.gt(maximum))
+        for idx in df.index[bad]:
+            violations.append({
+                "patient_id": df.at[idx, "patient_id"],
+                "baseline_date": df.at[idx, baseline_date_col] if baseline_date_col in df else pd.NaT,
+                "instrument": instrument,
+                "variable": col,
+                "raw_value": raw.loc[idx],
+                "expected_min": minimum,
+                "expected_max": maximum,
+                "action_taken": "set_missing",
+            })
+        out[col] = numeric.where(numeric.between(minimum, maximum))
+    return out, pd.DataFrame(violations)
+
+
+def map_sf36_item(col: str, value: Any) -> float:
+    """Map SF-36 v1 item codes to 0-100 item scores."""
+    if pd.isna(value):
+        return np.nan
+    try:
+        v = int(float(value))
+    except (TypeError, ValueError):
+        return np.nan
+    positive5 = {1: 100, 2: 75, 3: 50, 4: 25, 5: 0}
+    negative5 = {1: 0, 2: 25, 3: 50, 4: 75, 5: 100}
+    positive6 = {1: 100, 2: 80, 3: 60, 4: 40, 5: 20, 6: 0}
+    negative6 = {1: 0, 2: 20, 3: 40, 4: 60, 5: 80, 6: 100}
+    if col in [f"sf-36_health_survey__sf36_q{i}" for i in range(3, 13)]:
+        return {1: 0, 2: 50, 3: 100}.get(v, np.nan)
+    if col in [f"sf-36_health_survey__sf36_q{i}" for i in range(13, 20)]:
+        return {1: 0, 2: 100}.get(v, np.nan)
+    if col in {"sf-36_health_survey__sf36_q1", "sf-36_health_survey__sf36_q20", "sf-36_health_survey__sf36_q22", "sf-36_health_survey__sf36_q34", "sf-36_health_survey__sf36_q36"}:
+        return positive5.get(v, np.nan)
+    if col == "sf-36_health_survey__sf36_q30":
+        return positive5.get(v, np.nan)
+    if col == "sf-36_health_survey__sf36_q32":
+        return negative5.get(v, np.nan)
+    if col == "sf-36_health_survey__sf36_q21":
+        return {1: 100, 2: 80, 3: 60, 4: 40, 5: 20, 6: 0}.get(v, np.nan)
+    if col in {"sf-36_health_survey__sf36_q23", "sf-36_health_survey__sf_q26", "sf-36_health_survey__sf36_q27"}:
+        return positive6.get(v, np.nan)
+    if col in {"sf-36_health_survey__sf36_q24", "sf-36_health_survey__sf36_q25", "sf-36_health_survey__sf36_q28", "sf-36_health_survey__sf36_q29", "sf-36_health_survey__sf36_q31"}:
+        return negative6.get(v, np.nan)
+    if col in {"sf-36_health_survey__sf36_q33", "sf-36_health_survey__sf36_q35"}:
+        return negative5.get(v, np.nan)
+    return np.nan
+
+
+def score_sf36(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Score SF-36 v1 domains (0-100) and norm-based PCS/MCS from numeric item codes."""
     out = df.copy()
-    for measure in SF36_MEASURES:
-        out[measure] = np.nan
-        out[f"{measure}_scoring_status"] = NOT_VALIDATED
-    return out
+    scored_items = pd.DataFrame(index=out.index)
+    violations = []
+    expected_ranges = {c: (1, 6) for c in SF36_ITEMS}
+    for c in [f"sf-36_health_survey__sf36_q{i}" for i in range(3, 20)]:
+        expected_ranges[c] = (1, 3) if int(c.rsplit("q", 1)[1]) < 13 else (1, 2)
+    for c in ["sf-36_health_survey__sf36_q1", "sf-36_health_survey__sf36_q2", "sf-36_health_survey__sf36_q20", "sf-36_health_survey__sf36_q22", "sf-36_health_survey__sf36_q30", "sf-36_health_survey__sf36_q32", "sf-36_health_survey__sf36_q33", "sf-36_health_survey__sf36_q34", "sf-36_health_survey__sf36_q35", "sf-36_health_survey__sf36_q36"]:
+        expected_ranges[c] = (1, 5)
+    for col in SF36_ITEMS:
+        raw = out[col] if col in out else pd.Series(np.nan, index=out.index)
+        numeric = pd.to_numeric(raw, errors="coerce")
+        mn, mx = expected_ranges[col]
+        bad = raw.notna() & (~raw.map(is_missing_value)) & (numeric.isna() | numeric.lt(mn) | numeric.gt(mx))
+        for idx in out.index[bad]:
+            violations.append({"patient_id": out.at[idx, "patient_id"], "baseline_date": out.at[idx, "baseline_date"], "instrument": "SF-36", "variable": col, "raw_value": raw.loc[idx], "expected_min": mn, "expected_max": mx, "action_taken": "set_missing"})
+        scored_items[col] = numeric.where(numeric.between(mn, mx)).map(lambda v, c=col: map_sf36_item(c, v))
+    for measure, items in SF36_DOMAIN_ITEMS.items():
+        present = [c for c in items if c in scored_items]
+        answered = scored_items[present].notna().sum(axis=1)
+        min_required = int(np.ceil(len(items) / 2))
+        out[measure] = scored_items[present].mean(axis=1).where(answered.ge(min_required))
+        out[f"{measure}_n_items_expected"] = len(items)
+        out[f"{measure}_n_items_answered"] = answered
+        out[f"{measure}_scoring_status"] = np.where(out[measure].notna(), "scored_validated", "insufficient_items")
+        s = out[measure].dropna()
+        assert s.between(0, 100).all()
+    complete_domains = out[list(SF36_DOMAIN_ITEMS)].notna().all(axis=1)
+    z = pd.DataFrame({m: (out[m] - SF36_NORM_MEANS[m]) / SF36_NORM_SDS[m] for m in SF36_DOMAIN_ITEMS}, index=out.index)
+    out["sf36_pcs"] = (50 + 10 * sum(z[m] * SF36_PCS_COEFF[m] for m in SF36_DOMAIN_ITEMS)).where(complete_domains)
+    out["sf36_mcs"] = (50 + 10 * sum(z[m] * SF36_MCS_COEFF[m] for m in SF36_DOMAIN_ITEMS)).where(complete_domains)
+    out["sf36_pcs_scoring_status"] = np.where(out["sf36_pcs"].notna(), "scored_validated", "insufficient_items")
+    out["sf36_mcs_scoring_status"] = np.where(out["sf36_mcs"].notna(), "scored_validated", "insufficient_items")
+    return out, pd.DataFrame(violations)
 
 
 def inspect_profad_response_codes(df: pd.DataFrame) -> tuple[dict[str, list[str]], list[str]]:
     return inspect_response_codes(df, "PROFAD", PROFAD_ITEMS)
 
 
-def score_profad(df: pd.DataFrame) -> pd.DataFrame:
-    """Do not score PROFAD without a validated scoring algorithm for this extract."""
+def score_profad(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Score PROFAD as the mean of 19 items coded 0-7 when at least half are answered."""
     out = df.copy()
-    out["profad_total"] = np.nan
-    out["profad_scoring_status"] = NOT_VALIDATED
-    return out
+    numeric, violations = numeric_in_range(out, PROFAD_ITEMS, 0, 7, "PROFAD")
+    answered = numeric.notna().sum(axis=1)
+    min_required = int(np.ceil(len(PROFAD_ITEMS) / 2))
+    out["profad_total"] = numeric.mean(axis=1).where(answered.ge(min_required))
+    out["profad_n_items_answered"] = answered
+    out["profad_scoring_status"] = np.where(out["profad_total"].notna(), "scored_validated", "insufficient_items")
+    s = out["profad_total"].dropna()
+    assert s.between(0, 7).all()
+    return out, violations
 
 
 def inspect_mdafs_response_codes(df: pd.DataFrame) -> tuple[dict[str, list[str]], list[str]]:
     return inspect_response_codes(df, "MDAFS", MDAFS_ITEMS + MDAFS_ACTIVITY_FLAGS)
 
 
-def score_mdafs(df: pd.DataFrame) -> pd.DataFrame:
-    """Do not score MDAFS without a validated scoring algorithm for this extract."""
+def score_mdafs(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Score MDAFS/MAF global fatigue index from numeric baseline item codes."""
     out = df.copy()
-    out["mdafs_global"] = np.nan
-    out["mdafs_scoring_status"] = NOT_VALIDATED
-    return out
+    q1_14 = [f"multidimensional_assessment_of_fatigue_scale__fat_q{i}" for i in range(1, 15)]
+    q15_16 = ["multidimensional_assessment_of_fatigue_scale__fat_q15", "multidimensional_assessment_of_fatigue_scale__fat_q16"]
+    numeric_1_14, v1 = numeric_in_range(out, q1_14, 1, 10, "MDAFS")
+    numeric_15_16, v2 = numeric_in_range(out, q15_16, 0, 4, "MDAFS")
+    activity_items = [f"multidimensional_assessment_of_fatigue_scale__fat_q{i}" for i in range(4, 15)]
+    activity_answered = numeric_1_14[activity_items].notna().sum(axis=1)
+    required = numeric_1_14[[f"multidimensional_assessment_of_fatigue_scale__fat_q{i}" for i in range(1, 4)]].notna().all(axis=1) & numeric_15_16["multidimensional_assessment_of_fatigue_scale__fat_q15"].notna() & activity_answered.ge(6)
+    out["mdafs_global"] = (
+        numeric_1_14["multidimensional_assessment_of_fatigue_scale__fat_q1"]
+        + numeric_1_14["multidimensional_assessment_of_fatigue_scale__fat_q2"]
+        + numeric_1_14["multidimensional_assessment_of_fatigue_scale__fat_q3"]
+        + numeric_1_14[activity_items].mean(axis=1)
+        + numeric_15_16["multidimensional_assessment_of_fatigue_scale__fat_q15"]
+    ).where(required)
+    out["mdafs_n_activity_items_answered"] = activity_answered
+    out["mdafs_scoring_status"] = np.where(out["mdafs_global"].notna(), "scored_validated", "insufficient_items")
+    s = out["mdafs_global"].dropna()
+    assert s.between(1, 50).all()
+    return out, pd.concat([v1, v2], ignore_index=True)
 
 
 def summary_stats(series: pd.Series) -> dict[str, Any]:
@@ -344,14 +472,14 @@ def build_baseline_summary_table(df: pd.DataFrame) -> pd.DataFrame:
     for c, lab in [("esspri_dryness", "Dryness"), ("esspri_fatigue", "Fatigue"), ("esspri_pain", "Pain"), ("esspri_partial_mean", "Partial mean (sensitivity)")]:
         rows.append(summarize_baseline_measure(df, "ESSPRI", c, lab, "0-10", "scored_validated" if c != "esspri_partial_mean" else "sensitivity_available_cases"))
     for m, lab in SF36_MEASURES.items():
-        rows.append(summarize_baseline_measure(df, "SF-36", m, lab, "0-100 or norm-based T-score", NOT_VALIDATED, normative="50 ± 10" if m in {"sf36_pcs", "sf36_mcs"} else None, notes="Not scored because SF-36 version/coding and normative coefficients were not validated in this script."))
-    rows.append(summarize_baseline_measure(df, "PROFAD", "profad_total", "PROFAD total", "validated scale required", NOT_VALIDATED, notes="Not scored because PROFAD scoring rules/version were not validated."))
-    rows.append(summarize_baseline_measure(df, "MDAFS", "mdafs_global", "MDAFS global", "validated scale required", NOT_VALIDATED, notes="Not scored because MDAFS scoring rules/version were not validated."))
+        rows.append(summarize_baseline_measure(df, "SF-36", m, lab, "0-100 or norm-based T-score", "scored_validated", normative="50 ± 10" if m in {"sf36_pcs", "sf36_mcs"} else None, notes="SF-36 v1 item recoding; PCS/MCS use 1998 US norm means, SDs, and factor coefficients."))
+    rows.append(summarize_baseline_measure(df, "PROFAD", "profad_total", "PROFAD total", "0-7 mean item score", "scored_validated", notes="Mean of available 0-7 PROFAD items when at least half of the 19 items are answered."))
+    rows.append(summarize_baseline_measure(df, "MDAFS", "mdafs_global", "MDAFS global fatigue index", "1-50", "scored_validated", notes="MAF/MDAFS global fatigue index: q1+q2+q3+mean(q4-q14)+q15; q16 is not included."))
     return pd.DataFrame(rows)
 
 
 def build_baseline_availability_table(df: pd.DataFrame) -> pd.DataFrame:
-    specs = [("ESSPRI", list(ESSPRI_COMPONENTS.values()), "esspri_total", "scored_validated", ""), ("SF-36", SF36_ITEMS, "sf36_pcs", NOT_VALIDATED, "SF-36 version/coding/normative coefficients not validated"), ("PROFAD", PROFAD_ITEMS, "profad_total", NOT_VALIDATED, "PROFAD scoring algorithm not validated"), ("MDAFS", MDAFS_ITEMS + MDAFS_ACTIVITY_FLAGS, "mdafs_global", NOT_VALIDATED, "MDAFS scoring algorithm and activity flag handling not validated")]
+    specs = [("ESSPRI", list(ESSPRI_COMPONENTS.values()), "esspri_total", "scored_validated", ""), ("SF-36", SF36_ITEMS, "sf36_pcs", "scored_validated", ""), ("PROFAD", PROFAD_ITEMS, "profad_total", "scored_validated", ""), ("MDAFS", MDAFS_ITEMS + MDAFS_ACTIVITY_FLAGS, "mdafs_global", "scored_validated", "")]
     rows = []
     for inst, items, score, status, reason in specs:
         present = [c for c in items if c in df.columns]
@@ -399,11 +527,24 @@ def build_missingness(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_scoring_status(df: pd.DataFrame, missing_maps: dict[str, list[str]], observed_maps: dict[str, dict[str, list[str]]]) -> pd.DataFrame:
+    """Build scoring status QC for all scored instruments."""
     rows = []
-    rows.append({"instrument": "ESSPRI", "measure": "esspri_total", "scoring_status": "scored_validated", "n_scored": int(df["esspri_total"].notna().sum()), "n_not_scored": int(df["esspri_total"].isna().sum()), "missing_columns": [c for c in ESSPRI_COMPONENTS.values() if c not in df.columns], "unexpected_response_codes": "See range violations", "algorithm_version": "ESSPRI mean of dryness/fatigue/pain; complete components required", "completeness_rule": "3 of 3 valid components", "reason_not_scored": ""})
-    for inst, measures, reason in [("SF-36", SF36_MEASURES.keys(), "SF-36 version/coding and normative coefficients not validated"), ("PROFAD", ["profad_total"], "PROFAD validated scoring rules not confirmed"), ("MDAFS", ["mdafs_global"], "MDAFS validated scoring rules and activity flag handling not confirmed")]:
+    specs = [("ESSPRI", ["esspri_total"], "ESSPRI mean of dryness/fatigue/pain", "3 of 3 valid components"), ("SF-36", list(SF36_MEASURES), "SF-36 v1 0-100 domains; Ware/Kosinski norm-based PCS/MCS", "At least 50% items per domain; all 8 domains for PCS/MCS"), ("PROFAD", ["profad_total"], "PROFAD 0-7 mean item score", "At least 10 of 19 items"), ("MDAFS", ["mdafs_global"], "MAF/MDAFS global fatigue index", "q1-q3 and q15 required; at least 6 of q4-q14 activities")]
+    for inst, measures, version, rule in specs:
         for m in measures:
-            rows.append({"instrument": inst, "measure": m, "scoring_status": NOT_VALIDATED, "n_scored": 0, "n_not_scored": len(df), "missing_columns": missing_maps.get(inst, []), "unexpected_response_codes": json.dumps(observed_maps.get(inst, {}), default=str)[:30000], "algorithm_version": "not applied", "completeness_rule": "not applied; inventory only", "reason_not_scored": reason})
+            n_scored = int(df[m].notna().sum()) if m in df else 0
+            rows.append({
+                "instrument": inst,
+                "measure": m,
+                "scoring_status": "scored_validated" if n_scored else "insufficient_items",
+                "n_scored": n_scored,
+                "n_not_scored": len(df) - n_scored,
+                "missing_columns": missing_maps.get(inst, []),
+                "unexpected_response_codes": json.dumps(observed_maps.get(inst, {}), default=str)[:30000] if inst != "ESSPRI" else "See range violations",
+                "algorithm_version": version,
+                "completeness_rule": rule,
+                "reason_not_scored": "" if n_scored else "No baseline records met completeness/range requirements for this measure.",
+            })
     return pd.DataFrame(rows)
 
 
@@ -447,9 +588,9 @@ def main() -> None:
     collapsed, conflicts, dup_metrics = collapse_patient_visit_duplicates(valid)
     baseline, selection_audit = select_global_baseline(collapsed)
     baseline, esspri_viol = derive_esspri_scores(baseline)
-    sf_obs, sf_missing = inspect_sf36_response_codes(baseline); baseline = score_sf36(baseline)
-    prof_obs, prof_missing = inspect_profad_response_codes(baseline); baseline = score_profad(baseline)
-    mdafs_obs, mdafs_missing = inspect_mdafs_response_codes(baseline); baseline = score_mdafs(baseline)
+    sf_obs, sf_missing = inspect_sf36_response_codes(baseline); baseline, sf_viol = score_sf36(baseline)
+    prof_obs, prof_missing = inspect_profad_response_codes(baseline); baseline, prof_viol = score_profad(baseline)
+    mdafs_obs, mdafs_missing = inspect_mdafs_response_codes(baseline); baseline, mdafs_viol = score_mdafs(baseline)
     summary = build_baseline_summary_table(baseline)
     availability = build_baseline_availability_table(baseline)
     manuscript = build_manuscript_numbers(baseline, summary)
@@ -457,16 +598,17 @@ def main() -> None:
     scoring = build_scoring_status(baseline, {"SF-36": sf_missing, "PROFAD": prof_missing, "MDAFS": mdafs_missing}, {"SF-36": sf_obs, "PROFAD": prof_obs, "MDAFS": mdafs_obs})
     if conflicts.empty:
         conflicts = pd.DataFrame(columns=["patient_id", "visit_date", "variable", "observed_values", "n_distinct_values", "resolution_status", "selected_value", "resolution_reason"])
-    if esspri_viol.empty:
-        esspri_viol = pd.DataFrame(columns=["patient_id", "baseline_date", "instrument", "variable", "raw_value", "expected_min", "expected_max", "action_taken"])
+    range_violations = pd.concat([esspri_viol, sf_viol, prof_viol, mdafs_viol], ignore_index=True)
+    if range_violations.empty:
+        range_violations = pd.DataFrame(columns=["patient_id", "baseline_date", "instrument", "variable", "raw_value", "expected_min", "expected_max", "action_taken"])
     patient_cols = ["patient_id", "baseline_date", INTERVAL_COL, "parent_protocol", "visit_date_raw", "date_parse_status", "esspri_dryness", "esspri_fatigue", "esspri_pain", "esspri_n_components", "esspri_total", "esspri_partial_mean", *SF36_MEASURES.keys(), "profad_total", "mdafs_global", "is_baseline_visit", "profad_scoring_status", "mdafs_scoring_status"]
     for c in patient_cols:
         if c not in baseline:
             baseline[c] = np.nan
     qc_summary = {"n_input_rows": len(df), "n_unique_raw_patient_ids": int(df[PATIENT_ID_COL].nunique(dropna=True)), "n_invalid_patient_ids": int(df["patient_id"].isna().sum()), "n_rows_without_valid_date": int(df["visit_date"].isna().sum()), "n_unique_patients_with_valid_date": int(valid["patient_id"].nunique()), "n_duplicate_patient_dates": int(dup_metrics["n_patient_dates_with_multiple_rows"]), "n_baseline_patients": len(baseline), "n_patients_with_any_esspri": int(baseline[["esspri_dryness", "esspri_fatigue", "esspri_pain"]].notna().any(axis=1).sum()), "n_patients_with_complete_esspri": int(baseline["esspri_total"].notna().sum()), "n_patients_with_any_sf36": int(baseline[[c for c in SF36_ITEMS if c in baseline]].notna().any(axis=1).sum()) if any(c in baseline for c in SF36_ITEMS) else 0, "n_patients_with_valid_pcs": int(baseline["sf36_pcs"].notna().sum()), "n_patients_with_any_profad": int(baseline[[c for c in PROFAD_ITEMS if c in baseline]].notna().any(axis=1).sum()) if any(c in baseline for c in PROFAD_ITEMS) else 0, "n_patients_with_valid_profad": int(baseline["profad_total"].notna().sum()), "n_patients_with_any_mdafs": int(baseline[[c for c in MDAFS_ITEMS if c in baseline]].notna().any(axis=1).sum()) if any(c in baseline for c in MDAFS_ITEMS) else 0, "n_patients_with_valid_mdafs": int(baseline["mdafs_global"].notna().sum()), **dup_metrics, "log_path": str(log_path)}
     LOG.info("QC summary: %s", qc_summary)
-    LOG.info("Algorithms used: ESSPRI validated complete-component mean; SF-36/PROFAD/MDAFS not scored without validated extract-specific algorithms.")
-    write_outputs({"patient": baseline[patient_cols], "summary": summary, "availability": availability, "manuscript": manuscript, "qc_summary": qc_summary, "date_parsing": date_qc, "conflicts": conflicts, "range_violations": esspri_viol, "missingness": missingness, "scoring_status": scoring, "selection_audit": selection_audit}, args.overwrite)
+    LOG.info("Algorithms used: ESSPRI complete-component mean; SF-36 v1 domains and norm-based PCS/MCS; PROFAD mean 0-7 score; MAF/MDAFS global fatigue index.")
+    write_outputs({"patient": baseline[patient_cols], "summary": summary, "availability": availability, "manuscript": manuscript, "qc_summary": qc_summary, "date_parsing": date_qc, "conflicts": conflicts, "range_violations": range_violations, "missingness": missingness, "scoring_status": scoring, "selection_audit": selection_audit}, args.overwrite)
     LOG.info("Run completed successfully")
 
 
