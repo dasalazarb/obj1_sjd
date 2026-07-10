@@ -120,7 +120,19 @@ DEFAULT_INPUT = path_from_common(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate baseline PRO profile for Block A ITEM 7.1.")
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
-    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--overwrite",
+        dest="overwrite",
+        action="store_true",
+        default=True,
+        help="Overwrite previously generated 09_pros_baseline outputs (default).",
+    )
+    parser.add_argument(
+        "--no-overwrite",
+        dest="overwrite",
+        action="store_false",
+        help="Fail before replacing an existing output file.",
+    )
     return parser.parse_args()
 
 
