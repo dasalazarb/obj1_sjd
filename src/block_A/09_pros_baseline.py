@@ -434,10 +434,16 @@ def main() -> None:
     if PATIENT_ID_COL not in df or VISIT_DATE_COL not in df:
         raise ValueError(f"Input must include {PATIENT_ID_COL} and {VISIT_DATE_COL}")
     df["patient_id"] = df[PATIENT_ID_COL].map(normalize_patient_id)
-    parsed = pd.DataFrame([parse_visit_date_min(v) for v in df[VISIT_DATE_COL]])
-    df = pd.concat([df.reset_index(drop=True), parsed], axis=1)
+    parsed = pd.DataFrame([parse_visit_date_min(v) for v in df[VISIT_DATE_COL]], index=df.index)
+    # Assign parsed analytic date columns explicitly instead of concatenating.
+    # Some extracts may already contain helper columns such as ``visit_date``;
+    # duplicate column names make ``df["visit_date"]`` return a DataFrame and
+    # can break boolean filtering in pandas when indexes contain mixed types.
+    for parsed_col in ["visit_date_raw", "visit_date", "n_date_fragments", "n_valid_date_fragments", "date_parse_status"]:
+        df[parsed_col] = parsed[parsed_col]
     date_qc = df[["patient_id", "visit_date_raw", "n_date_fragments", "n_valid_date_fragments", "visit_date", "date_parse_status"]].copy()
-    valid = df[df["patient_id"].notna() & df["visit_date"].notna()].copy()
+    valid_date_mask = df["visit_date"].notna()
+    valid = df[df["patient_id"].notna() & valid_date_mask].copy()
     collapsed, conflicts, dup_metrics = collapse_patient_visit_duplicates(valid)
     baseline, selection_audit = select_global_baseline(collapsed)
     baseline, esspri_viol = derive_esspri_scores(baseline)
