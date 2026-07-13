@@ -356,17 +356,11 @@ def map_sf36_item(col: str, value: Any) -> float:
         return {1: 0, 2: 100}.get(v, np.nan)
     if col in {"sf-36_health_survey__sf36_q1", "sf-36_health_survey__sf36_q20", "sf-36_health_survey__sf36_q22", "sf-36_health_survey__sf36_q34", "sf-36_health_survey__sf36_q36"}:
         return positive5.get(v, np.nan)
-    if col == "sf-36_health_survey__sf36_q30":
-        return positive5.get(v, np.nan)
-    if col == "sf-36_health_survey__sf36_q32":
-        return negative5.get(v, np.nan)
-    if col == "sf-36_health_survey__sf36_q21":
-        return {1: 100, 2: 80, 3: 60, 4: 40, 5: 20, 6: 0}.get(v, np.nan)
-    if col in {"sf-36_health_survey__sf36_q23", "sf-36_health_survey__sf_q26", "sf-36_health_survey__sf36_q27"}:
+    if col in {"sf-36_health_survey__sf36_q21", "sf-36_health_survey__sf36_q23", "sf-36_health_survey__sf_q26", "sf-36_health_survey__sf36_q27", "sf-36_health_survey__sf36_q30"}:
         return positive6.get(v, np.nan)
     if col in {"sf-36_health_survey__sf36_q24", "sf-36_health_survey__sf36_q25", "sf-36_health_survey__sf36_q28", "sf-36_health_survey__sf36_q29", "sf-36_health_survey__sf36_q31"}:
         return negative6.get(v, np.nan)
-    if col in {"sf-36_health_survey__sf36_q33", "sf-36_health_survey__sf36_q35"}:
+    if col in {"sf-36_health_survey__sf36_q32", "sf-36_health_survey__sf36_q33", "sf-36_health_survey__sf36_q35"}:
         return negative5.get(v, np.nan)
     return np.nan
 
@@ -379,7 +373,7 @@ def score_sf36(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     expected_ranges = {c: (1, 6) for c in SF36_ITEMS}
     for c in [f"sf-36_health_survey__sf36_q{i}" for i in range(3, 20)]:
         expected_ranges[c] = (1, 3) if int(c.rsplit("q", 1)[1]) < 13 else (1, 2)
-    for c in ["sf-36_health_survey__sf36_q1", "sf-36_health_survey__sf36_q2", "sf-36_health_survey__sf36_q20", "sf-36_health_survey__sf36_q22", "sf-36_health_survey__sf36_q30", "sf-36_health_survey__sf36_q32", "sf-36_health_survey__sf36_q33", "sf-36_health_survey__sf36_q34", "sf-36_health_survey__sf36_q35", "sf-36_health_survey__sf36_q36"]:
+    for c in ["sf-36_health_survey__sf36_q1", "sf-36_health_survey__sf36_q2", "sf-36_health_survey__sf36_q20", "sf-36_health_survey__sf36_q22", "sf-36_health_survey__sf36_q32", "sf-36_health_survey__sf36_q33", "sf-36_health_survey__sf36_q34", "sf-36_health_survey__sf36_q35", "sf-36_health_survey__sf36_q36"]:
         expected_ranges[c] = (1, 5)
     for col in SF36_ITEMS:
         raw = out[col] if col in out else pd.Series(np.nan, index=out.index)
