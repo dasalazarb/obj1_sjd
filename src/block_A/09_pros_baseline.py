@@ -565,6 +565,7 @@ def write_file(path: Path, writer, overwrite: bool) -> None:
 
 def write_outputs(outputs: dict[str, Any], overwrite: bool) -> None:
     write_file(DATA_INTERMEDIATE_DIR / "09_pros_baseline_patient_level.parquet", lambda p: outputs["patient"].to_parquet(p, index=False), overwrite)
+    write_file(DATA_INTERMEDIATE_DIR / "09_pros_baseline_patient_level.csv", lambda p: outputs["patient"].to_csv(p, index=False), overwrite)
     write_file(TABLES_DIR / "09_pros_baseline.csv", lambda p: outputs["summary"].to_csv(p, index=False), overwrite)
     write_file(TABLES_DIR / "09_pros_baseline_availability.csv", lambda p: outputs["availability"].to_csv(p, index=False), overwrite)
     write_file(TABLES_DIR / "09_pros_baseline_manuscript_numbers.csv", lambda p: outputs["manuscript"].to_csv(p, index=False), overwrite)
