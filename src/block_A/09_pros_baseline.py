@@ -431,15 +431,16 @@ def score_mdafs(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     q15_16 = ["multidimensional_assessment_of_fatigue_scale__fat_q15", "multidimensional_assessment_of_fatigue_scale__fat_q16"]
     numeric_1_14, v1 = numeric_in_range(out, q1_14, 1, 10, "MDAFS")
     numeric_15_16, v2 = numeric_in_range(out, q15_16, 0, 4, "MDAFS")
+    q15_recoded = numeric_15_16["multidimensional_assessment_of_fatigue_scale__fat_q15"] * 2.5
     activity_items = [f"multidimensional_assessment_of_fatigue_scale__fat_q{i}" for i in range(4, 15)]
     activity_answered = numeric_1_14[activity_items].notna().sum(axis=1)
-    required = numeric_1_14[[f"multidimensional_assessment_of_fatigue_scale__fat_q{i}" for i in range(1, 4)]].notna().all(axis=1) & numeric_15_16["multidimensional_assessment_of_fatigue_scale__fat_q15"].notna() & activity_answered.ge(6)
+    required = numeric_1_14[[f"multidimensional_assessment_of_fatigue_scale__fat_q{i}" for i in range(1, 4)]].notna().all(axis=1) & q15_recoded.notna() & activity_answered.ge(6)
     out["mdafs_global"] = (
         numeric_1_14["multidimensional_assessment_of_fatigue_scale__fat_q1"]
         + numeric_1_14["multidimensional_assessment_of_fatigue_scale__fat_q2"]
         + numeric_1_14["multidimensional_assessment_of_fatigue_scale__fat_q3"]
         + numeric_1_14[activity_items].mean(axis=1)
-        + numeric_15_16["multidimensional_assessment_of_fatigue_scale__fat_q15"]
+        + q15_recoded
     ).where(required)
     out["mdafs_n_activity_items_answered"] = activity_answered
     out["mdafs_scoring_status"] = np.where(out["mdafs_global"].notna(), "scored_validated", "insufficient_items")
@@ -480,7 +481,7 @@ def build_baseline_summary_table(df: pd.DataFrame) -> pd.DataFrame:
     for m, lab in SF36_MEASURES.items():
         rows.append(summarize_baseline_measure(df, "SF-36", m, lab, "0-100 or norm-based T-score", "scored_validated", normative="50 ± 10" if m in {"sf36_pcs", "sf36_mcs"} else None, notes="SF-36 v1 item recoding; PCS/MCS use 1998 US norm means, SDs, and factor coefficients."))
     rows.append(summarize_baseline_measure(df, "PROFAD", "profad_total", "PROFAD total", "0-7 mean item score", "scored_validated", notes="Mean of available 0-7 PROFAD items when at least half of the 19 items are answered."))
-    rows.append(summarize_baseline_measure(df, "MDAFS", "mdafs_global", "MDAFS global fatigue index", "1-50", "scored_validated", notes="MAF/MDAFS global fatigue index: q1+q2+q3+mean(q4-q14)+q15; q16 is not included."))
+    rows.append(summarize_baseline_measure(df, "MDAFS", "mdafs_global", "MDAFS global fatigue index", "1-50", "scored_validated", notes="MAF/MDAFS global fatigue index: q1+q2+q3+mean(q4-q14)+(q15*2.5); q16 is not included."))
     return pd.DataFrame(rows)
 
 
