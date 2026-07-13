@@ -356,13 +356,11 @@ def map_sf36_item(col: str, value: Any) -> float:
         return {1: 0, 2: 100}.get(v, np.nan)
     if col in {"sf-36_health_survey__sf36_q1", "sf-36_health_survey__sf36_q20", "sf-36_health_survey__sf36_q22", "sf-36_health_survey__sf36_q34", "sf-36_health_survey__sf36_q36"}:
         return positive5.get(v, np.nan)
-    if col == "sf-36_health_survey__sf36_q32":
-        return negative5.get(v, np.nan)
     if col in {"sf-36_health_survey__sf36_q21", "sf-36_health_survey__sf36_q23", "sf-36_health_survey__sf_q26", "sf-36_health_survey__sf36_q27", "sf-36_health_survey__sf36_q30"}:
         return positive6.get(v, np.nan)
     if col in {"sf-36_health_survey__sf36_q24", "sf-36_health_survey__sf36_q25", "sf-36_health_survey__sf36_q28", "sf-36_health_survey__sf36_q29", "sf-36_health_survey__sf36_q31"}:
         return negative6.get(v, np.nan)
-    if col in {"sf-36_health_survey__sf36_q33", "sf-36_health_survey__sf36_q35"}:
+    if col in {"sf-36_health_survey__sf36_q32", "sf-36_health_survey__sf36_q33", "sf-36_health_survey__sf36_q35"}:
         return negative5.get(v, np.nan)
     return np.nan
 
