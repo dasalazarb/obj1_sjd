@@ -51,7 +51,6 @@ ESSPRI_COMPONENTS = [
     "esspri_questionnaire__fatigue",
     "esspri_questionnaire__pain",
 ]
-BASELINE_PATTERNS = re.compile(r"baseline|screening|\bbl\b|initial", flags=re.IGNORECASE)
 TABLE_DIR = common.OUTPUTS_DIR / "tables" / "blockA"
 FIGURE_DIR = common.OUTPUTS_DIR / "figures" / "blockA"
 QC_DIR = TABLE_DIR / "qc"
@@ -148,27 +147,11 @@ def derive_domain_activity(df):
 
 def select_baseline(df):
     work = df.copy()
-    work["_has_activity_data"] = (
-        work["essdai_total"].notna()
-        | work["esspri_total"].notna()
-        | work[[f"essdai_domain_{d}_score" for d in ESSDAI_DOMAIN_VARS]].notna().any(axis=1)
-    )
-    work["_is_explicit_baseline"] = work[INTERVAL_COL].astype("string").fillna("").str.contains(BASELINE_PATTERNS)
-    work["_sort_date"] = work["visit_date_parsed"]
-    work["_sort_year"] = work["visit_year"]
-    rows = []
-    duplicates_before = 0
-    for _, group in work.groupby(ID_COL, dropna=True, sort=True):
-        candidates = group[group["_is_explicit_baseline"]]
-        if candidates.empty:
-            candidates = group[group["_has_activity_data"]]
-        if candidates.empty:
-            continue
-        duplicates_before += max(len(candidates) - 1, 0)
-        selected = candidates.sort_values(["_sort_date", "_sort_year"], na_position="last").head(1)
-        rows.append(selected)
-    baseline = pd.concat(rows, ignore_index=True) if rows else work.head(0).copy()
-    return baseline.drop(columns=[c for c in baseline.columns if c.startswith("_")], errors="ignore"), duplicates_before
+    valid = work[work[ID_COL].notna() & work["visit_date_parsed"].notna()].copy()
+    valid = valid.sort_values([ID_COL, "visit_date_parsed"])
+    duplicates_before = int(valid[ID_COL].duplicated().sum())
+    baseline = valid.drop_duplicates(subset=ID_COL, keep="first").copy()
+    return baseline, duplicates_before
 
 
 def summarize_continuous(series):
@@ -239,15 +222,15 @@ def make_baseline_domain_bar(domain_summary):
     ax.set_title("Baseline ESSDAI domain activity")
     ax.text(0, -0.16, "Active defined as domain score >0; denominator excludes missing domain values.", transform=ax.transAxes, fontsize=8)
     fig.tight_layout()
-    fig.savefig(FIGURE_DIR / "01_essdai_domains_baseline_bar.pdf")
+    fig.savefig(FIGURE_DIR / "01_essdai_esspri_essdai_domains_baseline_bar.pdf")
     plt.close(fig)
 
 
 def make_distribution_plots(df, interval_order, domain_by_visit):
     plot_df = df[df[INTERVAL_COL].notna()].copy()
     for measure, ylabel, title, path in [
-        ("essdai_total", "ESSDAI total", "ESSDAI total distribution by visit interval", "01_essdai_total_distribution_by_visit.pdf"),
-        ("esspri_total", "ESSPRI total", "ESSPRI distribution by visit interval", "01_esspri_distribution_by_visit.pdf"),
+        ("essdai_total", "ESSDAI total", "ESSDAI total distribution by visit interval", "01_essdai_esspri_essdai_total_distribution_by_visit.pdf"),
+        ("esspri_total", "ESSPRI total", "ESSPRI distribution by visit interval", "01_essdai_esspri_esspri_distribution_by_visit.pdf"),
     ]:
         fig, ax = plt.subplots(figsize=(max(8, 0.45 * len(interval_order)), 5))
         sns.boxplot(data=plot_df, x=INTERVAL_COL, y=measure, order=interval_order, ax=ax, color="#9ECAE1")
@@ -267,7 +250,7 @@ def make_distribution_plots(df, interval_order, domain_by_visit):
     ax.set_ylabel("ESSDAI domain")
     ax.text(0, -0.18, "Active = domain score >0.", transform=ax.transAxes, fontsize=8)
     fig.tight_layout()
-    fig.savefig(FIGURE_DIR / "01_essdai_domain_activity_by_visit.pdf")
+    fig.savefig(FIGURE_DIR / "01_essdai_esspri_essdai_domain_activity_by_visit.pdf")
     plt.close(fig)
 
 
@@ -343,12 +326,12 @@ def write_metric_intermediates(df, baseline_df, input_path):
 
 
 def write_outputs(baseline_df, activity_summary, domain_summary, by_visit, domain_by_visit, qc_report):
-    baseline_df.to_csv(QC_DIR / "01_item1_3_baseline_dataset.csv", index=False)
-    activity_summary.to_csv(TABLE_DIR / "01_item1_3_disease_activity_summary.csv", index=False)
-    domain_summary.to_csv(TABLE_DIR / "01_item1_3_essdai_domain_baseline.csv", index=False)
-    by_visit.to_csv(TABLE_DIR / "01_item1_3_by_visit_summary.csv", index=False)
-    domain_by_visit.to_csv(TABLE_DIR / "01_item1_3_domain_by_visit_summary.csv", index=False)
-    qc_report.to_csv(QC_DIR / "01_item1_3_qc_report.csv", index=False)
+    baseline_df.to_csv(QC_DIR / "01_essdai_esspri_baseline_dataset.csv", index=False)
+    activity_summary.to_csv(TABLE_DIR / "01_essdai_esspri_disease_activity_summary.csv", index=False)
+    domain_summary.to_csv(TABLE_DIR / "01_essdai_esspri_essdai_domain_baseline.csv", index=False)
+    by_visit.to_csv(TABLE_DIR / "01_essdai_esspri_by_visit_summary.csv", index=False)
+    domain_by_visit.to_csv(TABLE_DIR / "01_essdai_esspri_domain_by_visit_summary.csv", index=False)
+    qc_report.to_csv(QC_DIR / "01_essdai_esspri_qc_report.csv", index=False)
     table_path = TABLE_DIR / "01_table1_overall.csv"
     if table_path.exists():
         overall = pd.read_csv(table_path)
