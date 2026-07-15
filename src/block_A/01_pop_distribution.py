@@ -19,7 +19,8 @@ from typing import Any, Iterable
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from scipy.stats import chi2_contingency, kruskal
+from scipy.stats import binomtest, chi2_contingency, kruskal, pearsonr, spearmanr
+from sklearn.metrics import accuracy_score, balanced_accuracy_score, cohen_kappa_score, confusion_matrix, f1_score
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -100,6 +101,15 @@ AGE_CANDIDATES = [
 ]
 SEX_CANDIDATES = ["ids__sex", "ids__gender", "demographics__sex", "demographics__gender", "sex", "gender"]
 RACE_CANDIDATES = ["ids__race", "demographics__race", "race", "ethnicity", "ids__ethnicity"]
+PROTOCOL_CANDIDATES = ["ids__protocol", "ids__protocol_number", "ids__study_protocol", "protocol", "protocol_number", "parent_protocol"]
+BOOTSTRAP_REPLICATES = 2000
+RANDOM_SEED = 20260714
+
+PROXY_CANDIDATES_S5 = [
+    ("fatigue_f1", "fatigue", "fatigue_proxy_f1_profad"), ("fatigue_f2", "fatigue", "fatigue_proxy_f2_mdafs_severity"), ("fatigue_f3", "fatigue", "fatigue_proxy_f3_mdafs_degree"), ("fatigue_f4", "fatigue", "fatigue_proxy_f4_ans"),
+    ("pain_p1", "pain", "pain_proxy_p1_limb"), ("pain_p2", "pain", "pain_proxy_p2_finger_wrist"), ("pain_p12", "pain", "pain_proxy_p12_composite"),
+    ("dryness_d1", "dryness", "dryness_proxy_d1_eye_mouth"), ("dryness_d2_core", "dryness", "dryness_proxy_d2_core"), ("dryness_d2_extended", "dryness", "dryness_proxy_d2_extended"), ("dryness_d3", "dryness", "dryness_proxy_d3_profad"),
+]
 POP_ORDER = ["Pop1", "Pop2", "Pop3", "Unclassifiable"]
 POP_COLORS = {"Pop1": "#d95f02", "Pop2": "#7570b3", "Pop3": "#1b9e77", "Unclassifiable": "#9e9e9e"}
 MISSING_STRINGS = {"", "na", "n/a", "nan", "none", "unknown", "unk", "-99"}
@@ -233,109 +243,162 @@ def is_not_applicable(value: object) -> bool:
     return s in {"1", "1.0", "true", "yes", "y", "si", "sí", "not applicable", "not_applicable", "n/a", "na"}
 
 
-def source_from_observed_proxy(observed: pd.Series, proxy: pd.Series, proxy_source: pd.Series) -> pd.Series:
-    return pd.Series(
-        np.select([observed.notna(), proxy.notna()], ["observed_esspri", proxy_source], default="missing"),
-        index=observed.index,
-        dtype="object",
-    )
+
+def validate_numeric_range(
+    series: pd.Series,
+    minimum: float,
+    maximum: float,
+    variable_name: str,
+    invalid_rows: list[dict[str, Any]],
+    patient_id: pd.Series,
+    visit_date: pd.Series,
+) -> pd.Series:
+    numeric = pd.to_numeric(series, errors="coerce")
+    invalid = numeric.notna() & ~numeric.between(minimum, maximum)
+    if invalid.any():
+        for idx in numeric.index[invalid]:
+            invalid_rows.append({"patient_id": patient_id.loc[idx], "visit_date": visit_date.loc[idx], "variable_name": variable_name, "invalid_value": numeric.loc[idx], "expected_min": minimum, "expected_max": maximum})
+        numeric.loc[invalid] = np.nan
+    return numeric.astype("float64")
 
 
-def populate_esspri_proxies(work: pd.DataFrame, qc_counts: dict[str, int]) -> pd.DataFrame:
+def count_distinct_nonmissing(series: pd.Series) -> int:
+    numeric = pd.to_numeric(series, errors="coerce").dropna()
+    if len(numeric):
+        return int(numeric.nunique())
+    return int(series.dropna().astype(str).nunique())
+
+
+def prepare_raw_esspri_proxy_inputs(work: pd.DataFrame, qc_counts: dict[str, Any]) -> pd.DataFrame:
+    """Create numeric observed ESSPRI and raw proxy inputs only; no derived proxies."""
+    invalid_rows: list[dict[str, Any]] = qc_counts.setdefault("invalid_value_rows", [])
     for key, src in ESSPRI_OBSERVED_COMPONENTS.items():
-        work[f"esspri_{key}_observed"] = numeric_optional(work, src)
+        raw = numeric_optional(work, src)
+        work[f"esspri_{key}_observed"] = validate_numeric_range(raw, 0, 10, src, invalid_rows, work["patient_id"], work["visit_date_clean"])
+    work["essdai_total"] = validate_numeric_range(work["essdai_total"], 0, 123, "essdai_total", invalid_rows, work["patient_id"], work["visit_date_clean"])
+    raw_specs: dict[str, tuple[str, float, float]] = {}
+    for col in FATIGUE_PROFAD_ITEMS + ["profile_of_fatigue_and_discomfort__profad_limb_discomfort", "profile_of_fatigue_and_discomfort__profad_finger_wrist_discomfort"] + DRYNESS_D3_PROFAD_ITEMS:
+        raw_specs[col] = (f"raw_{col.split('__')[-1]}", 0, 7)
+    for col in DRYNESS_D1_ITEMS + DRYNESS_D2_ITEMS:
+        raw_specs[col] = (f"raw_{col.split('__')[-1]}", 0, 10)
+    raw_specs["multidimensional_assessment_of_fatigue_scale__fat_q2"] = ("raw_mdafs_fat_q2", 1, 10)
+    raw_specs["multidimensional_assessment_of_fatigue_scale__fat_q1"] = ("raw_mdafs_fat_q1", 1, 10)
+    for i, col in enumerate(FATIGUE_ANS_CANDIDATES, start=1):
+        raw_specs[col] = (f"raw_ans_fatigue_{i}", 0, 10)
+    for src, (target, lo, hi) in raw_specs.items():
+        raw = numeric_optional(work, src)
+        work[target] = validate_numeric_range(raw, lo, hi, src, invalid_rows, work["patient_id"], work["visit_date_clean"])
+    if DRYNESS_D2_VAGINAL_NA in work.columns:
+        work["raw_vaginal_dryness_na"] = work[DRYNESS_D2_VAGINAL_NA]
+    else:
+        work["raw_vaginal_dryness_na"] = pd.NA
+    qc_counts["n_invalid_numeric_values"] = len(invalid_rows)
+    return work
 
-    observed_cols = ["esspri_dryness_observed", "esspri_fatigue_observed", "esspri_pain_observed"]
-    invalid = pd.DataFrame({c: (work[c] < 0) | (work[c] > 10) for c in observed_cols})
-    qc_counts["n_invalid_esspri_component_values"] = int(invalid.sum().sum())
-    if qc_counts["n_invalid_esspri_component_values"]:
-        bad = work.loc[invalid.any(axis=1), ["patient_id", "row_date_original", *observed_cols]].head(25).to_dict("records")
-        qc_counts["invalid_esspri_component_examples"] = bad
-        raise ValueError(f"ESSPRI observed component values outside range 0-10: {qc_counts['n_invalid_esspri_component_values']}")
 
-    work["esspri_total_observed"] = compute_esspri_from_components(*(work[c] for c in observed_cols))
+def build_hierarchical_component(observed: pd.Series, candidates: list[tuple[pd.Series, str]]) -> tuple[pd.Series, pd.Series]:
+    value = pd.to_numeric(observed, errors="coerce").copy()
+    source = pd.Series("missing", index=observed.index, dtype="string")
+    source.loc[value.notna()] = "observed_esspri"
+    for candidate, label in candidates:
+        candidate = pd.to_numeric(candidate, errors="coerce")
+        use = value.isna() & candidate.notna()
+        value.loc[use] = candidate.loc[use]
+        source.loc[use] = label
+    assert ~((value.notna()) & source.eq("missing")).any()
+    assert ~((value.isna()) & source.ne("missing")).any()
+    return value, source
 
-    profad_fatigue = pd.DataFrame({c: numeric_optional(work, c) for c in FATIGUE_PROFAD_ITEMS})
+
+def derive_esspri_proxies_from_collapsed_visit(work: pd.DataFrame, qc_counts: dict[str, Any]) -> pd.DataFrame:
+    work["esspri_total_observed"] = compute_esspri_from_components(work["esspri_dryness_observed"], work["esspri_fatigue_observed"], work["esspri_pain_observed"])
+    profad_fatigue = work[[f"raw_{c.split('__')[-1]}" for c in FATIGUE_PROFAD_ITEMS]]
     work["n_available_profad_fatigue"] = profad_fatigue.notna().sum(axis=1)
     work["fatigue_proxy_f1_profad_raw"] = mean_when(profad_fatigue, work["n_available_profad_fatigue"].eq(4))
     work["fatigue_proxy_f1_profad_relaxed_raw"] = mean_when(profad_fatigue, work["n_available_profad_fatigue"].ge(3))
     work["fatigue_proxy_f1_profad"] = work["fatigue_proxy_f1_profad_raw"] * 10 / 7
     work["fatigue_proxy_f1_profad_relaxed"] = work["fatigue_proxy_f1_profad_relaxed_raw"] * 10 / 7
-    work["fatigue_proxy_f2_mdafs_severity_raw"] = numeric_optional(work, "multidimensional_assessment_of_fatigue_scale__fat_q2")
-    work["fatigue_proxy_f2_mdafs_severity"] = (work["fatigue_proxy_f2_mdafs_severity_raw"] - 1) * 10 / 9
-    work["fatigue_proxy_f2_mdafs_direct"] = work["fatigue_proxy_f2_mdafs_severity_raw"]
-    work["fatigue_proxy_f3_mdafs_degree_raw"] = numeric_optional(work, "multidimensional_assessment_of_fatigue_scale__fat_q1")
-    work["fatigue_proxy_f3_mdafs_degree"] = (work["fatigue_proxy_f3_mdafs_degree_raw"] - 1) * 10 / 9
-    work["fatigue_proxy_f3_mdafs_direct"] = work["fatigue_proxy_f3_mdafs_degree_raw"]
-    ans1, ans2 = (numeric_optional(work, c) for c in FATIGUE_ANS_CANDIDATES)
-    conflict = ans1.notna() & ans2.notna() & ans1.ne(ans2)
-    qc_counts["n_fatigue_ans_conflicts"] = int(conflict.sum())
+    work["fatigue_proxy_f2_mdafs_severity_raw"] = work["raw_mdafs_fat_q2"]
+    work["fatigue_proxy_f2_mdafs_severity"] = (work["raw_mdafs_fat_q2"] - 1) * 10 / 9
+    work["fatigue_proxy_f2_mdafs_direct"] = work["raw_mdafs_fat_q2"]
+    work["fatigue_proxy_f3_mdafs_degree_raw"] = work["raw_mdafs_fat_q1"]
+    work["fatigue_proxy_f3_mdafs_degree"] = (work["raw_mdafs_fat_q1"] - 1) * 10 / 9
+    work["fatigue_proxy_f3_mdafs_direct"] = work["raw_mdafs_fat_q1"]
+    ans1, ans2 = work["raw_ans_fatigue_1"], work["raw_ans_fatigue_2"]
+    qc_counts["n_fatigue_ans_conflicts"] = int((ans1.notna() & ans2.notna() & ans1.ne(ans2)).sum())
     work["fatigue_proxy_f4_ans"] = ans1.combine_first(ans2)
-
-    work["pain_proxy_p1_limb_raw"] = numeric_optional(work, "profile_of_fatigue_and_discomfort__profad_limb_discomfort")
+    work["pain_proxy_p1_limb_raw"] = work["raw_profad_limb_discomfort"]
     work["pain_proxy_p1_limb"] = work["pain_proxy_p1_limb_raw"] * 10 / 7
-    work["pain_proxy_p2_finger_wrist_raw"] = numeric_optional(work, "profile_of_fatigue_and_discomfort__profad_finger_wrist_discomfort")
+    work["pain_proxy_p2_finger_wrist_raw"] = work["raw_profad_finger_wrist_discomfort"]
     work["pain_proxy_p2_finger_wrist"] = work["pain_proxy_p2_finger_wrist_raw"] * 10 / 7
     work["pain_proxy_p12_composite"] = pd.concat([work["pain_proxy_p1_limb"], work["pain_proxy_p2_finger_wrist"]], axis=1).mean(axis=1).where(work[["pain_proxy_p1_limb", "pain_proxy_p2_finger_wrist"]].notna().all(axis=1), np.nan)
     work["pain_strategy_hierarchy"] = work["pain_proxy_p1_limb"].combine_first(work["pain_proxy_p2_finger_wrist"])
     work["pain_strategy_composite"] = pd.concat([work["pain_proxy_p1_limb"], work["pain_proxy_p2_finger_wrist"]], axis=1).mean(axis=1)
-
-    d1 = pd.DataFrame({c: numeric_optional(work, c) for c in DRYNESS_D1_ITEMS})
+    d1 = work[[f"raw_{c.split('__')[-1]}" for c in DRYNESS_D1_ITEMS]]
     work["dryness_proxy_d1_n_available"] = d1.notna().sum(axis=1)
     work["dryness_proxy_d1_eye_mouth"] = mean_when(d1, work["dryness_proxy_d1_n_available"].eq(2))
     work["dryness_proxy_d1_eye_mouth_relaxed"] = mean_when(d1, work["dryness_proxy_d1_n_available"].ge(1))
-    d2_core = pd.DataFrame({c: numeric_optional(work, c) for c in DRYNESS_D2_CORE_ITEMS})
-    core_ok = d2_core.notna().sum(axis=1).ge(3) & d2_core[DRYNESS_D1_ITEMS].notna().any(axis=1)
+    d2_core = work[[f"raw_{c.split('__')[-1]}" for c in DRYNESS_D2_CORE_ITEMS]]
+    core_ok = d2_core.notna().sum(axis=1).ge(3) & d2_core[[f"raw_{c.split('__')[-1]}" for c in DRYNESS_D1_ITEMS]].notna().any(axis=1)
     work["dryness_proxy_d2_core"] = mean_when(d2_core, core_ok)
-    vaginal = numeric_optional(work, "esspri_questionnaire__vaginal_dryness")
-    vaginal_applicable = ~work.get(DRYNESS_D2_VAGINAL_NA, pd.Series(np.nan, index=work.index)).map(is_not_applicable)
-    vaginal_eval = vaginal.where(vaginal_applicable)
-    d2_ext = d2_core.assign(esspri_questionnaire__vaginal_dryness=vaginal_eval)
+    vaginal_applicable = ~work["raw_vaginal_dryness_na"].map(is_not_applicable)
+    vaginal_eval = work["raw_vaginal_dryness"].where(vaginal_applicable)
+    d2_ext = d2_core.assign(raw_vaginal_dryness=vaginal_eval)
     work["dryness_proxy_d2_n_available"] = d2_ext.notna().sum(axis=1)
     work["dryness_proxy_d2_vaginal_included"] = vaginal_eval.notna()
     work["dryness_proxy_d2_extended"] = mean_when(d2_ext, core_ok)
-    d3 = pd.DataFrame({c: numeric_optional(work, c) for c in DRYNESS_D3_PROFAD_ITEMS})
+    d3 = work[[f"raw_{c.split('__')[-1]}" for c in DRYNESS_D3_PROFAD_ITEMS]]
     work["dryness_proxy_d3_n_available"] = d3.notna().sum(axis=1)
-    d3_has_ocular = d3[DRYNESS_D3_OCULAR_ITEMS].notna().any(axis=1)
-    d3_has_oral = d3[DRYNESS_D3_ORAL_AIRWAY_ITEMS].notna().any(axis=1)
+    d3_has_ocular = d3[[f"raw_{c.split('__')[-1]}" for c in DRYNESS_D3_OCULAR_ITEMS]].notna().any(axis=1)
+    d3_has_oral = d3[[f"raw_{c.split('__')[-1]}" for c in DRYNESS_D3_ORAL_AIRWAY_ITEMS]].notna().any(axis=1)
     work["dryness_proxy_d3_profad_raw"] = mean_when(d3, work["dryness_proxy_d3_n_available"].ge(4) & d3_has_ocular & d3_has_oral)
     work["dryness_proxy_d3_profad_relaxed_raw"] = mean_when(d3, work["dryness_proxy_d3_n_available"].ge(3) & d3_has_ocular & d3_has_oral)
     work["dryness_proxy_d3_profad"] = work["dryness_proxy_d3_profad_raw"] * 10 / 7
     work["dryness_proxy_d3_profad_relaxed"] = work["dryness_proxy_d3_profad_relaxed_raw"] * 10 / 7
-
-    def hierarchy(observed: pd.Series, candidates: list[tuple[str, str]]) -> tuple[pd.Series, pd.Series]:
-        value = pd.to_numeric(observed, errors="coerce").astype("float64")
-        source = pd.Series("missing", index=work.index, dtype="object")
-        source.loc[value.notna()] = "observed_esspri"
-        for col, label in candidates:
-            candidate = pd.to_numeric(work[col], errors="coerce").astype("float64")
-            use = value.isna() & candidate.notna()
-            value.loc[use] = candidate.loc[use]
-            source.loc[use] = label
-        return value, source
-    work["fatigue_proxy_hierarchical"], work["fatigue_proxy_hierarchical_source"] = hierarchy(work["esspri_fatigue_observed"], [("fatigue_proxy_f1_profad", "proxy_f1_profad"), ("fatigue_proxy_f2_mdafs_severity", "proxy_f2_mdafs_severity"), ("fatigue_proxy_f3_mdafs_degree", "proxy_f3_mdafs_degree"), ("fatigue_proxy_f4_ans", "proxy_f4_ans")])
-    work["fatigue_proxy_hierarchical_relaxed"], work["fatigue_proxy_hierarchical_relaxed_source"] = hierarchy(work["esspri_fatigue_observed"], [("fatigue_proxy_f1_profad_relaxed", "proxy_f1_profad"), ("fatigue_proxy_f2_mdafs_severity", "proxy_f2_mdafs_severity"), ("fatigue_proxy_f3_mdafs_degree", "proxy_f3_mdafs_degree"), ("fatigue_proxy_f4_ans", "proxy_f4_ans")])
-    work["pain_proxy_hierarchical"], work["pain_proxy_hierarchical_source"] = hierarchy(work["esspri_pain_observed"], [("pain_proxy_p1_limb", "proxy_p1_limb"), ("pain_proxy_p2_finger_wrist", "proxy_p2_finger_wrist")])
-    work["dryness_proxy_hierarchical"], work["dryness_proxy_hierarchical_source"] = hierarchy(work["esspri_dryness_observed"], [("dryness_proxy_d1_eye_mouth", "proxy_d1_eye_mouth"), ("dryness_proxy_d2_core", "proxy_d2_core"), ("dryness_proxy_d3_profad", "proxy_d3_profad")])
-    work["dryness_proxy_hierarchical_relaxed"], work["dryness_proxy_hierarchical_relaxed_source"] = hierarchy(work["esspri_dryness_observed"], [("dryness_proxy_d1_eye_mouth_relaxed", "proxy_d1_eye_mouth"), ("dryness_proxy_d2_core", "proxy_d2_core"), ("dryness_proxy_d3_profad_relaxed", "proxy_d3_profad")])
+    work["fatigue_proxy_hierarchical"], work["fatigue_proxy_hierarchical_source"] = build_hierarchical_component(work["esspri_fatigue_observed"], [(work["fatigue_proxy_f1_profad"], "proxy_f1_profad"), (work["fatigue_proxy_f2_mdafs_severity"], "proxy_f2_mdafs_severity"), (work["fatigue_proxy_f3_mdafs_degree"], "proxy_f3_mdafs_degree"), (work["fatigue_proxy_f4_ans"], "proxy_f4_ans")])
+    work["fatigue_proxy_hierarchical_relaxed"], work["fatigue_proxy_hierarchical_relaxed_source"] = build_hierarchical_component(work["esspri_fatigue_observed"], [(work["fatigue_proxy_f1_profad_relaxed"], "proxy_f1_profad"), (work["fatigue_proxy_f2_mdafs_severity"], "proxy_f2_mdafs_severity"), (work["fatigue_proxy_f3_mdafs_degree"], "proxy_f3_mdafs_degree"), (work["fatigue_proxy_f4_ans"], "proxy_f4_ans")])
+    work["pain_proxy_hierarchical"], work["pain_proxy_hierarchical_source"] = build_hierarchical_component(work["esspri_pain_observed"], [(work["pain_proxy_p1_limb"], "proxy_p1_limb"), (work["pain_proxy_p2_finger_wrist"], "proxy_p2_finger_wrist")])
+    work["dryness_proxy_hierarchical"], work["dryness_proxy_hierarchical_source"] = build_hierarchical_component(work["esspri_dryness_observed"], [(work["dryness_proxy_d1_eye_mouth"], "proxy_d1_eye_mouth"), (work["dryness_proxy_d2_core"], "proxy_d2_core"), (work["dryness_proxy_d3_profad"], "proxy_d3_profad")])
+    work["dryness_proxy_hierarchical_relaxed"], work["dryness_proxy_hierarchical_relaxed_source"] = build_hierarchical_component(work["esspri_dryness_observed"], [(work["dryness_proxy_d1_eye_mouth_relaxed"], "proxy_d1_eye_mouth"), (work["dryness_proxy_d2_core"], "proxy_d2_core"), (work["dryness_proxy_d3_profad_relaxed"], "proxy_d3_profad")])
+    for col in [c for c in work.columns if c.startswith(("fatigue_proxy_", "pain_proxy_", "dryness_proxy_")) and not c.endswith("_source")]:
+        vals = pd.to_numeric(work[col], errors="coerce").dropna()
+        if len(vals) and not vals.between(0, 10).all() and not col.endswith(("_raw", "_n_available", "_included", "_direct")):
+            raise ValueError(f"Proxy column outside 0-10 after derivation: {col}")
+    work = add_esspri_scenarios(work, relaxed=False)
+    work = add_esspri_scenarios(work, relaxed=True)
     return work
 
 
 def add_esspri_scenarios(work: pd.DataFrame, relaxed: bool = False) -> pd.DataFrame:
+    """Build best-available ESSPRI components for recovery scenarios S1-S4."""
     suffix = "_relaxed" if relaxed else ""
     dry = "dryness_proxy_hierarchical_relaxed" if relaxed else "dryness_proxy_hierarchical"
     fat = "fatigue_proxy_hierarchical_relaxed" if relaxed else "fatigue_proxy_hierarchical"
     pain = "pain_proxy_hierarchical"
     for comp, col in [("dryness", dry), ("fatigue", fat), ("pain", pain)]:
         work[f"esspri_{comp}_best_available{suffix}"] = work[col]
-    best_cols = [f"esspri_dryness_best_available{suffix}", f"esspri_fatigue_best_available{suffix}", f"esspri_pain_best_available{suffix}"]
+    best_cols = [
+        f"esspri_dryness_best_available{suffix}",
+        f"esspri_fatigue_best_available{suffix}",
+        f"esspri_pain_best_available{suffix}",
+    ]
     obs_cols = ["esspri_dryness_observed", "esspri_fatigue_observed", "esspri_pain_observed"]
     work[f"esspri_n_observed_components{suffix}"] = work[obs_cols].notna().sum(axis=1)
     work[f"esspri_n_available_components{suffix}"] = work[best_cols].notna().sum(axis=1)
     work[f"esspri_n_proxy_components{suffix}"] = work[f"esspri_n_available_components{suffix}"] - work[f"esspri_n_observed_components{suffix}"]
     work[f"esspri_total_proxy{suffix}"] = compute_esspri_from_components(*(work[c] for c in best_cols))
-    scen = np.select([work[f"esspri_n_available_components{suffix}"].lt(3), work[f"esspri_n_observed_components{suffix}"].eq(3), work[f"esspri_n_proxy_components{suffix}"].eq(1), work[f"esspri_n_proxy_components{suffix}"].eq(2), work[f"esspri_n_proxy_components{suffix}"].eq(3)], ["unavailable", "observed_complete", "one_proxy", "two_proxies", "three_proxies"], default="unavailable")
-    work[f"esspri_derivation_scenario{suffix}"] = scen
+    scen = np.select(
+        [
+            work[f"esspri_n_available_components{suffix}"].lt(3),
+            work[f"esspri_n_observed_components{suffix}"].eq(3),
+            work[f"esspri_n_proxy_components{suffix}"].eq(1),
+            work[f"esspri_n_proxy_components{suffix}"].eq(2),
+            work[f"esspri_n_proxy_components{suffix}"].eq(3),
+        ],
+        ["unavailable", "observed_complete", "one_proxy", "two_proxies", "three_proxies"],
+        default="unavailable",
+    )
+    work[f"esspri_derivation_scenario{suffix}"] = pd.Series(scen, index=work.index, dtype="string")
     return work
 
 def classify_pop(essdai_total: object, esspri_total: object) -> str:
@@ -394,16 +457,31 @@ def normalize_visit_level_dtypes(vis: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def build_longitudinal_pop_dataset(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int], list[str]]:
+
+def _detect_duplicate_conflicts(work: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    rows = []
+    dup = work[work.duplicated(["patient_id", "visit_date_clean"], keep=False)]
+    for (pid, vdate), g in dup.groupby(["patient_id", "visit_date_clean"], dropna=False):
+        for col in cols:
+            if col not in g.columns:
+                continue
+            n = count_distinct_nonmissing(g[col])
+            if n > 1:
+                vals = pd.to_numeric(g[col], errors="coerce").dropna()
+                distinct = sorted(vals.unique().tolist()) if len(vals) else sorted(g[col].dropna().astype(str).unique().tolist())
+                rows.append({"patient_id": pid, "visit_date_clean": vdate, "variable_name": col, "n_distinct_values": n, "distinct_values": " | ".join(map(str, distinct)), "selected_value": first_nonmissing(g[col])})
+    return pd.DataFrame(rows, columns=["patient_id", "visit_date_clean", "variable_name", "n_distinct_values", "distinct_values", "selected_value"])
+
+
+def build_longitudinal_pop_dataset(df: pd.DataFrame, codebook: pd.DataFrame | None = None) -> tuple[pd.DataFrame, dict[str, Any], list[str]]:
     work = df.copy()
-    qc_counts: dict[str, int] = {"n_input_rows": int(len(work))}
+    qc_counts: dict[str, Any] = {"n_input_rows": int(len(work))}
     warnings: list[str] = []
 
     work["patient_id"] = work[PATIENT_ID_COL].astype("string").str.strip()
     valid_patient_id = ~work["patient_id"].map(is_missing)
     qc_counts["n_rows_with_valid_patient_id"] = int(valid_patient_id.sum())
     qc_counts["n_rows_excluded_missing_patient_id"] = int((~valid_patient_id).sum())
-
     work["row_date_original"] = work[VISIT_DATE_COL]
     parsed_lists = work[VISIT_DATE_COL].map(parse_visit_dates)
     work["row_date_min"] = parsed_lists.map(lambda x: min(x) if x else pd.NaT)
@@ -412,86 +490,57 @@ def build_longitudinal_pop_dataset(df: pd.DataFrame) -> tuple[pd.DataFrame, dict
     valid_visit_date = work["visit_date_clean"].notna()
     qc_counts["n_rows_with_valid_visit_date"] = int(valid_visit_date.sum())
     qc_counts["n_rows_excluded_missing_visit_date"] = int((~valid_visit_date).sum())
-
     work["essdai_total"] = coalesce_essdai(work)
-    work = populate_esspri_proxies(work, qc_counts)
+    work = prepare_raw_esspri_proxy_inputs(work, qc_counts)
 
-    out_of_range_essdai = int(((work["essdai_total"] < 0) | (work["essdai_total"] > 123)).sum())
-    qc_counts["n_invalid_essdai_values"] = out_of_range_essdai
-    if out_of_range_essdai:
-        raise ValueError(f"ESSDAI values outside plausible range 0-123: {out_of_range_essdai}")
+    protocol_col = select_first_available(work, PROTOCOL_CANDIDATES, codebook)
+    qc_counts["selected_protocol_column"] = protocol_col
+    if protocol_col is None:
+        warnings.append("Variable not found: protocol; protocol-stratified proxy validations omitted.")
+    selected_demo = {
+        "age_raw": select_first_available(work, AGE_CANDIDATES, codebook),
+        "sex_raw": select_first_available(work, SEX_CANDIDATES, codebook),
+        "race_raw": select_first_available(work, RACE_CANDIDATES, codebook),
+    }
+    for k, v in selected_demo.items():
+        qc_counts[f"selected_{k}_column"] = v
+        if v is None:
+            warnings.append(f"Variable not found before collapse: {k.replace('_raw','')}")
 
     work = work[valid_patient_id & valid_visit_date].copy()
     qc_counts["n_unique_patients"] = int(work["patient_id"].nunique())
     qc_counts["n_patient_visit_rows_before_collapse"] = int(len(work))
-    qc_counts["n_duplicate_patient_event_dates"] = int(work.duplicated(["patient_id", "visit_date_clean"]).sum())
-    qc_counts["n_duplicate_patient_visit_rows_before_collapse"] = qc_counts["n_duplicate_patient_event_dates"]
+    qc_counts["n_duplicate_patient_visit_rows"] = int(work.duplicated(["patient_id", "visit_date_clean"]).sum())
+    qc_counts["n_duplicate_patient_event_dates"] = qc_counts["n_duplicate_patient_visit_rows"]
+    raw_cols = ["essdai_total", "esspri_dryness_observed", "esspri_fatigue_observed", "esspri_pain_observed"] + [c for c in work.columns if c.startswith("raw_")]
+    conflict_df = _detect_duplicate_conflicts(work, raw_cols)
+    qc_counts["n_patient_visits_with_conflicts"] = int(conflict_df[["patient_id", "visit_date_clean"]].drop_duplicates().shape[0]) if not conflict_df.empty else 0
+    qc_counts["n_conflicting_variable_values"] = int(len(conflict_df))
+    BLOCKA_QC_DIR.mkdir(parents=True, exist_ok=True)
+    conflict_df.to_csv(BLOCKA_QC_DIR / "01_esspri_proxy_duplicate_conflicts.csv", index=False)
+    pd.DataFrame(qc_counts.get("invalid_value_rows", [])).to_csv(BLOCKA_QC_DIR / "01_esspri_proxy_invalid_values.csv", index=False)
 
-    work = (
-        work.groupby(["patient_id", "visit_date_clean"], as_index=False)
-        .agg(
-            row_date_original=("row_date_original", lambda s: " | ".join(pd.Series(s).dropna().astype(str).unique())),
-            row_date_min=("row_date_min", "min"),
-            row_date_max=("row_date_max", "max"),
-            essdai_total=("essdai_total", first_nonmissing),
-            esspri_dryness_observed=("esspri_dryness_observed", first_nonmissing),
-            esspri_fatigue_observed=("esspri_fatigue_observed", first_nonmissing),
-            esspri_pain_observed=("esspri_pain_observed", first_nonmissing),
-            esspri_total_observed=("esspri_total_observed", first_nonmissing),
-            n_available_profad_fatigue=("n_available_profad_fatigue", first_nonmissing),
-            fatigue_proxy_f1_profad_raw=("fatigue_proxy_f1_profad_raw", first_nonmissing),
-            fatigue_proxy_f1_profad_relaxed_raw=("fatigue_proxy_f1_profad_relaxed_raw", first_nonmissing),
-            fatigue_proxy_f1_profad=("fatigue_proxy_f1_profad", first_nonmissing),
-            fatigue_proxy_f1_profad_relaxed=("fatigue_proxy_f1_profad_relaxed", first_nonmissing),
-            fatigue_proxy_f2_mdafs_severity_raw=("fatigue_proxy_f2_mdafs_severity_raw", first_nonmissing),
-            fatigue_proxy_f2_mdafs_severity=("fatigue_proxy_f2_mdafs_severity", first_nonmissing),
-            fatigue_proxy_f2_mdafs_direct=("fatigue_proxy_f2_mdafs_direct", first_nonmissing),
-            fatigue_proxy_f3_mdafs_degree_raw=("fatigue_proxy_f3_mdafs_degree_raw", first_nonmissing),
-            fatigue_proxy_f3_mdafs_degree=("fatigue_proxy_f3_mdafs_degree", first_nonmissing),
-            fatigue_proxy_f3_mdafs_direct=("fatigue_proxy_f3_mdafs_direct", first_nonmissing),
-            fatigue_proxy_f4_ans=("fatigue_proxy_f4_ans", first_nonmissing),
-            pain_proxy_p1_limb_raw=("pain_proxy_p1_limb_raw", first_nonmissing),
-            pain_proxy_p1_limb=("pain_proxy_p1_limb", first_nonmissing),
-            pain_proxy_p2_finger_wrist_raw=("pain_proxy_p2_finger_wrist_raw", first_nonmissing),
-            pain_proxy_p2_finger_wrist=("pain_proxy_p2_finger_wrist", first_nonmissing),
-            pain_proxy_p12_composite=("pain_proxy_p12_composite", first_nonmissing),
-            pain_strategy_hierarchy=("pain_strategy_hierarchy", first_nonmissing),
-            pain_strategy_composite=("pain_strategy_composite", first_nonmissing),
-            dryness_proxy_d1_n_available=("dryness_proxy_d1_n_available", first_nonmissing),
-            dryness_proxy_d1_eye_mouth=("dryness_proxy_d1_eye_mouth", first_nonmissing),
-            dryness_proxy_d1_eye_mouth_relaxed=("dryness_proxy_d1_eye_mouth_relaxed", first_nonmissing),
-            dryness_proxy_d2_core=("dryness_proxy_d2_core", first_nonmissing),
-            dryness_proxy_d2_n_available=("dryness_proxy_d2_n_available", first_nonmissing),
-            dryness_proxy_d2_vaginal_included=("dryness_proxy_d2_vaginal_included", first_nonmissing),
-            dryness_proxy_d2_extended=("dryness_proxy_d2_extended", first_nonmissing),
-            dryness_proxy_d3_n_available=("dryness_proxy_d3_n_available", first_nonmissing),
-            dryness_proxy_d3_profad_raw=("dryness_proxy_d3_profad_raw", first_nonmissing),
-            dryness_proxy_d3_profad_relaxed_raw=("dryness_proxy_d3_profad_relaxed_raw", first_nonmissing),
-            dryness_proxy_d3_profad=("dryness_proxy_d3_profad", first_nonmissing),
-            dryness_proxy_d3_profad_relaxed=("dryness_proxy_d3_profad_relaxed", first_nonmissing),
-            fatigue_proxy_hierarchical=("fatigue_proxy_hierarchical", first_nonmissing),
-            fatigue_proxy_hierarchical_source=("fatigue_proxy_hierarchical_source", first_nonmissing),
-            fatigue_proxy_hierarchical_relaxed=("fatigue_proxy_hierarchical_relaxed", first_nonmissing),
-            fatigue_proxy_hierarchical_relaxed_source=("fatigue_proxy_hierarchical_relaxed_source", first_nonmissing),
-            pain_proxy_hierarchical=("pain_proxy_hierarchical", first_nonmissing),
-            pain_proxy_hierarchical_source=("pain_proxy_hierarchical_source", first_nonmissing),
-            dryness_proxy_hierarchical=("dryness_proxy_hierarchical", first_nonmissing),
-            dryness_proxy_hierarchical_source=("dryness_proxy_hierarchical_source", first_nonmissing),
-            dryness_proxy_hierarchical_relaxed=("dryness_proxy_hierarchical_relaxed", first_nonmissing),
-            dryness_proxy_hierarchical_relaxed_source=("dryness_proxy_hierarchical_relaxed_source", first_nonmissing),
-        )
-        .sort_values(["patient_id", "visit_date_clean"])
-        .reset_index(drop=True)
-    )
-    work["esspri_total_observed"] = compute_esspri_from_components(work["esspri_dryness_observed"], work["esspri_fatigue_observed"], work["esspri_pain_observed"])
-    work = add_esspri_scenarios(work, relaxed=False)
-    work = add_esspri_scenarios(work, relaxed=True)
+    agg = {
+        "row_date_original": ("row_date_original", lambda s: " | ".join(pd.Series(s).dropna().astype(str).unique())),
+        "row_date_min": ("row_date_min", "min"), "row_date_max": ("row_date_max", "max"),
+        "essdai_total": ("essdai_total", first_nonmissing),
+    }
+    for c in raw_cols:
+        if c != "essdai_total" and c in work.columns:
+            agg[c] = (c, first_nonmissing)
+    if protocol_col:
+        agg["protocol"] = (protocol_col, first_nonmissing)
+    for std, src in selected_demo.items():
+        if src:
+            agg[std.replace("_raw", "")] = (src, first_nonmissing)
+    work = work.groupby(["patient_id", "visit_date_clean"], as_index=False).agg(**agg).sort_values(["patient_id", "visit_date_clean"]).reset_index(drop=True)
+    work = derive_esspri_proxies_from_collapsed_visit(work, qc_counts)
+
     work["esspri_dryness"] = work["esspri_dryness_observed"]
     work["esspri_fatigue"] = work["esspri_fatigue_observed"]
     work["esspri_pain"] = work["esspri_pain_observed"]
     work["esspri_total"] = work["esspri_total_observed"]
     work["esspri_total_s0_observed"] = work["esspri_total_observed"]
-    work["esspri_total_proxy"] = work["esspri_total_proxy"]
     for comp, src_col in [("dryness", "dryness_proxy_hierarchical_source"), ("fatigue", "fatigue_proxy_hierarchical_source"), ("pain", "pain_proxy_hierarchical_source")]:
         work[f"esspri_{comp}_final_source"] = work[src_col]
     mask_s1 = work["esspri_n_observed_components"].ge(2) & work["esspri_n_available_components"].eq(3)
@@ -500,36 +549,27 @@ def build_longitudinal_pop_dataset(df: pd.DataFrame) -> tuple[pd.DataFrame, dict
     work["esspri_total_s1_one_proxy"] = work["esspri_total_proxy"].where(mask_s1)
     work["esspri_total_s2_up_to_two_proxies"] = work["esspri_total_proxy"].where(mask_s2)
     work["esspri_total_s3_all_available"] = work["esspri_total_proxy"].where(mask_s3)
-    work["esspri_total_s3_all_available_label"] = np.where(work["esspri_total_s3_all_available"].notna(), "exploratory_only", np.nan)
+    work["esspri_total_s3_all_available_label"] = pd.Series(pd.NA, index=work.index, dtype="string")
+    work.loc[work["esspri_total_s3_all_available"].notna(), "esspri_total_s3_all_available_label"] = "exploratory_only"
     mask_s1r = work["esspri_n_observed_components_relaxed"].ge(2) & work["esspri_n_available_components_relaxed"].eq(3)
     mask_s2r = work["esspri_n_observed_components_relaxed"].ge(1) & work["esspri_n_available_components_relaxed"].eq(3)
     work["esspri_total_s1_one_proxy_relaxed"] = work["esspri_total_proxy_relaxed"].where(mask_s1r)
     work["esspri_total_s2_up_to_two_proxies_relaxed"] = work["esspri_total_proxy_relaxed"].where(mask_s2r)
-    work["pop_status_s1_one_proxy"] = [classify_pop(e, p) for e, p in zip(work["essdai_total"], work["esspri_total_s1_one_proxy"])]
-    work["pop_status_s2_up_to_two_proxies"] = [classify_pop(e, p) for e, p in zip(work["essdai_total"], work["esspri_total_s2_up_to_two_proxies"])]
-    work["pop_status_s3_all_available"] = [classify_pop(e, p) for e, p in zip(work["essdai_total"], work["esspri_total_s3_all_available"])]
-    work["pop_status_s1_one_proxy_relaxed"] = [classify_pop(e, p) for e, p in zip(work["essdai_total"], work["esspri_total_s1_one_proxy_relaxed"])]
-    work["pop_status_s2_up_to_two_proxies_relaxed"] = [classify_pop(e, p) for e, p in zip(work["essdai_total"], work["esspri_total_s2_up_to_two_proxies_relaxed"])]
-    for name, comp, proxy in [
-        ("fatigue_f1", "fatigue", "fatigue_proxy_f1_profad"), ("fatigue_f2", "fatigue", "fatigue_proxy_f2_mdafs_severity"), ("fatigue_f3", "fatigue", "fatigue_proxy_f3_mdafs_degree"), ("fatigue_f4", "fatigue", "fatigue_proxy_f4_ans"),
-        ("pain_p1", "pain", "pain_proxy_p1_limb"), ("pain_p2", "pain", "pain_proxy_p2_finger_wrist"), ("pain_p12", "pain", "pain_proxy_p12_composite"),
-        ("dryness_d1", "dryness", "dryness_proxy_d1_eye_mouth"), ("dryness_d2_core", "dryness", "dryness_proxy_d2_core"), ("dryness_d2_extended", "dryness", "dryness_proxy_d2_extended"), ("dryness_d3", "dryness", "dryness_proxy_d3_profad"),
-    ]:
+    for label in ["s1_one_proxy", "s2_up_to_two_proxies", "s3_all_available", "s1_one_proxy_relaxed", "s2_up_to_two_proxies_relaxed"]:
+        total_col = f"esspri_total_{label}"
+        work[f"pop_status_{label}"] = [classify_pop(e, p) for e, p in zip(work["essdai_total"], work[total_col])]
+
+    for name, comp, proxy in PROXY_CANDIDATES_S5:
         d = pd.to_numeric(work["esspri_dryness_observed"], errors="coerce").astype("float64")
         f = pd.to_numeric(work["esspri_fatigue_observed"], errors="coerce").astype("float64")
         p = pd.to_numeric(work["esspri_pain_observed"], errors="coerce").astype("float64")
         proxy_value = pd.to_numeric(work[proxy], errors="coerce").astype("float64")
-        if comp == "dryness":
-            d = d.combine_first(proxy_value)
-        elif comp == "fatigue":
-            f = f.combine_first(proxy_value)
-        else:
-            p = p.combine_first(proxy_value)
+        if comp == "dryness": d = proxy_value
+        elif comp == "fatigue": f = proxy_value
+        else: p = proxy_value
         work[f"esspri_total_replace_{name}"] = compute_esspri_from_components(d, f, p)
-    out_of_range_esspri = int(((work["esspri_total_observed"] < 0) | (work["esspri_total_observed"] > 10)).sum())
-    if out_of_range_esspri:
-        raise ValueError(f"ESSPRI observed total values outside range 0-10: {out_of_range_esspri}")
-
+    if int(((work["esspri_total_observed"] < 0) | (work["esspri_total_observed"] > 10)).sum()):
+        raise ValueError("ESSPRI observed total values outside range 0-10")
     work["pop_status"] = [classify_pop(e, p) for e, p in zip(work["essdai_total"], work["esspri_total_observed"])]
     work["pop_status_display"] = work["pop_status"].map(DISPLAY)
     work["baseline_date"] = work.groupby("patient_id")["visit_date_clean"].transform("min")
@@ -538,9 +578,7 @@ def build_longitudinal_pop_dataset(df: pd.DataFrame) -> tuple[pd.DataFrame, dict
     work["time_since_baseline_years"] = work["time_since_baseline_days"] / 365.25
     work["time_years"] = work["time_since_baseline_years"]
     work["visit_number"] = work.groupby("patient_id").cumcount()
-    baseline_status = work.loc[work["visit_number"].eq(0), ["patient_id", "pop_status", "pop_status_display"]].rename(
-        columns={"pop_status": "baseline_pop_status", "pop_status_display": "baseline_pop_status_display"}
-    )
+    baseline_status = work.loc[work["visit_number"].eq(0), ["patient_id", "pop_status", "pop_status_display"]].rename(columns={"pop_status": "baseline_pop_status", "pop_status_display": "baseline_pop_status_display"})
     work = work.merge(baseline_status, on="patient_id", how="left")
     qc_counts["n_patient_visit_rows_after_collapse"] = int(len(work))
     qc_counts["n_rows_missing_visit_date"] = int(work["event_date"].isna().sum())
@@ -550,7 +588,6 @@ def build_longitudinal_pop_dataset(df: pd.DataFrame) -> tuple[pd.DataFrame, dict
     if qc_counts["n_rows_negative_time"]:
         warnings.append(f"Excluded {qc_counts['n_rows_negative_time']} rows with negative time_years.")
         work = work[~(work["time_years"] < 0)].copy()
-
     return normalize_visit_level_dtypes(work), qc_counts, warnings
 
 def build_baseline_dataset(longitudinal: pd.DataFrame) -> pd.DataFrame:
@@ -876,80 +913,196 @@ def build_by_visit_qc(longitudinal: pd.DataFrame, outside: int, warnings: list[s
 
 
 
+
+def _safe_corr(a: pd.Series, b: pd.Series, method: str) -> float:
+    pair = pd.concat([a, b], axis=1).dropna()
+    if len(pair) < 3 or pair.iloc[:, 0].nunique() < 2 or pair.iloc[:, 1].nunique() < 2:
+        return np.nan
+    try:
+        return float((pearsonr if method == "pearson" else spearmanr)(pair.iloc[:, 0], pair.iloc[:, 1]).statistic)
+    except Exception:
+        return np.nan
+
+
+def compute_icc_2_1(observed: pd.Series, proxy: pd.Series) -> float:
+    data = pd.concat([pd.to_numeric(observed, errors="coerce"), pd.to_numeric(proxy, errors="coerce")], axis=1).dropna().to_numpy(float)
+    n, k = data.shape if data.size else (0, 0)
+    if n < 2 or k != 2 or np.nanvar(data) == 0:
+        return np.nan
+    row_means = data.mean(axis=1, keepdims=True); col_means = data.mean(axis=0, keepdims=True); grand = data.mean()
+    ssr = k * ((row_means - grand) ** 2).sum(); ssc = n * ((col_means - grand) ** 2).sum(); sse = ((data - row_means - col_means + grand) ** 2).sum()
+    msr = ssr / (n - 1); msc = ssc / (k - 1); mse = sse / ((n - 1) * (k - 1))
+    denom = msr + (k - 1) * mse + k * (msc - mse) / n
+    return np.nan if denom == 0 else float((msr - mse) / denom)
+
+
+def continuous_metrics(data: pd.DataFrame, observed_col: str, proxy_col: str) -> dict[str, float]:
+    pair = data[[observed_col, proxy_col]].apply(pd.to_numeric, errors="coerce").dropna()
+    if pair.empty:
+        return {k: np.nan for k in ["mean_observed","mean_proxy","mae","rmse","mean_bias","median_bias","median_absolute_error","standard_deviation_difference","pearson_r","spearman_rho","icc_2_1","loa_lower","loa_upper"]}
+    diff = pair[proxy_col] - pair[observed_col]; ae = diff.abs(); sd = diff.std(ddof=1)
+    return {"mean_observed": float(pair[observed_col].mean()), "mean_proxy": float(pair[proxy_col].mean()), "mae": float(ae.mean()), "rmse": float(np.sqrt(np.mean(diff**2))), "mean_bias": float(diff.mean()), "median_bias": float(diff.median()), "median_absolute_error": float(ae.median()), "standard_deviation_difference": float(sd), "pearson_r": _safe_corr(pair[observed_col], pair[proxy_col], "pearson"), "spearman_rho": _safe_corr(pair[observed_col], pair[proxy_col], "spearman"), "icc_2_1": compute_icc_2_1(pair[observed_col], pair[proxy_col]), "loa_lower": float(diff.mean() - 1.96 * sd) if pd.notna(sd) else np.nan, "loa_upper": float(diff.mean() + 1.96 * sd) if pd.notna(sd) else np.nan}
+
+
+def cluster_bootstrap_metrics(data: pd.DataFrame, patient_col: str, metric_function: callable, n_bootstrap: int = BOOTSTRAP_REPLICATES, seed: int = RANDOM_SEED) -> dict[str, float]:
+    patients = pd.Series(data[patient_col].dropna().unique())
+    if patients.empty:
+        return {"n_valid_bootstrap_replicates": 0}
+    rng = np.random.default_rng(seed); vals: dict[str, list[float]] = {}
+    for _ in range(n_bootstrap):
+        parts = []
+        for i, pid in enumerate(rng.choice(patients, size=len(patients), replace=True)):
+            g = data[data[patient_col].eq(pid)].copy(); g[patient_col] = f"{pid}__boot{i}"; parts.append(g)
+        m = metric_function(pd.concat(parts, ignore_index=True))
+        for k, v in m.items():
+            if isinstance(v, (int, float, np.floating)) and pd.notna(v): vals.setdefault(k, []).append(float(v))
+    out = {"n_valid_bootstrap_replicates": max((len(v) for v in vals.values()), default=0)}
+    for k, v in vals.items():
+        out[f"{k}_ci_low"] = float(np.percentile(v, 2.5)); out[f"{k}_ci_high"] = float(np.percentile(v, 97.5))
+    return out
+
+
+def _subsets(df: pd.DataFrame) -> list[tuple[str, str, pd.DataFrame]]:
+    out = [("overall_all_visits", "overall", df), ("overall_baseline", "overall", df[df["visit_number"].eq(0)]), ("overall_essdai_lt5", "overall", df[pd.to_numeric(df["essdai_total"], errors="coerce").lt(5)])]
+    if "protocol" in df.columns:
+        for prot, g in df.groupby("protocol", dropna=True):
+            out.append(("protocol_all_visits", str(prot), g)); out.append(("protocol_essdai_lt5", str(prot), g[pd.to_numeric(g["essdai_total"], errors="coerce").lt(5)]))
+    return out
+
+
+def _status(data: pd.DataFrame) -> str:
+    return "insufficient_sample" if len(data) < 30 or data["patient_id"].nunique() < 20 else "ok"
+
+
 def build_proxy_validation(longitudinal: pd.DataFrame) -> pd.DataFrame:
-    """Validate candidate proxies where official ESSPRI components are also observed."""
-    candidates = [
-        ("fatigue", "F1_PROFAD_strict", "esspri_fatigue_observed", "fatigue_proxy_f1_profad"),
-        ("fatigue", "F1_PROFAD_relaxed", "esspri_fatigue_observed", "fatigue_proxy_f1_profad_relaxed"),
-        ("fatigue", "F2_MDAFS_severity", "esspri_fatigue_observed", "fatigue_proxy_f2_mdafs_severity"),
-        ("fatigue", "F2_MDAFS_direct", "esspri_fatigue_observed", "fatigue_proxy_f2_mdafs_direct"),
-        ("fatigue", "F3_MDAFS_degree", "esspri_fatigue_observed", "fatigue_proxy_f3_mdafs_degree"),
-        ("fatigue", "F3_MDAFS_direct", "esspri_fatigue_observed", "fatigue_proxy_f3_mdafs_direct"),
-        ("fatigue", "F4_ANS", "esspri_fatigue_observed", "fatigue_proxy_f4_ans"),
-        ("pain", "P1_limb", "esspri_pain_observed", "pain_proxy_p1_limb"),
-        ("pain", "P2_finger_wrist", "esspri_pain_observed", "pain_proxy_p2_finger_wrist"),
-        ("pain", "P12_composite", "esspri_pain_observed", "pain_proxy_p12_composite"),
-        ("dryness", "D1_eye_mouth", "esspri_dryness_observed", "dryness_proxy_d1_eye_mouth"),
-        ("dryness", "D1_eye_mouth_relaxed", "esspri_dryness_observed", "dryness_proxy_d1_eye_mouth_relaxed"),
-        ("dryness", "D2_core", "esspri_dryness_observed", "dryness_proxy_d2_core"),
-        ("dryness", "D2_extended", "esspri_dryness_observed", "dryness_proxy_d2_extended"),
-        ("dryness", "D3_PROFAD", "esspri_dryness_observed", "dryness_proxy_d3_profad"),
-        ("dryness", "D3_PROFAD_relaxed", "esspri_dryness_observed", "dryness_proxy_d3_profad_relaxed"),
-    ]
-    rows = []
-    for component, proxy_name, observed_col, proxy_col in candidates:
-        if observed_col not in longitudinal.columns or proxy_col not in longitudinal.columns:
-            continue
-        pair = longitudinal[[observed_col, proxy_col]].apply(pd.to_numeric, errors="coerce").dropna().astype("float64")
-        diff = pair[proxy_col] - pair[observed_col] if not pair.empty else pd.Series(dtype="float64")
-        if len(pair) > 1 and pair[observed_col].nunique(dropna=True) > 1 and pair[proxy_col].nunique(dropna=True) > 1:
-            pearson = float(np.corrcoef(pair[observed_col].to_numpy(dtype="float64"), pair[proxy_col].to_numpy(dtype="float64"))[0, 1])
-        else:
-            pearson = np.nan
-        rows.append(
-            {
-                "component": component,
-                "proxy": proxy_name,
-                "observed_column": observed_col,
-                "proxy_column": proxy_col,
-                "n_overlap_visits": int(len(pair)),
-                "mean_observed": float(pair[observed_col].mean()) if len(pair) else np.nan,
-                "mean_proxy": float(pair[proxy_col].mean()) if len(pair) else np.nan,
-                "mean_proxy_minus_observed": float(diff.mean()) if len(diff) else np.nan,
-                "median_abs_error": float(diff.abs().median()) if len(diff) else np.nan,
-                "pearson_correlation": pearson,
-                "n_threshold_5_discordant": int(((pair[observed_col] >= 5) != (pair[proxy_col] >= 5)).sum()) if len(pair) else 0,
-            }
-        )
+    candidates = [(d, n, {"fatigue":"esspri_fatigue_observed","pain":"esspri_pain_observed","dryness":"esspri_dryness_observed"}[d], p) for n,d,p in PROXY_CANDIDATES_S5]
+    rows=[]
+    for domain, cand, obs, proxy in candidates:
+        for subset, protocol, data in _subsets(longitudinal):
+            pair = data[["patient_id", obs, proxy]].dropna()
+            m = continuous_metrics(pair, obs, proxy); boot = cluster_bootstrap_metrics(pair, "patient_id", lambda x, o=obs, p=proxy: {k:v for k,v in continuous_metrics(x,o,p).items() if k in ["mae","rmse","mean_bias","pearson_r","spearman_rho","icc_2_1"]})
+            rows.append({"domain": domain, "candidate_id": cand, "observed_column": obs, "proxy_column": proxy, "subset": subset, "protocol": protocol, "n_visits": len(pair), "n_patients": pair["patient_id"].nunique(), **m, **boot, "component_threshold_5_discordant": int(((pair[obs]>=5)!=(pair[proxy]>=5)).sum()) if len(pair) else 0, "status": _status(pair)})
     return pd.DataFrame(rows)
+
+
+def build_proxy_total_validation(longitudinal: pd.DataFrame) -> pd.DataFrame:
+    rows=[]
+    for cand, domain, _proxy in PROXY_CANDIDATES_S5:
+        repl=f"esspri_total_replace_{cand}"
+        for subset, protocol, data in _subsets(longitudinal):
+            pair=data[["patient_id","esspri_total_observed",repl]].dropna()
+            m=continuous_metrics(pair,"esspri_total_observed",repl); boot=cluster_bootstrap_metrics(pair,"patient_id",lambda x,r=repl:{k:v for k,v in continuous_metrics(x,"esspri_total_observed",r).items() if k in ["mae","rmse","mean_bias","pearson_r","spearman_rho","icc_2_1"]})
+            rows.append({"domain":domain,"candidate_id":cand,"replaced_components":domain,"subset":subset,"protocol":protocol,"n_visits":len(pair),"n_patients":pair["patient_id"].nunique(),**m,**boot,"status":_status(pair)})
+    return pd.DataFrame(rows)
+
+
+def _threshold_metrics(data: pd.DataFrame, repl: str) -> dict[str, float]:
+    d=data.dropna(subset=["esspri_total_observed",repl]).copy(); y=(d["esspri_total_observed"]>=5); yp=(d[repl]>=5)
+    if d.empty: return {k:np.nan for k in ["sensitivity","specificity","ppv","npv","accuracy","balanced_accuracy","f1_score","cohen_kappa"]}
+    tn, fp, fn, tp = confusion_matrix(y, yp, labels=[False, True]).ravel()
+    div=lambda a,b: float(a/b) if b else np.nan
+    return {"TP":int(tp),"TN":int(tn),"FP":int(fp),"FN":int(fn),"sensitivity":div(tp,tp+fn),"specificity":div(tn,tn+fp),"ppv":div(tp,tp+fp),"npv":div(tn,tn+fn),"accuracy":float(accuracy_score(y,yp)),"balanced_accuracy":float(balanced_accuracy_score(y,yp)),"f1_score":float(f1_score(y,yp,zero_division=0)),"cohen_kappa":float(cohen_kappa_score(y,yp)),"esspri_total_threshold_5_discordant":int((y!=yp).sum())}
+
+
+def build_threshold_agreement(longitudinal: pd.DataFrame) -> pd.DataFrame:
+    rows=[]
+    base=longitudinal[pd.to_numeric(longitudinal["essdai_total"], errors="coerce").lt(5)]
+    for cand,domain,_ in PROXY_CANDIDATES_S5:
+        repl=f"esspri_total_replace_{cand}"
+        for subset,protocol,data in [("overall_essdai_lt5","overall",base)] + ([("protocol_essdai_lt5",str(p),g) for p,g in base.groupby("protocol",dropna=True)] if "protocol" in base.columns else []):
+            pair=data[["patient_id","esspri_total_observed",repl]].dropna(); m=_threshold_metrics(pair,repl); boot=cluster_bootstrap_metrics(pair,"patient_id",lambda x,r=repl:{k:v for k,v in _threshold_metrics(x,r).items() if k in ["sensitivity","specificity","cohen_kappa"]})
+            rows.append({"domain":domain,"candidate_id":cand,"subset":subset,"protocol":protocol,"n_visits":len(pair),"n_patients":pair["patient_id"].nunique(),**m,**boot,"status":_status(pair)})
+    return pd.DataFrame(rows)
+
+
+def build_pop2_pop3_reclassification(longitudinal: pd.DataFrame) -> tuple[pd.DataFrame,pd.DataFrame]:
+    rows=[]; mats=[]; base=longitudinal[pd.to_numeric(longitudinal["essdai_total"], errors="coerce").lt(5)]
+    for cand,domain,_ in PROXY_CANDIDATES_S5:
+        repl=f"esspri_total_replace_{cand}"; d=base.dropna(subset=["esspri_total_observed",repl]).copy()
+        obs=np.where(d["esspri_total_observed"]>=5,"Pop2","Pop3"); pred=np.where(d[repl]>=5,"Pop2","Pop3")
+        tab=pd.crosstab(pd.Series(obs,name="observed_pop"),pd.Series(pred,name="proxy_pop")).reindex(index=["Pop2","Pop3"],columns=["Pop2","Pop3"],fill_value=0)
+        b=int(tab.loc["Pop2","Pop3"]); c=int(tab.loc["Pop3","Pop2"]); pval=float(binomtest(min(b,c),b+c,0.5).pvalue) if b+c>0 else np.nan
+        rows.append({"domain":domain,"candidate_id":cand,"n_visits":len(d),"n_patients":d["patient_id"].nunique(),"percent_agreement":float((obs==pred).mean()*100) if len(d) else np.nan,"cohen_kappa":float(cohen_kappa_score(obs,pred)) if len(d) else np.nan,"n_pop2_to_pop3":b,"n_pop3_to_pop2":c,"net_change_pop2":c-b,"net_change_pop3":b-c,"mcnemar_exact_p_value":pval,"status":_status(d)})
+        for o in ["Pop2","Pop3"]:
+            mats.append({"domain":domain,"candidate_id":cand,"observed":o,"proxy_pop2":int(tab.loc[o,"Pop2"]),"proxy_pop3":int(tab.loc[o,"Pop3"])})
+    return pd.DataFrame(rows), pd.DataFrame(mats)
 
 
 def build_proxy_sensitivity_summary(longitudinal: pd.DataFrame) -> pd.DataFrame:
-    scenarios = [
-        ("S0_observed_official", "esspri_total_s0_observed", "pop_status"),
-        ("S1_one_proxy", "esspri_total_s1_one_proxy", "pop_status_s1_one_proxy"),
-        ("S2_up_to_two_proxies", "esspri_total_s2_up_to_two_proxies", "pop_status_s2_up_to_two_proxies"),
-        ("S3_all_available_exploratory_only", "esspri_total_s3_all_available", "pop_status_s3_all_available"),
-        ("S4_S1_one_proxy_relaxed", "esspri_total_s1_one_proxy_relaxed", "pop_status_s1_one_proxy_relaxed"),
-        ("S4_S2_up_to_two_proxies_relaxed", "esspri_total_s2_up_to_two_proxies_relaxed", "pop_status_s2_up_to_two_proxies_relaxed"),
-    ]
-    rows = []
-    for scenario, total_col, pop_col in scenarios:
-        if total_col not in longitudinal.columns:
-            continue
-        pop = longitudinal[pop_col] if pop_col in longitudinal.columns else pd.Series("Unclassifiable", index=longitudinal.index)
-        rows.append(
-            {
-                "scenario": scenario,
-                "n_visits_with_esspri_total": int(longitudinal[total_col].notna().sum()),
-                "n_esspri_ge_5": int((longitudinal[total_col] >= 5).sum()),
-                "n_pop2": int((pop == "Pop2").sum()),
-                "n_pop3": int((pop == "Pop3").sum()),
-                "n_unclassifiable": int((pop == "Unclassifiable").sum()),
-            }
-        )
+    scenarios=[("S0_observed_official","esspri_total_s0_observed","pop_status"),("S1_one_proxy","esspri_total_s1_one_proxy","pop_status_s1_one_proxy"),("S2_up_to_two_proxies","esspri_total_s2_up_to_two_proxies","pop_status_s2_up_to_two_proxies"),("S3_all_available_exploratory_only","esspri_total_s3_all_available","pop_status_s3_all_available"),("S4_S1_one_proxy_relaxed","esspri_total_s1_one_proxy_relaxed","pop_status_s1_one_proxy_relaxed"),("S4_S2_up_to_two_proxies_relaxed","esspri_total_s2_up_to_two_proxies_relaxed","pop_status_s2_up_to_two_proxies_relaxed")]
+    rows=[]
+    for scope,df in [("all_visits",longitudinal),("baseline",longitudinal[longitudinal["visit_number"].eq(0)])]:
+        denom=len(df); s0=None
+        for scenario,total_col,pop_col in scenarios:
+            pop=df[pop_col] if pop_col in df else pd.Series("Unclassifiable",index=df.index); nclass=int(pop.isin(["Pop1","Pop2","Pop3"]).sum())
+            if scenario.startswith("S0"): s0=nclass
+            rows.append({"time_scope":scope,"scenario":scenario,"denominator_type":"patients" if scope=="baseline" else "visits","denominator":denom,"n_visits_with_esspri":int(df[total_col].notna().sum()),"n_visits_classifiable":nclass,"n_baseline_patients_classifiable":nclass if scope=="baseline" else np.nan,"n_pop1":int((pop=="Pop1").sum()),"n_pop2":int((pop=="Pop2").sum()),"n_pop3":int((pop=="Pop3").sum()),"n_unclassifiable":int((pop=="Unclassifiable").sum()),"change_n_vs_s0":nclass-(s0 or 0),"change_percentage_points_vs_s0":100*(nclass-(s0 or 0))/denom if denom else np.nan})
     return pd.DataFrame(rows)
 
+
+def build_coverage_and_rescue(longitudinal: pd.DataFrame) -> tuple[pd.DataFrame,pd.DataFrame,pd.DataFrame]:
+    cov=[]
+    for cand,domain,proxy in PROXY_CANDIDATES_S5:
+        obs={"fatigue":"esspri_fatigue_observed","pain":"esspri_pain_observed","dryness":"esspri_dryness_observed"}[domain]
+        miss=longitudinal[obs].isna(); avail=longitudinal[proxy].notna() & miss
+        cov.append({"domain":domain,"candidate_id":cand,"proxy_column":proxy,"n_component_missing":int(miss.sum()),"n_proxy_available_when_component_missing":int(avail.sum()),"pct_missing_rescued":float(100*avail.sum()/miss.sum()) if miss.sum() else np.nan,"n_unique_patients_rescued":int(longitudinal.loc[avail,"patient_id"].nunique())})
+    rescue=longitudinal[longitudinal["esspri_total_observed"].isna() & longitudinal["esspri_total_proxy"].notna()].copy()
+    rescued=rescue["esspri_n_proxy_components"].value_counts().to_dict()
+    rescued_df=pd.DataFrame([{"rescued_with_one_proxy":int(rescued.get(1,0)),"rescued_with_two_proxies":int(rescued.get(2,0)),"rescued_with_three_proxies":int(rescued.get(3,0)),"n_rescued_visits":len(rescue),"n_rescued_patients":rescue["patient_id"].nunique()}])
+    rank=pd.DataFrame(cov)
+    return pd.DataFrame(cov), rescued_df, rank
+
+
+def build_candidate_ranking(component: pd.DataFrame,total: pd.DataFrame,threshold: pd.DataFrame,coverage: pd.DataFrame) -> pd.DataFrame:
+    c=component[component["subset"].eq("overall_all_visits")][["domain","candidate_id","mae","rmse","icc_2_1"]].rename(columns={"mae":"component_mae","rmse":"component_rmse","icc_2_1":"component_icc"})
+    t=total[total["subset"].eq("overall_all_visits")][["candidate_id","mae"]].rename(columns={"mae":"total_mae"})
+    th=threshold[["candidate_id","cohen_kappa","sensitivity","specificity"]].rename(columns={"cohen_kappa":"threshold_kappa"})
+    co=coverage[["candidate_id","n_proxy_available_when_component_missing"]].rename(columns={"n_proxy_available_when_component_missing":"coverage_rescued_visits"})
+    out=c.merge(t,on="candidate_id",how="left").merge(th,on="candidate_id",how="left").merge(co,on="candidate_id",how="left")
+    out["ranking_note"]="Evidence summary only; does not change prespecified hierarchies."
+    return out.sort_values(["domain","component_mae"], na_position="last")
+
+
+def run_internal_consistency_tests(longitudinal: pd.DataFrame) -> None:
+    assert compute_esspri_from_components(pd.Series([3.0]), pd.Series([np.nan]), pd.Series([9.0])).isna().iloc[0]
+    assert np.isclose(0*10/7,0) and np.isclose(7*10/7,10)
+    assert np.isclose((1-1)*10/9,0) and np.isclose((10-1)*10/9,10)
+    v,s=build_hierarchical_component(pd.Series([5.0]),[(pd.Series([1.0]),"proxy")]); assert v.iloc[0]==5.0 and s.iloc[0]=="observed_esspri"
+    for c in [x for x in longitudinal.columns if x.startswith("pop_status_s")]:
+        assert (longitudinal.loc[longitudinal["essdai_total"].ge(5), c] == "Pop1").all()
+    complete=longitudinal[["esspri_total_s0_observed","esspri_total_s1_one_proxy","esspri_total_s2_up_to_two_proxies","esspri_total_s3_all_available"]].dropna()
+    assert np.allclose(complete["esspri_total_s1_one_proxy"], complete["esspri_total_s0_observed"])
+    assert np.allclose(complete["esspri_total_s2_up_to_two_proxies"], complete["esspri_total_s0_observed"])
+    for c in [c for c in longitudinal.columns if c.startswith(("fatigue_proxy_","pain_proxy_","dryness_proxy_")) and not c.endswith(("_raw","_source","_included")) and "n_available" not in c]:
+        vals=pd.to_numeric(longitudinal[c],errors="coerce").dropna(); assert vals.between(0,10).all(), c
+    for val_col, src_col in [("fatigue_proxy_hierarchical","fatigue_proxy_hierarchical_source"),("pain_proxy_hierarchical","pain_proxy_hierarchical_source"),("dryness_proxy_hierarchical","dryness_proxy_hierarchical_source")]:
+        assert ~((longitudinal[val_col].notna()) & longitudinal[src_col].eq("missing")).any()
+    assert (longitudinal["esspri_n_available_components"] == longitudinal["esspri_n_observed_components"] + longitudinal["esspri_n_proxy_components"]).all()
+    synth=pd.DataFrame({"esspri_dryness_observed":[4.0],"esspri_fatigue_observed":[8.0],"esspri_pain_observed":[4.0],"fatigue_proxy_f1_profad":[2.0]})
+    obs=compute_esspri_from_components(synth["esspri_dryness_observed"],synth["esspri_fatigue_observed"],synth["esspri_pain_observed"])
+    repl=compute_esspri_from_components(synth["esspri_dryness_observed"],synth["fatigue_proxy_f1_profad"],synth["esspri_pain_observed"])
+    assert not np.isclose(obs.iloc[0], repl.iloc[0])
+
+
+def make_proxy_figures(longitudinal: pd.DataFrame, proxy_validation: pd.DataFrame, threshold_agreement: pd.DataFrame, proxy_sensitivity: pd.DataFrame) -> None:
+    BLOCKA_FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+    domains = {"fatigue": ("esspri_fatigue_observed", "fatigue_proxy_f1_profad"), "pain": ("esspri_pain_observed", "pain_proxy_p1_limb"), "dryness": ("esspri_dryness_observed", "dryness_proxy_d1_eye_mouth")}
+    for dom, (obs, prox) in domains.items():
+        pair = longitudinal[["patient_id", obs, prox]].dropna()
+        fig, ax = plt.subplots(figsize=(6, 6)); ax.scatter(pair[obs], pair[prox], s=10, alpha=.5); ax.plot([0,10],[0,10], color="black", ls="--")
+        m = continuous_metrics(pair, obs, prox); ax.set(xlim=(0,10), ylim=(0,10), xlabel="Observed ESSPRI component", ylabel="Proxy", title=f"{dom} observed vs proxy")
+        ax.text(.03,.97,f"n visits={len(pair)}\nn patients={pair['patient_id'].nunique() if len(pair) else 0}\nMAE={m['mae']:.2f}\nRMSE={m['rmse']:.2f}\nICC={m['icc_2_1']:.2f}\nSpearman={m['spearman_rho']:.2f}", transform=ax.transAxes, va="top")
+        fig.tight_layout(); fig.savefig(BLOCKA_FIGURES_DIR / f"01_esspri_proxy_scatter_{dom}.pdf"); plt.close(fig)
+        fig, ax = plt.subplots(figsize=(6, 4));
+        if len(pair):
+            mean=(pair[obs]+pair[prox])/2; diff=pair[prox]-pair[obs]; ax.scatter(mean,diff,s=10,alpha=.5); ax.axhline(diff.mean(),color="black"); ax.axhline(diff.mean()+1.96*diff.std(ddof=1),color="red",ls="--"); ax.axhline(diff.mean()-1.96*diff.std(ddof=1),color="red",ls="--")
+        ax.set(xlabel="Mean observed/proxy", ylabel="Proxy - observed", title=f"{dom} Bland-Altman"); fig.tight_layout(); fig.savefig(BLOCKA_FIGURES_DIR / f"01_esspri_proxy_bland_altman_{dom}.pdf"); plt.close(fig)
+    fig, ax = plt.subplots(figsize=(8, 4)); th = threshold_agreement.head(15)
+    if not th.empty: ax.bar(th["candidate_id"], th["esspri_total_threshold_5_discordant"].fillna(0)); ax.tick_params(axis="x", rotation=90)
+    ax.set(title="ESSPRI ≥5 discordance by proxy", ylabel="Discordant visits"); fig.tight_layout(); fig.savefig(BLOCKA_FIGURES_DIR / "01_esspri_proxy_threshold_confusion.pdf"); plt.close(fig)
+    fig, ax = plt.subplots(figsize=(8, 4)); ps = proxy_sensitivity[proxy_sensitivity["time_scope"].eq("all_visits")]
+    if not ps.empty: ax.bar(ps["scenario"], ps["n_visits_classifiable"]); ax.tick_params(axis="x", rotation=90)
+    ax.set(title="Classifiable visits by proxy scenario", ylabel="n visits"); fig.tight_layout(); fig.savefig(BLOCKA_FIGURES_DIR / "01_pop_distribution_proxy_sensitivity.pdf"); plt.close(fig)
 def write_parquet_with_csv(df: pd.DataFrame, parquet_path: Path) -> None:
     parquet_path.parent.mkdir(parents=True, exist_ok=True)
     normalize_visit_level_dtypes(df).to_parquet(parquet_path, index=False)
@@ -968,12 +1121,20 @@ def write_outputs(
     claim: str,
     proxy_validation: pd.DataFrame,
     proxy_sensitivity: pd.DataFrame,
+    proxy_total_validation: pd.DataFrame,
+    threshold_agreement: pd.DataFrame,
+    pop2pop3_reclassification: pd.DataFrame,
+    pop2pop3_matrix: pd.DataFrame,
+    proxy_coverage: pd.DataFrame,
+    proxy_rescued: pd.DataFrame,
+    proxy_ranking: pd.DataFrame,
 ) -> None:
     BLOCKA_TABLES_DIR.mkdir(parents=True, exist_ok=True)
     BLOCKA_FIGURES_DIR.mkdir(parents=True, exist_ok=True)
     BLOCKA_QC_DIR.mkdir(parents=True, exist_ok=True)
     INTERMEDIATE_DIR.mkdir(parents=True, exist_ok=True)
     write_parquet_with_csv(longitudinal, INTERMEDIATE_DIR / "01_visit_level_classification.parquet")
+    write_parquet_with_csv(longitudinal, INTERMEDIATE_DIR / "01_visit_level_esspri_proxy.parquet")
     write_parquet_with_csv(baseline, INTERMEDIATE_DIR / "01_baseline_classification.parquet")
     table1.to_csv(BLOCKA_TABLES_DIR / "01_table1_by_pop.csv", index=False)
     longitudinal[["patient_id", "baseline_date", "event_date", "visit_date_clean", "visit_number", "baseline_pop_status", "baseline_pop_status_display", "time_since_baseline_days", "time_since_baseline_years", "time_years", "essdai_total", "esspri_total", "pop_status", "pop_status_display", "row_date_original", "row_date_min", "row_date_max"]].to_csv(BLOCKA_TABLES_DIR / "01_pop_longitudinal_status.csv", index=False)
@@ -990,7 +1151,19 @@ def write_outputs(
     counts.merge(baseline_counts, on="pop_status", how="outer").to_csv(BLOCKA_TABLES_DIR / "01_pop_distribution_counts.csv", index=False)
     distribution_visit.to_csv(BLOCKA_TABLES_DIR / "01_pop_distribution_by_visit.csv", index=False)
     proxy_validation.to_csv(BLOCKA_TABLES_DIR / "01_esspri_proxy_validation.csv", index=False)
+    proxy_validation.to_csv(BLOCKA_TABLES_DIR / "01_esspri_proxy_component_validation.csv", index=False)
+    proxy_total_validation.to_csv(BLOCKA_TABLES_DIR / "01_esspri_proxy_total_validation.csv", index=False)
+    threshold_agreement.to_csv(BLOCKA_TABLES_DIR / "01_esspri_proxy_threshold_agreement.csv", index=False)
+    pop2pop3_reclassification.to_csv(BLOCKA_TABLES_DIR / "01_pop2_pop3_proxy_reclassification.csv", index=False)
+    pop2pop3_matrix.to_csv(BLOCKA_TABLES_DIR / "01_pop2_pop3_proxy_reclassification_matrix.csv", index=False)
+    proxy_coverage.to_csv(BLOCKA_TABLES_DIR / "01_esspri_proxy_coverage.csv", index=False)
+    proxy_rescued.to_csv(BLOCKA_TABLES_DIR / "01_esspri_proxy_rescued_visits.csv", index=False)
     proxy_sensitivity.to_csv(BLOCKA_TABLES_DIR / "01_esspri_proxy_sensitivity_summary.csv", index=False)
+    proxy_sensitivity.to_csv(BLOCKA_TABLES_DIR / "01_pop_distribution_proxy_sensitivity.csv", index=False)
+    proxy_ranking.to_csv(BLOCKA_TABLES_DIR / "01_esspri_proxy_candidate_ranking.csv", index=False)
+    make_proxy_figures(longitudinal, proxy_validation, threshold_agreement, proxy_sensitivity)
+    pd.DataFrame({"variable": longitudinal.columns, "n_nonmissing": [int(longitudinal[c].notna().sum()) for c in longitudinal.columns]}).to_csv(BLOCKA_QC_DIR / "01_esspri_proxy_variable_availability.csv", index=False)
+    with (BLOCKA_QC_DIR / "01_esspri_proxy_qc.json").open("w", encoding="utf-8") as f: json.dump(qc, f, indent=2, default=str)
     visit_unclassifiable_counts.to_csv(BLOCKA_TABLES_DIR / "01_pop_unclassifiable_reason_counts_by_visit.csv", index=False)
     write_parquet_with_csv(visit_unclassifiable_rows, INTERMEDIATE_DIR / "01_unclassifiable_reasons_visit_level.parquet")
     (BLOCKA_TABLES_DIR / "01_pop_distribution_claim.txt").write_text(claim + "\n", encoding="utf-8")
@@ -1005,15 +1178,21 @@ def main() -> None:
     df = load_data(args.input)
     codebook = load_codebook(args.codebook)
     selected = validate_columns(df)
-    longitudinal, row_qc, warnings = build_longitudinal_pop_dataset(df)
+    longitudinal, row_qc, warnings = build_longitudinal_pop_dataset(df, codebook)
     baseline = build_baseline_dataset(longitudinal)
     table1, selected_demo = summarize_table1_by_pop(baseline, codebook, warnings)
     baseline_unclassifiable = describe_baseline_unclassifiable(baseline)
     outside = make_pop_swimmer_plot(longitudinal, baseline, BLOCKA_FIGURES_DIR / "02_pop_distribution_plot.pdf", warnings)
     distribution_visit = distribution_by_visit(longitudinal)
     visit_unclassifiable_counts, visit_unclassifiable_rows = describe_visit_unclassifiable(longitudinal)
+    run_internal_consistency_tests(longitudinal)
     proxy_validation = build_proxy_validation(longitudinal)
+    proxy_total_validation = build_proxy_total_validation(longitudinal)
+    threshold_agreement = build_threshold_agreement(longitudinal)
+    pop2pop3_reclassification, pop2pop3_matrix = build_pop2_pop3_reclassification(longitudinal)
+    proxy_coverage, proxy_rescued, proxy_ranking_base = build_coverage_and_rescue(longitudinal)
     proxy_sensitivity = build_proxy_sensitivity_summary(longitudinal)
+    proxy_ranking = build_candidate_ranking(proxy_validation, proxy_total_validation, threshold_agreement, proxy_coverage)
     n_total_patients = int(baseline["patient_id"].nunique())
     baseline_counts = baseline["pop_status"].value_counts().reindex(POP_ORDER, fill_value=0)
     n_classifiable = int(baseline_counts[["Pop1", "Pop2", "Pop3"]].sum())
@@ -1067,6 +1246,13 @@ def main() -> None:
         claim,
         proxy_validation,
         proxy_sensitivity,
+        proxy_total_validation,
+        threshold_agreement,
+        pop2pop3_reclassification,
+        pop2pop3_matrix,
+        proxy_coverage,
+        proxy_rescued,
+        proxy_ranking,
     )
     print(claim)
 
