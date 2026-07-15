@@ -506,10 +506,16 @@ def build_longitudinal_pop_dataset(df: pd.DataFrame) -> tuple[pd.DataFrame, dict
         ("pain_p1", "pain", "pain_proxy_p1_limb"), ("pain_p2", "pain", "pain_proxy_p2_finger_wrist"), ("pain_p12", "pain", "pain_proxy_p12_composite"),
         ("dryness_d1", "dryness", "dryness_proxy_d1_eye_mouth"), ("dryness_d2_core", "dryness", "dryness_proxy_d2_core"), ("dryness_d2_extended", "dryness", "dryness_proxy_d2_extended"), ("dryness_d3", "dryness", "dryness_proxy_d3_profad"),
     ]:
-        d = work["esspri_dryness_observed"].copy(); f = work["esspri_fatigue_observed"].copy(); p = work["esspri_pain_observed"].copy()
-        if comp == "dryness": d = d.combine_first(work[proxy])
-        elif comp == "fatigue": f = f.combine_first(work[proxy])
-        else: p = p.combine_first(work[proxy])
+        d = pd.to_numeric(work["esspri_dryness_observed"], errors="coerce").astype("float64")
+        f = pd.to_numeric(work["esspri_fatigue_observed"], errors="coerce").astype("float64")
+        p = pd.to_numeric(work["esspri_pain_observed"], errors="coerce").astype("float64")
+        proxy_value = pd.to_numeric(work[proxy], errors="coerce").astype("float64")
+        if comp == "dryness":
+            d = d.combine_first(proxy_value)
+        elif comp == "fatigue":
+            f = f.combine_first(proxy_value)
+        else:
+            p = p.combine_first(proxy_value)
         work[f"esspri_total_replace_{name}"] = compute_esspri_from_components(d, f, p)
     out_of_range_esspri = int(((work["esspri_total_observed"] < 0) | (work["esspri_total_observed"] > 10)).sum())
     if out_of_range_esspri:
