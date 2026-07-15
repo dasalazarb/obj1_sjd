@@ -368,6 +368,39 @@ def derive_esspri_proxies_from_collapsed_visit(work: pd.DataFrame, qc_counts: di
     work = add_esspri_scenarios(work, relaxed=True)
     return work
 
+
+def add_esspri_scenarios(work: pd.DataFrame, relaxed: bool = False) -> pd.DataFrame:
+    """Build best-available ESSPRI components for recovery scenarios S1-S4."""
+    suffix = "_relaxed" if relaxed else ""
+    dry = "dryness_proxy_hierarchical_relaxed" if relaxed else "dryness_proxy_hierarchical"
+    fat = "fatigue_proxy_hierarchical_relaxed" if relaxed else "fatigue_proxy_hierarchical"
+    pain = "pain_proxy_hierarchical"
+    for comp, col in [("dryness", dry), ("fatigue", fat), ("pain", pain)]:
+        work[f"esspri_{comp}_best_available{suffix}"] = work[col]
+    best_cols = [
+        f"esspri_dryness_best_available{suffix}",
+        f"esspri_fatigue_best_available{suffix}",
+        f"esspri_pain_best_available{suffix}",
+    ]
+    obs_cols = ["esspri_dryness_observed", "esspri_fatigue_observed", "esspri_pain_observed"]
+    work[f"esspri_n_observed_components{suffix}"] = work[obs_cols].notna().sum(axis=1)
+    work[f"esspri_n_available_components{suffix}"] = work[best_cols].notna().sum(axis=1)
+    work[f"esspri_n_proxy_components{suffix}"] = work[f"esspri_n_available_components{suffix}"] - work[f"esspri_n_observed_components{suffix}"]
+    work[f"esspri_total_proxy{suffix}"] = compute_esspri_from_components(*(work[c] for c in best_cols))
+    scen = np.select(
+        [
+            work[f"esspri_n_available_components{suffix}"].lt(3),
+            work[f"esspri_n_observed_components{suffix}"].eq(3),
+            work[f"esspri_n_proxy_components{suffix}"].eq(1),
+            work[f"esspri_n_proxy_components{suffix}"].eq(2),
+            work[f"esspri_n_proxy_components{suffix}"].eq(3),
+        ],
+        ["unavailable", "observed_complete", "one_proxy", "two_proxies", "three_proxies"],
+        default="unavailable",
+    )
+    work[f"esspri_derivation_scenario{suffix}"] = pd.Series(scen, index=work.index, dtype="string")
+    return work
+
 def classify_pop(essdai_total: object, esspri_total: object) -> str:
     essdai_missing = pd.isna(essdai_total)
     esspri_missing = pd.isna(esspri_total)
