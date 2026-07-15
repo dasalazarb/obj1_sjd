@@ -373,7 +373,7 @@ def normalize_visit_level_dtypes(vis: pd.DataFrame) -> pd.DataFrame:
         "baseline_pop_status",
         "baseline_pop_status_display",
     ]
-    numeric_prefixes = ("esspri_", "fatigue_proxy_", "pain_proxy_", "dryness_proxy_", "n_available_")
+    numeric_prefixes = ("esspri_", "fatigue_proxy_", "pain_proxy_", "pain_strategy_", "dryness_proxy_", "n_available_")
     non_numeric_markers = ("_source", "_scenario", "_label")
     for col in out.columns:
         if col.endswith("_included"):
