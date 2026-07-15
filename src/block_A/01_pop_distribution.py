@@ -303,10 +303,15 @@ def populate_esspri_proxies(work: pd.DataFrame, qc_counts: dict[str, int]) -> pd
     work["dryness_proxy_d3_profad"] = work["dryness_proxy_d3_profad_raw"] * 10 / 7
     work["dryness_proxy_d3_profad_relaxed"] = work["dryness_proxy_d3_profad_relaxed_raw"] * 10 / 7
 
-    def hierarchy(observed, candidates):
-        value = observed.copy(); source = pd.Series("missing", index=work.index, dtype="object"); source[observed.notna()] = "observed_esspri"
+    def hierarchy(observed: pd.Series, candidates: list[tuple[str, str]]) -> tuple[pd.Series, pd.Series]:
+        value = pd.to_numeric(observed, errors="coerce").astype("float64")
+        source = pd.Series("missing", index=work.index, dtype="object")
+        source.loc[value.notna()] = "observed_esspri"
         for col, label in candidates:
-            use = value.isna() & work[col].notna(); value[use] = work.loc[use, col]; source[use] = label
+            candidate = pd.to_numeric(work[col], errors="coerce").astype("float64")
+            use = value.isna() & candidate.notna()
+            value.loc[use] = candidate.loc[use]
+            source.loc[use] = label
         return value, source
     work["fatigue_proxy_hierarchical"], work["fatigue_proxy_hierarchical_source"] = hierarchy(work["esspri_fatigue_observed"], [("fatigue_proxy_f1_profad", "proxy_f1_profad"), ("fatigue_proxy_f2_mdafs_severity", "proxy_f2_mdafs_severity"), ("fatigue_proxy_f3_mdafs_degree", "proxy_f3_mdafs_degree"), ("fatigue_proxy_f4_ans", "proxy_f4_ans")])
     work["fatigue_proxy_hierarchical_relaxed"], work["fatigue_proxy_hierarchical_relaxed_source"] = hierarchy(work["esspri_fatigue_observed"], [("fatigue_proxy_f1_profad_relaxed", "proxy_f1_profad"), ("fatigue_proxy_f2_mdafs_severity", "proxy_f2_mdafs_severity"), ("fatigue_proxy_f3_mdafs_degree", "proxy_f3_mdafs_degree"), ("fatigue_proxy_f4_ans", "proxy_f4_ans")])
