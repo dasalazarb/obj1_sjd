@@ -891,8 +891,12 @@ def build_proxy_validation(longitudinal: pd.DataFrame) -> pd.DataFrame:
     for component, proxy_name, observed_col, proxy_col in candidates:
         if observed_col not in longitudinal.columns or proxy_col not in longitudinal.columns:
             continue
-        pair = longitudinal[[observed_col, proxy_col]].apply(pd.to_numeric, errors="coerce").dropna()
+        pair = longitudinal[[observed_col, proxy_col]].apply(pd.to_numeric, errors="coerce").dropna().astype("float64")
         diff = pair[proxy_col] - pair[observed_col] if not pair.empty else pd.Series(dtype="float64")
+        if len(pair) > 1 and pair[observed_col].nunique(dropna=True) > 1 and pair[proxy_col].nunique(dropna=True) > 1:
+            pearson = float(np.corrcoef(pair[observed_col].to_numpy(dtype="float64"), pair[proxy_col].to_numpy(dtype="float64"))[0, 1])
+        else:
+            pearson = np.nan
         rows.append(
             {
                 "component": component,
@@ -904,7 +908,7 @@ def build_proxy_validation(longitudinal: pd.DataFrame) -> pd.DataFrame:
                 "mean_proxy": float(pair[proxy_col].mean()) if len(pair) else np.nan,
                 "mean_proxy_minus_observed": float(diff.mean()) if len(diff) else np.nan,
                 "median_abs_error": float(diff.abs().median()) if len(diff) else np.nan,
-                "pearson_correlation": float(pair[observed_col].corr(pair[proxy_col])) if len(pair) > 1 else np.nan,
+                "pearson_correlation": pearson,
                 "n_threshold_5_discordant": int(((pair[observed_col] >= 5) != (pair[proxy_col] >= 5)).sum()) if len(pair) else 0,
             }
         )
