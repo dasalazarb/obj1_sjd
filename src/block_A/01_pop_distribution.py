@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
 from scipy.stats import binomtest, chi2_contingency, kruskal, pearsonr, spearmanr
@@ -112,6 +113,15 @@ PROXY_CANDIDATES_S5 = [
 ]
 POP_ORDER = ["Pop1", "Pop2", "Pop3", "Unclassifiable"]
 POP_COLORS = {"Pop1": "#d95f02", "Pop2": "#7570b3", "Pop3": "#1b9e77", "Unclassifiable": "#9e9e9e"}
+MISSINGNESS_MARKERS = {
+    "ESSDAI and ESSPRI available": "o",
+    "missing ESSDAI; ESSPRI <5": "v",
+    "missing ESSDAI; ESSPRI >=5": "^",
+    "missing ESSPRI; ESSDAI <5": "s",
+    "missing ESSPRI; ESSDAI >=5": "P",
+    "missing ESSDAI and ESSPRI": "X",
+}
+MISSINGNESS_ORDER = list(MISSINGNESS_MARKERS)
 MISSING_STRINGS = {"", "na", "n/a", "nan", "none", "unknown", "unk", "-99"}
 
 
@@ -413,6 +423,19 @@ def classify_pop(essdai_total: object, esspri_total: object) -> str:
     return "Unclassifiable"
 
 
+def visit_missingness_label(essdai_total: object, esspri_total: object) -> str:
+    """Label ESSDAI/ESSPRI availability and threshold side for plot markers."""
+    essdai_missing = pd.isna(essdai_total)
+    esspri_missing = pd.isna(esspri_total)
+    if essdai_missing and esspri_missing:
+        return "missing ESSDAI and ESSPRI"
+    if essdai_missing:
+        return "missing ESSDAI; ESSPRI >=5" if float(esspri_total) >= 5 else "missing ESSDAI; ESSPRI <5"
+    if esspri_missing:
+        return "missing ESSPRI; ESSDAI >=5" if float(essdai_total) >= 5 else "missing ESSPRI; ESSDAI <5"
+    return "ESSDAI and ESSPRI available"
+
+
 def normalize_visit_level_dtypes(vis: pd.DataFrame) -> pd.DataFrame:
     """Use concrete dtypes before writing visit-level parquet artifacts."""
     out = vis.copy()
@@ -433,6 +456,7 @@ def normalize_visit_level_dtypes(vis: pd.DataFrame) -> pd.DataFrame:
         "row_date_original",
         "pop_status",
         "pop_status_display",
+        "pop_missingness_label",
         "baseline_pop_status",
         "baseline_pop_status_display",
     ]
@@ -572,6 +596,7 @@ def build_longitudinal_pop_dataset(df: pd.DataFrame, codebook: pd.DataFrame | No
         raise ValueError("ESSPRI observed total values outside range 0-10")
     work["pop_status"] = [classify_pop(e, p) for e, p in zip(work["essdai_total"], work["esspri_total_observed"])]
     work["pop_status_display"] = work["pop_status"].map(DISPLAY)
+    work["pop_missingness_label"] = [visit_missingness_label(e, p) for e, p in zip(work["essdai_total"], work["esspri_total_observed"])]
     work["baseline_date"] = work.groupby("patient_id")["visit_date_clean"].transform("min")
     work["event_date"] = work["visit_date_clean"]
     work["time_since_baseline_days"] = (work["event_date"] - work["baseline_date"]).dt.days
@@ -727,8 +752,24 @@ def make_pop_swimmer_plot(longitudinal: pd.DataFrame, baseline: pd.DataFrame, ou
         for _, row in group.iterrows():
             ax.hlines(row["y"], row["first"], row["last"], color="#d0d0d0", linewidth=0.8, zorder=1)
         for pop in POP_ORDER:
-            sub = panel_df[panel_df["pop_status"] == pop]
-            ax.scatter(sub["time_years"], sub["y"], s=12, color=POP_COLORS[pop], label=pop, alpha=0.9, zorder=2)
+            pop_sub = panel_df[panel_df["pop_status"] == pop]
+            for missingness_label in MISSINGNESS_ORDER:
+                sub = pop_sub[pop_sub["pop_missingness_label"].eq(missingness_label)]
+                if sub.empty:
+                    continue
+                is_complete = missingness_label == "ESSDAI and ESSPRI available"
+                ax.scatter(
+                    sub["time_years"],
+                    sub["y"],
+                    s=12 if is_complete else 24,
+                    marker=MISSINGNESS_MARKERS[missingness_label],
+                    color=POP_COLORS[pop],
+                    edgecolors="none" if is_complete else "#222222",
+                    linewidths=0 if is_complete else 0.45,
+                    label=pop if is_complete else None,
+                    alpha=0.9,
+                    zorder=2 if is_complete else 3,
+                )
         for x, label in x_ticks:
             ax.axvline(x, color="#777777", linestyle="--", linewidth=0.7, alpha=0.6)
             if x <= max(x_limit, 10):
@@ -748,7 +789,26 @@ def make_pop_swimmer_plot(longitudinal: pd.DataFrame, baseline: pd.DataFrame, ou
         )
         if group.empty:
             ax.text(0.5, 0.5, "No patients", transform=ax.transAxes, ha="center", va="center", color="#777777")
-        ax.legend(
+        pop_handles = [
+            Line2D([0], [0], marker="o", color="none", markerfacecolor=POP_COLORS[pop], markeredgecolor="none", markersize=6, label=pop)
+            for pop in POP_ORDER
+        ]
+        missingness_handles = [
+            Line2D(
+                [0],
+                [0],
+                marker=MISSINGNESS_MARKERS[label],
+                color="none",
+                markerfacecolor="#ffffff",
+                markeredgecolor="#222222",
+                markeredgewidth=0.8,
+                markersize=6,
+                label=label,
+            )
+            for label in MISSINGNESS_ORDER
+        ]
+        legend_pop = ax.legend(
+            handles=pop_handles,
             loc="upper center",
             bbox_to_anchor=(0.5, -0.18),
             frameon=False,
@@ -756,14 +816,27 @@ def make_pop_swimmer_plot(longitudinal: pd.DataFrame, baseline: pd.DataFrame, ou
             columnspacing=2.5,
             handletextpad=0.8,
             borderaxespad=1.2,
+            title="Population color",
+        )
+        ax.add_artist(legend_pop)
+        ax.legend(
+            handles=missingness_handles,
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.31),
+            frameon=False,
+            ncol=3,
+            columnspacing=1.8,
+            handletextpad=0.6,
+            borderaxespad=1.2,
+            title="ESSDAI/ESSPRI availability marker",
         )
         fig.text(
             0.01,
             0.01,
-            "Pop1 = ESSDAI ≥5; Pop2 = ESSDAI <5 and ESSPRI ≥5; Pop3 = ESSDAI <5 and ESSPRI <5; grey = insufficient data.",
+            "Pop1 = ESSDAI ≥5; Pop2 = ESSDAI <5 and ESSPRI ≥5; Pop3 = ESSDAI <5 and ESSPRI <5; grey = insufficient data. Marker shape shows which score is missing and the available score's <5 vs ≥5 side.",
             fontsize=9,
         )
-        fig.tight_layout(rect=(0, 0.08, 1, 1))
+        fig.tight_layout(rect=(0, 0.16, 1, 1))
         suffix = baseline_pop.lower()
         panel_path = output_path.with_name(f"{output_path.stem}_{suffix}{output_path.suffix}")
         fig.savefig(panel_path, bbox_inches="tight")
