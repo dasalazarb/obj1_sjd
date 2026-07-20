@@ -168,15 +168,24 @@ def _fmt(x, digits=1):
     return "NA" if pd.isna(x) else f"{x:.{digits}f}"
 
 
+def _fmt_median_iqr_range(stats):
+    """Format a continuous summary with both interquartile and full ranges."""
+    return (
+        f"{_fmt(stats['median'])} "
+        f"(IQR {_fmt(stats['q1'])}–{_fmt(stats['q3'])}; "
+        f"range {_fmt(stats['min'])}–{_fmt(stats['max'])})"
+    )
+
+
 def summarize_baseline_activity(baseline_df):
     essdai = summarize_continuous(baseline_df["essdai_total"])
     esspri = summarize_continuous(baseline_df["esspri_total"])
     n_ge5 = int((baseline_df["essdai_total"] >= 5).sum())
     pct_ge5 = 100 * n_ge5 / essdai["n"] if essdai["n"] else np.nan
     rows = [
-        {"section": "Disease activity", "variable": "ESSDAI, median (IQR)", "n": essdai["n"], "summary": f"{_fmt(essdai['median'])} ({_fmt(essdai['q1'])}–{_fmt(essdai['q3'])})", "value_numeric": essdai["median"], "denominator": essdai["n"], "note": "Baseline"},
+        {"section": "Disease activity", "variable": "ESSDAI, median (IQR; range)", "n": essdai["n"], "summary": _fmt_median_iqr_range(essdai), "value_numeric": essdai["median"], "min": essdai["min"], "max": essdai["max"], "denominator": essdai["n"], "note": "Baseline"},
         {"section": "Disease activity", "variable": "ESSDAI ≥5, n (%)", "n": n_ge5, "summary": f"{n_ge5} / {essdai['n']} ({_fmt(pct_ge5)}%)", "value_numeric": pct_ge5, "denominator": essdai["n"], "note": "Systemic disease activity"},
-        {"section": "Disease activity", "variable": "ESSPRI, median (IQR)", "n": esspri["n"], "summary": f"{_fmt(esspri['median'])} ({_fmt(esspri['q1'])}–{_fmt(esspri['q3'])})", "value_numeric": esspri["median"], "denominator": esspri["n"], "note": "Mean of dryness/fatigue/pain; ≥2 components required"},
+        {"section": "Disease activity", "variable": "ESSPRI, median (IQR; range)", "n": esspri["n"], "summary": _fmt_median_iqr_range(esspri), "value_numeric": esspri["median"], "min": esspri["min"], "max": esspri["max"], "denominator": esspri["n"], "note": "Mean of dryness/fatigue/pain; ≥2 components required"},
     ]
     return pd.DataFrame(rows), {"essdai": essdai, "esspri": esspri, "n_ge5": n_ge5, "pct_ge5": pct_ge5}
 
@@ -366,7 +375,7 @@ def main():
     make_baseline_domain_bar(domain_summary)
     make_distribution_plots(df, interval_order, domain_by_visit)
     essdai, esspri = stats["essdai"], stats["esspri"]
-    print(f"At baseline, median ESSDAI was {_fmt(essdai['median'])} (IQR {_fmt(essdai['q1'])}–{_fmt(essdai['q3'])}); {_fmt(stats['pct_ge5'])}% of patients had ESSDAI ≥5 (systemic disease activity). Median ESSPRI was {_fmt(esspri['median'])} (IQR {_fmt(esspri['q1'])}–{_fmt(esspri['q3'])}).")
+    print(f"At baseline, median ESSDAI was {_fmt_median_iqr_range(essdai)}; {_fmt(stats['pct_ge5'])}% of patients had ESSDAI ≥5 (systemic disease activity). Median ESSPRI was {_fmt_median_iqr_range(esspri)}.")
     top3 = domain_summary.head(3)
     domains = ", ".join(f"{row.domain} ({_fmt(row.pct_active)}%)" for row in top3.itertuples(index=False))
     print(f"Most common active ESSDAI domains at baseline were: {domains}.")
