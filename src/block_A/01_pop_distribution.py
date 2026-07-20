@@ -807,36 +807,45 @@ def make_pop_swimmer_plot(longitudinal: pd.DataFrame, baseline: pd.DataFrame, ou
             )
             for label in MISSINGNESS_ORDER
         ]
-        legend_pop = ax.legend(
+        # Keep both legends inside the figure canvas.  Anchoring them below the
+        # axes (and then relying on ``bbox_inches='tight'``) made the legend
+        # titles and entries collide in short panels.
+        fig.legend(
             handles=pop_handles,
             loc="upper center",
-            bbox_to_anchor=(0.5, -0.18),
+            bbox_to_anchor=(0.5, 0.32),
             frameon=False,
             ncol=4,
             columnspacing=2.5,
             handletextpad=0.8,
-            borderaxespad=1.2,
+            borderaxespad=0,
             title="Population color",
+            fontsize=9,
+            title_fontsize=10,
         )
-        ax.add_artist(legend_pop)
-        ax.legend(
+        fig.legend(
             handles=missingness_handles,
             loc="upper center",
-            bbox_to_anchor=(0.5, -0.31),
+            bbox_to_anchor=(0.5, 0.17),
             frameon=False,
             ncol=3,
             columnspacing=1.8,
             handletextpad=0.6,
-            borderaxespad=1.2,
+            borderaxespad=0,
             title="ESSDAI/ESSPRI availability marker",
+            fontsize=9,
+            title_fontsize=10,
         )
         fig.text(
-            0.01,
-            0.01,
+            0.02,
+            0.025,
             "Pop1 = ESSDAI ≥5; Pop2 = ESSDAI <5 and ESSPRI ≥5; Pop3 = ESSDAI <5 and ESSPRI <5; grey = insufficient data. Marker shape shows which score is missing and the available score's <5 vs ≥5 side.",
-            fontsize=9,
+            fontsize=8,
         )
-        fig.tight_layout(rect=(0, 0.16, 1, 1))
+        # Reserve a dedicated lower band for the two legends and footnote.
+        # This is deliberately explicit instead of ``tight_layout`` because
+        # the legends are figure-level artists.
+        fig.subplots_adjust(left=0.07, right=0.98, top=0.86, bottom=0.42)
         suffix = baseline_pop.lower()
         panel_path = output_path.with_name(f"{output_path.stem}_{suffix}{output_path.suffix}")
         fig.savefig(panel_path, bbox_inches="tight")
