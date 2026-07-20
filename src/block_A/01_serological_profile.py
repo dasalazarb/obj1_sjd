@@ -456,15 +456,12 @@ def _metadata_label(g: pd.DataFrame) -> str:
 
 
 def _add_reference_lines(ax: plt.Axes, g: pd.DataFrame) -> None:
-    """Add horizontal normal-range dividers when one stable range is available."""
-    ranges = [v for v in g.get("normal_range", pd.Series(dtype=object)).dropna().astype(str).unique() if str(v).strip()]
-    lows_highs = [_ref_low_high(r) for r in ranges]
-    lows = sorted({lo for lo, _ in lows_highs if lo is not None})
-    highs = sorted({hi for _, hi in lows_highs if hi is not None})
-    for lo in lows[:3]:
-        ax.axhline(lo, color="tab:green", linestyle="--", linewidth=.8, alpha=.6, label="_nolegend_")
-    for hi in highs[:3]:
-        ax.axhline(hi, color="tab:red", linestyle="--", linewidth=.8, alpha=.6, label="_nolegend_")
+    """Add one collapsed lower and upper reference boundary per marker."""
+    low, high = _reference_bounds(g)
+    if low is not None:
+        ax.axhline(low, color="tab:green", linestyle="--", linewidth=.8, alpha=.6, label="_nolegend_")
+    if high is not None:
+        ax.axhline(high, color="tab:red", linestyle="--", linewidth=.8, alpha=.6, label="_nolegend_")
 
 
 def _continuous_markers(long: pd.DataFrame, threshold: float = 0.5) -> set[str]:
@@ -506,15 +503,22 @@ def _numeric_ticks(lower: float, upper: float) -> tuple[np.ndarray, np.ndarray]:
     return major, minor
 
 
-def _numeric_color(row: pd.Series, value: float) -> str:
-    """Color real values outside a reported reference range by direction."""
+def _reference_bounds(g: pd.DataFrame) -> tuple[float | None, float | None]:
+    """Collapse all reported reference ranges into one marker-level range."""
+    bounds = [_ref_low_high(value) for value in g.get("normal_range", pd.Series(dtype=object)).dropna()]
+    lows = [low for low, _ in bounds if low is not None]
+    highs = [high for _, high in bounds if high is not None]
+    return (min(lows) if lows else None, max(highs) if highs else None)
+
+
+def _numeric_color(row: pd.Series, value: float, reference_low: float | None, reference_high: float | None) -> str:
+    """Color real values outside the marker's collapsed reference range."""
     lab_name = str(row.get("Cluster Name", "")).strip()
     if lab_name in {"SS-A/Ro Ab, IgG (Blood)", "SS-B/La Ab, IgG (Blood)"} and value < .2:
         return "tab:green"
-    lo, hi = _ref_low_high(row.get("normal_range"))
-    if hi is not None and value > hi:
+    if reference_high is not None and value > reference_high:
         return "tab:red"
-    if lo is not None and value < lo:
+    if reference_low is not None and value < reference_low:
         return "tab:green"
     return "0.2"
 
@@ -573,7 +577,8 @@ def _plot_continuous_timeline(ax: plt.Axes, g: pd.DataFrame) -> None:
     categorical = g[g["timeline_type"] == "category"]
 
     if not continuous.empty:
-        colors = [_numeric_color(row, value) for (_, row), value in zip(continuous.iterrows(), continuous.timeline_value)]
+        reference_low, reference_high = _reference_bounds(g)
+        colors = [_numeric_color(row, value, reference_low, reference_high) for (_, row), value in zip(continuous.iterrows(), continuous.timeline_value)]
         ax.scatter(continuous.lab_date, continuous.timeline_value, s=14, c=colors, alpha=.7)
         lower = float(continuous.timeline_value.min())
         upper = float(continuous.timeline_value.max())
@@ -583,31 +588,44 @@ def _plot_continuous_timeline(ax: plt.Axes, g: pd.DataFrame) -> None:
     else:
         category_start, category_step = 0.0, 1.0
 
-    # Text and lower limits belong below the numeric range, while upper limits
-    # are placed above it so the position conveys the direction of the limit.
+    # Text is always the first (bottom) category, then lower limits; upper
+    # limits remain above the numeric range so their direction is apparent.
     categories = list(dict.fromkeys(categorical.timeline_category.dropna()))
     lower_categories = [c for c in categories if c != "Text" and (c == "Other" or str(c).startswith("<"))]
     upper_categories = [c for c in categories if c not in lower_categories and c != "Text"]
-    ordered_categories = lower_categories + upper_categories + (["Text"] if "Text" in categories else [])
+    ordered_categories = (["Text"] if "Text" in categories else []) + lower_categories + upper_categories
     y_map = {category: category_start - (len(lower_categories) - idx - 1) * category_step for idx, category in enumerate(lower_categories)}
+    if "Text" in categories:
+        y_map["Text"] = category_start - len(lower_categories) * category_step
     upper_start = (upper + padding) if not continuous.empty else len(lower_categories) * category_step
     y_map.update({category: upper_start + idx * category_step for idx, category in enumerate(upper_categories)})
-    if "Text" in categories:
-        y_map["Text"] = upper_start + len(upper_categories) * category_step
     if not categorical.empty:
         for category, s in categorical.groupby("timeline_category", sort=False):
             color, _ = _limit_style(category)
             y = y_map[category]
             ax.axhline(y, color=color, linestyle=":", linewidth=1, alpha=.35, zorder=0)
-            ax.scatter(s.lab_date, [y] * len(s), s=14, color=color, alpha=.7)
             if category == "Text":
+                text_keys = s["clean_value"].astype(str).str.slice(0, 4)
+                unique_text = list(dict.fromkeys(text_keys))
+                text_colors = {}
+                if 1 < len(unique_text) <= 4:
+                    palette = plt.get_cmap("tab10")
+                    text_colors = {text: palette(index) for index, text in enumerate(unique_text)}
+                point_colors = [text_colors.get(text, color) for text in text_keys]
+                ax.scatter(s.lab_date, [y] * len(s), s=14, color=point_colors, alpha=.7)
                 for _, row in s.iterrows():
                     ax.annotate(str(row["clean_value"])[:4], (row.lab_date, y), xytext=(4, 5), textcoords="offset points", fontsize=7, arrowprops={"arrowstyle": "-", "color": color, "alpha": .55})
+                if text_colors:
+                    for text, text_color in text_colors.items():
+                        ax.scatter([], [], s=18, color=text_color, label=text)
+                    ax.legend(title="Text", loc="upper right", fontsize=7, title_fontsize=8, frameon=True)
+            else:
+                ax.scatter(s.lab_date, [y] * len(s), s=14, color=color, alpha=.7)
 
     _add_reference_lines(ax, g)
     if ordered_categories:
         major_ticks, minor_ticks = _numeric_ticks(lower, upper) if not continuous.empty else (np.array([]), np.array([]))
-        ax.set_yticks(list(y_map.values()) + list(major_ticks))
+        ax.set_yticks([y_map[category] for category in ordered_categories] + list(major_ticks))
         ax.set_yticklabels(ordered_categories + [f"{tick:g}" for tick in major_ticks])
         if len(minor_ticks):
             ax.set_yticks(minor_ticks, minor=True)
