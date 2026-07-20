@@ -612,8 +612,9 @@ def _plot_continuous_timeline(ax: plt.Axes, g: pd.DataFrame) -> None:
                 unique_text = list(dict.fromkeys(text_keys))
                 text_colors = {}
                 if 1 < len(unique_text) <= 4:
-                    palette = plt.get_cmap("tab10")
-                    text_colors = {text: palette(index) for index, text in enumerate(unique_text)}
+                    # Use violet instead of red, which denotes upper limits.
+                    palette = ["tab:blue", "tab:orange", "tab:green", "tab:purple"]
+                    text_colors = {text: palette[index] for index, text in enumerate(unique_text)}
                 point_colors = [text_colors.get(text, color) for text in text_keys]
                 ax.scatter(s.lab_date, [y] * len(s), s=14, color=point_colors, alpha=.7)
                 if text_colors:
