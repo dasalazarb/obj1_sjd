@@ -18,6 +18,7 @@ from typing import Any
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.ticker import FormatStrFormatter
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -492,6 +493,32 @@ def _limit_style(category: Any) -> tuple[str, str]:
     return "tab:green", "other"
 
 
+def _numeric_ticks(lower: float, upper: float) -> tuple[np.ndarray, np.ndarray]:
+    """Create readable major ticks plus lighter intermediate numeric ticks."""
+    span = max(upper - lower, .01)
+    raw_step = span / 5
+    magnitude = 10 ** np.floor(np.log10(raw_step))
+    step = next(multiplier * magnitude for multiplier in (1, 2, 5, 10) if multiplier * magnitude >= raw_step)
+    major = np.arange(np.ceil(lower / step) * step, upper + step * .01, step)
+    minor_step = step / 2
+    minor = np.arange(np.ceil(lower / minor_step) * minor_step, upper + minor_step * .01, minor_step)
+    minor = minor[~np.isclose(minor[:, None], major).any(axis=1)]
+    return major, minor
+
+
+def _numeric_color(row: pd.Series, value: float) -> str:
+    """Color real values outside a reported reference range by direction."""
+    lab_name = str(row.get("Cluster Name", "")).strip()
+    if lab_name in {"SS-A/Ro Ab, IgG (Blood)", "SS-B/La Ab, IgG (Blood)"} and value < .2:
+        return "tab:green"
+    lo, hi = _ref_low_high(row.get("normal_range"))
+    if hi is not None and value > hi:
+        return "tab:red"
+    if lo is not None and value < lo:
+        return "tab:green"
+    return "0.2"
+
+
 def _continuous_timeline_point(row: pd.Series) -> tuple[str, float | None, str | None]:
     """Classify one result for a timeline with numeric and categorical y regions.
 
@@ -522,7 +549,11 @@ def _continuous_timeline_point(row: pd.Series) -> tuple[str, float | None, str |
             return "category", None, "Other"
         if operator in {"<", "<="}:
             return "category", None, "< 0.2"
-        if operator in {">", ">="}:
+        if value >= 1300:
+            return "category", None, "> 1300"
+        if operator in {">", ">="} or value >= 240:
+            return "category", None, "> 240"
+        if value >= 8:
             return "category", None, "> 8.0"
         return "continuous", value, None
 
@@ -544,7 +575,8 @@ def _plot_continuous_timeline(ax: plt.Axes, g: pd.DataFrame) -> None:
     categorical = g[g["timeline_type"] == "category"]
 
     if not continuous.empty:
-        ax.scatter(continuous.lab_date, continuous.timeline_value, s=14, color="0.2", alpha=.7)
+        colors = [_numeric_color(row, value) for (_, row), value in zip(continuous.iterrows(), continuous.timeline_value)]
+        ax.scatter(continuous.lab_date, continuous.timeline_value, s=14, c=colors, alpha=.7)
         lower = float(continuous.timeline_value.min())
         upper = float(continuous.timeline_value.max())
         padding = max((upper - lower) * .08, 0.2)
@@ -556,27 +588,34 @@ def _plot_continuous_timeline(ax: plt.Axes, g: pd.DataFrame) -> None:
     # Text and lower limits belong below the numeric range, while upper limits
     # are placed above it so the position conveys the direction of the limit.
     categories = list(dict.fromkeys(categorical.timeline_category.dropna()))
-    lower_categories = [c for c in categories if c in {"Text", "Other"} or str(c).startswith("<")]
-    upper_categories = [c for c in categories if c not in lower_categories]
-    y_map = {
-        category: category_start - (len(lower_categories) - idx - 1) * category_step
-        for idx, category in enumerate(lower_categories)
-    }
+    lower_categories = [c for c in categories if c != "Text" and (c == "Other" or str(c).startswith("<"))]
+    upper_categories = [c for c in categories if c not in lower_categories and c != "Text"]
+    ordered_categories = lower_categories + upper_categories + (["Text"] if "Text" in categories else [])
+    y_map = {category: category_start - (len(lower_categories) - idx - 1) * category_step for idx, category in enumerate(lower_categories)}
     upper_start = (upper + padding) if not continuous.empty else len(lower_categories) * category_step
     y_map.update({category: upper_start + idx * category_step for idx, category in enumerate(upper_categories)})
-    ordered_categories = lower_categories + upper_categories
+    if "Text" in categories:
+        y_map["Text"] = upper_start + len(upper_categories) * category_step
     if not categorical.empty:
         for category, s in categorical.groupby("timeline_category", sort=False):
             color, _ = _limit_style(category)
             y = y_map[category]
             ax.axhline(y, color=color, linestyle=":", linewidth=1, alpha=.35, zorder=0)
             ax.scatter(s.lab_date, [y] * len(s), s=14, color=color, alpha=.7)
+            if category == "Text":
+                for _, row in s.iterrows():
+                    ax.annotate(str(row["clean_value"])[:4], (row.lab_date, y), xytext=(4, 5), textcoords="offset points", fontsize=7, arrowprops={"arrowstyle": "-", "color": color, "alpha": .55})
 
     _add_reference_lines(ax, g)
     if ordered_categories:
-        numeric_ticks = [tick for tick in ax.get_yticks() if lower <= tick <= upper] if not continuous.empty else []
-        ax.set_yticks(list(y_map.values()) + numeric_ticks)
-        ax.set_yticklabels(ordered_categories + [f"{tick:g}" for tick in numeric_ticks])
+        major_ticks, minor_ticks = _numeric_ticks(lower, upper) if not continuous.empty else (np.array([]), np.array([]))
+        ax.set_yticks(list(y_map.values()) + list(major_ticks))
+        ax.set_yticklabels(ordered_categories + [f"{tick:g}" for tick in major_ticks])
+        if len(minor_ticks):
+            ax.set_yticks(minor_ticks, minor=True)
+            ax.yaxis.set_minor_formatter(FormatStrFormatter("%g"))
+            ax.tick_params(axis="y", which="minor", labelsize=7, labelcolor="0.5")
+            ax.grid(axis="y", which="minor", color="0.7", linestyle=":", linewidth=.7, alpha=.5)
     ax.set_ylabel("Value / reported limit")
 
 
