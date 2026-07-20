@@ -534,14 +534,16 @@ def _continuous_timeline_point(row: pd.Series) -> tuple[str, float | None, str |
     if lab_name == "SS-A/Ro Ab, IgG (Blood)":
         if value is None:
             return "category", None, "Other"
-        # Preserve numeric measurements below 240.  The assay's reported
-        # lower/upper limits remain categorical, as does the 240--1300 range.
+        # Preserve numeric measurements below 8.  This assay's upper bands
+        # distinguish 8--240, 240--1300, and values at/above 1300.
         if operator in {"<", "<="}:
             return "category", None, "< 0.2" if value <= .2 else "< 5"
         if value >= 1300:
             return "category", None, "> 1300"
-        if operator in {">", ">="} or value >= 240:
+        if value >= 240:
             return "category", None, "> 240"
+        if operator in {">", ">="} or value >= 8:
+            return "category", None, "> 8.0"
         return "continuous", value, None
 
     if lab_name == "SS-B/La Ab, IgG (Blood)":
@@ -549,11 +551,7 @@ def _continuous_timeline_point(row: pd.Series) -> tuple[str, float | None, str |
             return "category", None, "Other"
         if operator in {"<", "<="}:
             return "category", None, "< 0.2"
-        if value >= 1300:
-            return "category", None, "> 1300"
-        if operator in {">", ">="} or value >= 240:
-            return "category", None, "> 240"
-        if value >= 8:
+        if operator in {">", ">="} or value >= 8:
             return "category", None, "> 8.0"
         return "continuous", value, None
 
