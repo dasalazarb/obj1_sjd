@@ -514,7 +514,8 @@ def _reference_bounds(g: pd.DataFrame) -> tuple[float | None, float | None]:
 def _numeric_color(row: pd.Series, value: float, reference_low: float | None, reference_high: float | None) -> str:
     """Color real values outside the marker's collapsed reference range."""
     lab_name = str(row.get("Cluster Name", "")).strip()
-    if lab_name in {"SS-A/Ro Ab, IgG (Blood)", "SS-B/La Ab, IgG (Blood)"} and value < .2:
+    marker = str(row.get("serology_marker", "")).strip()
+    if (lab_name in {"SS-A/Ro Ab, IgG (Blood)", "SS-B/La Ab, IgG (Blood)"} or marker in {"ro_ssa_igg", "la_ssb_igg"}) and value < .2:
         return "tab:green"
     if reference_high is not None and value > reference_high:
         return "tab:red"
@@ -535,7 +536,9 @@ def _continuous_timeline_point(row: pd.Series) -> tuple[str, float | None, str |
     operator = str(row["operator"] or "")
     lab_name = str(row.get("Cluster Name", "")).strip()
 
-    if lab_name == "SS-A/Ro Ab, IgG (Blood)":
+    # SS-A/Ro60/Ro52 are rendered together in the same SS-A/Ro panel, so the
+    # collapsed bands must apply to the marker rather than only one lab label.
+    if row.get("serology_marker") == "ro_ssa_igg":
         if value is None:
             return "category", None, "Other"
         # Preserve numeric measurements below 8.  This assay's upper bands
@@ -613,8 +616,6 @@ def _plot_continuous_timeline(ax: plt.Axes, g: pd.DataFrame) -> None:
                     text_colors = {text: palette(index) for index, text in enumerate(unique_text)}
                 point_colors = [text_colors.get(text, color) for text in text_keys]
                 ax.scatter(s.lab_date, [y] * len(s), s=14, color=point_colors, alpha=.7)
-                for _, row in s.iterrows():
-                    ax.annotate(str(row["clean_value"])[:4], (row.lab_date, y), xytext=(4, 5), textcoords="offset points", fontsize=7, arrowprops={"arrowstyle": "-", "color": color, "alpha": .55})
                 if text_colors:
                     for text, text_color in text_colors.items():
                         ax.scatter([], [], s=18, color=text_color, label=text)
