@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -19,6 +18,7 @@ from typing import Any
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.ticker import FormatStrFormatter
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -476,6 +476,147 @@ def _continuous_markers(long: pd.DataFrame, threshold: float = 0.5) -> set[str]:
     return set(numeric_share[numeric_share > threshold].index.astype(str))
 
 
+def _limit_label(operator: str, value: float, clean_value: Any) -> str:
+    """Use the reported limit as the categorical-axis label."""
+    if operator:
+        return f"{operator} {value:g}"
+    return str(clean_value).strip() or "Other"
+
+
+def _limit_style(category: Any) -> tuple[str, str]:
+    """Return a subdued color and direction for a categorical limit."""
+    text = str(category).strip()
+    if text.startswith(">"):
+        return "tab:red", "upper"
+    if text.startswith("<"):
+        return "tab:blue", "lower"
+    return "tab:green", "other"
+
+
+def _numeric_ticks(lower: float, upper: float) -> tuple[np.ndarray, np.ndarray]:
+    """Create readable major ticks plus lighter intermediate numeric ticks."""
+    span = max(upper - lower, .01)
+    raw_step = span / 5
+    magnitude = 10 ** np.floor(np.log10(raw_step))
+    step = next(multiplier * magnitude for multiplier in (1, 2, 5, 10) if multiplier * magnitude >= raw_step)
+    major = np.arange(np.ceil(lower / step) * step, upper + step * .01, step)
+    minor_step = step / 2
+    minor = np.arange(np.ceil(lower / minor_step) * minor_step, upper + minor_step * .01, minor_step)
+    minor = minor[~np.isclose(minor[:, None], major).any(axis=1)]
+    return major, minor
+
+
+def _numeric_color(row: pd.Series, value: float) -> str:
+    """Color real values outside a reported reference range by direction."""
+    lab_name = str(row.get("Cluster Name", "")).strip()
+    if lab_name in {"SS-A/Ro Ab, IgG (Blood)", "SS-B/La Ab, IgG (Blood)"} and value < .2:
+        return "tab:green"
+    lo, hi = _ref_low_high(row.get("normal_range"))
+    if hi is not None and value > hi:
+        return "tab:red"
+    if lo is not None and value < lo:
+        return "tab:green"
+    return "0.2"
+
+
+def _continuous_timeline_point(row: pd.Series) -> tuple[str, float | None, str | None]:
+    """Classify one result for a timeline with numeric and categorical y regions.
+
+    ``continuous`` points retain their measurement on the numeric scale.  The
+    remaining point types are assigned categorical labels later, so limits and
+    text never distort the numeric range.
+    """
+    value = row["numeric_value"]
+    value = None if pd.isna(value) else float(value)
+    operator = str(row["operator"] or "")
+    lab_name = str(row.get("Cluster Name", "")).strip()
+
+    if lab_name == "SS-A/Ro Ab, IgG (Blood)":
+        if value is None:
+            return "category", None, "Other"
+        # Preserve numeric measurements below 8.  This assay's upper bands
+        # distinguish 8--240, 240--1300, and values at/above 1300.
+        if operator in {"<", "<="}:
+            return "category", None, "< 0.2" if value <= .2 else "< 5"
+        if value >= 1300:
+            return "category", None, "> 1300"
+        if value >= 240:
+            return "category", None, "> 240"
+        if operator in {">", ">="} or value >= 8:
+            return "category", None, "> 8.0"
+        return "continuous", value, None
+
+    if lab_name == "SS-B/La Ab, IgG (Blood)":
+        if value is None:
+            return "category", None, "Other"
+        if operator in {"<", "<="}:
+            return "category", None, "< 0.2"
+        if operator in {">", ">="} or value >= 8:
+            return "category", None, "> 8.0"
+        return "continuous", value, None
+
+    if value is not None and not operator:
+        return "continuous", value, None
+    if value is not None and operator:
+        return "category", None, _limit_label(operator, value, row["clean_value"])
+    # Free text is represented by a marker without exposing potentially long
+    # clinical notes in the figure.
+    return "category", None, "Text"
+
+
+def _plot_continuous_timeline(ax: plt.Axes, g: pd.DataFrame) -> None:
+    """Plot continuous values plus limit/text categories on one y-axis."""
+    points = g.apply(_continuous_timeline_point, axis=1, result_type="expand")
+    points.columns = ["timeline_type", "timeline_value", "timeline_category"]
+    g = pd.concat([g, points], axis=1)
+    continuous = g[g["timeline_type"] == "continuous"]
+    categorical = g[g["timeline_type"] == "category"]
+
+    if not continuous.empty:
+        colors = [_numeric_color(row, value) for (_, row), value in zip(continuous.iterrows(), continuous.timeline_value)]
+        ax.scatter(continuous.lab_date, continuous.timeline_value, s=14, c=colors, alpha=.7)
+        lower = float(continuous.timeline_value.min())
+        upper = float(continuous.timeline_value.max())
+        padding = max((upper - lower) * .08, 0.2)
+        category_start = lower - padding
+        category_step = max(padding, 0.2)
+    else:
+        category_start, category_step = 0.0, 1.0
+
+    # Text and lower limits belong below the numeric range, while upper limits
+    # are placed above it so the position conveys the direction of the limit.
+    categories = list(dict.fromkeys(categorical.timeline_category.dropna()))
+    lower_categories = [c for c in categories if c != "Text" and (c == "Other" or str(c).startswith("<"))]
+    upper_categories = [c for c in categories if c not in lower_categories and c != "Text"]
+    ordered_categories = lower_categories + upper_categories + (["Text"] if "Text" in categories else [])
+    y_map = {category: category_start - (len(lower_categories) - idx - 1) * category_step for idx, category in enumerate(lower_categories)}
+    upper_start = (upper + padding) if not continuous.empty else len(lower_categories) * category_step
+    y_map.update({category: upper_start + idx * category_step for idx, category in enumerate(upper_categories)})
+    if "Text" in categories:
+        y_map["Text"] = upper_start + len(upper_categories) * category_step
+    if not categorical.empty:
+        for category, s in categorical.groupby("timeline_category", sort=False):
+            color, _ = _limit_style(category)
+            y = y_map[category]
+            ax.axhline(y, color=color, linestyle=":", linewidth=1, alpha=.35, zorder=0)
+            ax.scatter(s.lab_date, [y] * len(s), s=14, color=color, alpha=.7)
+            if category == "Text":
+                for _, row in s.iterrows():
+                    ax.annotate(str(row["clean_value"])[:4], (row.lab_date, y), xytext=(4, 5), textcoords="offset points", fontsize=7, arrowprops={"arrowstyle": "-", "color": color, "alpha": .55})
+
+    _add_reference_lines(ax, g)
+    if ordered_categories:
+        major_ticks, minor_ticks = _numeric_ticks(lower, upper) if not continuous.empty else (np.array([]), np.array([]))
+        ax.set_yticks(list(y_map.values()) + list(major_ticks))
+        ax.set_yticklabels(ordered_categories + [f"{tick:g}" for tick in major_ticks])
+        if len(minor_ticks):
+            ax.set_yticks(minor_ticks, minor=True)
+            ax.yaxis.set_minor_formatter(FormatStrFormatter("%g"))
+            ax.tick_params(axis="y", which="minor", labelsize=7, labelcolor="0.5")
+            ax.grid(axis="y", which="minor", color="0.7", linestyle=":", linewidth=.7, alpha=.5)
+    ax.set_ylabel("Value / reported limit")
+
+
 def make_plots(long: pd.DataFrame) -> None:
     out = common.OUTPUTS_DIR / "figures" / "blockA"; out.mkdir(parents=True, exist_ok=True)
     marker_titles = {"ro_ssa_igg":"SS-A/Ro IgG", "la_ssb_igg":"SS-B/La IgG", "ana":"ANA", "ana_titer":"ANA titer", "ana_pattern":"ANA pattern", "rf":"RF", "c4":"C4", "wbc":"WBC", "cryoglobulins":"Cryoglobulins"}
@@ -484,20 +625,15 @@ def make_plots(long: pd.DataFrame) -> None:
     panel_markers = [m for m in default_continuous if m in set(long.serology_marker.dropna())]
     panel_markers.extend(sorted(continuous_markers - set(panel_markers)))
     panels = {marker: marker_titles.get(marker, marker.replace("_", " ").title()) for marker in panel_markers}
-    fig, axes = plt.subplots(len(panels), 1, figsize=(10, 3*len(panels)), sharex=False)
-    if len(panels) == 1: axes = [axes]
-    marker_styles = {"Limit value": "D", "real number": "o", "text": "x"}
-    for ax, (marker, title) in zip(axes, panels.items()):
-        g = long[long.serology_marker == marker].copy(); g["y"] = g["numeric_value"].fillna(-0.05)
-        for value_type, mk in marker_styles.items():
-            s = g[g.plot_value_type == value_type]
-            ax.scatter(s.lab_date, s.y, marker=mk, alpha=.7, label=value_type)
-            for _, r in s.head(60).iterrows():
-                if r["operator"] or pd.isna(r["numeric_value"]): ax.annotate((str(r["operator"])+str(r["clean_value"]))[:30], (r.lab_date, r.y), fontsize=6)
-        _add_reference_lines(ax, g)
-        metadata = _metadata_label(g)
-        ax.set_title(title + (f" ({metadata})" if metadata else "")); ax.set_ylabel("value\ntext / see note at bottom"); ax.legend(loc="best", fontsize=7)
-    fig.tight_layout(); fig.savefig(out / "01_dotplot_serological_profile.pdf"); shutil.copyfile(out / "01_dotplot_serological_profile.pdf", out / "01_dotplot_serological profile.pdf"); plt.close(fig)
+    if panels:
+        fig, axes = plt.subplots(len(panels), 1, figsize=(14, 5 * len(panels)), sharex=False)
+        if len(panels) == 1: axes = [axes]
+        for ax, (marker, title) in zip(axes, panels.items()):
+            g = long[(long.serology_marker == marker) & long.lab_date.notna()].copy()
+            _plot_continuous_timeline(ax, g)
+            metadata = _metadata_label(g)
+            ax.set_title(title + (f" ({metadata})" if metadata else "")); ax.set_xlabel("Time")
+        fig.tight_layout(); fig.savefig(out / "01_serological_continuous_timeline.pdf"); plt.close(fig)
 
     categorical_markers = ["ro_ssa_igg", "la_ssb_igg", "ana", "ana_pattern", "rf", "cryoglobulins"]
     categorical_markers = [m for m in categorical_markers if m not in continuous_markers]
@@ -508,23 +644,24 @@ def make_plots(long: pd.DataFrame) -> None:
     cat_agg = cat.groupby(["serology_marker", "lab_date", "observed_category", "classification"], dropna=False).size().reset_index(name="n")
     cat_panels = list(cat_agg["serology_marker"].dropna().unique())
     if cat_panels:
-        fig, axes = plt.subplots(len(cat_panels), 1, figsize=(12, max(3, 2.8*len(cat_panels))), sharex=False)
+        fig, axes = plt.subplots(len(cat_panels), 1, figsize=(14, max(5, 4.5 * len(cat_panels))), sharex=False)
         if len(cat_panels) == 1: axes = [axes]
         for ax, marker in zip(axes, cat_panels):
             g = cat_agg[cat_agg.serology_marker == marker].copy()
             categories = sorted(g["observed_category"].dropna().unique())
             y_map = {cat_value: idx for idx, cat_value in enumerate(categories)}
-            for cls, s in g.groupby("classification", dropna=False):
-                ax.scatter(s.lab_date, s["observed_category"].map(y_map), s=(s.n.clip(1, 50) * 12), label=str(cls), alpha=.7)
-            for y in np.arange(.5, len(categories), 1):
-                ax.axhline(y, color="0.9", linewidth=.6, zorder=0)
+            for category, y in y_map.items():
+                color, _ = _limit_style(category)
+                ax.axhline(y, color=color, linestyle=":", linewidth=1, alpha=.35, zorder=0)
+            for category, s in g.groupby("observed_category", dropna=False):
+                color, _ = _limit_style(category)
+                ax.scatter(s.lab_date, s["observed_category"].map(y_map), s=(s.n.clip(1, 50) * 10), color=color, alpha=.7)
             source = cat[cat.serology_marker == marker]
             title = marker_titles.get(marker, marker.replace("_", " ").title())
             metadata = _metadata_label(source)
             ax.set_title(title + (f" ({metadata})" if metadata else ""))
             ax.set_yticks(range(len(categories))); ax.set_yticklabels(categories, fontsize=7)
             ax.set_xlabel("Time"); ax.set_ylabel("Observed category")
-            ax.legend(fontsize=7, loc="best")
         fig.tight_layout(); fig.savefig(out / "01_serology_categorical_timeline.pdf"); plt.close(fig)
 
 
