@@ -636,6 +636,18 @@ def fmt_median_iqr(values: pd.Series) -> str:
     return f"{vals.median():.1f} [{vals.quantile(0.25):.1f}, {vals.quantile(0.75):.1f}]"
 
 
+def fmt_median_iqr_range(values: pd.Series) -> str:
+    """Format a continuous value as median, IQR, and observed range."""
+    vals = pd.to_numeric(values, errors="coerce").dropna()
+    if vals.empty:
+        return "NA"
+    return (
+        f"{vals.median():.1f} "
+        f"[{vals.quantile(0.25):.1f}, {vals.quantile(0.75):.1f}]; "
+        f"range {vals.min():.1f}–{vals.max():.1f}"
+    )
+
+
 def normalize_sex(value: object) -> str | float:
     if is_missing(value):
         return np.nan
@@ -678,9 +690,12 @@ def summarize_table1_by_pop(baseline: pd.DataFrame, codebook: pd.DataFrame | Non
     pop_counts = classifiable["pop_status"].value_counts().reindex(["Pop1", "Pop2", "Pop3"], fill_value=0)
     rows.append({"Variable": "N", "Overall": str(n_class), **{p: str(int(pop_counts[p])) for p in ["Pop1", "Pop2", "Pop3"]}, "p_value": "", "test": "", **counts_avail()})
     rows.append({"Variable": "Percent of baseline classifiable cohort", "Overall": "100.0%" if n_class else "NA", **{p: (f"{100*pop_counts[p]/n_class:.1f}%" if n_class else "NA") for p in ["Pop1", "Pop2", "Pop3"]}, "p_value": "", "test": "", **counts_avail()})
-    for var, label in [("essdai_total", "ESSDAI total, median [IQR]"), ("esspri_total", "ESSPRI total, median [IQR]")]:
+    for var, label in [
+        ("essdai_total", "ESSDAI total, median [IQR]; range"),
+        ("esspri_total", "ESSPRI total, median [IQR]; range"),
+    ]:
         p, test = run_stat_tests(classifiable, var, "continuous", warnings)
-        rows.append({"Variable": label, "Overall": fmt_median_iqr(classifiable[var]), **{pop: fmt_median_iqr(classifiable.loc[classifiable["pop_status"] == pop, var]) for pop in ["Pop1", "Pop2", "Pop3"]}, "p_value": p, "test": test, **counts_avail(var)})
+        rows.append({"Variable": label, "Overall": fmt_median_iqr_range(classifiable[var]), **{pop: fmt_median_iqr_range(classifiable.loc[classifiable["pop_status"] == pop, var]) for pop in ["Pop1", "Pop2", "Pop3"]}, "p_value": p, "test": test, **counts_avail(var)})
     selected = {
         "selected_age_column": select_first_available(baseline, AGE_CANDIDATES, codebook),
         "selected_sex_column": select_first_available(baseline, SEX_CANDIDATES, codebook),
