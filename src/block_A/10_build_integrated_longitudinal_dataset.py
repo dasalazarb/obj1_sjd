@@ -10,6 +10,11 @@ import argparse
 import json
 import sys
 from datetime import date
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 from pathlib import Path
 
 import numpy as np
@@ -38,6 +43,12 @@ OVERLAP_COLUMNS = ["glandular_active", "glandular_evaluable", "extraglandular_ac
                    "eg_pulmonary_active", "eg_renal_active", "eg_muscular_active", "eg_pns_active",
                    "eg_cns_active", "eg_hematologic_active", "eg_biological_active",
                    "time_since_diagnosis_days", "time_since_diagnosis_years", "dx_date", "dx_date_precision"]
+FIGURES_DIR = common.OUTPUTS_DIR / "figures" / "blockA"
+POP_ORDER = ["Pop1", "Pop2", "Pop3", "Unclassifiable"]
+POP_COLORS = {"Pop1": "#E66101", "Pop2": "#5E5AA8", "Pop3": "#1B9E77", "Unclassifiable": "#9E9E9E"}
+OVERLAP_ORDER = ["neither", "glandular_only", "extraglandular_only", "overlap", "insufficient_info"]
+OVERLAP_COLORS = {"neither": "#9E9E9E", "glandular_only": "#4C78A8", "extraglandular_only": "#59A14F", "overlap": "#E15759", "insufficient_info": "#BAB0AC"}
+
 PRO_COLUMNS = ["sf36_physical_functioning", "sf36_role_physical", "sf36_bodily_pain",
                "sf36_general_health", "sf36_vitality", "sf36_social_functioning", "sf36_role_emotional",
                "sf36_mental_health", "sf36_pcs", "sf36_mcs", "profad_total", "mdafs_global",
@@ -181,29 +192,190 @@ def coverage(integrated: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame([{"measure": name, "n_visits_available": int(mask.sum()), "pct_visits_available": 100 * mask.mean(), "n_patients_available": int(integrated.loc[mask, "patient_id"].nunique()), "pct_patients_available": 100 * integrated.loc[mask, "patient_id"].nunique() / n_patients if n_patients else np.nan} for name, mask in measures.items()])
 
 
+
+def progress(step: int, total: int, message: str) -> None:
+    """Print a compact, readable progress message for command-line runs."""
+    width = 24
+    completed = round(width * step / total)
+    bar = "█" * completed + "░" * (width - completed)
+    print(f"\n[{bar}] {step}/{total}  {message}", flush=True)
+
+
+def report_output(path: Path) -> None:
+    """Print each artifact as it is written, relative to the project when possible."""
+    try:
+        display_path = path.relative_to(PROJECT_ROOT)
+    except ValueError:
+        display_path = path
+    print(f"  ✓ Generated: {display_path}", flush=True)
+
+
+def baseline_pop_groups(integrated: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:
+    """Return one stable patient order shared by every longitudinal figure."""
+    baseline = integrated.loc[integrated["is_observed_baseline"], ["patient_id", "baseline_pop"]].copy()
+    baseline["baseline_pop"] = baseline["baseline_pop"].where(
+        baseline["baseline_pop"].isin(POP_ORDER[:-1]), "Unclassifiable"
+    )
+    rank = {pop: position for position, pop in enumerate(POP_ORDER)}
+    baseline["pop_rank"] = baseline["baseline_pop"].map(rank)
+    ordered = baseline.sort_values(["pop_rank", "patient_id"], kind="stable").reset_index(drop=True)
+    ordered["patient_position"] = np.arange(len(ordered), 0, -1)
+    return ordered, ordered.groupby("baseline_pop", sort=False).size().to_dict()
+
+
+def add_population_separators(ax: plt.Axes, patient_order: pd.DataFrame) -> None:
+    """Mark baseline-Pop sections without changing the shared patient positions."""
+    previous_end = 0
+    for population in POP_ORDER:
+        members = patient_order.loc[patient_order["baseline_pop"].eq(population)]
+        if members.empty:
+            continue
+        start, end = previous_end, previous_end + len(members)
+        center = patient_order.loc[members.index, "patient_position"].mean()
+        ax.text(-0.025, center, f"{population}\n(n={len(members)})", transform=ax.get_yaxis_transform(),
+                ha="right", va="center", color=POP_COLORS[population], fontsize=8, fontweight="bold")
+        if start:
+            ax.axhline(len(patient_order) - start + 0.5, color="#BDBDBD", linewidth=0.9, zorder=1)
+        previous_end = end
+
+
+def plot_longitudinal_measure(
+    integrated: pd.DataFrame, patient_order: pd.DataFrame, path: Path, title: str,
+    value_columns: list[str], value_label: str, categorical: bool = False,
+) -> None:
+    """Create a patient timeline with an identical Pop-grouped y-order in every plot."""
+    plot_data = integrated.merge(patient_order[["patient_id", "patient_position"]], on="patient_id", how="inner")
+    plot_data = plot_data.loc[plot_data["time_since_observed_baseline_years"].notna()].copy()
+    fig_height = max(6.5, 2.8 + len(patient_order) * 0.23)
+    fig, ax = plt.subplots(figsize=(15, fig_height), constrained_layout=True)
+    for y in patient_order["patient_position"]:
+        ax.axhline(y, color="#E5E5E5", linewidth=0.75, zorder=0)
+    if categorical:
+        column = value_columns[0]
+        plot_data["plot_category"] = plot_data[column].where(plot_data[column].isin(OVERLAP_ORDER), "insufficient_info")
+        for category in OVERLAP_ORDER:
+            subset = plot_data.loc[plot_data["plot_category"].eq(category)]
+            ax.scatter(subset["time_since_observed_baseline_years"], subset["patient_position"], s=34,
+                       color=OVERLAP_COLORS[category], edgecolor="white", linewidth=0.35, label=category.replace("_", " "), zorder=3)
+        legend_title = "Overlap status"
+    else:
+        values = plot_data[value_columns].copy()
+        if len(value_columns) == 1:
+            plot_data["plot_value"] = values.iloc[:, 0]
+            series = [(value_columns[0], "o")]
+        else:
+            plot_data["plot_value"] = values.mean(axis=1)
+            series = [(value_columns[0], "o"), (value_columns[1], "s")]
+        finite = plot_data["plot_value"].dropna()
+        if finite.empty:
+            norm_min, norm_max = 0.0, 1.0
+        elif finite.min() == finite.max():
+            norm_min, norm_max = float(finite.min()) - 0.5, float(finite.max()) + 0.5
+        else:
+            norm_min, norm_max = float(finite.min()), float(finite.max())
+        scatter = None
+        for column, marker in series:
+            subset = plot_data.loc[plot_data[column].notna()]
+            scatter = ax.scatter(subset["time_since_observed_baseline_years"], subset["patient_position"],
+                                 c=subset[column], cmap="viridis", vmin=norm_min, vmax=norm_max, s=34,
+                                 marker=marker, edgecolor="white", linewidth=0.35, zorder=3)
+        if scatter is not None:
+            colorbar = fig.colorbar(scatter, ax=ax, pad=0.01)
+            colorbar.set_label(value_label)
+        if len(value_columns) > 1:
+            ax.legend(handles=[Line2D([0], [0], marker="o", color="none", markerfacecolor="#555555", label="SF-36 PCS", markersize=6),
+                               Line2D([0], [0], marker="s", color="none", markerfacecolor="#555555", label="SF-36 MCS", markersize=6)],
+                      title="Score", loc="upper right", frameon=False)
+        legend_title = None
+    add_population_separators(ax, patient_order)
+    max_years = max(1.0, float(plot_data["time_since_observed_baseline_years"].max())) if not plot_data.empty else 1.0
+    ax.set_xlim(-0.05 * max_years, max_years * 1.08)
+    ax.set_ylim(0.25, len(patient_order) + 0.75)
+    ax.set_yticks([])
+    ax.set_xlabel("Time since observed baseline (years)")
+    ax.set_ylabel("Patients (shared order across figures)")
+    ax.set_title(f"{title}\nPatients are grouped by baseline Pop; the patient order is identical in every figure.", loc="left", color="#D95F02", pad=16)
+    ax.grid(axis="x", color="#BDBDBD", linestyle="--", linewidth=0.7)
+    ax.spines[["top", "right"]].set_visible(False)
+    if categorical:
+        ax.legend(title=legend_title, loc="upper right", frameon=False, ncol=2)
+    fig.savefig(path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+
+
+def generate_longitudinal_figures(integrated: pd.DataFrame) -> list[Path]:
+    """Write the four requested comparable longitudinal patient timelines."""
+    FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+    patient_order, _ = baseline_pop_groups(integrated)
+    figures = [
+        ("10_longitudinal_profad.pdf", "Longitudinal PROFAD", ["profad_total"], "PROFAD total", False),
+        ("10_longitudinal_sf36.pdf", "Longitudinal SF-36", ["sf36_pcs", "sf36_mcs"], "SF-36 score", False),
+        ("10_longitudinal_mdafs.pdf", "Longitudinal MDAFS", ["mdafs_global"], "MDAFS global", False),
+        ("10_longitudinal_overlapping.pdf", "Longitudinal glandular/extraglandular overlap", ["overlap_status"], "", True),
+    ]
+    paths = []
+    for filename, title, columns, label, categorical in figures:
+        path = FIGURES_DIR / filename
+        plot_longitudinal_measure(integrated, patient_order, path, title, columns, label, categorical)
+        paths.append(path)
+    return paths
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--spine", type=Path, default=common.VISIT_SPINE_PARQUET); parser.add_argument("--pop", type=Path, default=common.POP_LONGITUDINAL_PARQUET); parser.add_argument("--overlap", type=Path, default=common.OVERLAP_LONGITUDINAL_PARQUET); parser.add_argument("--pros", type=Path, default=common.PROS_LONGITUDINAL_PARQUET); parser.add_argument("--output", type=Path, default=common.INTEGRATED_LONGITUDINAL_PARQUET)
-    args = parser.parse_args(); common.ensure_output_dirs()
+    args = parser.parse_args()
+    common.ensure_output_dirs()
+    total_steps = 5
+    print("\n╔══════════════════════════════════════════════════════════════╗")
+    print("║  Building integrated longitudinal dataset                    ║")
+    print("╚══════════════════════════════════════════════════════════════╝", flush=True)
+    progress(1, total_steps, "Reading visit spine, Pop, overlap, and PRO sources")
     frames = [
         canonicalize_patient_id(pd.read_parquet(path), source)
         for source, path in zip(["visit_spine", "pop", "overlap", "pros"], [args.spine, args.pop, args.overlap, args.pros])
     ]
+    for source, frame in zip(["Visit spine", "Pop", "Overlap", "PROs"], frames):
+        print(f"  • {source:<12} {len(frame):>6,} visits | {frame.patient_id.nunique():>5,} patients", flush=True)
+
+    progress(2, total_steps, "Merging sources and deriving longitudinal variables")
     integrated, discrepancies = build_integrated(*frames)
     assert integrated.visit_id.is_unique and not integrated.duplicated(KEYS).any()
     assert integrated.time_since_observed_baseline_days.ge(0).all()
     assert integrated.loc[integrated.visit_number.eq(0)].groupby("patient_id").size().eq(1).all()
     assert integrated.time_to_next_visit_days.dropna().ge(0).all()
-    args.output.parent.mkdir(parents=True, exist_ok=True); integrated.to_parquet(args.output, index=False); integrated.to_csv(args.output.with_suffix(".csv"), index=False)
-    coverage(integrated).to_csv(common.BLOCKA_TABLES_DIR / "10_integrated_longitudinal_coverage.csv", index=False)
-    spine_ids = set(frames[0].visit_id); summary = []; unmatched = []
+    progress(3, total_steps, "Writing integrated dataset and coverage table")
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    output_csv = args.output.with_suffix(".csv")
+    coverage_path = common.BLOCKA_TABLES_DIR / "10_integrated_longitudinal_coverage.csv"
+    integrated.to_parquet(args.output, index=False)
+    integrated.to_csv(output_csv, index=False)
+    coverage(integrated).to_csv(coverage_path, index=False)
+    for path in [args.output, output_csv, coverage_path]:
+        report_output(path)
+
+    progress(4, total_steps, "Creating comparable Pop-grouped patient timelines")
+    for path in generate_longitudinal_figures(integrated):
+        report_output(path)
+
+    progress(5, total_steps, "Writing merge and quality-control reports")
+    spine_ids = set(frames[0].visit_id)
+    summary = []
+    unmatched = []
     for name, frame in zip(["visit_spine", "pop", "overlap", "pros"], frames):
         matched = frame.visit_id.isin(spine_ids); summary.append({"source": name, "n_source_rows": len(frame), "n_unique_patients": frame.patient_id.nunique(), "n_matched_visit_ids": int(matched.sum()), "n_unmatched_visit_ids": int((~matched).sum()), "pct_matched_visit_ids": 100 * matched.mean() if len(frame) else np.nan})
         if (~matched).any(): unmatched.append(frame.loc[~matched, ["patient_id", "visit_id", "visit_date"]].assign(source=name))
-    pd.DataFrame(summary).to_csv(common.BLOCKA_QC_DIR / "10_integrated_merge_summary.csv", index=False)
-    if unmatched: pd.concat(unmatched).loc[:, ["source", "patient_id", "visit_id", "visit_date"]].to_csv(common.BLOCKA_QC_DIR / "10_integrated_unmatched_visits.csv", index=False)
+    merge_summary_path = common.BLOCKA_QC_DIR / "10_integrated_merge_summary.csv"
+    pd.DataFrame(summary).to_csv(merge_summary_path, index=False)
+    report_output(merge_summary_path)
+    if unmatched:
+        unmatched_path = common.BLOCKA_QC_DIR / "10_integrated_unmatched_visits.csv"
+        pd.concat(unmatched).loc[:, ["source", "patient_id", "visit_id", "visit_date"]].to_csv(unmatched_path, index=False)
+        report_output(unmatched_path)
     qc = {"n_rows_integrated": len(integrated), "n_unique_patients": int(integrated.patient_id.nunique()), "n_unique_visit_ids": int(integrated.visit_id.nunique()), "n_baseline_rows": int(integrated.is_observed_baseline.sum()), "n_rows_with_pop": int(integrated.has_pop_data.sum()), "n_rows_with_overlap": int(integrated.has_overlap_data.sum()), "n_rows_with_pro": int(integrated.has_pro_data.sum()), "n_rows_with_all_three_blocks": int(integrated.n_data_blocks_available.eq(3).sum()), "n_pop_transitions_evaluable": int(integrated.pop_transition_evaluable.sum()), "n_overlap_transitions_evaluable": int(integrated.overlap_transition_evaluable.sum()), "n_incident_extraglandular_events": int(integrated.incident_extraglandular_from_previous.sum()), "n_transition_to_pop1_events": int(integrated.transition_to_pop1_next_visit.sum()), "n_negative_visit_intervals": int(integrated.time_to_next_visit_days.dropna().lt(0).sum()), "n_duplicate_visit_ids": int(integrated.visit_id.duplicated().sum()), "shared_column_discrepancies": discrepancies}
-    (common.BLOCKA_QC_DIR / "10_integrated_longitudinal_qc.json").write_text(json.dumps(qc, indent=2))
+    qc_path = common.BLOCKA_QC_DIR / "10_integrated_longitudinal_qc.json"
+    qc_path.write_text(json.dumps(qc, indent=2))
+    report_output(qc_path)
+    print(f"\n✓ Complete: {len(integrated):,} visits across {integrated.patient_id.nunique():,} patients.\n", flush=True)
 
 
 if __name__ == "__main__":
