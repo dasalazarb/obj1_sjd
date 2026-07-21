@@ -28,6 +28,12 @@ BLOCKA_TABLES_DIR = OUTPUTS_DIR / "tables" / "blockA"
 BLOCKA_QC_DIR = OUTPUTS_DIR / "qc" / "blockA"
 VISIT_SPINE_PARQUET = INTERMEDIATE_DATA_DIR / "00_patient_visit_spine.parquet"
 VISIT_SPINE_CSV = INTERMEDIATE_DATA_DIR / "00_patient_visit_spine.csv"
+POP_LONGITUDINAL_PARQUET = INTERMEDIATE_DATA_DIR / "01_visit_level_classification.parquet"
+OVERLAP_LONGITUDINAL_PARQUET = (
+    INTERMEDIATE_DATA_DIR / "06_overlap_longitudinal_dx_temporal_anchor_patient_visit.parquet"
+)
+PROS_LONGITUDINAL_PARQUET = INTERMEDIATE_DATA_DIR / "09_pros_longitudinal_patient_visit.parquet"
+INTEGRATED_LONGITUDINAL_PARQUET = ANALYTIC_DATA_DIR / "10_integrated_longitudinal_patient_visit.parquet"
 
 
 def ensure_output_dirs() -> None:
