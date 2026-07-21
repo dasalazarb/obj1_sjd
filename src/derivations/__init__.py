@@ -1,1 +1,1 @@
-"""Shared derivations used across clinical analysis scripts."""
+"""Reusable derivations for analytic datasets."""
