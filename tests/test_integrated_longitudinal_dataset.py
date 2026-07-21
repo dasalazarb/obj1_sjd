@@ -28,7 +28,7 @@ def frames():
                             "n_extraglandular_domains_active": [0, 2, 1]})
     pros = pd.DataFrame({"patient_id": ["a", "a", "b"], "visit_id": ["a0", "a1", "b0"],
                          "visit_date": spine.visit_date, "sf36_pcs": [40.0, 35.0, 50.0], "sf36_mcs": [45.0, 46.0, 48.0],
-                         "profad_total": [1.0, 2.0, 3.0], "profad_fatigue": [1.0, 2.0, 3.0], "mdafs_total": [2.0, 3.0, 4.0]})
+                         "profad_total": [1.0, 2.0, 3.0], "profad_fatigue": [1.0, 2.0, 3.0], "mdafs_global": [2.0, 3.0, 4.0]})
     return spine, pop, overlap, pros
 
 
@@ -60,3 +60,8 @@ def test_lags_deltas_incidence_and_original_scores_are_preserved():
     assert follow_up.incident_extraglandular_from_previous
     assert result.loc[result.visit_id.eq("a0"), "sf36_pcs"].iloc[0] == 40.0
     assert result.loc[result.visit_id.eq("a1"), "essdai_total"].iloc[0] == 2.0
+    assert result.loc[result.visit_id.eq("a0"), "mdafs_global"].iloc[0] == 2.0
+    assert follow_up.delta_mdafs_global == 1.0
+    assert follow_up.change_from_baseline_mdafs_global == 1.0
+    assert follow_up.next_mdafs_global is pd.NA or pd.isna(follow_up.next_mdafs_global)
+    assert result.loc[result.visit_id.eq("a0"), "next_mdafs_global"].iloc[0] == 3.0

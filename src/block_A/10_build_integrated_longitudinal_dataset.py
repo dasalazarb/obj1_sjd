@@ -41,8 +41,7 @@ OVERLAP_COLUMNS = ["glandular_active", "glandular_evaluable", "extraglandular_ac
 PRO_COLUMNS = ["sf36_physical_functioning", "sf36_role_physical", "sf36_bodily_pain",
                "sf36_general_health", "sf36_vitality", "sf36_social_functioning", "sf36_role_emotional",
                "sf36_mental_health", "sf36_pcs", "sf36_mcs", "profad_total", "profad_fatigue",
-               "profad_discomfort", "mdafs_total", "mdafs_severity", "mdafs_distress",
-               "mdafs_interference", "sf36_scoring_valid", "profad_scoring_valid",
+               "profad_discomfort", "mdafs_global", "sf36_scoring_valid", "profad_scoring_valid",
                "mdafs_scoring_valid", "esspri_scoring_valid"]
 
 
@@ -128,8 +127,8 @@ def derive_longitudinal(integrated: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("visit_number is inconsistent with patient visit_date ordering")
     integrated["has_pop_data"] = integrated.pop_status.notna()
     integrated["has_overlap_data"] = integrated.overlap_status.notna()
-    integrated["has_pro_data"] = integrated[[c for c in ["sf36_pcs", "sf36_mcs", "profad_total", "mdafs_total"] if c in integrated]].notna().any(axis=1)
-    for output, source in [("has_essdai", "essdai_total"), ("has_esspri", "esspri_total"), ("has_sf36_pcs", "sf36_pcs"), ("has_sf36_mcs", "sf36_mcs"), ("has_profad", "profad_total"), ("has_mdafs", "mdafs_total")]:
+    integrated["has_pro_data"] = integrated[[c for c in ["sf36_pcs", "sf36_mcs", "profad_total", "mdafs_global"] if c in integrated]].notna().any(axis=1)
+    for output, source in [("has_essdai", "essdai_total"), ("has_esspri", "esspri_total"), ("has_sf36_pcs", "sf36_pcs"), ("has_sf36_mcs", "sf36_mcs"), ("has_profad", "profad_total"), ("has_mdafs", "mdafs_global")]:
         integrated[output] = integrated[source].notna()
     integrated["n_data_blocks_available"] = integrated[["has_pop_data", "has_overlap_data", "has_pro_data"]].sum(axis=1)
     integrated["n_visits_patient"] = grouped.visit_id.transform("count")
@@ -158,11 +157,11 @@ def derive_longitudinal(integrated: pd.DataFrame) -> pd.DataFrame:
     incident = integrated.previous_extraglandular_active.eq(False) & integrated.extraglandular_active.eq(True) & evaluable
     integrated["incident_extraglandular_from_previous"] = incident.astype("boolean").where(evaluable, pd.NA)
     integrated["first_incident_extraglandular"] = (incident & ~integrated.baseline_extraglandular_active.eq(True) & ~incident.groupby(integrated.patient_id).shift(fill_value=False).groupby(integrated.patient_id).cummax()).astype("boolean").where(evaluable, pd.NA)
-    delta_map = {"delta_essdai": "essdai_total", "delta_esspri": "esspri_total", "delta_pcs": "sf36_pcs", "delta_mcs": "sf36_mcs", "delta_profad_total": "profad_total", "delta_profad_fatigue": "profad_fatigue", "delta_mdafs_total": "mdafs_total", "delta_n_extraglandular_domains": "n_extraglandular_domains_active"}
+    delta_map = {"delta_essdai": "essdai_total", "delta_esspri": "esspri_total", "delta_pcs": "sf36_pcs", "delta_mcs": "sf36_mcs", "delta_profad_total": "profad_total", "delta_profad_fatigue": "profad_fatigue", "delta_mdafs_global": "mdafs_global", "delta_n_extraglandular_domains": "n_extraglandular_domains_active"}
     for output, source in delta_map.items(): integrated[output] = grouped[source].diff()
-    baseline_map = {"change_from_baseline_essdai": "essdai_total", "change_from_baseline_esspri": "esspri_total", "change_from_baseline_pcs": "sf36_pcs", "change_from_baseline_mcs": "sf36_mcs", "change_from_baseline_profad_total": "profad_total", "change_from_baseline_mdafs_total": "mdafs_total", "change_from_baseline_n_extraglandular_domains": "n_extraglandular_domains_active"}
+    baseline_map = {"change_from_baseline_essdai": "essdai_total", "change_from_baseline_esspri": "esspri_total", "change_from_baseline_pcs": "sf36_pcs", "change_from_baseline_mcs": "sf36_mcs", "change_from_baseline_profad_total": "profad_total", "change_from_baseline_mdafs_global": "mdafs_global", "change_from_baseline_n_extraglandular_domains": "n_extraglandular_domains_active"}
     for output, source in baseline_map.items(): integrated[output] = integrated[source] - baseline_value(integrated, source)
-    for output, source in [("next_essdai", "essdai_total"), ("next_esspri", "esspri_total"), ("next_pcs", "sf36_pcs"), ("next_mcs", "sf36_mcs"), ("next_profad_total", "profad_total"), ("next_mdafs_total", "mdafs_total"), ("next_extraglandular_active", "extraglandular_active"), ("next_n_extraglandular_domains", "n_extraglandular_domains_active")]: integrated[output] = grouped[source].shift(-1)
+    for output, source in [("next_essdai", "essdai_total"), ("next_esspri", "esspri_total"), ("next_pcs", "sf36_pcs"), ("next_mcs", "sf36_mcs"), ("next_profad_total", "profad_total"), ("next_mdafs_global", "mdafs_global"), ("next_extraglandular_active", "extraglandular_active"), ("next_n_extraglandular_domains", "n_extraglandular_domains_active")]: integrated[output] = grouped[source].shift(-1)
     integrated["transition_to_pop1_next_visit"] = integrated.pop_status.isin(["Pop2", "Pop3"]) & integrated.next_pop.eq("Pop1")
     integrated["at_risk_transition_to_pop1"] = integrated.pop_status.isin(["Pop2", "Pop3"]) & integrated.next_pop.isin(valid_pop)
     integrated["pcs_decreased_from_previous"] = integrated.delta_pcs < 0
@@ -177,7 +176,7 @@ def transition(left: pd.Series, right: pd.Series) -> pd.Series:
 
 
 def coverage(integrated: pd.DataFrame) -> pd.DataFrame:
-    measures = {"pop_status": integrated.has_pop_data, "overlap_status": integrated.has_overlap_data, "essdai_total": integrated.has_essdai, "esspri_total": integrated.has_esspri, "sf36_pcs": integrated.has_sf36_pcs, "sf36_mcs": integrated.has_sf36_mcs, "profad_total": integrated.has_profad, "mdafs_total": integrated.has_mdafs, "complete_pop_overlap": integrated.has_pop_data & integrated.has_overlap_data, "complete_pop_pro": integrated.has_pop_data & integrated.has_pro_data, "complete_overlap_pro": integrated.has_overlap_data & integrated.has_pro_data, "complete_all_three_blocks": integrated.n_data_blocks_available.eq(3)}
+    measures = {"pop_status": integrated.has_pop_data, "overlap_status": integrated.has_overlap_data, "essdai_total": integrated.has_essdai, "esspri_total": integrated.has_esspri, "sf36_pcs": integrated.has_sf36_pcs, "sf36_mcs": integrated.has_sf36_mcs, "profad_total": integrated.has_profad, "mdafs_global": integrated.has_mdafs, "complete_pop_overlap": integrated.has_pop_data & integrated.has_overlap_data, "complete_pop_pro": integrated.has_pop_data & integrated.has_pro_data, "complete_overlap_pro": integrated.has_overlap_data & integrated.has_pro_data, "complete_all_three_blocks": integrated.n_data_blocks_available.eq(3)}
     n_patients = integrated.patient_id.nunique()
     return pd.DataFrame([{"measure": name, "n_visits_available": int(mask.sum()), "pct_visits_available": 100 * mask.mean(), "n_patients_available": int(integrated.loc[mask, "patient_id"].nunique()), "pct_patients_available": 100 * integrated.loc[mask, "patient_id"].nunique() / n_patients if n_patients else np.nan} for name, mask in measures.items()])
 
