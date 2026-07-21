@@ -39,6 +39,17 @@ def test_merge_preserves_spine_rows_and_unique_patient_visits():
     assert not result.duplicated(["patient_id", "visit_id"]).any()
 
 
+def test_merge_accepts_legacy_overlap_patient_id_column():
+    spine, pop, overlap, pros = frames()
+    overlap = overlap.drop(columns="patient_id")
+    overlap.insert(0, "ids__patient_record_number", ["a", "a", "b"])
+
+    result, _ = builder.build_integrated(spine, pop, overlap, pros)
+
+    assert result.overlap_status.notna().all()
+    assert result.loc[result.visit_id.eq("a1"), "overlap_status"].iloc[0] == "overlap"
+
+
 def test_lags_deltas_incidence_and_original_scores_are_preserved():
     spine, pop, overlap, pros = frames()
     result, _ = builder.build_integrated(spine, pop, overlap, pros)
