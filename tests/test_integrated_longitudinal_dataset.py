@@ -14,6 +14,14 @@ assert spec.loader is not None
 spec.loader.exec_module(builder)
 
 
+def test_pro_columns_match_longitudinal_pro_scoring_output():
+    from src.derivations.pro_scoring import score_all_pros
+
+    scored = score_all_pros(pd.DataFrame({"patient_id": ["a"], "visit_date": [pd.Timestamp("2020-01-01")]}))
+
+    assert set(builder.PRO_COLUMNS).issubset(scored.columns)
+
+
 def frames():
     spine = pd.DataFrame({"patient_id": ["a", "a", "b"], "visit_id": ["a0", "a1", "b0"],
                           "visit_date": pd.to_datetime(["2020-01-01", "2021-01-01", "2020-06-01"]),
@@ -28,7 +36,7 @@ def frames():
                             "n_extraglandular_domains_active": [0, 2, 1]})
     pros = pd.DataFrame({"patient_id": ["a", "a", "b"], "visit_id": ["a0", "a1", "b0"],
                          "visit_date": spine.visit_date, "sf36_pcs": [40.0, 35.0, 50.0], "sf36_mcs": [45.0, 46.0, 48.0],
-                         "profad_total": [1.0, 2.0, 3.0], "profad_fatigue": [1.0, 2.0, 3.0], "mdafs_global": [2.0, 3.0, 4.0]})
+                         "profad_total": [1.0, 2.0, 3.0], "mdafs_global": [2.0, 3.0, 4.0]})
     return spine, pop, overlap, pros
 
 

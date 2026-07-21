@@ -40,8 +40,8 @@ OVERLAP_COLUMNS = ["glandular_active", "glandular_evaluable", "extraglandular_ac
                    "time_since_diagnosis_days", "time_since_diagnosis_years", "dx_date", "dx_date_precision"]
 PRO_COLUMNS = ["sf36_physical_functioning", "sf36_role_physical", "sf36_bodily_pain",
                "sf36_general_health", "sf36_vitality", "sf36_social_functioning", "sf36_role_emotional",
-               "sf36_mental_health", "sf36_pcs", "sf36_mcs", "profad_total", "profad_fatigue",
-               "profad_discomfort", "mdafs_global", "sf36_scoring_valid", "profad_scoring_valid",
+               "sf36_mental_health", "sf36_pcs", "sf36_mcs", "profad_total", "mdafs_global",
+               "sf36_scoring_valid", "profad_scoring_valid",
                "mdafs_scoring_valid", "esspri_scoring_valid"]
 
 
@@ -157,7 +157,7 @@ def derive_longitudinal(integrated: pd.DataFrame) -> pd.DataFrame:
     incident = integrated.previous_extraglandular_active.eq(False) & integrated.extraglandular_active.eq(True) & evaluable
     integrated["incident_extraglandular_from_previous"] = incident.astype("boolean").where(evaluable, pd.NA)
     integrated["first_incident_extraglandular"] = (incident & ~integrated.baseline_extraglandular_active.eq(True) & ~incident.groupby(integrated.patient_id).shift(fill_value=False).groupby(integrated.patient_id).cummax()).astype("boolean").where(evaluable, pd.NA)
-    delta_map = {"delta_essdai": "essdai_total", "delta_esspri": "esspri_total", "delta_pcs": "sf36_pcs", "delta_mcs": "sf36_mcs", "delta_profad_total": "profad_total", "delta_profad_fatigue": "profad_fatigue", "delta_mdafs_global": "mdafs_global", "delta_n_extraglandular_domains": "n_extraglandular_domains_active"}
+    delta_map = {"delta_essdai": "essdai_total", "delta_esspri": "esspri_total", "delta_pcs": "sf36_pcs", "delta_mcs": "sf36_mcs", "delta_profad_total": "profad_total", "delta_mdafs_global": "mdafs_global", "delta_n_extraglandular_domains": "n_extraglandular_domains_active"}
     for output, source in delta_map.items(): integrated[output] = grouped[source].diff()
     baseline_map = {"change_from_baseline_essdai": "essdai_total", "change_from_baseline_esspri": "esspri_total", "change_from_baseline_pcs": "sf36_pcs", "change_from_baseline_mcs": "sf36_mcs", "change_from_baseline_profad_total": "profad_total", "change_from_baseline_mdafs_global": "mdafs_global", "change_from_baseline_n_extraglandular_domains": "n_extraglandular_domains_active"}
     for output, source in baseline_map.items(): integrated[output] = integrated[source] - baseline_value(integrated, source)
