@@ -58,6 +58,10 @@ def add_parsed_visit_dates(df: pd.DataFrame, patient_id_col: str, visit_date_col
     out = df.copy()
     out["patient_id"] = out[patient_id_col].map(normalize_patient_id).astype("string")
     parsed = pd.DataFrame(list(out[visit_date_col].map(parse_visit_date_fragments)), index=out.index)
+    # Analytic extracts can retain helper fields from a prior processing run.
+    # Parsed values are canonical, so replace rather than collide with any
+    # pre-existing fields (particularly ``visit_date``).
+    out = out.drop(columns=parsed.columns.intersection(out.columns))
     return out.join(parsed)
 
 
