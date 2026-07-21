@@ -625,7 +625,7 @@ def main() -> None:
     df["in_near_dx_window"] = df["days_from_dx"].between(-DX_WINDOW_PRE_DAYS, DX_WINDOW_POST_DAYS)
 
     long_df = pd.concat([
-        df[[PATIENT_ID_COL, "visit_id", "visit_date", "visit_number", "observed_baseline_date", "time_since_observed_baseline_days", "time_since_observed_baseline_years", "visit_date_min", "dx_date", "dx_date_precision", "days_from_dx", "time_from_dx_yrs", "in_near_dx_window", "near_dx_window_start", "near_dx_window_end"]],
+        df[["patient_id", PATIENT_ID_COL, "visit_id", "visit_date", "visit_number", "observed_baseline_date", "time_since_observed_baseline_days", "time_since_observed_baseline_years", "visit_date_min", "dx_date", "dx_date_precision", "days_from_dx", "time_from_dx_yrs", "in_near_dx_window", "near_dx_window_start", "near_dx_window_end"]],
         derive_glandular_flags(df),
         derive_extraglandular_flags(df),
     ], axis=1)

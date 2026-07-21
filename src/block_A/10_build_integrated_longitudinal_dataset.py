@@ -19,8 +19,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 import common  # noqa: E402
+from src.derivations.visit_dates import normalize_patient_id  # noqa: E402
 
 KEYS = ["patient_id", "visit_id"]
+LEGACY_PATIENT_ID_COLUMN = "ids__patient_record_number"
 SHARED_SPINE_COLUMNS = ["visit_date", "visit_number", "observed_baseline_date",
                         "time_since_observed_baseline_days", "time_since_observed_baseline_years",
                         "protocol", "interval_name"]
@@ -48,6 +50,24 @@ def require_columns(frame: pd.DataFrame, columns: list[str], source: str) -> Non
     missing = [column for column in columns if column not in frame]
     if missing:
         raise ValueError(f"{source} is missing required columns: {missing}")
+
+
+def canonicalize_patient_id(frame: pd.DataFrame, source: str) -> pd.DataFrame:
+    """Return a frame with the canonical patient ID column when possible.
+
+    The diagnosis-anchored overlap export historically retained its raw input
+    identifier (``ids__patient_record_number``) instead of ``patient_id``.
+    Normalize that identifier with the same routine used to build the visit
+    spine so its values remain valid merge keys (for example, ``"123.0"``
+    becomes ``"123"``).
+    """
+    if "patient_id" in frame:
+        return frame
+    if LEGACY_PATIENT_ID_COLUMN not in frame:
+        return frame
+    canonical = frame.copy()
+    canonical["patient_id"] = canonical[LEGACY_PATIENT_ID_COLUMN].map(normalize_patient_id).astype("string")
+    return canonical
 
 
 def assert_unique_keys(frame: pd.DataFrame, source: str) -> None:
@@ -79,6 +99,10 @@ def baseline_value(frame: pd.DataFrame, column: str) -> pd.Series:
 
 def build_integrated(visit_spine: pd.DataFrame, pop: pd.DataFrame, overlap: pd.DataFrame, pros: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:
     """Build the canonical longitudinal table, returning it and date discrepancy counts."""
+    visit_spine, pop, overlap, pros = [
+        canonicalize_patient_id(frame, source)
+        for source, frame in [("visit_spine", visit_spine), ("pop", pop), ("overlap", overlap), ("pros", pros)]
+    ]
     for source, frame in [("visit_spine", visit_spine), ("pop", pop), ("overlap", overlap), ("pros", pros)]:
         assert_unique_keys(frame, source)
     require_columns(visit_spine, KEYS + ["visit_date", "visit_number", "time_since_observed_baseline_days"], "visit_spine")
@@ -162,7 +186,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--spine", type=Path, default=common.VISIT_SPINE_PARQUET); parser.add_argument("--pop", type=Path, default=common.POP_LONGITUDINAL_PARQUET); parser.add_argument("--overlap", type=Path, default=common.OVERLAP_LONGITUDINAL_PARQUET); parser.add_argument("--pros", type=Path, default=common.PROS_LONGITUDINAL_PARQUET); parser.add_argument("--output", type=Path, default=common.INTEGRATED_LONGITUDINAL_PARQUET)
     args = parser.parse_args(); common.ensure_output_dirs()
-    frames = [pd.read_parquet(path) for path in [args.spine, args.pop, args.overlap, args.pros]]
+    frames = [
+        canonicalize_patient_id(pd.read_parquet(path), source)
+        for source, path in zip(["visit_spine", "pop", "overlap", "pros"], [args.spine, args.pop, args.overlap, args.pros])
+    ]
     integrated, discrepancies = build_integrated(*frames)
     assert integrated.visit_id.is_unique and not integrated.duplicated(KEYS).any()
     assert integrated.time_since_observed_baseline_days.ge(0).all()
