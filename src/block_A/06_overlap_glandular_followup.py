@@ -29,6 +29,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import common  # noqa: E402
+from src.derivations.visit_dates import add_parsed_visit_dates
 
 PATIENT_ID_COL = "ids__patient_record_number"
 VISIT_DATE_COL = "ids__visit_date"
@@ -129,15 +130,6 @@ NO_STRINGS = {"no", "n", "negative", "absent", "normal", "no activity", "no acit
 YES_STRINGS = {"yes", "y", "positive", "present", "abnormal", "ocular symptoms", "oral symptoms", "1", "1.0", "true"}
 ESSDAI_ACTIVE = {"low activity", "moderate activity", "high activity", "high acitivity"}
 ESSDAI_SCORE = {"no activity": 0, "no acitivity": 0, "low activity": 1, "moderate activity": 2, "high activity": 3, "high acitivity": 3}
-
-
-def parse_min_visit_date(x: Any) -> pd.Timestamp:
-    pieces = str(x).split("|")
-    parsed = [pd.to_datetime(p.strip(), errors="coerce") for p in pieces]
-    valid = [p.normalize() for p in parsed if pd.notna(p)]
-    return min(valid) if valid else pd.NaT
-
-
 
 
 def parse_dx_date(x: Any) -> pd.Timestamp:
@@ -617,11 +609,15 @@ def main() -> None:
     if not any(m["col"] in raw.columns for m in EXTRAGLANDULAR_DOMAINS.values()):
         raise ValueError("No ESSDAI extraglandular domain column is available.")
 
-    df = raw.copy()
-    df["visit_date_min"] = df[VISIT_DATE_COL].map(parse_min_visit_date)
+    df = add_parsed_visit_dates(raw, patient_id_col=PATIENT_ID_COL, visit_date_col=VISIT_DATE_COL)
+    df["visit_date_min"] = df["visit_date"]  # legacy alias used by clinical derivations
     df["dx_date"] = df[DX_DATE_COL].map(parse_dx_date)
     df["dx_date_precision"] = df[DX_DATE_COL].map(dx_date_imputed_precision)
     df = df[df["visit_date_min"].notna()].sort_values([PATIENT_ID_COL, "visit_date_min"]).copy()
+    spine_cols = ["patient_id", "visit_id", "visit_date", "observed_baseline_date", "time_since_observed_baseline_days", "time_since_observed_baseline_years", "visit_number"]
+    spine = pd.read_parquet(common.VISIT_SPINE_PARQUET)[spine_cols]
+    df = df.merge(spine, on=["patient_id", "visit_date"], how="left", validate="many_to_one")
+    if df["visit_id"].isna().any(): raise ValueError("Overlap follow-up visits missing from canonical spine")
     df["days_from_dx"] = (df["visit_date_min"] - df["dx_date"]).dt.days
     df["time_from_dx_yrs"] = df["days_from_dx"] / 365.25
     df["near_dx_window_start"] = df["dx_date"] - pd.to_timedelta(DX_WINDOW_PRE_DAYS, unit="D")
@@ -629,7 +625,7 @@ def main() -> None:
     df["in_near_dx_window"] = df["days_from_dx"].between(-DX_WINDOW_PRE_DAYS, DX_WINDOW_POST_DAYS)
 
     long_df = pd.concat([
-        df[[PATIENT_ID_COL, "visit_date_min", "dx_date", "dx_date_precision", "days_from_dx", "time_from_dx_yrs", "in_near_dx_window", "near_dx_window_start", "near_dx_window_end"]],
+        df[[PATIENT_ID_COL, "visit_id", "visit_date", "visit_number", "observed_baseline_date", "time_since_observed_baseline_days", "time_since_observed_baseline_years", "visit_date_min", "dx_date", "dx_date_precision", "days_from_dx", "time_from_dx_yrs", "in_near_dx_window", "near_dx_window_start", "near_dx_window_end"]],
         derive_glandular_flags(df),
         derive_extraglandular_flags(df),
     ], axis=1)
@@ -639,13 +635,13 @@ def main() -> None:
     baseline = select_observed_baseline(dx_long_df)
     baseline_valid = baseline[baseline["observed_baseline_date"].notna()].copy()
     long_df = long_df.merge(
-        baseline[[PATIENT_ID_COL, "observed_baseline_date", "baseline_timing_category"]],
+        baseline[[PATIENT_ID_COL, "baseline_timing_category"]],
         on=PATIENT_ID_COL,
         how="left",
     )
-    long_df["is_observed_baseline"] = long_df["visit_date_min"].eq(long_df["observed_baseline_date"])
-    long_df["is_post_observed_baseline_followup"] = long_df["visit_date_min"] > long_df["observed_baseline_date"]
-    long_df["time_from_observed_baseline_yrs"] = (long_df["visit_date_min"] - long_df["observed_baseline_date"]).dt.days / 365.25
+    long_df["is_observed_baseline"] = long_df["visit_number"].eq(0)
+    long_df["is_post_observed_baseline_followup"] = long_df["visit_number"].gt(0)
+    long_df["time_from_observed_baseline_yrs"] = long_df["time_since_observed_baseline_years"]
 
     patient = build_dx_temporal_patient_summary(baseline_valid, long_df)
     follow = make_followup_table(patient)

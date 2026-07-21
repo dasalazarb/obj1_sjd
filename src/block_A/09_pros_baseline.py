@@ -27,6 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import common  # noqa: E402
+from src.derivations.visit_dates import add_parsed_visit_dates
 
 LOG = logging.getLogger("pros_baseline")
 
@@ -177,29 +178,6 @@ def normalize_patient_id(value: Any) -> str | float:
     return text if text else np.nan
 
 
-def parse_visit_date_min(value: Any) -> dict[str, Any]:
-    """Parse pipe-separated visit dates and return the earliest valid date."""
-    raw = np.nan if pd.isna(value) else str(value)
-    if is_missing_value(value):
-        return {"visit_date_raw": raw, "visit_date": pd.NaT, "n_date_fragments": 0, "n_valid_date_fragments": 0, "date_parse_status": "missing_date"}
-    fragments = [part.strip() for part in str(value).split("|")]
-    parsed = [pd.to_datetime(part, errors="coerce") for part in fragments if part.strip()]
-    valid = [dt.normalize() for dt in parsed if pd.notna(dt)]
-    if not valid:
-        status = "no_valid_date"
-        out_date = pd.NaT
-    elif len(valid) == len([f for f in fragments if f.strip()]) == 1:
-        status = "single_valid_date"
-        out_date = min(valid)
-    elif len(valid) == len([f for f in fragments if f.strip()]):
-        status = "multiple_valid_dates"
-        out_date = min(valid)
-    else:
-        status = "partially_parsed"
-        out_date = min(valid)
-    return {"visit_date_raw": raw, "visit_date": out_date, "n_date_fragments": len([f for f in fragments if f.strip()]), "n_valid_date_fragments": len(valid), "date_parse_status": status}
-
-
 def nonmissing_distinct(values: Iterable[Any]) -> list[str]:
     vals = []
     for v in values:
@@ -256,18 +234,20 @@ def derive_parent_protocol(interval: Any) -> str:
 
 
 def select_global_baseline(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Select earliest valid global visit date for each patient."""
+    """Select observed baseline visits defined by the canonical spine."""
     valid = df[df["patient_id"].notna() & df["visit_date"].notna()].copy()
-    min_dates = valid.groupby("patient_id")["visit_date"].min().rename("baseline_date")
-    valid = valid.merge(min_dates, on="patient_id", how="left")
-    valid["is_baseline_visit"] = valid["visit_date"].eq(valid["baseline_date"])
+    spine = pd.read_parquet(common.VISIT_SPINE_PARQUET)[["patient_id", "visit_date", "visit_id", "visit_number", "observed_baseline_date", "time_since_observed_baseline_days", "time_since_observed_baseline_years"]]
+    valid = valid.merge(spine, on=["patient_id", "visit_date"], how="left", validate="one_to_one")
+    if valid["visit_id"].isna().any():
+        raise ValueError("PRO visits missing from canonical spine")
+    valid["baseline_date"] = valid["observed_baseline_date"]  # compatibility alias
+    valid["is_baseline_visit"] = valid["visit_number"].eq(0)
     audit = valid.groupby("patient_id").agg(n_valid_visit_dates=("visit_date", "nunique"), earliest_visit_date=("visit_date", "min"), selected_baseline_date=("baseline_date", "min"), n_rows_on_baseline_date=("is_baseline_visit", "sum")).reset_index()
     audit["baseline_selection_status"] = np.where(audit["n_rows_on_baseline_date"].eq(1), "selected_unique_earliest_visit", "multiple_rows_on_earliest_date_after_collapse")
     baseline = valid[valid["is_baseline_visit"]].copy().sort_values(["patient_id", "visit_date"]).drop_duplicates("patient_id")
     assert baseline["patient_id"].notna().all()
     assert baseline["baseline_date"].notna().all()
     assert baseline["patient_id"].is_unique
-    assert baseline.set_index("patient_id")["baseline_date"].equals(min_dates.loc[baseline["patient_id"]].rename("baseline_date"))
     baseline["parent_protocol"] = baseline[INTERVAL_COL].map(derive_parent_protocol) if INTERVAL_COL in baseline else "Unknown"
     return baseline, audit
 
@@ -582,14 +562,12 @@ def main() -> None:
     LOG.info("Required columns absent: %s", sorted(required - set(df.columns)))
     if PATIENT_ID_COL not in df or VISIT_DATE_COL not in df:
         raise ValueError(f"Input must include {PATIENT_ID_COL} and {VISIT_DATE_COL}")
-    df["patient_id"] = df[PATIENT_ID_COL].map(normalize_patient_id)
-    parsed = pd.DataFrame([parse_visit_date_min(v) for v in df[VISIT_DATE_COL]], index=df.index)
+    df = add_parsed_visit_dates(df, patient_id_col=PATIENT_ID_COL, visit_date_col=VISIT_DATE_COL)
+    parsed = df
     # Assign parsed analytic date columns explicitly instead of concatenating.
     # Some extracts may already contain helper columns such as ``visit_date``;
     # duplicate column names make ``df["visit_date"]`` return a DataFrame and
     # can break boolean filtering in pandas when indexes contain mixed types.
-    for parsed_col in ["visit_date_raw", "visit_date", "n_date_fragments", "n_valid_date_fragments", "date_parse_status"]:
-        df[parsed_col] = parsed[parsed_col]
     date_qc = df[["patient_id", "visit_date_raw", "n_date_fragments", "n_valid_date_fragments", "visit_date", "date_parse_status"]].copy()
     valid_date_mask = df["visit_date"].notna()
     valid = df[df["patient_id"].notna() & valid_date_mask].copy()
