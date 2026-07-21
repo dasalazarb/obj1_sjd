@@ -27,6 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import common  # noqa: E402
+from src.derivations.visit_dates import add_parsed_visit_dates
 
 LOG = logging.getLogger(__name__)
 
@@ -94,20 +95,6 @@ def is_missing_value(value: Any) -> bool:
     if pd.isna(value):
         return True
     return str(value).strip().lower() in MISSING_STRINGS
-
-
-def parse_visit_date_min(value: Any) -> pd.Timestamp:
-    """Parse possibly pipe-delimited visit dates and return the earliest date."""
-    if is_missing_value(value):
-        return pd.NaT
-    if isinstance(value, pd.Timestamp):
-        return pd.to_datetime(value, errors="coerce")
-    parsed = []
-    for piece in str(value).split("|"):
-        dt = pd.to_datetime(piece.strip(), errors="coerce")
-        if pd.notna(dt):
-            parsed.append(dt.normalize())
-    return min(parsed) if parsed else pd.NaT
 
 
 def read_input() -> pd.DataFrame:
@@ -296,14 +283,12 @@ def build_baseline(df: pd.DataFrame, strict_missingness: bool = True) -> pd.Data
     if VISIT_DATE_COL not in df.columns:
         raise ValueError(f"Required visit date missing: {VISIT_DATE_COL}")
 
-    work = df.copy()
-    work["patient_id"] = work[PATIENT_ID_COL].astype("string")
-    work["visit_date_min"] = work[VISIT_DATE_COL].map(parse_visit_date_min)
-    work["_had_piped_date"] = work[VISIT_DATE_COL].apply(lambda v: isinstance(v, str) and "|" in v)
-    work = work[work["patient_id"].notna() & work["visit_date_min"].notna()].copy()
-
-    earliest = work.groupby("patient_id", dropna=True)["visit_date_min"].transform("min")
-    candidates = work[work["visit_date_min"].eq(earliest)].copy()
+    work = add_parsed_visit_dates(df, patient_id_col=PATIENT_ID_COL, visit_date_col=VISIT_DATE_COL)
+    work["visit_date_min"] = work["visit_date"]  # legacy output alias
+    work["_had_piped_date"] = work["had_pipe_delimited_date"]
+    work = work[work["patient_id"].notna() & work["visit_date"].notna()].copy()
+    spine = pd.read_parquet(common.VISIT_SPINE_PARQUET)[["patient_id", "visit_id", "visit_date", "visit_number", "observed_baseline_date"]]
+    candidates = work.merge(spine[spine.visit_number.eq(0)], on=["patient_id", "visit_date"], how="inner", validate="many_to_one")
 
     raw_vars = []
     for d in DOMAINS:
@@ -316,6 +301,8 @@ def build_baseline(df: pd.DataFrame, strict_missingness: bool = True) -> pd.Data
     consolidated_rows = []
     for _patient_id, group in candidates.groupby("patient_id", sort=True):
         row: dict[str, Any] = {"patient_id": _patient_id}
+        for col in ["visit_id", "visit_date", "visit_number", "observed_baseline_date"]:
+            row[col] = group[col].iloc[0]
         for col in keep_cols:
             row[col] = first_nonmissing(group[col])
         row["n_tied_baseline_rows"] = int(len(group))
@@ -328,6 +315,8 @@ def build_baseline(df: pd.DataFrame, strict_missingness: bool = True) -> pd.Data
             row[f"{d['domain']}_baseline_source"] = source
         consolidated_rows.append(row)
     baseline = pd.DataFrame(consolidated_rows)
+    if not baseline.empty and not baseline["visit_number"].eq(0).all():
+        raise ValueError("Overlap baseline output contains non-baseline canonical visits")
 
     add_extraglandular_rollup(baseline, include_biological=True)
     add_extraglandular_rollup(baseline, include_biological=False, suffix="_no_biological")

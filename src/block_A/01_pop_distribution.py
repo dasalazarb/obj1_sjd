@@ -28,6 +28,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import common  # noqa: E402
+from src.derivations.visit_dates import add_parsed_visit_dates
 
 PATIENT_ID_COL = "ids__patient_record_number"
 VISIT_DATE_COL = "ids__visit_date"
@@ -194,17 +195,6 @@ def validate_columns(df: pd.DataFrame) -> dict[str, list[str]]:
         raise ValueError(f"No ESSDAI total column found. Tried: {ESSDAI_TOTAL_CANDIDATES}")
     available_esspri = [col for col in ESSPRI_COMPONENTS if col in df.columns]
     return {"essdai": essdai_cols, "esspri": available_esspri, "missing_esspri": [col for col in ESSPRI_COMPONENTS if col not in df.columns]}
-
-
-def parse_visit_dates(value: object) -> list[pd.Timestamp]:
-    if is_missing(value):
-        return []
-    dates = []
-    for fragment in str(value).split("|"):
-        parsed = pd.to_datetime(fragment.strip(), errors="coerce")
-        if pd.notna(parsed):
-            dates.append(pd.Timestamp(parsed).normalize())
-    return dates
 
 
 def numeric_from_first_number(series: pd.Series) -> pd.Series:
@@ -484,8 +474,8 @@ def normalize_visit_level_dtypes(vis: pd.DataFrame) -> pd.DataFrame:
 
 def _detect_duplicate_conflicts(work: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     rows = []
-    dup = work[work.duplicated(["patient_id", "visit_date_clean"], keep=False)]
-    for (pid, vdate), g in dup.groupby(["patient_id", "visit_date_clean"], dropna=False):
+    dup = work[work.duplicated(["patient_id", "visit_date"], keep=False)]
+    for (pid, vdate), g in dup.groupby(["patient_id", "visit_date"], dropna=False):
         for col in cols:
             if col not in g.columns:
                 continue
@@ -493,8 +483,8 @@ def _detect_duplicate_conflicts(work: pd.DataFrame, cols: list[str]) -> pd.DataF
             if n > 1:
                 vals = pd.to_numeric(g[col], errors="coerce").dropna()
                 distinct = sorted(vals.unique().tolist()) if len(vals) else sorted(g[col].dropna().astype(str).unique().tolist())
-                rows.append({"patient_id": pid, "visit_date_clean": vdate, "variable_name": col, "n_distinct_values": n, "distinct_values": " | ".join(map(str, distinct)), "selected_value": first_nonmissing(g[col])})
-    return pd.DataFrame(rows, columns=["patient_id", "visit_date_clean", "variable_name", "n_distinct_values", "distinct_values", "selected_value"])
+                rows.append({"patient_id": pid, "visit_date": vdate, "variable_name": col, "n_distinct_values": n, "distinct_values": " | ".join(map(str, distinct)), "selected_value": first_nonmissing(g[col])})
+    return pd.DataFrame(rows, columns=["patient_id", "visit_date", "variable_name", "n_distinct_values", "distinct_values", "selected_value"])
 
 
 def build_longitudinal_pop_dataset(df: pd.DataFrame, codebook: pd.DataFrame | None = None) -> tuple[pd.DataFrame, dict[str, Any], list[str]]:
@@ -502,16 +492,15 @@ def build_longitudinal_pop_dataset(df: pd.DataFrame, codebook: pd.DataFrame | No
     qc_counts: dict[str, Any] = {"n_input_rows": int(len(work))}
     warnings: list[str] = []
 
-    work["patient_id"] = work[PATIENT_ID_COL].astype("string").str.strip()
+    work = add_parsed_visit_dates(work, patient_id_col=PATIENT_ID_COL, visit_date_col=VISIT_DATE_COL)
     valid_patient_id = ~work["patient_id"].map(is_missing)
     qc_counts["n_rows_with_valid_patient_id"] = int(valid_patient_id.sum())
     qc_counts["n_rows_excluded_missing_patient_id"] = int((~valid_patient_id).sum())
-    work["row_date_original"] = work[VISIT_DATE_COL]
-    parsed_lists = work[VISIT_DATE_COL].map(parse_visit_dates)
-    work["row_date_min"] = parsed_lists.map(lambda x: min(x) if x else pd.NaT)
-    work["row_date_max"] = parsed_lists.map(lambda x: max(x) if x else pd.NaT)
-    work["visit_date_clean"] = work["row_date_min"]
-    valid_visit_date = work["visit_date_clean"].notna()
+    work["row_date_original"] = work["visit_date_raw"]
+    work["row_date_min"] = work["visit_date_min"]
+    work["row_date_max"] = work["visit_date_max"]
+    work["visit_date_clean"] = work["visit_date"]  # compatibility alias
+    valid_visit_date = work["visit_date"].notna()
     qc_counts["n_rows_with_valid_visit_date"] = int(valid_visit_date.sum())
     qc_counts["n_rows_excluded_missing_visit_date"] = int((~valid_visit_date).sum())
     work["essdai_total"] = coalesce_essdai(work)
@@ -534,11 +523,11 @@ def build_longitudinal_pop_dataset(df: pd.DataFrame, codebook: pd.DataFrame | No
     work = work[valid_patient_id & valid_visit_date].copy()
     qc_counts["n_unique_patients"] = int(work["patient_id"].nunique())
     qc_counts["n_patient_visit_rows_before_collapse"] = int(len(work))
-    qc_counts["n_duplicate_patient_visit_rows"] = int(work.duplicated(["patient_id", "visit_date_clean"]).sum())
+    qc_counts["n_duplicate_patient_visit_rows"] = int(work.duplicated(["patient_id", "visit_date"]).sum())
     qc_counts["n_duplicate_patient_event_dates"] = qc_counts["n_duplicate_patient_visit_rows"]
     raw_cols = ["essdai_total", "esspri_dryness_observed", "esspri_fatigue_observed", "esspri_pain_observed"] + [c for c in work.columns if c.startswith("raw_")]
     conflict_df = _detect_duplicate_conflicts(work, raw_cols)
-    qc_counts["n_patient_visits_with_conflicts"] = int(conflict_df[["patient_id", "visit_date_clean"]].drop_duplicates().shape[0]) if not conflict_df.empty else 0
+    qc_counts["n_patient_visits_with_conflicts"] = int(conflict_df[["patient_id", "visit_date"]].drop_duplicates().shape[0]) if not conflict_df.empty else 0
     qc_counts["n_conflicting_variable_values"] = int(len(conflict_df))
     BLOCKA_QC_DIR.mkdir(parents=True, exist_ok=True)
     conflict_df.to_csv(BLOCKA_QC_DIR / "01_esspri_proxy_duplicate_conflicts.csv", index=False)
@@ -557,7 +546,8 @@ def build_longitudinal_pop_dataset(df: pd.DataFrame, codebook: pd.DataFrame | No
     for std, src in selected_demo.items():
         if src:
             agg[std.replace("_raw", "")] = (src, first_nonmissing)
-    work = work.groupby(["patient_id", "visit_date_clean"], as_index=False).agg(**agg).sort_values(["patient_id", "visit_date_clean"]).reset_index(drop=True)
+    work = work.groupby(["patient_id", "visit_date"], as_index=False).agg(**agg).sort_values(["patient_id", "visit_date"]).reset_index(drop=True)
+    work["visit_date_clean"] = work["visit_date"]  # compatibility alias
     work = derive_esspri_proxies_from_collapsed_visit(work, qc_counts)
 
     work["esspri_dryness"] = work["esspri_dryness_observed"]
@@ -597,12 +587,14 @@ def build_longitudinal_pop_dataset(df: pd.DataFrame, codebook: pd.DataFrame | No
     work["pop_status"] = [classify_pop(e, p) for e, p in zip(work["essdai_total"], work["esspri_total_observed"])]
     work["pop_status_display"] = work["pop_status"].map(DISPLAY)
     work["pop_missingness_label"] = [visit_missingness_label(e, p) for e, p in zip(work["essdai_total"], work["esspri_total_observed"])]
-    work["baseline_date"] = work.groupby("patient_id")["visit_date_clean"].transform("min")
-    work["event_date"] = work["visit_date_clean"]
-    work["time_since_baseline_days"] = (work["event_date"] - work["baseline_date"]).dt.days
-    work["time_since_baseline_years"] = work["time_since_baseline_days"] / 365.25
-    work["time_years"] = work["time_since_baseline_years"]
-    work["visit_number"] = work.groupby("patient_id").cumcount()
+    spine = pd.read_parquet(common.VISIT_SPINE_PARQUET)[["patient_id", "visit_id", "visit_date", "observed_baseline_date", "time_since_observed_baseline_days", "time_since_observed_baseline_years", "visit_number"]]
+    work = work.merge(spine, on=["patient_id", "visit_date"], how="left", validate="one_to_one")
+    if work["visit_id"].isna().any(): raise ValueError("clinical Pop visits missing from canonical spine")
+    work["baseline_date"] = work["observed_baseline_date"]  # compatibility aliases
+    work["event_date"] = work["visit_date"]
+    work["time_since_baseline_days"] = work["time_since_observed_baseline_days"]
+    work["time_since_baseline_years"] = work["time_since_observed_baseline_years"]
+    work["time_years"] = work["time_since_observed_baseline_years"]
     baseline_status = work.loc[work["visit_number"].eq(0), ["patient_id", "pop_status", "pop_status_display"]].rename(columns={"pop_status": "baseline_pop_status", "pop_status_display": "baseline_pop_status_display"})
     work = work.merge(baseline_status, on="patient_id", how="left")
     qc_counts["n_patient_visit_rows_after_collapse"] = int(len(work))
@@ -618,10 +610,8 @@ def build_longitudinal_pop_dataset(df: pd.DataFrame, codebook: pd.DataFrame | No
 def build_baseline_dataset(longitudinal: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for _, g in longitudinal.groupby("patient_id", dropna=True, sort=True):
-        baseline_date = g["baseline_date"].iloc[0]
-        baseline_rows = g[g["row_date_min"] == baseline_date].copy()
-        if baseline_rows.empty:
-            baseline_rows = g.sort_values(["row_date_min", "row_date_max"], na_position="last").head(1).copy()
+        baseline_rows = g[g["visit_number"].eq(0)].copy()
+        if len(baseline_rows) != 1: raise ValueError("Expected exactly one canonical baseline visit per patient")
         baseline_rows["_has_essdai"] = baseline_rows["essdai_total"].notna().astype(int)
         baseline_rows["_has_esspri"] = baseline_rows["esspri_total"].notna().astype(int)
         baseline_rows = baseline_rows.sort_values(["_has_essdai", "_has_esspri", "row_date_max"], ascending=[False, False, True], na_position="last")
@@ -1234,7 +1224,7 @@ def write_outputs(
     write_parquet_with_csv(longitudinal, INTERMEDIATE_DIR / "01_visit_level_esspri_proxy.parquet")
     write_parquet_with_csv(baseline, INTERMEDIATE_DIR / "01_baseline_classification.parquet")
     table1.to_csv(BLOCKA_TABLES_DIR / "01_table1_by_pop.csv", index=False)
-    longitudinal[["patient_id", "baseline_date", "event_date", "visit_date_clean", "visit_number", "baseline_pop_status", "baseline_pop_status_display", "time_since_baseline_days", "time_since_baseline_years", "time_years", "essdai_total", "esspri_total", "pop_status", "pop_status_display", "row_date_original", "row_date_min", "row_date_max"]].to_csv(BLOCKA_TABLES_DIR / "01_pop_longitudinal_status.csv", index=False)
+    longitudinal[["patient_id", "visit_id", "visit_date", "observed_baseline_date", "time_since_observed_baseline_days", "time_since_observed_baseline_years", "baseline_date", "event_date", "visit_date_clean", "visit_number", "baseline_pop_status", "baseline_pop_status_display", "time_since_baseline_days", "time_since_baseline_years", "time_years", "essdai_total", "esspri_total", "pop_status", "pop_status_display", "row_date_original", "row_date_min", "row_date_max"]].to_csv(BLOCKA_TABLES_DIR / "01_pop_longitudinal_status.csv", index=False)
     counts = longitudinal.groupby(["pop_status"]).size().reindex(POP_ORDER, fill_value=0).rename("n_visits").reset_index()
     baseline_counts = baseline["pop_status"].value_counts().reindex(POP_ORDER, fill_value=0).rename_axis("pop_status").reset_index(name="n_baseline_patients")
     baseline_unclassifiable.to_csv(BLOCKA_TABLES_DIR / "01_pop_unclassifiable_baseline_essdai_esspri_status.csv", index=False)
