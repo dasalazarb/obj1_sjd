@@ -5,10 +5,20 @@ Reads the longitudinal collapsed visit parquet, derives visit-level glandular an
 ESSDAI extraglandular activity, summarizes follow-up overlap prevalence and
 incident extraglandular manifestations after glandular-only baseline disease,
 and writes manuscript tables, intermediate QC files, and timeline figures.
+
+CHANGE LOG (this version):
+- Added `make_domain_incident_table`: per-domain "n at risk" (evaluable AND
+  inactive at baseline), n incident, % incident, person-years observed, and
+  incidence rate per 100 person-years — mirroring the dx-anchored script's
+  06_incident_extraglandular_domains_dx_temporal_anchor.csv, but using the
+  1st-visit baseline (visit_order == 1) instead of a dx-anchored baseline.
+- `build_patient_summary` now also carries per-domain baseline active/evaluable
+  flags on the patient row, since the domain table needs them.
 """
 
 from __future__ import annotations
 
+import math
 import sys
 import warnings
 from collections import Counter
@@ -55,6 +65,22 @@ INPUT_PARQUET = Path(common.DEFAULT_ANALYTIC_DATASET)
 
 FOLLOWUP_TABLE = TABLE_DIR / "06_overlap_followup.csv"
 INCIDENT_TABLE = TABLE_DIR / "06_incident_extraglandular.csv"
+DOMAIN_INCIDENT_TABLE = TABLE_DIR / "06_incident_extraglandular_domains.csv"
+PAIRWISE_TABLE = TABLE_DIR / "06_pairwise_domain_associations_baseline.csv"
+PAIRWISE_HEATMAP_FIG = FIGURE_DIR / "06_domain_association_heatmap_baseline.pdf"
+
+PRIMARY_EG_DOMAIN_KEYS = [
+    "constitutional",
+    "lymphadenopathy",
+    "articular",
+    "cutaneous",
+    "pulmonary",
+    "renal",
+    "muscular",
+    "pns",
+    "cns",
+    "hematologic",
+]
 LONGITUDINAL_OUT = INTERMEDIATE_DIR / "06_overlap_longitudinal_patient_visit.parquet"
 PATIENT_SUMMARY_OUT = INTERMEDIATE_DIR / "06_overlap_patient_summary.parquet"
 QC_OUT = INTERMEDIATE_DIR / "06_overlap_qc_summary.csv"
@@ -272,6 +298,178 @@ def make_incident_table(patient: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["section", "domain", "n_incident_first_event", "denominator_incident_patients", "pct_among_incident_patients", "notes"])
 
 
+def make_domain_incident_table(patient: pd.DataFrame, long_df: pd.DataFrame) -> pd.DataFrame:
+    """Per-domain incidence during follow-up, anchored to the 1st-visit baseline.
+
+    Mirrors the dx-anchored script's domain incidence table:
+    - "At risk" = baseline (visit_order == 1) evaluable AND NOT active for that domain.
+    - Follow-up = visit_order > 1.
+    - Person-years = time from baseline (years) to the patient's last evaluable
+      follow-up visit for that domain (censored at last observation if no event).
+    - Incidence rate = incident cases per 100 person-years.
+    """
+    rows = []
+    for key, meta in EXTRAGLANDULAR_DOMAINS.items():
+        active_col = meta["active_col"]
+        eval_col = f"eg_{key}_evaluable"
+        base_active_col = f"baseline_eg_{key}_active"
+        base_eval_col = f"baseline_eg_{key}_evaluable"
+
+        at_risk = patient[(patient[base_eval_col] == True) & (patient[base_active_col] == False)]
+
+        n_at_risk = 0
+        n_inc = 0
+        times = []
+        py = 0.0
+        event_dates = []
+
+        for pid in at_risk[PATIENT_ID_COL]:
+            fu = long_df[
+                (long_df[PATIENT_ID_COL] == pid)
+                & (long_df["visit_order"] > 1)
+                & (long_df[eval_col])
+            ]
+            if fu.empty:
+                continue
+            n_at_risk += 1
+            py += max(float(fu["time_from_baseline_yrs"].max()), 0.0)
+            ev = fu[fu[active_col]].sort_values("time_from_baseline_yrs").head(1)
+            if len(ev):
+                n_inc += 1
+                times.append(ev.iloc[0]["time_from_baseline_yrs"])
+                event_dates.append(ev.iloc[0]["visit_date_min"])
+
+        rows.append([
+            key,
+            meta["label"],
+            n_at_risk,
+            n_inc,
+            (100 * n_inc / n_at_risk) if n_at_risk else np.nan,
+            np.nanmedian(times) if times else np.nan,
+            py,
+            (100 * n_inc / py) if py else np.nan,
+            min(event_dates) if event_dates else pd.NaT,
+            max(event_dates) if event_dates else pd.NaT,
+        ])
+
+    return pd.DataFrame(rows, columns=[
+        "domain", "domain_label", "n_at_risk", "n_incident", "pct_incident",
+        "median_time_to_domain_yrs", "person_years_observed",
+        "incidence_rate_per_100_py", "first_event_date_min", "first_event_date_max",
+    ])
+
+
+def _fisher_exact_p(a: int, b: int, c: int, d: int) -> float:
+    n = a + b + c + d
+    r1 = a + b
+    c1 = a + c
+
+    def prob(x: int) -> float:
+        return math.comb(c1, x) * math.comb(n - c1, r1 - x) / math.comb(n, r1)
+
+    lo = max(0, r1 - (n - c1))
+    hi = min(r1, c1)
+    p_obs = prob(a)
+    return min(1.0, sum(prob(x) for x in range(lo, hi + 1) if prob(x) <= p_obs + 1e-12))
+
+
+def _bh(pvals: list[float]) -> list[float]:
+    m = len(pvals)
+    order = np.argsort([1 if pd.isna(p) else p for p in pvals])
+    adj = [np.nan] * m
+    prev = 1.0
+    for rank, i in enumerate(order[::-1], start=1):
+        p = pvals[i]
+        if pd.isna(p):
+            continue
+        val = min(prev, p * m / (m - rank + 1))
+        adj[i] = val
+        prev = val
+    return adj
+
+
+def make_pairwise_table(
+    patient: pd.DataFrame,
+    glandular_active_col: str = "baseline_glandular_active",
+    glandular_eval_col: str = "baseline_glandular_evaluable",
+) -> pd.DataFrame:
+    """Baseline (1st-visit) 2x2 associations between sicca/glandular status and
+    each ESSDAI extraglandular domain: prevalence ratio, risk difference, odds
+    ratio (Haldane-Anscombe corrected when any cell is zero), Fisher exact or
+    chi-square depending on minimum expected cell count, and BH-FDR across the
+    primary domain set. Mirrors the dx-anchored script's make_pairwise_table,
+    but computed on the 1st-visit baseline rather than a dx-anchored baseline.
+    """
+    rows = []
+    for key in PRIMARY_EG_DOMAIN_KEYS:
+        meta = EXTRAGLANDULAR_DOMAINS[key]
+        active_col = f"baseline_eg_{key}_active"
+        eval_col = f"baseline_eg_{key}_evaluable"
+        comp = patient[(patient[glandular_eval_col] == True) & (patient[eval_col] == True)]
+        gp = comp[glandular_active_col].astype(bool)
+        dp = comp[active_col].astype(bool)
+        a = int((gp & dp).sum()); b = int((gp & ~dp).sum())
+        c = int((~gp & dp).sum()); d = int((~gp & ~dp).sum())
+        n = a + b + c + d
+        miss = len(patient) - n
+        if n:
+            exp = [(a + b) * (a + c) / n, (a + b) * (b + d) / n, (c + d) * (a + c) / n, (c + d) * (b + d) / n]
+            min_exp = min(exp)
+        else:
+            min_exp = np.nan
+        fisher = bool(n and min_exp < 5)
+        if fisher:
+            p = _fisher_exact_p(a, b, c, d)
+        elif all(x > 0 for x in [(a + b), (c + d), (a + c), (b + d)]):
+            chi2 = ((a * d - b * c) ** 2 * n) / ((a + b) * (c + d) * (a + c) * (b + d))
+            p = math.erfc(math.sqrt(chi2 / 2))
+        else:
+            p = np.nan
+        aa, bb, cc, dd = (a, b, c, d) if min(a, b, c, d) > 0 else (a + .5, b + .5, c + .5, d + .5)
+        risk1 = aa / (aa + bb); risk0 = cc / (cc + dd)
+        pr = risk1 / risk0 if risk0 else np.nan
+        se_log_pr = math.sqrt((1 / aa) - (1 / (aa + bb)) + (1 / cc) - (1 / (cc + dd))) if aa and cc else np.nan
+        orv = (aa * dd) / (bb * cc) if bb and cc else np.nan
+        se_log_or = math.sqrt(1 / aa + 1 / bb + 1 / cc + 1 / dd)
+        rows.append({
+            "domain": key, "domain_label": meta["label"],
+            "n_complete": n, "n_missing_or_not_evaluable": miss,
+            "glandular_pos_domain_pos": a, "glandular_pos_domain_neg": b,
+            "glandular_neg_domain_pos": c, "glandular_neg_domain_neg": d,
+            "pct_domain_active_if_glandular_pos": 100 * a / (a + b) if (a + b) else np.nan,
+            "pct_domain_active_if_glandular_neg": 100 * c / (c + d) if (c + d) else np.nan,
+            "prevalence_ratio": pr,
+            "pr_ci_low": math.exp(math.log(pr) - 1.96 * se_log_pr) if pr and not pd.isna(se_log_pr) else np.nan,
+            "pr_ci_high": math.exp(math.log(pr) + 1.96 * se_log_pr) if pr and not pd.isna(se_log_pr) else np.nan,
+            "risk_difference": (a / (a + b) - c / (c + d)) if (a + b) and (c + d) else np.nan,
+            "odds_ratio": orv,
+            "or_ci_low": math.exp(math.log(orv) - 1.96 * se_log_or) if orv else np.nan,
+            "or_ci_high": math.exp(math.log(orv) + 1.96 * se_log_or) if orv else np.nan,
+            "min_expected_cell_count": min_exp,
+            "test_used": "fisher_exact" if fisher else "chi_square",
+            "p_value": p,
+            "haldane_anscombe_applied": min(a, b, c, d) == 0,
+        })
+    out = pd.DataFrame(rows)
+    out["p_adj_fdr_bh"] = _bh(out["p_value"].tolist())
+    out["significant_nominal_0_05"] = out["p_value"] < 0.05
+    out["significant_fdr_0_05"] = out["p_adj_fdr_bh"] < 0.05
+    return out
+
+
+def make_pairwise_heatmap(pairwise: pd.DataFrame, path: Path) -> None:
+    fig, ax = plt.subplots(figsize=(8, max(4, 0.35 * len(pairwise) + 1)))
+    vals = np.log2(pairwise["prevalence_ratio"].replace([np.inf, -np.inf], np.nan)).to_numpy().reshape(-1, 1)
+    im = ax.imshow(vals, aspect="auto", cmap="coolwarm", vmin=-2, vmax=2)
+    ax.set_yticks(range(len(pairwise))); ax.set_yticklabels(pairwise["domain_label"])
+    ax.set_xticks([0]); ax.set_xticklabels(["log2(PR)"])
+    for i, r in pairwise.reset_index(drop=True).iterrows():
+        star = "*" if bool(r["significant_fdr_0_05"]) else ""
+        ax.text(0, i, f"PR {r['prevalence_ratio']:.2f}\nN {int(r['n_complete'])}\nFDR {r['p_adj_fdr_bh']:.3g}{star}", ha="center", va="center", fontsize=7)
+    fig.colorbar(im, ax=ax, label="log2(prevalence ratio)")
+    ax.set_title("1st-visit baseline pairwise associations")
+    fig.tight_layout(); fig.savefig(path, bbox_inches="tight"); plt.close(fig)
+
 
 def assign_plot_group(row: pd.Series) -> int:
     if row.get("baseline_status") == "overlap":
@@ -450,9 +648,13 @@ def build_patient_summary(long_df: pd.DataFrame) -> pd.DataFrame:
         incident_denom = bool(base["glandular_active"] and not base["extraglandular_active"] and base["overlap_evaluable"] and len(fu_eg_eval) > 0)
         inc_visits = fu_eg_eval[fu_eg_eval["extraglandular_active"]] if incident_denom else fu_eg_eval.iloc[0:0]
         first = inc_visits.iloc[0] if len(inc_visits) else None
-        row = {PATIENT_ID_COL: pid, "baseline_date": base["baseline_date"], "baseline_status": base["overlap_status"], "baseline_glandular_active": bool(base["glandular_active"]), "baseline_extraglandular_active": bool(base["extraglandular_active"]), "fu_n_visits": len(fu), "fu_n_evaluable_visits": len(fu_eval), "fu_has_evaluable_overlap": len(fu_eval) > 0, "fu_glandular_ever": bool(fu_eval["glandular_active"].any()), "fu_extraglandular_ever": bool(fu_eval["extraglandular_active"].any()), "fu_overlap_ever": bool(fu_eval["overlap_active"].any()), "max_overlap_intensity_count": int(fu_eval["overlap_intensity_count"].max()) if len(fu_eval) else 0, "fu_active_extraglandular_domains_ever": ";".join(sorted(set(d for s in fu["active_extraglandular_domains"] for d in str(s).split(";") if d))), "incident_denominator": incident_denom, "incident_extraglandular": first is not None, "first_incident_date": first["visit_date_min"] if first is not None else pd.NaT, "time_to_new_domain_yrs": first["time_from_baseline_yrs"] if first is not None else np.nan, "incident_domains_at_first_event": first["active_extraglandular_domains"] if first is not None else "", "n_visits": len(g), "n_evaluable_visits": int(g["overlap_evaluable"].sum())}
+        row = {PATIENT_ID_COL: pid, "baseline_date": base["baseline_date"], "baseline_status": base["overlap_status"], "baseline_glandular_active": bool(base["glandular_active"]), "baseline_glandular_evaluable": bool(base["glandular_evaluable"]), "baseline_extraglandular_active": bool(base["extraglandular_active"]), "baseline_extraglandular_evaluable": bool(base["extraglandular_evaluable"]), "fu_n_visits": len(fu), "fu_n_evaluable_visits": len(fu_eval), "fu_has_evaluable_overlap": len(fu_eval) > 0, "fu_glandular_ever": bool(fu_eval["glandular_active"].any()), "fu_extraglandular_ever": bool(fu_eval["extraglandular_active"].any()), "fu_overlap_ever": bool(fu_eval["overlap_active"].any()), "max_overlap_intensity_count": int(fu_eval["overlap_intensity_count"].max()) if len(fu_eval) else 0, "fu_active_extraglandular_domains_ever": ";".join(sorted(set(d for s in fu["active_extraglandular_domains"] for d in str(s).split(";") if d))), "incident_denominator": incident_denom, "incident_extraglandular": first is not None, "first_incident_date": first["visit_date_min"] if first is not None else pd.NaT, "time_to_new_domain_yrs": first["time_from_baseline_yrs"] if first is not None else np.nan, "incident_domains_at_first_event": first["active_extraglandular_domains"] if first is not None else "", "n_visits": len(g), "n_evaluable_visits": int(g["overlap_evaluable"].sum())}
         for key, meta in EXTRAGLANDULAR_DOMAINS.items():
             row[f"fu_eg_{key}_ever"] = bool(fu_eval[meta["active_col"]].any()) if len(fu_eval) else False
+            # NEW: per-domain baseline active/evaluable flags, needed for the
+            # domain-specific incidence table (make_domain_incident_table).
+            row[f"baseline_eg_{key}_active"] = bool(base[meta["active_col"]])
+            row[f"baseline_eg_{key}_evaluable"] = bool(base[f"eg_{key}_evaluable"])
         if not row["fu_has_evaluable_overlap"]:
             row["followup_status"] = "insufficient_followup"
         elif row["fu_overlap_ever"]:
@@ -531,13 +733,21 @@ def main() -> None:
     long_df = derive_overlap_flags(long_df)
     patient = build_patient_summary(long_df)
 
-    follow = make_followup_table(patient); incident = make_incident_table(patient)
+    follow = make_followup_table(patient)
+    incident = make_incident_table(patient)
+    domain_incident = make_domain_incident_table(patient, long_df)  # NEW
+    pairwise = make_pairwise_table(patient)  # NEW
+
     long_df.to_parquet(LONGITUDINAL_OUT, index=False); patient.to_parquet(PATIENT_SUMMARY_OUT, index=False)
     follow.to_csv(FOLLOWUP_TABLE, index=False); incident.to_csv(INCIDENT_TABLE, index=False)
+    domain_incident.to_csv(DOMAIN_INCIDENT_TABLE, index=False)  # NEW
+    pairwise.to_csv(PAIRWISE_TABLE, index=False)  # NEW
     make_overlap_timeline_plot(long_df, patient, TIMELINE_FIG); make_domain_timeline_plot(long_df, patient, DOMAIN_TIMELINE_FIG)
-    qc = run_qc(raw, long_df, patient, missing_optional, [FOLLOWUP_TABLE, INCIDENT_TABLE, LONGITUDINAL_OUT, PATIENT_SUMMARY_OUT, TIMELINE_FIG, DOMAIN_TIMELINE_FIG], invalid_visit_dates)
+    make_pairwise_heatmap(pairwise, PAIRWISE_HEATMAP_FIG)  # NEW
+    output_paths = [FOLLOWUP_TABLE, INCIDENT_TABLE, DOMAIN_INCIDENT_TABLE, PAIRWISE_TABLE, LONGITUDINAL_OUT, PATIENT_SUMMARY_OUT, TIMELINE_FIG, DOMAIN_TIMELINE_FIG, PAIRWISE_HEATMAP_FIG]
+    qc = run_qc(raw, long_df, patient, missing_optional, output_paths, invalid_visit_dates)
     qc.to_csv(QC_OUT, index=False)
-    run_qc(raw, long_df, patient, missing_optional, [FOLLOWUP_TABLE, INCIDENT_TABLE, LONGITUDINAL_OUT, PATIENT_SUMMARY_OUT, QC_OUT, TIMELINE_FIG, DOMAIN_TIMELINE_FIG], invalid_visit_dates)
+    run_qc(raw, long_df, patient, missing_optional, output_paths + [QC_OUT], invalid_visit_dates)
 
     follow_saved = pd.read_csv(FOLLOWUP_TABLE); incident_saved = pd.read_csv(INCIDENT_TABLE)
     overlap_row = follow_saved.loc[follow_saved["category"] == "overlap_followup"].iloc[0]
@@ -551,6 +761,23 @@ def main() -> None:
           f"({int(overlap_row['n'])}/{int(overlap_row['denominator'])}). Among {int(float(denom_inc_row['n_incident_first_event']))} patients with glandular-only disease at baseline and evaluable follow-up, "
           f"{float(inc_row['pct_among_incident_patients']):.1f}% developed new extraglandular manifestations ({int(float(inc_row['n_incident_first_event']))}/{int(float(denom_inc_row['n_incident_first_event']))}), "
           f"most commonly {common_row['n_incident_first_event']}. Median time to new extraglandular domain was {median:.2f} years.")
+
+    print("\nPer-domain incidence during follow-up (1st-visit baseline):")
+    for _, r in domain_incident.sort_values("pct_incident", ascending=False).iterrows():
+        print(
+            f"{r['domain_label']}: {r['n_incident']}/{r['n_at_risk']} ({r['pct_incident']:.1f}%), "
+            f"{r['incidence_rate_per_100_py']:.2f}/100 PY"
+        )
+
+    print("\nBaseline (1st-visit) pairwise associations, sorted by FDR:")
+    for _, r in pairwise.sort_values(["p_adj_fdr_bh", "p_value"]).iterrows():
+        star = "*" if bool(r["significant_fdr_0_05"]) else ""
+        print(
+            f"{r['domain_label']}: PR={r['prevalence_ratio']:.2f} "
+            f"(95% CI {r['pr_ci_low']:.2f}-{r['pr_ci_high']:.2f}), "
+            f"OR={r['odds_ratio']:.2f}, p={r['p_value']:.4g}, "
+            f"FDR={r['p_adj_fdr_bh']:.4g}{star}, N={int(r['n_complete'])}"
+        )
 
 
 if __name__ == "__main__":
