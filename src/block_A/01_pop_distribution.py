@@ -104,7 +104,7 @@ AGE_CANDIDATES = [
 SEX_CANDIDATES = ["ids__sex", "ids__gender", "demographics__sex", "demographics__gender", "sex", "gender"]
 RACE_CANDIDATES = ["ids__race", "demographics__race", "race", "ethnicity", "ids__ethnicity"]
 PROTOCOL_CANDIDATES = ["ids__protocol", "ids__protocol_number", "ids__study_protocol", "protocol", "protocol_number", "parent_protocol"]
-BOOTSTRAP_REPLICATES = 2000
+BOOTSTRAP_REPLICATES = 5
 RANDOM_SEED = 20260714
 
 PROXY_CANDIDATES_S5 = [
