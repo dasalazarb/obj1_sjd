@@ -21,6 +21,24 @@ OPTIONAL = {"ids__subject_number": "subject_number", "ids__interval_name": "inte
             "ids__sex": "sex", "ids__race": "race", "ids__ethnicity": "ethnicity",
             "sjogren's_syndrome_history__sjogrens_dx_date": "dx_date_raw"}
 
+
+def progress(step: int, total: int, message: str) -> None:
+    """Print a compact, readable progress message for command-line runs."""
+    width = 24
+    completed = round(width * step / total)
+    bar = "█" * completed + "░" * (width - completed)
+    print(f"\n[{bar}] {step}/{total}  {message}", flush=True)
+
+
+def report_output(path: Path) -> None:
+    """Print each artifact as it is written, relative to the project when possible."""
+    try:
+        display_path = path.relative_to(PROJECT_ROOT)
+    except ValueError:
+        display_path = path
+    print(f"  ✓ Generated: {display_path}", flush=True)
+
+
 def first_nonmissing_if_consistent(values: pd.Series) -> tuple[object, bool]:
     clean = values.dropna().astype("string").str.strip()
     clean = clean[~clean.str.lower().isin({"", "na", "n/a", "nan", "none", "unknown", "unk", "missing", "-99"})]
@@ -59,15 +77,30 @@ def main() -> None:
     p = argparse.ArgumentParser(); p.add_argument("--input", type=Path, default=common.DEFAULT_ANALYTIC_DATASET)
     p.add_argument("--overwrite", dest="overwrite", action="store_true", default=True); p.add_argument("--no-overwrite", dest="overwrite", action="store_false")
     args = p.parse_args(); common.ensure_output_dirs()
+    print("\n╔══════════════════════════════════════════════════════════════╗", flush=True)
+    print(f"║  {'Building visit spine':<60}║", flush=True)
+    print("╚══════════════════════════════════════════════════════════════╝", flush=True)
+    total_steps = 3
     if not args.overwrite and (common.VISIT_SPINE_PARQUET.exists() or common.VISIT_SPINE_CSV.exists()): raise FileExistsError("spine output exists")
+    progress(1, total_steps, "Reading source dataset")
     source = pd.read_parquet(args.input) if args.input.suffix == ".parquet" else pd.read_csv(args.input)
+    print(f"  • {'Source':<12} {len(source):>6,} rows   | {source[PATIENT].nunique():>5,} patients", flush=True)
+    progress(2, total_steps, "Building canonical visit spine")
     spine, duplicates, conflicts, pipe = build_spine(source)
-    spine.to_parquet(common.VISIT_SPINE_PARQUET, index=False); spine.to_csv(common.VISIT_SPINE_CSV, index=False)
-    duplicates.to_csv(common.BLOCKA_QC_DIR / "00_visit_spine_duplicate_patient_dates.csv", index=False)
-    conflicts.to_csv(common.BLOCKA_QC_DIR / "00_visit_spine_metadata_conflicts.csv", index=False)
-    pipe.to_csv(common.BLOCKA_QC_DIR / "00_visit_spine_pipe_date_audit.csv", index=False)
+    progress(3, total_steps, "Writing datasets and quality-control reports")
+    spine.to_parquet(common.VISIT_SPINE_PARQUET, index=False); report_output(common.VISIT_SPINE_PARQUET)
+    spine.to_csv(common.VISIT_SPINE_CSV, index=False); report_output(common.VISIT_SPINE_CSV)
+    duplicates_path = common.BLOCKA_QC_DIR / "00_visit_spine_duplicate_patient_dates.csv"
+    duplicates.to_csv(duplicates_path, index=False); report_output(duplicates_path)
+    conflicts_path = common.BLOCKA_QC_DIR / "00_visit_spine_metadata_conflicts.csv"
+    conflicts.to_csv(conflicts_path, index=False); report_output(conflicts_path)
+    pipe_path = common.BLOCKA_QC_DIR / "00_visit_spine_pipe_date_audit.csv"
+    pipe.to_csv(pipe_path, index=False); report_output(pipe_path)
     reconciliation = pd.DataFrame([{"script_name": name, "n_rows_before": pd.NA, "n_rows_after": pd.NA, "n_patients_before": pd.NA, "n_patients_after": pd.NA, "n_unique_dates_before": pd.NA, "n_unique_dates_after": pd.NA, "n_baseline_patients_before": pd.NA, "n_baseline_patients_after": pd.NA, "n_unmatched_visit_ids": pd.NA, "n_duplicate_visit_ids": pd.NA, "status": "pending_cross_script_run"} for name in ["01_pop_distribution", "06_overlap_glandular", "06_overlap_glandular_followup", "09_pros_baseline"]])
-    reconciliation.to_csv(common.BLOCKA_QC_DIR / "00_visit_spine_cross_script_reconciliation.csv", index=False)
-    (common.BLOCKA_QC_DIR / "00_visit_spine_qc.json").write_text(json.dumps({"n_input_rows": len(source), "n_spine_rows": len(spine), "n_patients": int(spine.patient_id.nunique()), "n_duplicate_patient_dates": int((duplicates.n_source_rows > 1).sum()), "n_pipe_dates": len(pipe)}, indent=2))
+    reconciliation_path = common.BLOCKA_QC_DIR / "00_visit_spine_cross_script_reconciliation.csv"
+    reconciliation.to_csv(reconciliation_path, index=False); report_output(reconciliation_path)
+    qc_path = common.BLOCKA_QC_DIR / "00_visit_spine_qc.json"
+    qc_path.write_text(json.dumps({"n_input_rows": len(source), "n_spine_rows": len(spine), "n_patients": int(spine.patient_id.nunique()), "n_duplicate_patient_dates": int((duplicates.n_source_rows > 1).sum()), "n_pipe_dates": len(pipe)}, indent=2)); report_output(qc_path)
+    print(f"\n✓ Complete: {len(spine):,} visits across {spine.patient_id.nunique():,} patients.\n", flush=True)
 
 if __name__ == "__main__": main()
