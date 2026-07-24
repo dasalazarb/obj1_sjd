@@ -137,8 +137,19 @@ def valid_mask(frame: pd.DataFrame, outcome: str, validity: str, warnings: list[
 
 
 def summarize(series: pd.Series) -> dict[str, float | int]:
-    x=pd.to_numeric(series, errors="coerce").dropna()
-    return {"n":len(x), "mean":x.mean(), "sd":x.std(ddof=1), "median":x.median(), "q1":x.quantile(.25), "q3":x.quantile(.75), "minimum":x.min(), "maximum":x.max()}
+    """Summarize numeric values, coercing nullable booleans to 0/1 safely.
+
+    Pandas considers BooleanDtype numeric in some versions, but its quantile
+    implementation cannot interpolate booleans.  A float conversion provides
+    stable descriptive output for availability/indicator columns as well.
+    """
+    x = pd.to_numeric(series, errors="coerce").astype("float64").dropna()
+    if x.empty:
+        return {"n": 0, "mean": np.nan, "sd": np.nan, "median": np.nan,
+                "q1": np.nan, "q3": np.nan, "minimum": np.nan, "maximum": np.nan}
+    return {"n": len(x), "mean": x.mean(), "sd": x.std(ddof=1),
+            "median": x.median(), "q1": x.quantile(.25), "q3": x.quantile(.75),
+            "minimum": x.min(), "maximum": x.max()}
 
 
 def variable_availability(baseline: pd.DataFrame, valid: dict[str,pd.Series]) -> pd.DataFrame:
