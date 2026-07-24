@@ -14,6 +14,8 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.cm import ScalarMappable
+from matplotlib.colors import Normalize
 from matplotlib.lines import Line2D
 from pathlib import Path
 
@@ -43,12 +45,6 @@ OVERLAP_COLUMNS = ["glandular_active", "glandular_evaluable", "extraglandular_ac
                    "eg_pulmonary_active", "eg_renal_active", "eg_muscular_active", "eg_pns_active",
                    "eg_cns_active", "eg_hematologic_active", "eg_biological_active",
                    "time_since_diagnosis_days", "time_since_diagnosis_years", "dx_date", "dx_date_precision"]
-FIGURES_DIR = common.OUTPUTS_DIR / "figures" / "blockA"
-POP_ORDER = ["Pop1", "Pop2", "Pop3", "Unclassifiable"]
-POP_COLORS = {"Pop1": "#E66101", "Pop2": "#5E5AA8", "Pop3": "#1B9E77", "Unclassifiable": "#9E9E9E"}
-OVERLAP_ORDER = ["neither", "glandular_only", "extraglandular_only", "overlap", "insufficient_info"]
-OVERLAP_COLORS = {"neither": "#9E9E9E", "glandular_only": "#4C78A8", "extraglandular_only": "#59A14F", "overlap": "#E15759", "insufficient_info": "#BAB0AC"}
-
 PRO_COLUMNS = ["sf36_physical_functioning", "sf36_role_physical", "sf36_bodily_pain",
                "sf36_general_health", "sf36_vitality", "sf36_social_functioning", "sf36_role_emotional",
                "sf36_mental_health", "sf36_pcs", "sf36_mcs", "profad_total", "mdafs_global",
@@ -192,7 +188,6 @@ def coverage(integrated: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame([{"measure": name, "n_visits_available": int(mask.sum()), "pct_visits_available": 100 * mask.mean(), "n_patients_available": int(integrated.loc[mask, "patient_id"].nunique()), "pct_patients_available": 100 * integrated.loc[mask, "patient_id"].nunique() / n_patients if n_patients else np.nan} for name, mask in measures.items()])
 
 
-
 def progress(step: int, total: int, message: str) -> None:
     """Print a compact, readable progress message for command-line runs."""
     width = 24
@@ -210,115 +205,217 @@ def report_output(path: Path) -> None:
     print(f"  ✓ Generated: {display_path}", flush=True)
 
 
-def baseline_pop_groups(integrated: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:
-    """Return one stable patient order shared by every longitudinal figure."""
-    baseline = integrated.loc[integrated["is_observed_baseline"], ["patient_id", "baseline_pop"]].copy()
-    baseline["baseline_pop"] = baseline["baseline_pop"].where(
-        baseline["baseline_pop"].isin(POP_ORDER[:-1]), "Unclassifiable"
-    )
-    rank = {pop: position for position, pop in enumerate(POP_ORDER)}
-    baseline["pop_rank"] = baseline["baseline_pop"].map(rank)
-    ordered = baseline.sort_values(["pop_rank", "patient_id"], kind="stable").reset_index(drop=True)
-    ordered["patient_position"] = np.arange(len(ordered), 0, -1)
-    return ordered, ordered.groupby("baseline_pop", sort=False).size().to_dict()
+# =============================================================================
+# FIGURES: comparable longitudinal patient timelines, one panel per baseline Pop
+# =============================================================================
+FIGURES_DIR = common.OUTPUTS_DIR / "figures" / "blockA"
+
+POP_ORDER = ["Pop1", "Pop2", "Pop3", "Unclassifiable"]
+POP_COLORS = {"Pop1": "#E66101", "Pop2": "#5E5AA8", "Pop3": "#1B9E77", "Unclassifiable": "#9E9E9E"}
+OVERLAP_ORDER = ["neither", "glandular_only", "extraglandular_only", "overlap", "insufficient_info"]
+OVERLAP_COLORS = {"neither": "#9E9E9E", "glandular_only": "#4C78A8", "extraglandular_only": "#59A14F",
+                  "overlap": "#E15759", "insufficient_info": "#D9D2CE"}
+
+FIGURE_STYLE = {
+    "font.family": "DejaVu Sans", "font.size": 9, "axes.labelsize": 9.5,
+    "xtick.labelsize": 8.5, "ytick.labelsize": 8.5, "axes.edgecolor": "#8A8A8A",
+    "axes.linewidth": 0.8, "figure.facecolor": "white", "savefig.facecolor": "white",
+    "pdf.fonttype": 42, "ps.fonttype": 42, "legend.frameon": False,
+}
+TIME_TICKS = [(0.0, "baseline"), (0.5, "6 mo"), (1.0, "1y"), (2.0, "2y"), (4.0, "4y"),
+              (6.0, "6y"), (8.0, "8y"), (10.0, "10y"), (12.0, "12y"), (14.0, "14y")]
+TITLE_COLOR = "#C2560B"
+GRID_COLOR = "#CFCFCF"
+SPAN_COLOR = "#DCDCDC"
+MISSING_COLOR = "#BDBDBD"
+
+ROW_HEIGHT_IN = 0.105        # vertical space per patient (compressed y-axis)
+PANEL_MIN_IN = 0.85          # floor so tiny Pop groups stay readable
+PANEL_GAP_IN = 0.34
+FIG_WIDTH_IN = 13.0
+TITLE_BLOCK_IN = 1.15        # room for title, subtitle and the top time axis
+POINT_SIZE = 26
+LEFT_FRAC, RIGHT_FRAC = 0.085, 0.985
 
 
-def add_population_separators(ax: plt.Axes, patient_order: pd.DataFrame) -> None:
-    """Mark baseline-Pop sections without changing the shared patient positions."""
-    previous_end = 0
-    for population in POP_ORDER:
-        members = patient_order.loc[patient_order["baseline_pop"].eq(population)]
-        if members.empty:
-            continue
-        start, end = previous_end, previous_end + len(members)
-        center = patient_order.loc[members.index, "patient_position"].mean()
-        ax.text(-0.025, center, f"{population}\n(n={len(members)})", transform=ax.get_yaxis_transform(),
-                ha="right", va="center", color=POP_COLORS[population], fontsize=8, fontweight="bold")
-        if start:
-            ax.axhline(len(patient_order) - start + 0.5, color="#BDBDBD", linewidth=0.9, zorder=1)
-        previous_end = end
+def patient_display_order(integrated: pd.DataFrame) -> pd.DataFrame:
+    """One patient order shared by every figure: grouped by baseline Pop, longest follow-up first."""
+    patient_ids = pd.Index(pd.unique(integrated["patient_id"]), name="patient_id")
+    baseline = (integrated.loc[integrated["is_observed_baseline"]]
+                .drop_duplicates("patient_id")
+                .set_index("patient_id")["baseline_pop"]
+                .reindex(patient_ids))
+    follow_up = (integrated.groupby("patient_id")["time_since_observed_baseline_years"]
+                 .max().reindex(patient_ids).fillna(0.0))
+    order = pd.DataFrame({"patient_id": patient_ids, "baseline_pop": baseline.to_numpy(),
+                          "followup_years": follow_up.to_numpy()})
+    order["baseline_pop"] = order["baseline_pop"].where(order["baseline_pop"].isin(POP_ORDER[:-1]), "Unclassifiable")
+    order["pop_rank"] = order["baseline_pop"].map({pop: rank for rank, pop in enumerate(POP_ORDER)})
+    order = order.sort_values(["pop_rank", "followup_years", "patient_id"],
+                              ascending=[True, False, True], kind="stable").reset_index(drop=True)
+    order["row"] = order.groupby("baseline_pop", sort=False).cumcount()
+    return order
 
 
-def plot_longitudinal_measure(
-    integrated: pd.DataFrame, patient_order: pd.DataFrame, path: Path, title: str,
-    value_columns: list[str], value_label: str, categorical: bool = False,
-) -> None:
-    """Create a patient timeline with an identical Pop-grouped y-order in every plot."""
-    plot_data = integrated.merge(patient_order[["patient_id", "patient_position"]], on="patient_id", how="inner")
-    plot_data = plot_data.loc[plot_data["time_since_observed_baseline_years"].notna()].copy()
-    fig_height = max(6.5, 2.8 + len(patient_order) * 0.23)
-    fig, ax = plt.subplots(figsize=(15, fig_height), constrained_layout=True)
-    for y in patient_order["patient_position"]:
-        ax.axhline(y, color="#E5E5E5", linewidth=0.75, zorder=0)
-    if categorical:
-        column = value_columns[0]
-        plot_data["plot_category"] = plot_data[column].where(plot_data[column].isin(OVERLAP_ORDER), "insufficient_info")
-        for category in OVERLAP_ORDER:
-            subset = plot_data.loc[plot_data["plot_category"].eq(category)]
-            ax.scatter(subset["time_since_observed_baseline_years"], subset["patient_position"], s=34,
-                       color=OVERLAP_COLORS[category], edgecolor="white", linewidth=0.35, label=category.replace("_", " "), zorder=3)
-        legend_title = "Overlap status"
-    else:
-        values = plot_data[value_columns].copy()
-        if len(value_columns) == 1:
-            plot_data["plot_value"] = values.iloc[:, 0]
-            series = [(value_columns[0], "o")]
-        else:
-            plot_data["plot_value"] = values.mean(axis=1)
-            series = [(value_columns[0], "o"), (value_columns[1], "s")]
-        finite = plot_data["plot_value"].dropna()
-        if finite.empty:
-            norm_min, norm_max = 0.0, 1.0
-        elif finite.min() == finite.max():
-            norm_min, norm_max = float(finite.min()) - 0.5, float(finite.max()) + 0.5
-        else:
-            norm_min, norm_max = float(finite.min()), float(finite.max())
-        scatter = None
-        for column, marker in series:
-            subset = plot_data.loc[plot_data[column].notna()]
-            scatter = ax.scatter(subset["time_since_observed_baseline_years"], subset["patient_position"],
-                                 c=subset[column], cmap="viridis", vmin=norm_min, vmax=norm_max, s=34,
-                                 marker=marker, edgecolor="white", linewidth=0.35, zorder=3)
-        if scatter is not None:
-            colorbar = fig.colorbar(scatter, ax=ax, pad=0.01)
-            colorbar.set_label(value_label)
-        if len(value_columns) > 1:
-            ax.legend(handles=[Line2D([0], [0], marker="o", color="none", markerfacecolor="#555555", label="SF-36 PCS", markersize=6),
-                               Line2D([0], [0], marker="s", color="none", markerfacecolor="#555555", label="SF-36 MCS", markersize=6)],
-                      title="Score", loc="upper right", frameon=False)
-        legend_title = None
-    add_population_separators(ax, patient_order)
-    max_years = max(1.0, float(plot_data["time_since_observed_baseline_years"].max())) if not plot_data.empty else 1.0
-    ax.set_xlim(-0.05 * max_years, max_years * 1.08)
-    ax.set_ylim(0.25, len(patient_order) + 0.75)
+def _style_panel(ax: plt.Axes, population: str, n_patients: int, xlim: tuple[float, float]) -> None:
+    ax.set_xlim(*xlim)
+    ax.set_ylim(n_patients - 0.5, -0.5)
     ax.set_yticks([])
-    ax.set_xlabel("Time since observed baseline (years)")
-    ax.set_ylabel("Patients (shared order across figures)")
-    ax.set_title(f"{title}\nPatients are grouped by baseline Pop; the patient order is identical in every figure.", loc="left", color="#D95F02", pad=16)
-    ax.grid(axis="x", color="#BDBDBD", linestyle="--", linewidth=0.7)
-    ax.spines[["top", "right"]].set_visible(False)
-    if categorical:
-        ax.legend(title=legend_title, loc="upper right", frameon=False, ncol=2)
-    fig.savefig(path, dpi=220, bbox_inches="tight")
-    plt.close(fig)
+    ax.tick_params(axis="x", length=3, color="#8A8A8A")
+    ax.text(-0.008, 0.5, f"{population}\n(n={n_patients})", transform=ax.transAxes, ha="right",
+            va="center", color=POP_COLORS[population], fontsize=9, fontweight="bold")
+    for position, _ in TIME_TICKS:
+        if xlim[0] <= position <= xlim[1]:
+            ax.axvline(position, color=GRID_COLOR, linestyle="--", linewidth=0.7, zorder=0)
+
+
+def _draw_spans(ax: plt.Axes, panel: pd.DataFrame) -> None:
+    spans = panel.groupby("row")["time_since_observed_baseline_years"].agg(["min", "max"])
+    ax.hlines(spans.index.to_numpy(), spans["min"].to_numpy(), spans["max"].to_numpy(),
+              color=SPAN_COLOR, linewidth=0.9, zorder=1)
+
+
+def plot_measure_by_pop(integrated: pd.DataFrame, order: pd.DataFrame, path: Path, title: str,
+                        subtitle: str, value_columns: list[str], value_label: str,
+                        footnote: str, categorical: bool = False,
+                        marker_labels: list[str] | None = None) -> None:
+    """Stack one panel per baseline Pop in a single PDF, sharing scale, order and time axis."""
+    panels = order[["patient_id", "baseline_pop", "row"]].rename(columns={"baseline_pop": "panel_pop"})
+    data = integrated.drop(columns=["panel_pop"], errors="ignore").merge(panels, on="patient_id", how="inner")
+    data = data.loc[data["time_since_observed_baseline_years"].notna()].copy()
+    groups = [(pop, int(order.baseline_pop.eq(pop).sum())) for pop in POP_ORDER]
+    groups = [(pop, size) for pop, size in groups if size]
+    heights = [max(PANEL_MIN_IN, size * ROW_HEIGHT_IN) for _, size in groups]
+
+    two_series = (not categorical) and len(value_columns) > 1
+    legend_block_in = 1.60 if (two_series or categorical) else 1.20
+    fig_height = TITLE_BLOCK_IN + sum(heights) + PANEL_GAP_IN * (len(groups) - 1) + legend_block_in
+
+    with plt.rc_context(FIGURE_STYLE):
+        fig = plt.figure(figsize=(FIG_WIDTH_IN, fig_height))
+        grid = fig.add_gridspec(len(groups), 1, height_ratios=heights,
+                                hspace=PANEL_GAP_IN / (sum(heights) / len(groups)),
+                                left=LEFT_FRAC, right=RIGHT_FRAC,
+                                top=1 - TITLE_BLOCK_IN / fig_height,
+                                bottom=legend_block_in / fig_height)
+        axes = [fig.add_subplot(grid[index]) for index in range(len(groups))]
+
+        max_years = float(data["time_since_observed_baseline_years"].max()) if not data.empty else 1.0
+        max_years = max(1.0, max_years)
+        xlim = (-0.015 * max_years, max_years * 1.04)
+
+        if categorical:
+            column = value_columns[0]
+            data["plot_category"] = data[column].where(data[column].isin(OVERLAP_ORDER), "insufficient_info")
+            normalizer = None
+        else:
+            observed = data[value_columns].to_numpy(dtype="float64")
+            observed = observed[np.isfinite(observed)]
+            low, high = (float(observed.min()), float(observed.max())) if observed.size else (0.0, 1.0)
+            if low == high:
+                low, high = low - 0.5, high + 0.5
+            normalizer = Normalize(vmin=low, vmax=high)
+
+        for ax, (population, size) in zip(axes, groups):
+            panel = data.loc[data["panel_pop"].eq(population)]
+            _style_panel(ax, population, size, xlim)
+            if not panel.empty:
+                _draw_spans(ax, panel)
+            if categorical:
+                for category in OVERLAP_ORDER:
+                    subset = panel.loc[panel["plot_category"].eq(category)]
+                    ax.scatter(subset["time_since_observed_baseline_years"], subset["row"], s=POINT_SIZE,
+                               color=OVERLAP_COLORS[category], edgecolor="white", linewidth=0.4, zorder=3)
+            else:
+                unmeasured = panel.loc[panel[value_columns].isna().all(axis=1)]
+                ax.scatter(unmeasured["time_since_observed_baseline_years"], unmeasured["row"], s=13,
+                           facecolor="none", edgecolor=MISSING_COLOR, linewidth=0.7, zorder=2)
+                for column, marker in zip(value_columns, ["o", "s"]):
+                    subset = panel.loc[panel[column].notna()]
+                    ax.scatter(subset["time_since_observed_baseline_years"], subset["row"],
+                               c=subset[column], cmap="viridis", norm=normalizer, s=POINT_SIZE,
+                               marker=marker, edgecolor="white", linewidth=0.4, zorder=3)
+            ax.set_xticks(np.arange(0, np.floor(max_years) + 1, 2))
+            if ax is not axes[-1]:
+                ax.set_xticklabels([])
+
+        top_axis = axes[0].secondary_xaxis("top")
+        visible_ticks = [(position, label) for position, label in TIME_TICKS if xlim[0] <= position <= xlim[1]]
+        top_axis.set_xticks([position for position, _ in visible_ticks])
+        top_axis.set_xticklabels([label for _, label in visible_ticks], fontsize=8, color="#5A5A5A")
+        top_axis.tick_params(length=0, pad=2)
+        top_axis.spines["top"].set_visible(False)
+
+        axes[-1].set_xlabel("Time since observed baseline (years)")
+        fig.supylabel("Patients (shared order across figures; longest follow-up first)", x=0.012, fontsize=9)
+
+        fig.text(LEFT_FRAC, 1 - 0.28 / fig_height, title, color=TITLE_COLOR, fontsize=14.5, ha="left", va="top")
+        fig.text(LEFT_FRAC, 1 - 0.56 / fig_height, subtitle, color=TITLE_COLOR, fontsize=10.5, ha="left", va="top")
+
+        if categorical:
+            handles = [Line2D([0], [0], marker="o", linestyle="none", markerfacecolor=OVERLAP_COLORS[category],
+                              markeredgecolor="white", markersize=7, label=category.replace("_", " "))
+                       for category in OVERLAP_ORDER]
+            fig.legend(handles=handles, title="Overlap status", loc="lower center",
+                       bbox_to_anchor=(0.5, 0.55 / fig_height), ncol=5, columnspacing=1.6, handletextpad=0.4)
+        else:
+            colorbar_axes = fig.add_axes([0.36, 0.62 / fig_height, 0.28, 0.115 / fig_height])
+            colorbar = fig.colorbar(ScalarMappable(norm=normalizer, cmap="viridis"),
+                                    cax=colorbar_axes, orientation="horizontal")
+            colorbar.set_label(value_label, fontsize=9)
+            colorbar.outline.set_linewidth(0.6)
+            colorbar.ax.tick_params(labelsize=8, length=2.5)
+            handles = [Line2D([0], [0], marker=marker, linestyle="none", markerfacecolor="#4C4C4C",
+                              markeredgecolor="white", markersize=7, label=label)
+                       for marker, label in zip(["o", "s"], marker_labels or [])] if two_series else []
+            handles.append(Line2D([0], [0], marker="o", linestyle="none", markerfacecolor="none",
+                                  markeredgecolor=MISSING_COLOR, markersize=6, label="visit without this measure"))
+            fig.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, 1.02 / fig_height),
+                       ncol=len(handles), columnspacing=1.8, handletextpad=0.4)
+
+        fig.text(0.5, 0.20 / fig_height, footnote, ha="center", va="bottom", fontsize=8.2, color="#4A4A4A")
+        fig.savefig(path, bbox_inches=None)
+        plt.close(fig)
 
 
 def generate_longitudinal_figures(integrated: pd.DataFrame) -> list[Path]:
-    """Write the four requested comparable longitudinal patient timelines."""
+    """Write one PDF per measure, each stacking the four baseline-Pop panels."""
     FIGURES_DIR.mkdir(parents=True, exist_ok=True)
-    patient_order, _ = baseline_pop_groups(integrated)
+    order = patient_display_order(integrated)
+    shared_subtitle = ("One panel per baseline Pop; within a panel each row is a patient "
+                       "(longest follow-up first) and each point is a visit.")
     figures = [
-        ("10_longitudinal_profad.pdf", "Longitudinal PROFAD", ["profad_total"], "PROFAD total", False),
-        ("10_longitudinal_sf36.pdf", "Longitudinal SF-36", ["sf36_pcs", "sf36_mcs"], "SF-36 score", False),
-        ("10_longitudinal_mdafs.pdf", "Longitudinal MDAFS", ["mdafs_global"], "MDAFS global", False),
-        ("10_longitudinal_overlapping.pdf", "Longitudinal glandular/extraglandular overlap", ["overlap_status"], "", True),
+        dict(filename="10_longitudinal_profad.pdf", title="Longitudinal PROFAD",
+             value_columns=["profad_total"], value_label="PROFAD total", categorical=False,
+             marker_labels=None,
+             footnote=("PROFAD total per visit, colored on a common scale across all panels. "
+                       "Open grey circles are visits with no PROFAD score.")),
+        dict(filename="10_longitudinal_sf36_pcs.pdf", title="Longitudinal SF-36 PCS",
+             value_columns=["sf36_pcs"], value_label="SF-36 PCS", categorical=False, marker_labels=None,
+             footnote=("SF-36 physical component summary per visit, colored on a common scale across all "
+                       "panels. Open grey circles are visits with no PCS score.")),
+        dict(filename="10_longitudinal_sf36_mcs.pdf", title="Longitudinal SF-36 MCS",
+             value_columns=["sf36_mcs"], value_label="SF-36 MCS", categorical=False, marker_labels=None,
+             footnote=("SF-36 mental component summary per visit, colored on a common scale across all "
+                       "panels. Open grey circles are visits with no MCS score.")),
+        dict(filename="10_longitudinal_mdafs.pdf", title="Longitudinal MDAFS",
+             value_columns=["mdafs_global"], value_label="MDAFS global", categorical=False,
+             marker_labels=None,
+             footnote=("MDAFS global per visit, colored on a common scale across all panels. "
+                       "Open grey circles are visits with no MDAFS score.")),
+        dict(filename="10_longitudinal_overlapping.pdf",
+             title="Longitudinal glandular / extraglandular overlap",
+             value_columns=["overlap_status"], value_label="", categorical=True, marker_labels=None,
+             footnote=("Overlap status per visit. 'insufficient info' marks visits where glandular or "
+                       "extraglandular activity could not be evaluated.")),
     ]
     paths = []
-    for filename, title, columns, label, categorical in figures:
-        path = FIGURES_DIR / filename
-        plot_longitudinal_measure(integrated, patient_order, path, title, columns, label, categorical)
+    for figure in figures:
+        path = FIGURES_DIR / figure.pop("filename")
+        plot_measure_by_pop(integrated, order, path, subtitle=shared_subtitle, **figure)
         paths.append(path)
     return paths
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
