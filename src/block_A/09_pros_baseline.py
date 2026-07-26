@@ -13,7 +13,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -28,7 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import common  # noqa: E402
 import config  # noqa: E402
-from src.derivations.visit_dates import add_parsed_visit_dates
+from src.derivations.visit_dates import add_parsed_visit_dates, normalize_patient_id
 
 LOG = logging.getLogger("pros_baseline")
 
@@ -106,17 +105,6 @@ def is_missing_value(value: Any) -> bool:
     if pd.isna(value):
         return True
     return str(value).strip().lower() in MISSING_STRINGS
-
-
-def normalize_patient_id(value: Any) -> str | float:
-    """Normalize patient identifiers without stripping meaningful leading zeroes."""
-    if is_missing_value(value):
-        return np.nan
-    text = str(value).strip()
-    if text.lower() in MISSING_STRINGS:
-        return np.nan
-    text = re.sub(r"\.0$", "", text)
-    return text if text else np.nan
 
 
 def nonmissing_distinct(values: Iterable[Any]) -> list[str]:
