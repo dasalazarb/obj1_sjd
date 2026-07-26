@@ -41,7 +41,6 @@ from src.derivations.pro_scoring import (
 )
 
 MISSING_STRINGS = config.MISSING_STRINGS
-NOT_VALIDATED = "scoring_algorithm_not_validated"
 
 def path_from_common(name: str, fallback: Path) -> Path:
     """Return a path from common.py when present, otherwise a fallback."""

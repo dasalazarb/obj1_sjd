@@ -25,7 +25,6 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import Normalize
@@ -42,7 +41,6 @@ import common  # noqa: E402
 PATIENT_ID_COL = "ids__patient_record_number"
 VISIT_DATE_COL = "ids__visit_date"
 EXPECTED_INPUT_NAME = "visits_long_collapsed_by_interval_codebook_corrected.parquet"
-MAX_PATIENTS_FOR_LABELS = 120
 
 plt.rcParams.update({
     "figure.dpi": 300,
@@ -57,7 +55,6 @@ plt.rcParams.update({
     "ps.fonttype": 42,
 })
 
-RAW_DIR = common.RAW_DATA_DIR
 INTERMEDIATE_DIR = common.INTERMEDIATE_DATA_DIR
 TABLE_DIR = common.BLOCKA_TABLES_DIR
 FIGURE_DIR = common.OUTPUTS_DIR / "figures" / "blockA"

@@ -222,11 +222,6 @@ def compute_esspri_from_components(dry: pd.Series, fatigue: pd.Series, pain: pd.
     comp_df.columns = ["dryness", "fatigue", "pain"]
     return comp_df.mean(axis=1).where(comp_df.notna().all(axis=1), np.nan)
 
-def compute_esspri(df: pd.DataFrame) -> pd.Series:
-    return compute_esspri_from_components(*(numeric_from_first_number(df[col]) for col in ESSPRI_COMPONENTS))
-
-
-
 def numeric_optional(df: pd.DataFrame, col: str) -> pd.Series:
     if col not in df.columns:
         return pd.Series(np.nan, index=df.index, dtype="float64")

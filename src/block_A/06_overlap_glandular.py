@@ -127,16 +127,6 @@ def essdai_to_binary(value: Any) -> float:
     return pd.NA if pd.isna(numeric) else float(numeric > 0)
 
 
-def any_positive_composite(row: pd.Series, cols: list[str]) -> float:
-    """Return 1.0 if any col in cols is positive, 0.0 if all are 0/missing
-    but at least one is non-missing, pd.NA if all are missing."""
-    values = [preferred_flag_to_binary(row[c]) for c in cols if c in row.index]
-    non_missing = [v for v in values if pd.notna(v)]
-    if not non_missing:
-        return pd.NA
-    return 1.0 if any(v == 1.0 for v in non_missing) else 0.0
-
-
 def aggregate_binary(values: pd.Series, converter) -> Any:
     """Collapse tied baseline rows: any positive > any explicit negative > missing."""
     converted = [converter(value) for value in values]

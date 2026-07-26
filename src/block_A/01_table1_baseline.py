@@ -174,11 +174,6 @@ def normalize_sjogren_class(x: object) -> str:
     return mapping.get(s, "unknown")
 
 
-def class_is_target_sjd(x: object) -> bool:
-    """Return True for Sjögren classification codes included in this cohort."""
-    return normalize_sjogren_class(x) in {"primary_sjd", "secondary_sjd", "incomplete"}
-
-
 def filter_to_target_sjogren_class_patients(df: pd.DataFrame) -> pd.DataFrame:
     """Keep patients whose modal Sjögren class is primary, secondary, or incomplete."""
     patient_id_source = select_patient_id_col(df)

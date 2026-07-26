@@ -16,7 +16,6 @@ INTERMEDIATE_DATA_DIR = DATA_DIR / "intermediate"
 ANALYTIC_DATA_DIR = DATA_DIR / "analytic"
 METADATA_DIR = PROJECT_ROOT / "metadata"
 OUTPUTS_DIR = PROJECT_ROOT / "outputs"
-ANALYSIS_DIR = PROJECT_ROOT / "analysis"
 
 # Canonical input defaults. CLI arguments in scripts may override these.
 DEFAULT_ANALYTIC_DATASET = Path("/data/salazarda/data/obj1_sjd/data/raw") / "visits_long_collapsed_by_interval_codebook_corrected.parquet"

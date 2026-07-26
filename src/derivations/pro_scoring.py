@@ -84,7 +84,6 @@ MDAFS_ACTIVITY_FLAGS = [
 ] + [f"multidimensional_assessment_of_fatigue_scale__fat_q{i}_no_actvty" for i in range(6, 15)]
 
 MISSING_STRINGS = config.MISSING_STRINGS
-NOT_VALIDATED = "scoring_algorithm_not_validated"
 
 
 def _is_missing(value: Any) -> bool:
