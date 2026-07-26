@@ -20,6 +20,7 @@ NOTAS:
 """
 
 from pathlib import Path
+from typing import Optional
 
 # ── Rutas ─────────────────────────────────────────────────────────────────────
 
@@ -98,7 +99,7 @@ INTERVAL_SHORT_LABELS: list[str] = list(PHASE_LABELS.values())
 #   df.groupby(INTERVAL_COL)[VISIT_DATE].agg(['min','max','count'])
 # y actualizar estos valores si corresponde.
 
-INTERVAL_MONTHS_NOMINAL: dict[str, int | None] = {
+INTERVAL_MONTHS_NOMINAL: dict[str, Optional[int]] = {
     "Natural History Protocol 478 Interval": 0,
     "(missing)":                             0,
     "Phase 1: Initial Full Evaluation":      None,  # verificar contra fechas reales
