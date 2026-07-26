@@ -28,6 +28,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import common  # noqa: E402
+import config  # noqa: E402
 from src.derivations.visit_dates import add_parsed_visit_dates
 
 PATIENT_ID_COL = "ids__patient_record_number"
@@ -123,7 +124,7 @@ MISSINGNESS_MARKERS = {
     "missing ESSDAI and ESSPRI": "X",
 }
 MISSINGNESS_ORDER = list(MISSINGNESS_MARKERS)
-MISSING_STRINGS = {"", "na", "n/a", "nan", "none", "unknown", "unk", "-99"}
+MISSING_STRINGS = config.MISSING_STRINGS
 
 
 def _common_path(name: str, fallback: Path) -> Path:
@@ -404,11 +405,11 @@ def add_esspri_scenarios(work: pd.DataFrame, relaxed: bool = False) -> pd.DataFr
 def classify_pop(essdai_total: object, esspri_total: object) -> str:
     essdai_missing = pd.isna(essdai_total)
     esspri_missing = pd.isna(esspri_total)
-    if not essdai_missing and float(essdai_total) >= 5:
+    if not essdai_missing and float(essdai_total) >= config.ESSDAI_SEVERE:
         return "Pop1"
-    if not essdai_missing and float(essdai_total) < 5 and not esspri_missing and float(esspri_total) >= 5:
+    if not essdai_missing and float(essdai_total) < config.ESSDAI_SEVERE and not esspri_missing and float(esspri_total) >= config.ESSPRI_THRESHOLD:
         return "Pop2"
-    if not essdai_missing and float(essdai_total) < 5 and not esspri_missing and float(esspri_total) < 5:
+    if not essdai_missing and float(essdai_total) < config.ESSDAI_SEVERE and not esspri_missing and float(esspri_total) < config.ESSPRI_THRESHOLD:
         return "Pop3"
     return "Unclassifiable"
 
@@ -420,9 +421,9 @@ def visit_missingness_label(essdai_total: object, esspri_total: object) -> str:
     if essdai_missing and esspri_missing:
         return "missing ESSDAI and ESSPRI"
     if essdai_missing:
-        return "missing ESSDAI; ESSPRI >=5" if float(esspri_total) >= 5 else "missing ESSDAI; ESSPRI <5"
+        return "missing ESSDAI; ESSPRI >=5" if float(esspri_total) >= config.ESSPRI_THRESHOLD else "missing ESSDAI; ESSPRI <5"
     if esspri_missing:
-        return "missing ESSPRI; ESSDAI >=5" if float(essdai_total) >= 5 else "missing ESSPRI; ESSDAI <5"
+        return "missing ESSPRI; ESSDAI >=5" if float(essdai_total) >= config.ESSDAI_SEVERE else "missing ESSPRI; ESSDAI <5"
     return "ESSDAI and ESSPRI available"
 
 
@@ -931,7 +932,7 @@ def unclassifiable_reason(row: pd.Series, suffix: str = "") -> str:
         return f"missing ESSDAI and ESSPRI{suffix}"
     if essdai_missing:
         return f"missing ESSDAI{suffix}"
-    if not essdai_missing and float(row["essdai_total"]) < 5 and esspri_missing:
+    if not essdai_missing and float(row["essdai_total"]) < config.ESSDAI_SEVERE and esspri_missing:
         return f"missing ESSPRI{suffix} with ESSDAI <5" if suffix else "missing ESSPRI with ESSDAI <5"
     return "not classifiable by ESSDAI/ESSPRI rule"
 
@@ -1068,7 +1069,7 @@ def build_proxy_validation(longitudinal: pd.DataFrame) -> pd.DataFrame:
         for subset, protocol, data in _subsets(longitudinal):
             pair = data[["patient_id", obs, proxy]].dropna()
             m = continuous_metrics(pair, obs, proxy); boot = cluster_bootstrap_metrics(pair, "patient_id", lambda x, o=obs, p=proxy: {k:v for k,v in continuous_metrics(x,o,p).items() if k in ["mae","rmse","mean_bias","pearson_r","spearman_rho","icc_2_1"]})
-            rows.append({"domain": domain, "candidate_id": cand, "observed_column": obs, "proxy_column": proxy, "subset": subset, "protocol": protocol, "n_visits": len(pair), "n_patients": pair["patient_id"].nunique(), **m, **boot, "component_threshold_5_discordant": int(((pair[obs]>=5)!=(pair[proxy]>=5)).sum()) if len(pair) else 0, "status": _status(pair)})
+            rows.append({"domain": domain, "candidate_id": cand, "observed_column": obs, "proxy_column": proxy, "subset": subset, "protocol": protocol, "n_visits": len(pair), "n_patients": pair["patient_id"].nunique(), **m, **boot, "component_threshold_5_discordant": int(((pair[obs]>=config.ESSPRI_THRESHOLD)!=(pair[proxy]>=config.ESSPRI_THRESHOLD)).sum()) if len(pair) else 0, "status": _status(pair)})
     return pd.DataFrame(rows)
 
 
@@ -1084,7 +1085,7 @@ def build_proxy_total_validation(longitudinal: pd.DataFrame) -> pd.DataFrame:
 
 
 def _threshold_metrics(data: pd.DataFrame, repl: str) -> dict[str, float]:
-    d=data.dropna(subset=["esspri_total_observed",repl]).copy(); y=(d["esspri_total_observed"]>=5); yp=(d[repl]>=5)
+    d=data.dropna(subset=["esspri_total_observed",repl]).copy(); y=(d["esspri_total_observed"]>=config.ESSPRI_THRESHOLD); yp=(d[repl]>=config.ESSPRI_THRESHOLD)
     if d.empty: return {k:np.nan for k in ["sensitivity","specificity","ppv","npv","accuracy","balanced_accuracy","f1_score","cohen_kappa"]}
     tn, fp, fn, tp = confusion_matrix(y, yp, labels=[False, True]).ravel()
     div=lambda a,b: float(a/b) if b else np.nan
@@ -1093,7 +1094,7 @@ def _threshold_metrics(data: pd.DataFrame, repl: str) -> dict[str, float]:
 
 def build_threshold_agreement(longitudinal: pd.DataFrame) -> pd.DataFrame:
     rows=[]
-    base=longitudinal[pd.to_numeric(longitudinal["essdai_total"], errors="coerce").lt(5)]
+    base=longitudinal[pd.to_numeric(longitudinal["essdai_total"], errors="coerce").lt(config.ESSDAI_SEVERE)]
     for cand,domain,_ in PROXY_CANDIDATES_S5:
         repl=f"esspri_total_replace_{cand}"
         for subset,protocol,data in [("overall_essdai_lt5","overall",base)] + ([("protocol_essdai_lt5",str(p),g) for p,g in base.groupby("protocol",dropna=True)] if "protocol" in base.columns else []):
@@ -1106,7 +1107,7 @@ def build_pop2_pop3_reclassification(longitudinal: pd.DataFrame) -> tuple[pd.Dat
     rows=[]; mats=[]; base=longitudinal[pd.to_numeric(longitudinal["essdai_total"], errors="coerce").lt(5)]
     for cand,domain,_ in PROXY_CANDIDATES_S5:
         repl=f"esspri_total_replace_{cand}"; d=base.dropna(subset=["esspri_total_observed",repl]).copy()
-        obs=np.where(d["esspri_total_observed"]>=5,"Pop2","Pop3"); pred=np.where(d[repl]>=5,"Pop2","Pop3")
+        obs=np.where(d["esspri_total_observed"]>=config.ESSPRI_THRESHOLD,"Pop2","Pop3"); pred=np.where(d[repl]>=config.ESSPRI_THRESHOLD,"Pop2","Pop3")
         tab=pd.crosstab(pd.Series(obs,name="observed_pop"),pd.Series(pred,name="proxy_pop")).reindex(index=["Pop2","Pop3"],columns=["Pop2","Pop3"],fill_value=0)
         b=int(tab.loc["Pop2","Pop3"]); c=int(tab.loc["Pop3","Pop2"]); pval=float(binomtest(min(b,c),b+c,0.5).pvalue) if b+c>0 else np.nan
         rows.append({"domain":domain,"candidate_id":cand,"n_visits":len(d),"n_patients":d["patient_id"].nunique(),"percent_agreement":float((obs==pred).mean()*100) if len(d) else np.nan,"cohen_kappa":float(cohen_kappa_score(obs,pred)) if len(d) else np.nan,"n_pop2_to_pop3":b,"n_pop3_to_pop2":c,"net_change_pop2":c-b,"net_change_pop3":b-c,"mcnemar_exact_p_value":pval,"status":_status(d)})

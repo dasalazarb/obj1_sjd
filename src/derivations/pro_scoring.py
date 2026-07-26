@@ -6,9 +6,18 @@ computed independently for every input row; callers control visit selection.
 """
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from typing import Any
+
 import numpy as np
 import pandas as pd
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+import config  # noqa: E402
 
 ESSPRI_COMPONENTS = {
     "dryness": "esspri_questionnaire__dryness",
@@ -74,7 +83,7 @@ MDAFS_ACTIVITY_FLAGS = [
     "multidimensional_assessment_of_fatigue_scale__fat_q5_dont_do_activity",
 ] + [f"multidimensional_assessment_of_fatigue_scale__fat_q{i}_no_actvty" for i in range(6, 15)]
 
-MISSING_STRINGS = {"", "na", "n/a", "nan", "none", "null", "unknown", "not available", "missing"}
+MISSING_STRINGS = config.MISSING_STRINGS
 NOT_VALIDATED = "scoring_algorithm_not_validated"
 
 

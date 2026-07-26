@@ -23,6 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import common  # noqa: E402
+import config  # noqa: E402
 
 LOG = logging.getLogger(__name__)
 
@@ -57,7 +58,7 @@ REQUIRED_DATASET_VARS = {
     AGE_AT_VISIT_COL,
 }
 
-MISSING_STRINGS = {"", "na", "n/a", "nan", "none", "unknown", "unk", "-99"}
+MISSING_STRINGS = config.MISSING_STRINGS
 
 
 def parse_args() -> argparse.Namespace:

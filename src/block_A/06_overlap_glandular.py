@@ -27,6 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import common  # noqa: E402
+import config  # noqa: E402
 from src.derivations.visit_dates import add_parsed_visit_dates
 
 LOG = logging.getLogger(__name__)
@@ -48,7 +49,7 @@ PATIENT_LEVEL_OUTPUT = common.INTERMEDIATE_DATA_DIR / "06_overlap_baseline_patie
 MANIFEST_OUTPUT = common.INTERMEDIATE_DATA_DIR / "06_overlap_baseline_variable_manifest.csv"
 QC_OUTPUT = common.INTERMEDIATE_DATA_DIR / "06_overlap_baseline_qc.json"
 
-MISSING_STRINGS = {"", "na", "n/a", "nan", "none", "unknown", "unk", "missing", ".", "-99"}
+MISSING_STRINGS = config.MISSING_STRINGS
 POSITIVE_STRINGS = {"1", "1.0", "yes", "y", "true", "t", "positive", "pos", "present", "checked", "x"}
 NEGATIVE_STRINGS = {"0", "0.0", "no", "n", "false", "f", "negative", "neg", "absent", "unchecked"}
 SOURCE_VARIABLE_KEY = {

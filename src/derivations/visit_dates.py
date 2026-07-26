@@ -7,9 +7,18 @@ pipe-delimited dates so they can be audited rather than silently discarded.
 from __future__ import annotations
 
 import re
+import sys
+from pathlib import Path
+
 import pandas as pd
 
-_MISSING = {"", "na", "n/a", "nan", "none", "unknown", "unk", "missing", "-99"}
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+import config  # noqa: E402
+
+_MISSING = config.MISSING_STRINGS
 
 
 def normalize_patient_id(value: object) -> str | pd.NA:

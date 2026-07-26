@@ -27,6 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import common  # noqa: E402
+import config  # noqa: E402
 from src.derivations.visit_dates import add_parsed_visit_dates
 
 LOG = logging.getLogger("pros_baseline")
@@ -40,7 +41,7 @@ from src.derivations.pro_scoring import (
     MDAFS_ACTIVITY_FLAGS, score_all_pros,
 )
 
-MISSING_STRINGS = {"", "na", "n/a", "nan", "none", "null", "unknown", "not available", "missing"}
+MISSING_STRINGS = config.MISSING_STRINGS
 NOT_VALIDATED = "scoring_algorithm_not_validated"
 
 def path_from_common(name: str, fallback: Path) -> Path:
