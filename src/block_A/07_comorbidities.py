@@ -187,12 +187,19 @@ def _read_required(path: Path, columns: Sequence[str]) -> pd.DataFrame:
     return pd.read_parquet(path, columns=list(columns))
 
 
+def parse_age_first_value(series: pd.Series) -> pd.Series:
+    """Parse age as numeric, taking the first value from pipe-delimited entries."""
+    first = series.astype("string").str.split("|", regex=False).str[0].str.strip()
+    return pd.to_numeric(first, errors="coerce")
+
+
 def load_visit_spine() -> pd.DataFrame:
     # Patient and canonical visit identity are the integration keys.
     cols = ["patient_id", "visit_id", "visit_date", "visit_number", "observed_baseline_date", "time_since_observed_baseline_days", "time_since_observed_baseline_years", "age_at_visit", "sex"]
     df = _read_required(common.VISIT_SPINE_PARQUET, cols)
     df["visit_date"] = pd.to_datetime(df["visit_date"])
     df["observed_baseline_date"] = pd.to_datetime(df["observed_baseline_date"])
+    df["age_at_visit"] = parse_age_first_value(df["age_at_visit"])
     if df["patient_id"].isna().any() or not df["visit_id"].is_unique or df.duplicated(["patient_id", "visit_date"]).any():
         raise ValueError("Visit spine violates patient/visit identity constraints")
     if (df["time_since_observed_baseline_days"] < 0).any():
