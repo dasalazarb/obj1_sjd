@@ -46,8 +46,12 @@ PATIENT_ID_COL = "ids__patient_record_number"
 VISIT_DATE_COL = "ids__visit_date"
 AGE_COL = "ids__age_at_visit"
 SEX_COL = "ids__sex"
-ESSDAI_PRIMARY_COL = "essdai-_r__essdai_total_score"
-ESSDAI_RAW_QC_COL = "essdai__essdai_total_score"
+# The deployed analytic extract contains only this total-score field.  Keep one
+# explicit source of truth rather than requiring an unavailable alias.  The
+# ``*_raw_qc`` output is retained for schema compatibility and is
+# therefore an identical audit copy of the primary value in this extract.
+ESSDAI_PRIMARY_COL = config.ESSDAI_TOTAL_RAW
+ESSDAI_RAW_QC_COL = config.ESSDAI_TOTAL_RAW
 # The acceptance criteria and requested severe14 outputs specify high activity
 # (>=14), whereas an earlier paragraph says >=5.  >=5 remains the Pop threshold.
 SEVERE_THRESHOLD = config.ESSDAI_HIGH
@@ -315,13 +319,14 @@ def build_baseline_comorbidity_dataset(raw: pd.DataFrame, spine: pd.DataFrame, p
     base_pop = pop.loc[pop["visit_number"].eq(0), ["patient_id", "baseline_pop_status", "essdai_total"]].drop_duplicates("patient_id")
     base = base.merge(base_pop, on="patient_id", how="left", validate="one_to_one")
     base = base.rename(columns={"visit_id": "baseline_visit_id", "visit_date": "baseline_date", "age_at_visit": "age_baseline", "baseline_pop_status": "baseline_pop", "essdai_total": "baseline_essdai_pop_pipeline"})
-    # Primary ESSDAI comes strictly from the recoded raw column at the canonical baseline.
+    # Primary ESSDAI comes from the available total-score column at canonical baseline.
     baseline_raw = parsed.merge(base_spine[["patient_id", "visit_date"]], on=["patient_id", "visit_date"], how="inner")
     ess = baseline_raw.groupby("patient_id", as_index=False).agg(
         baseline_essdai=(ESSDAI_PRIMARY_COL, lambda s: pd.to_numeric(s, errors="coerce").dropna().iloc[0] if pd.to_numeric(s, errors="coerce").notna().any() else np.nan),
         baseline_essdai_raw_qc=(ESSDAI_RAW_QC_COL, lambda s: pd.to_numeric(s, errors="coerce").dropna().iloc[0] if pd.to_numeric(s, errors="coerce").notna().any() else np.nan),
     )
-    base = base.drop(columns=[c for c in (ESSDAI_PRIMARY_COL, ESSDAI_RAW_QC_COL) if c in base]).merge(ess, on="patient_id", how="left", validate="one_to_one")
+    essdai_source_columns = list(dict.fromkeys(c for c in (ESSDAI_PRIMARY_COL, ESSDAI_RAW_QC_COL) if c in base))
+    base = base.drop(columns=essdai_source_columns).merge(ess, on="patient_id", how="left", validate="one_to_one")
     base["n_prespecified_comorbidities"] = base[CONDITION_NAMES].fillna(False).astype(int).sum(axis=1)
     base["n_comorbidities_evaluable"] = base[CONDITION_NAMES].notna().sum(axis=1)
     base["any_comorbidity"] = (base["n_prespecified_comorbidities"] > 0).astype("boolean")
@@ -648,7 +653,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     pd.DataFrame(_UNRECOGNIZED,columns=["source_column","original_value","row_index"]).drop_duplicates().to_csv(QC_DIR/"07_comorbidities_unrecognized_values.csv",index=False)
     both=long[["essdai_total_recoded","essdai_total_raw_qc"]].dropna(); diff=both["essdai_total_recoded"]-both["essdai_total_raw_qc"]
     pop_counts=base["baseline_pop"].fillna("Unclassifiable").value_counts(); classifiable=int(base["baseline_pop"].isin(["Pop1","Pop2","Pop3"]).sum()); with_followup=int(long.loc[(long.visit_number>0)&long.essdai_total_recoded.notna(),"patient_id"].nunique())
-    qc={"input_path":str(args.input),"input_modification_time":datetime.fromtimestamp(args.input.stat().st_mtime,timezone.utc).isoformat(),"script_version":SCRIPT_VERSION,"run_timestamp":datetime.now(timezone.utc).isoformat(),"random_seed":args.random_seed,"n_input_rows":len(raw),"n_input_patients":int(raw[PATIENT_ID_COL].nunique()),"n_canonical_visits":len(spine),"n_baseline_patients":len(base),"n_duplicate_patient_dates":len(duplicates),"n_pipe_delimited_visit_dates":n_pipe,"n_pop_classifiable":classifiable,"n_pop_unclassifiable":len(base)-classifiable,"pop_counts":pop_counts.to_dict(),"n_with_followup_essdai":with_followup,"n_at_risk_severe14":len(severe),"n_severe14_events":int(severe.get("severe14_event",pd.Series(dtype=int)).sum()),"n_at_risk_new_domain":len(new_domain),"n_new_domain_events":int(new_domain.get("new_domain_event",pd.Series(dtype=int)).sum()),"severe_threshold_used":SEVERE_THRESHOLD,"essdai_primary_column":ESSDAI_PRIMARY_COL,"essdai_raw_qc_column":ESSDAI_RAW_QC_COL,"upstream_files_used":[str(p) for p in UPSTREAM],"upstream_file_timestamps":timestamps,"essdai_reconciliation":{"n_both":len(both),"n_concordant":int(diff.eq(0).sum()),"n_discordant":int(diff.ne(0).sum()),"mean_difference":float(diff.mean()) if len(diff) else None,"median_difference":float(diff.median()) if len(diff) else None,"maximum_absolute_difference":float(diff.abs().max()) if len(diff) else None},"warnings":["Conflicting specification resolved in favor of acceptance criterion: severe/high activity is ESSDAI >=14; Pop1 remains >=5."],**qc_extra}
+    qc={"input_path":str(args.input),"input_modification_time":datetime.fromtimestamp(args.input.stat().st_mtime,timezone.utc).isoformat(),"script_version":SCRIPT_VERSION,"run_timestamp":datetime.now(timezone.utc).isoformat(),"random_seed":args.random_seed,"n_input_rows":len(raw),"n_input_patients":int(raw[PATIENT_ID_COL].nunique()),"n_canonical_visits":len(spine),"n_baseline_patients":len(base),"n_duplicate_patient_dates":len(duplicates),"n_pipe_delimited_visit_dates":n_pipe,"n_pop_classifiable":classifiable,"n_pop_unclassifiable":len(base)-classifiable,"pop_counts":pop_counts.to_dict(),"n_with_followup_essdai":with_followup,"n_at_risk_severe14":len(severe),"n_severe14_events":int(severe.get("severe14_event",pd.Series(dtype=int)).sum()),"n_at_risk_new_domain":len(new_domain),"n_new_domain_events":int(new_domain.get("new_domain_event",pd.Series(dtype=int)).sum()),"severe_threshold_used":SEVERE_THRESHOLD,"essdai_primary_column":ESSDAI_PRIMARY_COL,"essdai_raw_qc_column":ESSDAI_RAW_QC_COL,"upstream_files_used":[str(p) for p in UPSTREAM],"upstream_file_timestamps":timestamps,"essdai_reconciliation":{"n_both":len(both),"n_concordant":int(diff.eq(0).sum()),"n_discordant":int(diff.ne(0).sum()),"mean_difference":float(diff.mean()) if len(diff) else None,"median_difference":float(diff.median()) if len(diff) else None,"maximum_absolute_difference":float(diff.abs().max()) if len(diff) else None},"warnings":["The deployed extract has only essdai__essdai_total_score; it is used as the primary longitudinal ESSDAI source and duplicated in the raw-QC compatibility field.","Conflicting specification resolved in favor of acceptance criterion: severe/high activity is ESSDAI >=14; Pop1 remains >=5."],**qc_extra}
     (QC_DIR/"07_comorbidities_qc.json").write_text(json.dumps(qc,indent=2,default=str)+"\n")
     claim=overall.head(3); ild=float(overall.loc[overall.condition.eq("ild"),"pct_total_cohort"].iloc[0]); logger.info("Claim: %s was the most prevalent documented baseline comorbidity (%.1f%%), followed by %s (%.1f%%) and %s (%.1f%%). Interstitial lung disease was documented in %.1f%% of patients.",claim.iloc[0].display_label,claim.iloc[0].pct_total_cohort,claim.iloc[1].display_label,claim.iloc[1].pct_total_cohort,claim.iloc[2].display_label,claim.iloc[2].pct_total_cohort,ild)
     fitted=int(progression.model_status.isin(["fitted","reduced_adjustment"]).sum()); not_est=len(progression)-fitted
