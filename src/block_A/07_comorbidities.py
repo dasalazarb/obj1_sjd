@@ -68,6 +68,8 @@ SEVERE_PATH = common.INTERMEDIATE_DATA_DIR / "07_comorbidity_severe5_survival.pa
 NEW_DOMAIN_PATH = common.INTERMEDIATE_DATA_DIR / "07_comorbidity_new_domain_survival.parquet"
 DOMAIN_AUDIT_PATH = common.INTERMEDIATE_DATA_DIR / "07_comorbidity_new_domain_patient_domain.parquet"
 
+INTERMEDIATE_PATHS = [BASELINE_PATH, LONGITUDINAL_PATH, SEVERE_PATH, NEW_DOMAIN_PATH, DOMAIN_AUDIT_PATH]
+
 ORGAN_DOMAINS = [
     "eg_constitutional_active", "eg_lymphadenopathy_active", "eg_articular_active",
     "eg_cutaneous_active", "eg_pulmonary_active", "eg_renal_active",
@@ -582,6 +584,14 @@ def _plot_save(fig: plt.Figure, path: Path) -> None:
     if path.stat().st_size < 1000: raise IOError(f"Generated figure appears empty: {path}")
 
 
+def write_intermediate_dataset(data: pd.DataFrame, parquet_path: Path) -> tuple[Path, Path]:
+    """Write an intermediate dataset in both Parquet and review-friendly CSV."""
+    csv_path = parquet_path.with_suffix(".csv")
+    data.to_parquet(parquet_path, index=False)
+    data.to_csv(csv_path, index=False)
+    return parquet_path, csv_path
+
+
 def _nonnegative_interval_errors(
     estimate: Sequence[float], lower: Sequence[float], upper: Sequence[float]
 ) -> np.ndarray:
@@ -684,7 +694,8 @@ def source_mapping(raw_columns: Iterable[str]) -> pd.DataFrame:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args=parse_args(argv); ensure_directories(); np.random.seed(args.random_seed)
-    outputs=[BASELINE_PATH,LONGITUDINAL_PATH,SEVERE_PATH,NEW_DOMAIN_PATH,DOMAIN_AUDIT_PATH,TABLES_DIR/"07_comorbidities_overall.csv",TABLES_DIR/"07_comorbidities_by_pop.csv",TABLES_DIR/"07_comorbidities_progression.csv",FIGURES_DIR/"07_comorbidities_dotplot.pdf",FIGURES_DIR/"07_comorbidities_grouped_bar.pdf",FIGURES_DIR/"07_comorbidities_progression_forestplot.pdf",QC_DIR/"07_comorbidities_qc.json",QC_DIR/"07_comorbidities_missingness.csv",QC_DIR/"07_comorbidities_source_mapping.csv",QC_DIR/"07_comorbidities_model_diagnostics.csv",QC_DIR/"07_comorbidities_patient_duplicates.csv",QC_DIR/"07_comorbidities_unavailable_conditions.csv",QC_DIR/"07_comorbidities_unrecognized_values.csv",LOG_PATH]
+    intermediate_outputs = [path for parquet_path in INTERMEDIATE_PATHS for path in (parquet_path, parquet_path.with_suffix(".csv"))]
+    outputs=intermediate_outputs+[TABLES_DIR/"07_comorbidities_overall.csv",TABLES_DIR/"07_comorbidities_by_pop.csv",TABLES_DIR/"07_comorbidities_progression.csv",FIGURES_DIR/"07_comorbidities_dotplot.pdf",FIGURES_DIR/"07_comorbidities_grouped_bar.pdf",FIGURES_DIR/"07_comorbidities_progression_forestplot.pdf",QC_DIR/"07_comorbidities_qc.json",QC_DIR/"07_comorbidities_missingness.csv",QC_DIR/"07_comorbidities_source_mapping.csv",QC_DIR/"07_comorbidities_model_diagnostics.csv",QC_DIR/"07_comorbidities_patient_duplicates.csv",QC_DIR/"07_comorbidities_unavailable_conditions.csv",QC_DIR/"07_comorbidities_unrecognized_values.csv",LOG_PATH]
     existing = [p for p in outputs if p.exists()]
     logger=setup_logging()
     if existing:
@@ -693,10 +704,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     timestamps=check_upstream_artifacts(args.input,args.rebuild_upstream,logger); spine=load_visit_spine(); pop=load_pop_classification(); domains=load_domain_flags(); raw=load_selected_raw_columns(args.input)
     logger.info("[2/8] Building baseline comorbidity indicators")
     base,duplicates,n_pipe=build_baseline_comorbidity_dataset(raw,spine,pop)
-    logger.info("[3/8] Writing baseline intermediate dataset"); base.to_parquet(BASELINE_PATH,index=False)
+    logger.info("[3/8] Writing baseline intermediate dataset"); write_intermediate_dataset(base,BASELINE_PATH)
     logger.info("[4/8] Estimating overall prevalence"); overall=summarize_overall_prevalence(base); overall.to_csv(TABLES_DIR/"07_comorbidities_overall.csv",index=False); create_dotplot(overall)
     logger.info("[5/8] Comparing prevalence across Pop 1-3"); by_pop=summarize_prevalence_by_pop(base,args.monte_carlo_replicates,args.random_seed); by_pop.to_csv(TABLES_DIR/"07_comorbidities_by_pop.csv",index=False); create_grouped_barplot(by_pop)
-    logger.info("[6/8] Building longitudinal outcomes"); long=build_longitudinal_essdai_dataset(raw,spine,pop,domains,base); long.to_parquet(LONGITUDINAL_PATH,index=False); severe=build_severe5_survival_dataset(long,base); severe.to_parquet(SEVERE_PATH,index=False); new_domain,domain_audit=build_new_domain_survival_dataset(long,base); new_domain.to_parquet(NEW_DOMAIN_PATH,index=False); domain_audit.to_parquet(DOMAIN_AUDIT_PATH,index=False)
+    logger.info("[6/8] Building longitudinal outcomes"); long=build_longitudinal_essdai_dataset(raw,spine,pop,domains,base); write_intermediate_dataset(long,LONGITUDINAL_PATH); severe=build_severe5_survival_dataset(long,base); write_intermediate_dataset(severe,SEVERE_PATH); new_domain,domain_audit=build_new_domain_survival_dataset(long,base); write_intermediate_dataset(new_domain,NEW_DOMAIN_PATH); write_intermediate_dataset(domain_audit,DOMAIN_AUDIT_PATH)
     logger.info("[7/8] Fitting progression models"); progression_rows=[]; diagnostics=[]
     for c in CONDITIONS:
         rows,diag=fit_mixed_model(long,c); progression_rows.extend(rows); diagnostics.append(diag)
