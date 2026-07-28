@@ -558,9 +558,31 @@ def _plot_save(fig: plt.Figure, path: Path) -> None:
     if path.stat().st_size < 1000: raise IOError(f"Generated figure appears empty: {path}")
 
 
+def _nonnegative_interval_errors(
+    estimate: Sequence[float], lower: Sequence[float], upper: Sequence[float]
+) -> np.ndarray:
+    """Return matplotlib-compatible CI distances, guarding round-off error.
+
+    Matplotlib rejects even tiny negative error distances.  Wilson bounds can
+    differ from their displayed estimate at floating-point precision, so CI
+    distances are clipped at zero after validating the bound ordering.
+    """
+    estimate_array = np.asarray(estimate, dtype=float)
+    lower_array = np.asarray(lower, dtype=float)
+    upper_array = np.asarray(upper, dtype=float)
+    finite = np.isfinite(estimate_array) & np.isfinite(lower_array) & np.isfinite(upper_array)
+    if np.any(lower_array[finite] > upper_array[finite]):
+        raise ValueError("Confidence interval lower bound exceeds upper bound")
+    return np.vstack((np.maximum(estimate_array - lower_array, 0.0),
+                      np.maximum(upper_array - estimate_array, 0.0)))
+
+
 def create_dotplot(overall: pd.DataFrame) -> None:
     d = overall.iloc[::-1]; fig, ax = plt.subplots(figsize=(10, max(6, .55*len(d))))
-    y = np.arange(len(d)); ax.errorbar(d["pct_total_cohort"], y, xerr=[d["pct_total_cohort"]-d["ci95_low"], d["ci95_high"]-d["pct_total_cohort"]], fmt="o", color="#2c7fb8", capsize=3)
+    y = np.arange(len(d)); estimate = d["pct_total_cohort"].to_numpy(dtype=float)
+    finite = np.isfinite(estimate) & d["ci95_low"].notna().to_numpy() & d["ci95_high"].notna().to_numpy()
+    errors = _nonnegative_interval_errors(estimate, d["ci95_low"], d["ci95_high"])
+    ax.errorbar(estimate[finite], y[finite], xerr=errors[:, finite], fmt="o", color="#2c7fb8", capsize=3)
     ax.set_yticks(y, d["display_label"]); ax.set_xlabel("Documented prevalence in total baseline cohort (%)"); ax.grid(axis="x", alpha=.25)
     for yy, (_, r) in zip(y, d.iterrows()): ax.annotate(f"{r.n_positive}/{r.n_total_cohort}", (r.pct_total_cohort, yy), xytext=(6, 4), textcoords="offset points", fontsize=8)
     fig.text(.01, .01, "Points use the total baseline cohort denominator; Wilson 95% CIs. Missing documentation is not treated as evaluable absence.", fontsize=8)
@@ -571,8 +593,10 @@ def create_grouped_barplot(by_pop: pd.DataFrame) -> None:
     d = by_pop.merge(pd.DataFrame({"condition": CONDITION_NAMES, "order": range(len(CONDITION_NAMES))}), on="condition").sort_values("order").iloc[::-1]
     fig, ax = plt.subplots(figsize=(11, max(7, .65*len(d)))); y = np.arange(len(d)); offsets = (-.22, 0, .22); colors = ("#1b9e77", "#d95f02", "#7570b3")
     for i, (off, color) in enumerate(zip(offsets, colors), 1):
-        pct=d[f"pct_pop{i}"].to_numpy(); lo=d[f"ci95_pop{i}_low"].to_numpy(); hi=d[f"ci95_pop{i}_high"].to_numpy()
-        ax.errorbar(pct, y+off, xerr=[pct-lo, hi-pct], fmt="o", label=f"Pop{i}", color=color, capsize=2)
+        pct=d[f"pct_pop{i}"].to_numpy(dtype=float); lo=d[f"ci95_pop{i}_low"].to_numpy(dtype=float); hi=d[f"ci95_pop{i}_high"].to_numpy(dtype=float)
+        finite = np.isfinite(pct) & np.isfinite(lo) & np.isfinite(hi)
+        errors = _nonnegative_interval_errors(pct, lo, hi)
+        ax.errorbar(pct[finite], (y+off)[finite], xerr=errors[:, finite], fmt="o", label=f"Pop{i}", color=color, capsize=2)
         for x, yy, n, N in zip(pct, y+off, d[f"n_pop{i}"], d[f"N_pop{i}"]):
             if np.isfinite(x): ax.annotate(f"{n}/{N}", (x, yy), xytext=(5, 0), textcoords="offset points", va="center", fontsize=7)
     ax.set_yticks(y, d["display_label"]); ax.set_xlabel("Prevalence among evaluable patients (%)"); ax.legend(ncol=3); ax.grid(axis="x", alpha=.2)
@@ -586,8 +610,9 @@ def create_progression_forestplot(progression: pd.DataFrame) -> None:
     for ax, (outcome, title, null, logscale) in zip(axes, panels):
         d = progression[(progression["outcome"] == outcome) & ((progression["effect_measure"] == "Beta per year") if "trajectory" in outcome else True)].set_index("comorbidity")
         for y, name in enumerate(order):
-            if name in d.index and np.isfinite(d.loc[name, "estimate"]):
-                r=d.loc[name]; ax.errorbar(r.estimate, y, xerr=[[r.estimate-r.ci95_low], [r.ci95_high-r.estimate]], fmt="o", color="#2166ac" if r.model_status=="fitted" else "#b2182b", capsize=2)
+            if name in d.index and np.isfinite(d.loc[name, ["estimate", "ci95_low", "ci95_high"]].astype(float)).all():
+                r=d.loc[name]; errors = _nonnegative_interval_errors([r.estimate], [r.ci95_low], [r.ci95_high])
+                ax.errorbar(r.estimate, y, xerr=errors, fmt="o", color="#2166ac" if r.model_status=="fitted" else "#b2182b", capsize=2)
                 ax.annotate(f"n={int(r.n_patients)}" + (f", e={int(r.n_events)}" if pd.notna(r.n_events) else ""), (r.estimate,y), xytext=(5,4), textcoords="offset points", fontsize=6)
             else: ax.plot(null, y, marker="x", color="gray")
         ax.axvline(null, color="black", ls="--", lw=.8); ax.set_title(title); ax.grid(axis="x", alpha=.2)
@@ -632,7 +657,9 @@ def source_mapping(raw_columns: Iterable[str]) -> pd.DataFrame:
 def main(argv: Sequence[str] | None = None) -> int:
     args=parse_args(argv); ensure_directories(); logger=setup_logging(); np.random.seed(args.random_seed)
     outputs=[BASELINE_PATH,LONGITUDINAL_PATH,SEVERE_PATH,NEW_DOMAIN_PATH,DOMAIN_AUDIT_PATH,TABLES_DIR/"07_comorbidities_overall.csv",TABLES_DIR/"07_comorbidities_by_pop.csv",TABLES_DIR/"07_comorbidities_progression.csv",FIGURES_DIR/"07_comorbidities_dotplot.pdf",FIGURES_DIR/"07_comorbidities_grouped_bar.pdf",FIGURES_DIR/"07_comorbidities_progression_forestplot.pdf"]
-    if not args.overwrite and any(p.exists() for p in outputs): raise FileExistsError("One or more outputs already exist; use --overwrite")
+    existing = [p for p in outputs if p.exists()]
+    if existing and not args.overwrite:
+        logger.warning("Replacing %d existing Section 5 output(s), allowing recovery from a partial prior run", len(existing))
     logger.info("[1/8] Loading canonical sources")
     timestamps=check_upstream_artifacts(args.input,args.rebuild_upstream,logger); spine=load_visit_spine(); pop=load_pop_classification(); domains=load_domain_flags(); raw=load_selected_raw_columns(args.input)
     logger.info("[2/8] Building baseline comorbidity indicators")
