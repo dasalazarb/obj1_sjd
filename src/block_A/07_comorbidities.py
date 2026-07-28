@@ -52,9 +52,8 @@ SEX_COL = "ids__sex"
 # therefore an identical audit copy of the primary value in this extract.
 ESSDAI_PRIMARY_COL = config.ESSDAI_TOTAL_RAW
 ESSDAI_RAW_QC_COL = config.ESSDAI_TOTAL_RAW
-# The acceptance criteria and requested severe14 outputs specify high activity
-# (>=14), whereas an earlier paragraph says >=5.  >=5 remains the Pop threshold.
-SEVERE_THRESHOLD = config.ESSDAI_HIGH
+# Section 5 progression uses the same moderate-to-severe threshold as Pop 1.
+SEVERE_THRESHOLD = config.ESSDAI_SEVERE
 RANDOM_SEED = 20260728
 SCRIPT_VERSION = "1.0.0"
 
@@ -65,7 +64,7 @@ LOG_PATH = common.OUTPUTS_DIR / "logs" / "07_comorbidities.log"
 
 BASELINE_PATH = common.INTERMEDIATE_DATA_DIR / "07_comorbidities_baseline_patient.parquet"
 LONGITUDINAL_PATH = common.INTERMEDIATE_DATA_DIR / "07_comorbidities_analysis_longitudinal.parquet"
-SEVERE_PATH = common.INTERMEDIATE_DATA_DIR / "07_comorbidity_severe14_survival.parquet"
+SEVERE_PATH = common.INTERMEDIATE_DATA_DIR / "07_comorbidity_severe5_survival.parquet"
 NEW_DOMAIN_PATH = common.INTERMEDIATE_DATA_DIR / "07_comorbidity_new_domain_survival.parquet"
 DOMAIN_AUDIT_PATH = common.INTERMEDIATE_DATA_DIR / "07_comorbidity_new_domain_patient_domain.parquet"
 
@@ -455,7 +454,7 @@ def build_longitudinal_essdai_dataset(raw: pd.DataFrame, spine: pd.DataFrame, po
     return long
 
 
-def build_severe14_survival_dataset(long: pd.DataFrame, base: pd.DataFrame) -> pd.DataFrame:
+def build_severe5_survival_dataset(long: pd.DataFrame, base: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for pid, g in long.groupby("patient_id"):
         b = base.loc[base["patient_id"].eq(pid)].iloc[0]
@@ -464,7 +463,7 @@ def build_severe14_survival_dataset(long: pd.DataFrame, base: pd.DataFrame) -> p
         event_rows = follow.loc[follow["essdai_total_recoded"] >= SEVERE_THRESHOLD]
         event_date = event_rows["visit_date"].iloc[0] if not event_rows.empty else pd.NaT
         last = follow["visit_date"].max(); end = event_date if pd.notna(event_date) else last
-        row = b.to_dict(); row.update({"last_evaluable_date": last, "event_date": event_date, "followup_days": (end-b["baseline_date"]).days, "severe14_event": int(pd.notna(event_date))})
+        row = b.to_dict(); row.update({"last_evaluable_date": last, "event_date": event_date, "followup_days": (end-b["baseline_date"]).days, "severe5_event": int(pd.notna(event_date))})
         rows.append(row)
     out = pd.DataFrame(rows); out["followup_years"] = out.get("followup_days", pd.Series(dtype=float))/365.25
     if len(out) and ((out["followup_days"] <= 0).any() or (out["event_date"].dropna() > out.loc[out["event_date"].notna(), "last_evaluable_date"]).any()): raise ValueError("Invalid severe-event timing")
@@ -510,7 +509,7 @@ def build_new_domain_survival_dataset(long: pd.DataFrame, base: pd.DataFrame) ->
 
 
 def _empty_progression(c: Condition, outcome: str, estimand: str, warning: str, **counts: Any) -> dict[str, Any]:
-    return {"comorbidity": c.name, "display_label": c.label, "outcome": outcome, "estimand": estimand, "model_type": "not fitted", "effect_measure": "Not estimable", "estimate": np.nan, "ci95_low": np.nan, "ci95_high": np.nan, "p_value": np.nan, "n_patients": counts.get("n_patients", 0), "n_followup_observations": counts.get("n_followup_observations", 0), "n_events": counts.get("n_events", np.nan), "n_complete_cases": counts.get("n_complete_cases", 0), "baseline_reference_group": "Comorbidity absent", "adjustment_covariates": "baseline ESSDAI; baseline Pop; age; sex", "time_scale": "years since observed baseline", "threshold": SEVERE_THRESHOLD if outcome == "Progression to ESSDAI >=14" else np.nan, "model_converged": False, "proportional_hazards_p": np.nan, "sparse_event_flag": True, "model_status": "not_estimable", "warning": warning, "interpretation": "Not estimable; no causal interpretation is warranted."}
+    return {"comorbidity": c.name, "display_label": c.label, "outcome": outcome, "estimand": estimand, "model_type": "not fitted", "effect_measure": "Not estimable", "estimate": np.nan, "ci95_low": np.nan, "ci95_high": np.nan, "p_value": np.nan, "n_patients": counts.get("n_patients", 0), "n_followup_observations": counts.get("n_followup_observations", 0), "n_events": counts.get("n_events", np.nan), "n_complete_cases": counts.get("n_complete_cases", 0), "baseline_reference_group": "Comorbidity absent", "adjustment_covariates": "baseline ESSDAI; baseline Pop; age; sex", "time_scale": "years since observed baseline", "threshold": SEVERE_THRESHOLD if outcome == "Progression to ESSDAI >=5" else np.nan, "model_converged": False, "proportional_hazards_p": np.nan, "sparse_event_flag": True, "model_status": "not_estimable", "warning": warning, "interpretation": "Not estimable; no causal interpretation is warranted."}
 
 
 def fit_mixed_model(long: pd.DataFrame, c: Condition) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -631,7 +630,7 @@ def create_grouped_barplot(by_pop: pd.DataFrame) -> None:
 
 
 def create_progression_forestplot(progression: pd.DataFrame) -> None:
-    panels = [("Longitudinal ESSDAI trajectory", "Difference in annual ESSDAI slope", 0, False), ("Progression to ESSDAI >=14", "Progression to ESSDAI ≥14", 1, True), ("New ESSDAI-domain involvement", "Development of new ESSDAI-domain involvement", 1, True)]
+    panels = [("Longitudinal ESSDAI trajectory", "Difference in annual ESSDAI slope", 0, False), ("Progression to ESSDAI >=5", "Progression to ESSDAI ≥5", 1, True), ("New ESSDAI-domain involvement", "Development of new ESSDAI-domain involvement", 1, True)]
     fig, axes = plt.subplots(1, 3, figsize=(18, max(7, .5*len(CONDITIONS))), sharey=True); order = CONDITION_NAMES[::-1]; labels={c.name:c.label for c in CONDITIONS}
     for ax, (outcome, title, null, logscale) in zip(axes, panels):
         d = progression[(progression["outcome"] == outcome) & ((progression["effect_measure"] == "Beta per year") if "trajectory" in outcome else True)].set_index("comorbidity")
@@ -702,11 +701,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     logger.info("[3/8] Writing baseline intermediate dataset"); base.to_parquet(BASELINE_PATH,index=False)
     logger.info("[4/8] Estimating overall prevalence"); overall=summarize_overall_prevalence(base); overall.to_csv(TABLES_DIR/"07_comorbidities_overall.csv",index=False); create_dotplot(overall)
     logger.info("[5/8] Comparing prevalence across Pop 1-3"); by_pop=summarize_prevalence_by_pop(base,args.monte_carlo_replicates,args.random_seed); by_pop.to_csv(TABLES_DIR/"07_comorbidities_by_pop.csv",index=False); create_grouped_barplot(by_pop)
-    logger.info("[6/8] Building longitudinal outcomes"); long=build_longitudinal_essdai_dataset(raw,spine,pop,domains,base); long.to_parquet(LONGITUDINAL_PATH,index=False); severe=build_severe14_survival_dataset(long,base); severe.to_parquet(SEVERE_PATH,index=False); new_domain,domain_audit=build_new_domain_survival_dataset(long,base); new_domain.to_parquet(NEW_DOMAIN_PATH,index=False); domain_audit.to_parquet(DOMAIN_AUDIT_PATH,index=False)
+    logger.info("[6/8] Building longitudinal outcomes"); long=build_longitudinal_essdai_dataset(raw,spine,pop,domains,base); long.to_parquet(LONGITUDINAL_PATH,index=False); severe=build_severe5_survival_dataset(long,base); severe.to_parquet(SEVERE_PATH,index=False); new_domain,domain_audit=build_new_domain_survival_dataset(long,base); new_domain.to_parquet(NEW_DOMAIN_PATH,index=False); domain_audit.to_parquet(DOMAIN_AUDIT_PATH,index=False)
     logger.info("[7/8] Fitting progression models"); progression_rows=[]; diagnostics=[]
     for c in CONDITIONS:
         rows,diag=fit_mixed_model(long,c); progression_rows.extend(rows); diagnostics.append(diag)
-        row,diag=fit_cox_model(severe,c,"severe14_event","Progression to ESSDAI >=14",args.minimum_events); progression_rows.append(row); diagnostics.append(diag)
+        row,diag=fit_cox_model(severe,c,"severe5_event","Progression to ESSDAI >=5",args.minimum_events); progression_rows.append(row); diagnostics.append(diag)
         row,diag=fit_cox_model(new_domain,c,"new_domain_event","New ESSDAI-domain involvement",args.minimum_events); progression_rows.append(row); diagnostics.append(diag)
     progression=pd.DataFrame(progression_rows); progression["fdr_bh_q_value"]=progression.groupby(["outcome","estimand"])["p_value"].transform(apply_fdr); progression.to_csv(TABLES_DIR/"07_comorbidities_progression.csv",index=False)
     logger.info("[8/8] Writing tables, figures, and QC"); create_progression_forestplot(progression); qc_extra=run_qc_checks(base,long,severe,new_domain,domain_audit)
@@ -715,11 +714,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     pd.DataFrame(_UNRECOGNIZED,columns=["source_column","original_value","row_index"]).drop_duplicates().to_csv(QC_DIR/"07_comorbidities_unrecognized_values.csv",index=False)
     both=long[["essdai_total_recoded","essdai_total_raw_qc"]].dropna(); diff=both["essdai_total_recoded"]-both["essdai_total_raw_qc"]
     pop_counts=base["baseline_pop"].fillna("Unclassifiable").value_counts(); classifiable=int(base["baseline_pop"].isin(["Pop1","Pop2","Pop3"]).sum()); with_followup=int(long.loc[(long.visit_number>0)&long.essdai_total_recoded.notna(),"patient_id"].nunique())
-    qc={"input_path":str(args.input),"input_modification_time":datetime.fromtimestamp(args.input.stat().st_mtime,timezone.utc).isoformat(),"script_version":SCRIPT_VERSION,"run_timestamp":datetime.now(timezone.utc).isoformat(),"random_seed":args.random_seed,"n_input_rows":len(raw),"n_input_patients":int(raw[PATIENT_ID_COL].nunique()),"n_canonical_visits":len(spine),"n_baseline_patients":len(base),"n_duplicate_patient_dates":len(duplicates),"n_pipe_delimited_visit_dates":n_pipe,"n_pop_classifiable":classifiable,"n_pop_unclassifiable":len(base)-classifiable,"pop_counts":pop_counts.to_dict(),"n_with_followup_essdai":with_followup,"n_at_risk_severe14":len(severe),"n_severe14_events":int(severe.get("severe14_event",pd.Series(dtype=int)).sum()),"n_at_risk_new_domain":len(new_domain),"n_new_domain_events":int(new_domain.get("new_domain_event",pd.Series(dtype=int)).sum()),"severe_threshold_used":SEVERE_THRESHOLD,"essdai_primary_column":ESSDAI_PRIMARY_COL,"essdai_raw_qc_column":ESSDAI_RAW_QC_COL,"upstream_files_used":[str(p) for p in UPSTREAM],"upstream_file_timestamps":timestamps,"essdai_reconciliation":{"n_both":len(both),"n_concordant":int(diff.eq(0).sum()),"n_discordant":int(diff.ne(0).sum()),"mean_difference":float(diff.mean()) if len(diff) else None,"median_difference":float(diff.median()) if len(diff) else None,"maximum_absolute_difference":float(diff.abs().max()) if len(diff) else None},"warnings":["The deployed extract has only essdai__essdai_total_score; it is used as the primary longitudinal ESSDAI source and duplicated in the raw-QC compatibility field.","Conflicting specification resolved in favor of acceptance criterion: severe/high activity is ESSDAI >=14; Pop1 remains >=5."],**qc_extra}
+    qc={"input_path":str(args.input),"input_modification_time":datetime.fromtimestamp(args.input.stat().st_mtime,timezone.utc).isoformat(),"script_version":SCRIPT_VERSION,"run_timestamp":datetime.now(timezone.utc).isoformat(),"random_seed":args.random_seed,"n_input_rows":len(raw),"n_input_patients":int(raw[PATIENT_ID_COL].nunique()),"n_canonical_visits":len(spine),"n_baseline_patients":len(base),"n_duplicate_patient_dates":len(duplicates),"n_pipe_delimited_visit_dates":n_pipe,"n_pop_classifiable":classifiable,"n_pop_unclassifiable":len(base)-classifiable,"pop_counts":pop_counts.to_dict(),"n_with_followup_essdai":with_followup,"n_at_risk_severe5":len(severe),"n_severe5_events":int(severe.get("severe5_event",pd.Series(dtype=int)).sum()),"n_at_risk_new_domain":len(new_domain),"n_new_domain_events":int(new_domain.get("new_domain_event",pd.Series(dtype=int)).sum()),"severe_threshold_used":SEVERE_THRESHOLD,"essdai_primary_column":ESSDAI_PRIMARY_COL,"essdai_raw_qc_column":ESSDAI_RAW_QC_COL,"upstream_files_used":[str(p) for p in UPSTREAM],"upstream_file_timestamps":timestamps,"essdai_reconciliation":{"n_both":len(both),"n_concordant":int(diff.eq(0).sum()),"n_discordant":int(diff.ne(0).sum()),"mean_difference":float(diff.mean()) if len(diff) else None,"median_difference":float(diff.median()) if len(diff) else None,"maximum_absolute_difference":float(diff.abs().max()) if len(diff) else None},"warnings":["The deployed extract has only essdai__essdai_total_score; it is used as the primary longitudinal ESSDAI source and duplicated in the raw-QC compatibility field."],**qc_extra}
     (QC_DIR/"07_comorbidities_qc.json").write_text(json.dumps(qc,indent=2,default=str)+"\n")
     claim=overall.head(3); ild=float(overall.loc[overall.condition.eq("ild"),"pct_total_cohort"].iloc[0]); logger.info("Claim: %s was the most prevalent documented baseline comorbidity (%.1f%%), followed by %s (%.1f%%) and %s (%.1f%%). Interstitial lung disease was documented in %.1f%% of patients.",claim.iloc[0].display_label,claim.iloc[0].pct_total_cohort,claim.iloc[1].display_label,claim.iloc[1].pct_total_cohort,claim.iloc[2].display_label,claim.iloc[2].pct_total_cohort,ild)
     fitted=int(progression.model_status.isin(["fitted","reduced_adjustment"]).sum()); not_est=len(progression)-fitted
-    print(f"Total baseline patients: {len(base)}\nClassifiable Pop patients: {classifiable}\nPatients with follow-up ESSDAI: {with_followup}\nSevere14 events: {qc['n_severe14_events']}\nNew-domain events: {qc['n_new_domain_events']}\nNumber of models fitted: {fitted}\nNumber of models not estimable: {not_est}\nGenerated files:")
+    print(f"Total baseline patients: {len(base)}\nClassifiable Pop patients: {classifiable}\nPatients with follow-up ESSDAI: {with_followup}\nESSDAI >=5 progression events: {qc['n_severe5_events']}\nNew-domain events: {qc['n_new_domain_events']}\nNumber of models fitted: {fitted}\nNumber of models not estimable: {not_est}\nGenerated files:")
     for path in outputs+[QC_DIR/"07_comorbidities_qc.json",QC_DIR/"07_comorbidities_missingness.csv",QC_DIR/"07_comorbidities_source_mapping.csv",QC_DIR/"07_comorbidities_model_diagnostics.csv",QC_DIR/"07_comorbidities_patient_duplicates.csv",QC_DIR/"07_comorbidities_unavailable_conditions.csv",QC_DIR/"07_comorbidities_unrecognized_values.csv",LOG_PATH]: print(path.resolve())
     return 0
 
