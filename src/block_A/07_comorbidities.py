@@ -546,18 +546,36 @@ def fit_mixed_model(long: pd.DataFrame, c: Condition) -> tuple[list[dict[str, An
 
 
 def fit_cox_model(data: pd.DataFrame, c: Condition, event_col: str, outcome: str, minimum_events: int) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Fit a Cox model, coding undocumented exposure as the negative case."""
     counts = {"n_patients": len(data), "n_events": int(data[event_col].sum()) if len(data) else 0, "n_complete_cases": 0}
+    cols = ["followup_years", event_col, c.name, "baseline_essdai", "baseline_pop", "age_baseline", "sex"]
+    d = data[cols].copy()
+    n_exposure_missing_as_negative = int(d[c.name].isna().sum())
+    d[c.name] = d[c.name].fillna(False).astype("boolean")
+    # Complete-case exclusion still applies to outcome, time, and adjustment
+    # covariates; only an empty comorbidity exposure is assigned to the negative
+    # reference group for Cox analyses.
+    d = d.dropna().copy()
+    counts.update({"n_complete_cases": len(d), "n_patients": len(d),
+                   "n_events": int(d[event_col].sum()) if len(d) else 0})
     if importlib.util.find_spec("lifelines") is None:
         row = _empty_progression(c, outcome, "Baseline comorbidity", "lifelines is not installed; Cox model not executed", **counts)
-        return row, {"comorbidity": c.name, "outcome": outcome, "convergence": False, "warning": row["warning"]}
+        row.update({"baseline_reference_group": "Comorbidity absent or undocumented",
+                    "n_exposure_missing_assigned_negative": n_exposure_missing_as_negative})
+        return row, {"comorbidity": c.name, "outcome": outcome, "convergence": False,
+                     "n_exposure_missing_assigned_negative": n_exposure_missing_as_negative,
+                     "warning": row["warning"]}
     from lifelines import CoxPHFitter
     from lifelines.statistics import proportional_hazard_test
-    cols = ["followup_years", event_col, c.name, "baseline_essdai", "baseline_pop", "age_baseline", "sex"]
-    d = data[cols].dropna().copy(); counts["n_complete_cases"] = len(d); counts["n_patients"] = len(d); counts["n_events"] = int(d[event_col].sum())
     if len(d) < 5 or d[c.name].nunique() < 2 or counts["n_events"] < minimum_events:
         row = _empty_progression(c, outcome, "Baseline comorbidity", f"Insufficient events (<{minimum_events}) or exposure variation", **counts)
-        row["model_status"] = "insufficient_events"
-        return row, {"comorbidity": c.name, "outcome": outcome, "convergence": False, "events": counts["n_events"], "warning": row["warning"]}
+        row.update({"model_status": "insufficient_events",
+                    "baseline_reference_group": "Comorbidity absent or undocumented",
+                    "n_exposure_missing_assigned_negative": n_exposure_missing_as_negative})
+        return row, {"comorbidity": c.name, "outcome": outcome, "convergence": False,
+                     "events": counts["n_events"],
+                     "n_exposure_missing_assigned_negative": n_exposure_missing_as_negative,
+                     "warning": row["warning"]}
     d[c.name] = d[c.name].astype(int); d = pd.get_dummies(d, columns=["baseline_pop", "sex"], drop_first=True, dtype=float)
     # Full model only when event support is reasonable; otherwise preserve the
     # exposure and baseline ESSDAI in a prespecified reduced model.
@@ -572,11 +590,16 @@ def fit_cox_model(data: pd.DataFrame, c: Condition, event_col: str, outcome: str
         summary = fitter.summary.loc[c.name]; ph = proportional_hazard_test(fitter, d, time_transform="rank")
         ph_p = float(ph.summary.loc[c.name, "p"])
         warning_text = "Proportional-hazards assumption may be violated." if ph_p < .05 else ""
-        row = {**_empty_progression(c, outcome, "Baseline comorbidity", warning_text, **counts), "model_type": model_type, "effect_measure": "Hazard ratio", "estimate": float(summary["exp(coef)"]), "ci95_low": float(summary["exp(coef) lower 95%"]), "ci95_high": float(summary["exp(coef) upper 95%"]), "p_value": float(summary["p"]), "model_converged": True, "proportional_hazards_p": ph_p, "sparse_event_flag": reduced, "model_status": "reduced_adjustment" if reduced else "fitted", "interpretation": "Adjusted hazard association; this is not a causal effect."}
-        return row, {"comorbidity": c.name, "outcome": outcome, "convergence": True, "events": counts["n_events"], "events_per_parameter": counts["n_events"]/max(len(d.columns)-2, 1), "proportional_hazards_p": ph_p, "warning": warning_text}
+        row = {**_empty_progression(c, outcome, "Baseline comorbidity", warning_text, **counts), "model_type": model_type, "effect_measure": "Hazard ratio", "estimate": float(summary["exp(coef)"]), "ci95_low": float(summary["exp(coef) lower 95%"]), "ci95_high": float(summary["exp(coef) upper 95%"]), "p_value": float(summary["p"]), "model_converged": True, "proportional_hazards_p": ph_p, "sparse_event_flag": reduced, "model_status": "reduced_adjustment" if reduced else "fitted", "baseline_reference_group": "Comorbidity absent or undocumented", "n_exposure_missing_assigned_negative": n_exposure_missing_as_negative, "interpretation": "Adjusted hazard association; undocumented comorbidity was coded as negative. This is not a causal effect."}
+        return row, {"comorbidity": c.name, "outcome": outcome, "convergence": True, "events": counts["n_events"], "events_per_parameter": counts["n_events"]/max(len(d.columns)-2, 1), "n_exposure_missing_assigned_negative": n_exposure_missing_as_negative, "proportional_hazards_p": ph_p, "warning": warning_text}
     except (ValueError, np.linalg.LinAlgError, RuntimeError) as exc:
-        row = _empty_progression(c, outcome, "Baseline comorbidity", f"Cox model failed: {exc}", **counts); row["model_status"] = "failed"
-        return row, {"comorbidity": c.name, "outcome": outcome, "convergence": False, "events": counts["n_events"], "warning": row["warning"]}
+        row = _empty_progression(c, outcome, "Baseline comorbidity", f"Cox model failed: {exc}", **counts)
+        row.update({"model_status": "failed", "baseline_reference_group": "Comorbidity absent or undocumented",
+                    "n_exposure_missing_assigned_negative": n_exposure_missing_as_negative})
+        return row, {"comorbidity": c.name, "outcome": outcome, "convergence": False,
+                     "events": counts["n_events"],
+                     "n_exposure_missing_assigned_negative": n_exposure_missing_as_negative,
+                     "warning": row["warning"]}
 
 
 def _plot_save(fig: plt.Figure, path: Path) -> None:
@@ -652,7 +675,7 @@ def create_progression_forestplot(progression: pd.DataFrame) -> None:
         ax.axvline(null, color="black", ls="--", lw=.8); ax.set_title(title); ax.grid(axis="x", alpha=.2)
         if logscale: ax.set_xscale("log"); ax.set_xlabel("Hazard ratio (log scale)")
         else: ax.set_xlabel("Adjusted beta per year")
-    axes[0].set_yticks(range(len(order)), [labels[x] for x in order]); fig.text(.01,.01,"Models integrate patients across visits and adjust for baseline ESSDAI, baseline Pop, age, and sex when event support permits. X marks not estimable; red denotes reduced models. Associations are not causal.",fontsize=8)
+    axes[0].set_yticks(range(len(order)), [labels[x] for x in order]); fig.text(.01,.01,"Models integrate patients across visits and adjust for baseline ESSDAI, baseline Pop, age, and sex when event support permits. In Cox models, undocumented comorbidity is coded as the negative case. X marks not estimable; red denotes reduced models. Associations are not causal.",fontsize=8)
     fig.subplots_adjust(left=.18,bottom=.1,wspace=.15); _plot_save(fig, FIGURES_DIR/"07_comorbidities_progression_forestplot.pdf")
 
 
