@@ -171,7 +171,8 @@ def _read_required(path: Path, columns: Sequence[str]) -> pd.DataFrame:
 
 
 def load_visit_spine() -> pd.DataFrame:
-    cols = ["patient_id", "visit_id", "visit_date", "visit_number", "observed_baseline_date", "time_since_observed_baseline_days", "time_since_observed_baseline_years", "age_at_visit", "sex", "protocol", "interval_name"]
+    # Patient and canonical visit identity are the integration keys.
+    cols = ["patient_id", "visit_id", "visit_date", "visit_number", "observed_baseline_date", "time_since_observed_baseline_days", "time_since_observed_baseline_years", "age_at_visit", "sex"]
     df = _read_required(common.VISIT_SPINE_PARQUET, cols)
     df["visit_date"] = pd.to_datetime(df["visit_date"])
     df["observed_baseline_date"] = pd.to_datetime(df["observed_baseline_date"])
@@ -325,7 +326,6 @@ def build_baseline_comorbidity_dataset(raw: pd.DataFrame, spine: pd.DataFrame, p
     base["n_comorbidities_evaluable"] = base[CONDITION_NAMES].notna().sum(axis=1)
     base["any_comorbidity"] = (base["n_prespecified_comorbidities"] > 0).astype("boolean")
     base["two_or_more_comorbidities"] = (base["n_prespecified_comorbidities"] >= 2).astype("boolean")
-    base["protocol"] = base["protocol"].astype("string")
     if len(base) != base["patient_id"].nunique():
         raise ValueError("Baseline dataset is not one row per patient")
     if not base["baseline_date"].equals(base["observed_baseline_date"]):
@@ -427,8 +427,8 @@ def build_longitudinal_essdai_dataset(raw: pd.DataFrame, spine: pd.DataFrame, po
     long = spine.merge(values, on=["patient_id", "visit_date"], how="left", validate="one_to_one")
     popcols = pop[["visit_id", "pop_status"]].drop_duplicates("visit_id")
     long = long.merge(popcols, on="visit_id", how="left", validate="one_to_one").merge(domains.drop(columns=["patient_id", "visit_date"]), on="visit_id", how="left", validate="one_to_one")
-    bcols = ["patient_id", "baseline_essdai", "baseline_pop", "age_baseline", "sex", "protocol", *CONDITION_NAMES]
-    long = long.drop(columns=["sex", "protocol"], errors="ignore").merge(base[bcols], on="patient_id", how="left", validate="many_to_one")
+    bcols = ["patient_id", "baseline_essdai", "baseline_pop", "age_baseline", "sex", *CONDITION_NAMES]
+    long = long.drop(columns=["sex"], errors="ignore").merge(base[bcols], on="patient_id", how="left", validate="many_to_one")
     if long["patient_id"].isna().any() or not long["visit_id"].is_unique:
         raise ValueError("Longitudinal analytic dataset violates identity constraints")
     valid = long["essdai_total_recoded"].dropna()
@@ -479,18 +479,18 @@ def build_new_domain_survival_dataset(long: pd.DataFrame, base: pd.DataFrame) ->
 
 
 def _empty_progression(c: Condition, outcome: str, estimand: str, warning: str, **counts: Any) -> dict[str, Any]:
-    return {"comorbidity": c.name, "display_label": c.label, "outcome": outcome, "estimand": estimand, "model_type": "not fitted", "effect_measure": "Not estimable", "estimate": np.nan, "ci95_low": np.nan, "ci95_high": np.nan, "p_value": np.nan, "n_patients": counts.get("n_patients", 0), "n_followup_observations": counts.get("n_followup_observations", 0), "n_events": counts.get("n_events", np.nan), "n_complete_cases": counts.get("n_complete_cases", 0), "baseline_reference_group": "Comorbidity absent", "adjustment_covariates": "baseline ESSDAI; baseline Pop; age; sex; protocol", "time_scale": "years since observed baseline", "threshold": SEVERE_THRESHOLD if outcome == "Progression to ESSDAI >=14" else np.nan, "model_converged": False, "proportional_hazards_p": np.nan, "sparse_event_flag": True, "model_status": "not_estimable", "warning": warning, "interpretation": "Not estimable; no causal interpretation is warranted."}
+    return {"comorbidity": c.name, "display_label": c.label, "outcome": outcome, "estimand": estimand, "model_type": "not fitted", "effect_measure": "Not estimable", "estimate": np.nan, "ci95_low": np.nan, "ci95_high": np.nan, "p_value": np.nan, "n_patients": counts.get("n_patients", 0), "n_followup_observations": counts.get("n_followup_observations", 0), "n_events": counts.get("n_events", np.nan), "n_complete_cases": counts.get("n_complete_cases", 0), "baseline_reference_group": "Comorbidity absent", "adjustment_covariates": "baseline ESSDAI; baseline Pop; age; sex", "time_scale": "years since observed baseline", "threshold": SEVERE_THRESHOLD if outcome == "Progression to ESSDAI >=14" else np.nan, "model_converged": False, "proportional_hazards_p": np.nan, "sparse_event_flag": True, "model_status": "not_estimable", "warning": warning, "interpretation": "Not estimable; no causal interpretation is warranted."}
 
 
 def fit_mixed_model(long: pd.DataFrame, c: Condition) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     import statsmodels.formula.api as smf
-    cols = ["patient_id", "essdai_total_recoded", "time_since_observed_baseline_years", c.name, "baseline_essdai", "baseline_pop", "age_baseline", "sex", "protocol", "visit_number"]
+    cols = ["patient_id", "essdai_total_recoded", "time_since_observed_baseline_years", c.name, "baseline_essdai", "baseline_pop", "age_baseline", "sex", "visit_number"]
     data = long.loc[long["visit_number"] > 0, cols].dropna().copy(); data[c.name] = data[c.name].astype(int)
     eligible = data.groupby("patient_id").size(); n = len(eligible)
     if n < 5 or data[c.name].nunique() < 2:
         row = _empty_progression(c, "Longitudinal ESSDAI trajectory", "Time x comorbidity", "Too few complete patients or no exposure variation", n_patients=n, n_followup_observations=len(data), n_complete_cases=n)
         return [row], {"comorbidity": c.name, "outcome": "ESSDAI trajectory", "convergence": False, "warning": row["warning"]}
-    formula = "essdai_total_recoded ~ time_since_observed_baseline_years * Q('%s') + baseline_essdai + C(baseline_pop) + age_baseline + C(sex) + C(protocol)" % c.name
+    formula = "essdai_total_recoded ~ time_since_observed_baseline_years * Q('%s') + baseline_essdai + C(baseline_pop) + age_baseline + C(sex)" % c.name
     model_type, fit, warning_text = "Linear mixed model (random intercept)", None, ""
     try:
         with warnings.catch_warnings(record=True) as caught:
@@ -521,13 +521,13 @@ def fit_cox_model(data: pd.DataFrame, c: Condition, event_col: str, outcome: str
         return row, {"comorbidity": c.name, "outcome": outcome, "convergence": False, "warning": row["warning"]}
     from lifelines import CoxPHFitter
     from lifelines.statistics import proportional_hazard_test
-    cols = ["followup_years", event_col, c.name, "baseline_essdai", "baseline_pop", "age_baseline", "sex", "protocol"]
+    cols = ["followup_years", event_col, c.name, "baseline_essdai", "baseline_pop", "age_baseline", "sex"]
     d = data[cols].dropna().copy(); counts["n_complete_cases"] = len(d); counts["n_patients"] = len(d); counts["n_events"] = int(d[event_col].sum())
     if len(d) < 5 or d[c.name].nunique() < 2 or counts["n_events"] < minimum_events:
         row = _empty_progression(c, outcome, "Baseline comorbidity", f"Insufficient events (<{minimum_events}) or exposure variation", **counts)
         row["model_status"] = "insufficient_events"
         return row, {"comorbidity": c.name, "outcome": outcome, "convergence": False, "events": counts["n_events"], "warning": row["warning"]}
-    d[c.name] = d[c.name].astype(int); d = pd.get_dummies(d, columns=["baseline_pop", "sex", "protocol"], drop_first=True, dtype=float)
+    d[c.name] = d[c.name].astype(int); d = pd.get_dummies(d, columns=["baseline_pop", "sex"], drop_first=True, dtype=float)
     # Full model only when event support is reasonable; otherwise preserve the
     # exposure and baseline ESSDAI in a prespecified reduced model.
     covars = [x for x in d if x not in ("followup_years", event_col)]
@@ -588,7 +588,7 @@ def create_progression_forestplot(progression: pd.DataFrame) -> None:
         ax.axvline(null, color="black", ls="--", lw=.8); ax.set_title(title); ax.grid(axis="x", alpha=.2)
         if logscale: ax.set_xscale("log"); ax.set_xlabel("Hazard ratio (log scale)")
         else: ax.set_xlabel("Adjusted beta per year")
-    axes[0].set_yticks(range(len(order)), [labels[x] for x in order]); fig.text(.01,.01,"Models adjust for baseline ESSDAI, baseline Pop, age, sex, and protocol when event support permits. X marks not estimable; red denotes reduced models. Associations are not causal.",fontsize=8)
+    axes[0].set_yticks(range(len(order)), [labels[x] for x in order]); fig.text(.01,.01,"Models integrate patients across visits and adjust for baseline ESSDAI, baseline Pop, age, and sex when event support permits. X marks not estimable; red denotes reduced models. Associations are not causal.",fontsize=8)
     fig.subplots_adjust(left=.18,bottom=.1,wspace=.15); _plot_save(fig, FIGURES_DIR/"07_comorbidities_progression_forestplot.pdf")
 
 
@@ -610,7 +610,7 @@ def run_qc_checks(base: pd.DataFrame, long: pd.DataFrame, severe: pd.DataFrame, 
 def missingness_table(base: pd.DataFrame) -> pd.DataFrame:
     rows=[]
     for group, data in [("Overall", base), *[(p, base[base["baseline_pop"].eq(p)]) for p in ("Pop1","Pop2","Pop3","Unclassifiable")]]:
-        for col in CONDITION_NAMES + ["baseline_essdai", "age_baseline", "sex", "protocol"]:
+        for col in CONDITION_NAMES + ["baseline_essdai", "age_baseline", "sex"]:
             rows.append({"group":group,"variable":col,"n_total":len(data),"n_missing":int(data[col].isna().sum()),"pct_missing":100*data[col].isna().mean() if len(data) else np.nan})
     return pd.DataFrame(rows)
 
