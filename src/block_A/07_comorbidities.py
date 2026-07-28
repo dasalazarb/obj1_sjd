@@ -123,7 +123,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--input", type=Path, default=common.DEFAULT_ANALYTIC_DATASET)
     p.add_argument("--rebuild-upstream", action="store_true")
-    p.add_argument("--overwrite", action="store_true")
     p.add_argument("--random-seed", type=int, default=RANDOM_SEED)
     p.add_argument("--monte-carlo-replicates", type=int, default=100_000)
     p.add_argument("--minimum-events", type=int, default=10)
@@ -687,13 +686,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args=parse_args(argv); ensure_directories(); np.random.seed(args.random_seed)
     outputs=[BASELINE_PATH,LONGITUDINAL_PATH,SEVERE_PATH,NEW_DOMAIN_PATH,DOMAIN_AUDIT_PATH,TABLES_DIR/"07_comorbidities_overall.csv",TABLES_DIR/"07_comorbidities_by_pop.csv",TABLES_DIR/"07_comorbidities_progression.csv",FIGURES_DIR/"07_comorbidities_dotplot.pdf",FIGURES_DIR/"07_comorbidities_grouped_bar.pdf",FIGURES_DIR/"07_comorbidities_progression_forestplot.pdf",QC_DIR/"07_comorbidities_qc.json",QC_DIR/"07_comorbidities_missingness.csv",QC_DIR/"07_comorbidities_source_mapping.csv",QC_DIR/"07_comorbidities_model_diagnostics.csv",QC_DIR/"07_comorbidities_patient_duplicates.csv",QC_DIR/"07_comorbidities_unavailable_conditions.csv",QC_DIR/"07_comorbidities_unrecognized_values.csv",LOG_PATH]
     existing = [p for p in outputs if p.exists()]
-    if existing and not args.overwrite:
-        preview = ", ".join(str(p) for p in existing[:3])
-        raise FileExistsError(
-            f"{len(existing)} Section 5 output(s) already exist (for example: {preview}). "
-            "Use --overwrite to replace them."
-        )
     logger=setup_logging()
+    if existing:
+        logger.info("Replacing %d existing Section 5 output(s)", len(existing))
     logger.info("[1/8] Loading canonical sources")
     timestamps=check_upstream_artifacts(args.input,args.rebuild_upstream,logger); spine=load_visit_spine(); pop=load_pop_classification(); domains=load_domain_flags(); raw=load_selected_raw_columns(args.input)
     logger.info("[2/8] Building baseline comorbidity indicators")
