@@ -342,10 +342,48 @@ def planned_output_paths()->List[Path]:
     paths += [INTERMEDIATE_DIR/n for n in ["20_observation_process_patient_visit.parquet","20_observation_process_patient_visit.csv","20_observation_process_patient_summary.parquet","20_observation_process_patient_summary.csv","20_analytic_cohort_membership_patient.parquet","20_analytic_cohort_membership_patient.csv"]]; return paths
 
 
+def build_availability_heatmap_data(
+    df: pd.DataFrame,
+) -> Tuple[np.ndarray, List[str], List[str]]:
+    """Return Matplotlib-safe heatmap values and display labels.
+
+    ``n_pro_instruments_complete`` is a pandas nullable ``Int64`` column.  A
+    pivot mean of nullable integers can retain an extension/object dtype on
+    pandas versions used by the production Python 3.9 environment.  Matplotlib
+    cannot render that object array, so conversion to an ordinary floating
+    NumPy array is an explicit plotting-boundary operation.  Missing cells are
+    retained as ``NaN`` and rendered with the colormap's missing-value color;
+    they are not converted to observed zeroes.
+    """
+    required = {"protocol_group", "calendar_period", "n_pro_instruments_complete"}
+    missing = sorted(required.difference(df.columns))
+    if missing:
+        raise ValueError(
+            "Availability heatmap input missing required columns: "
+            + ", ".join(missing)
+        )
+
+    heat = df.pivot_table(
+        index="protocol_group",
+        columns="calendar_period",
+        values="n_pro_instruments_complete",
+        aggfunc="mean",
+        dropna=False,
+    )
+    if heat.empty:
+        raise ValueError("Availability heatmap cannot be created from zero rows")
+
+    numeric_heat = heat.apply(pd.to_numeric, errors="coerce")
+    values = numeric_heat.to_numpy(dtype=float, na_value=np.nan)
+    return values, [str(value) for value in heat.columns], [str(value) for value in heat.index]
+
+
 def make_figures(df:pd.DataFrame,patterns:pd.DataFrame,patient:pd.DataFrame,counts:pd.DataFrame)->None:
     # Protocol x period complete-instrument mean (unknown categories retained).
-    heat=df.pivot_table(index="protocol_group",columns="calendar_period",values="n_pro_instruments_complete",aggfunc="mean",dropna=False)
-    fig,ax=plt.subplots(figsize=(8,4)); im=ax.imshow(heat.fillna(0),aspect="auto",cmap="Blues"); ax.set_xticks(range(len(heat.columns)),heat.columns,rotation=30,ha="right"); ax.set_yticks(range(len(heat.index)),heat.index); ax.set_title("Mean complete PRO instruments by protocol and period\nDenominator: all canonical visits in each cell"); fig.colorbar(im,ax=ax); fig.tight_layout(); fig.savefig(FIGURES_DIR/"20_availability_heatmap_protocol_time.pdf"); plt.close(fig)
+    heat_values, period_labels, protocol_labels = build_availability_heatmap_data(df)
+    cmap = plt.get_cmap("Blues").copy()
+    cmap.set_bad(color="#d9d9d9")
+    fig,ax=plt.subplots(figsize=(8,4)); im=ax.imshow(np.ma.masked_invalid(heat_values),aspect="auto",cmap=cmap); ax.set_xticks(range(len(period_labels)),period_labels,rotation=30,ha="right"); ax.set_yticks(range(len(protocol_labels)),protocol_labels); ax.set_title("Mean complete PRO instruments by protocol and period\nDenominator: all canonical visits in each cell; gray = no visits"); fig.colorbar(im,ax=ax); fig.tight_layout(); fig.savefig(FIGURES_DIR/"20_availability_heatmap_protocol_time.pdf"); plt.close(fig)
     top=patterns.nlargest(10,"number_of_visits"); fig,ax=plt.subplots(figsize=(8,5)); ax.barh(range(len(top)),top.number_of_visits); ax.set_yticks(range(len(top)),top.visit_observation_pattern); ax.invert_yaxis(); ax.set_xlabel("Canonical visits"); ax.set_title("Most frequent exact observation patterns"); fig.tight_layout(); fig.savefig(FIGURES_DIR/"20_completeness_patterns_bar.pdf"); plt.close(fig)
     summary=[]
     for t in ["esspri","sf36"]:

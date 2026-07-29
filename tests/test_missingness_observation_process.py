@@ -3,6 +3,7 @@ import ast
 import importlib.util
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -93,6 +94,38 @@ def test_models_skip_no_variation_and_user_skip_schema():
 
 def test_nullable_unknown_not_false():
     x=base(); x=x.drop(columns="sf36_n_items_available"); x["sf36_scoring_valid"]=pd.NA; x["sf36_pcs"]=None; x["sf36_mcs"]=None; d=derived(x); assert d.avail_sf36_complete.isna().all()
+
+
+def test_availability_heatmap_converts_nullable_mean_to_float():
+    data = pd.DataFrame(
+        {
+            "protocol_group": pd.Series(["11D", "11D", "Unknown"], dtype="string"),
+            "calendar_period": pd.Series(
+                ["2016–2020", "2021–2026", "2021–2026"], dtype="string"
+            ),
+            "n_pro_instruments_complete": pd.Series([1, 3, 2], dtype="Int64"),
+        }
+    )
+
+    values, periods, protocols = M.build_availability_heatmap_data(data)
+
+    assert values.dtype == np.dtype("float64")
+    assert values.shape == (2, 2)
+    assert periods == ["2016–2020", "2021–2026"]
+    assert protocols == ["11D", "Unknown"]
+    assert np.isnan(values[1, 0]) and values[1, 1] == 2.0
+
+
+def test_availability_heatmap_rejects_empty_input():
+    empty = pd.DataFrame(
+        {
+            "protocol_group": pd.Series(dtype="string"),
+            "calendar_period": pd.Series(dtype="string"),
+            "n_pro_instruments_complete": pd.Series(dtype="Int64"),
+        }
+    )
+    with pytest.raises(ValueError, match="zero rows"):
+        M.build_availability_heatmap_data(empty)
 
 
 def test_import_has_no_mkdir_or_analysis_side_effect(tmp_path):
