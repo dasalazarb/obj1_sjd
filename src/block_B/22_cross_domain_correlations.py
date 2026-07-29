@@ -72,11 +72,16 @@ def load_baseline(path):
 
 def define_ssa_group(data):
     out = data.copy()
-    interpretable = out.get("anti_ro_interpretable", pd.Series(False, index=out.index)).eq(True)
+    # ``eq`` on pandas' nullable BooleanDtype returns a BooleanArray.  Older
+    # NumPy versions reject that extension array in ``np.select``; explicit
+    # pandas assignment also makes the handling of <NA> unambiguous.
+    interpretable = out.get("anti_ro_interpretable", pd.Series(False, index=out.index)).eq(True).fillna(False)
     anti_ro = out.get("anti_ro_pos", pd.Series(pd.NA, index=out.index))
-    positive, negative = anti_ro.eq(True), anti_ro.eq(False)
-    out["ssa_group"] = np.select([interpretable & positive, interpretable & negative],
-                                  ["SSA_positive", "SSA_negative"], default="SSA_unknown")
+    positive = anti_ro.eq(True).fillna(False)
+    negative = anti_ro.eq(False).fillna(False)
+    out["ssa_group"] = pd.Series("SSA_unknown", index=out.index, dtype="string")
+    out.loc[(interpretable & positive).astype(bool), "ssa_group"] = "SSA_positive"
+    out.loc[(interpretable & negative).astype(bool), "ssa_group"] = "SSA_negative"
     return out
 
 

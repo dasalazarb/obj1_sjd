@@ -31,8 +31,10 @@ def test_pairwise_complete_n_and_uninterpretable_serology():
 
 
 def test_ssa_unknown_is_not_negative():
-    data = pd.DataFrame({"anti_ro_interpretable": [True, True, False, pd.NA],
-                         "anti_ro_pos": [True, False, False, False]})
+    data = pd.DataFrame({
+        "anti_ro_interpretable": pd.Series([True, True, False, pd.NA], dtype="boolean"),
+        "anti_ro_pos": pd.Series([True, False, False, pd.NA], dtype="boolean"),
+    })
     assert mod.define_ssa_group(data).ssa_group.tolist() == ["SSA_positive", "SSA_negative", "SSA_unknown", "SSA_unknown"]
 
 
