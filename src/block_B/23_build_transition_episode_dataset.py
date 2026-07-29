@@ -19,7 +19,9 @@ import common  # noqa: E402
 
 REQUIRED = ["patient_id", "visit_id", "visit_date", "visit_number", "is_observed_baseline",
             "time_since_observed_baseline_days", "time_since_observed_baseline_years"]
-MEASURES = {"essdai": "essdai_total", "esspri": "esspri_total", "pcs": "sf36_pcs",
+MEASURES = {"essdai": "essdai_total", "esspri": "esspri_total",
+            "esspri_dryness": "esspri_dryness", "esspri_fatigue": "esspri_fatigue",
+            "esspri_pain": "esspri_pain", "pcs": "sf36_pcs",
             "mcs": "sf36_mcs", "profad": "profad_total", "mdafs": "mdafs_global",
             "n_extraglandular_domains": "n_extraglandular_domains_active"}
 DOMAINS = [f"eg_{name}_active" for name in ("constitutional", "lymphadenopathy", "articular",
