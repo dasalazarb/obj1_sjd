@@ -55,7 +55,7 @@ ESSDAI_RAW_QC_COL = config.ESSDAI_TOTAL_RAW
 # Section 5 progression uses the same moderate-to-severe threshold as Pop 1.
 SEVERE_THRESHOLD = config.ESSDAI_SEVERE
 RANDOM_SEED = 20260728
-SCRIPT_VERSION = "1.0.0"
+SCRIPT_VERSION = "1.1.0"
 
 FIGURES_DIR = common.OUTPUTS_DIR / "figures" / "blockA"
 TABLES_DIR = common.OUTPUTS_DIR / "tables" / "blockA"
@@ -348,7 +348,13 @@ def build_baseline_comorbidity_dataset(raw: pd.DataFrame, spine: pd.DataFrame, p
     )
     essdai_source_columns = list(dict.fromkeys(c for c in (ESSDAI_PRIMARY_COL, ESSDAI_RAW_QC_COL) if c in base))
     base = base.drop(columns=essdai_source_columns).merge(ess, on="patient_id", how="left", validate="one_to_one")
-    base["n_prespecified_comorbidities"] = base[CONDITION_NAMES].fillna(False).astype(int).sum(axis=1)
+    # These fields are absence-by-default checkboxes in the clinical extract:
+    # an empty value means that the patient does not have the condition, rather
+    # than that the condition was not evaluated.  Resolve that convention once
+    # in the baseline dataset so prevalence plots and downstream models use the
+    # full relevant cohort as their denominator/reference population.
+    base[CONDITION_NAMES] = base[CONDITION_NAMES].fillna(False).astype("boolean")
+    base["n_prespecified_comorbidities"] = base[CONDITION_NAMES].astype(int).sum(axis=1)
     base["n_comorbidities_evaluable"] = base[CONDITION_NAMES].notna().sum(axis=1)
     base["any_comorbidity"] = (base["n_prespecified_comorbidities"] > 0).astype("boolean")
     base["two_or_more_comorbidities"] = (base["n_prespecified_comorbidities"] >= 2).astype("boolean")
@@ -372,7 +378,7 @@ def summarize_overall_prevalence(base: pd.DataFrame) -> pd.DataFrame:
     rows = []
     n_total = len(base)
     for c in CONDITIONS:
-        s = base[c.name]
+        s = base[c.name].fillna(False).astype("boolean")
         n_eval, n_pos = int(s.notna().sum()), int(s.eq(True).sum())
         lo, hi = calculate_wilson_ci(n_pos, n_total)
         rows.append({"condition": c.name, "display_label": c.label, "definition_type": c.definition_type,
@@ -414,7 +420,7 @@ def summarize_prevalence_by_pop(base: pd.DataFrame, replicates: int, seed: int) 
         row: dict[str, Any] = {"condition": c.name, "display_label": c.label}
         table = []
         for i, pop_name in enumerate(("Pop1", "Pop2", "Pop3"), 1):
-            s = base.loc[base["baseline_pop"].eq(pop_name), c.name]
+            s = base.loc[base["baseline_pop"].eq(pop_name), c.name].fillna(False).astype("boolean")
             n, N = int(s.eq(True).sum()), int(s.notna().sum()); lo, hi = calculate_wilson_ci(n, N)
             row.update({f"n_pop{i}": n, f"N_pop{i}": N, f"pct_pop{i}": 100*n/N if N else np.nan, f"ci95_pop{i}_low": lo, f"ci95_pop{i}_high": hi})
             table.append([n, int(s.eq(False).sum())])
@@ -553,21 +559,21 @@ def fit_mixed_model(long: pd.DataFrame, c: Condition) -> tuple[list[dict[str, An
 
 
 def fit_cox_model(data: pd.DataFrame, c: Condition, event_col: str, outcome: str, minimum_events: int) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Fit a Cox model, coding undocumented exposure as the negative case."""
+    """Fit a Cox model using condition absence as the reference exposure."""
     counts = {"n_patients": len(data), "n_events": int(data[event_col].sum()) if len(data) else 0, "n_complete_cases": 0}
     cols = ["followup_years", event_col, c.name, "baseline_essdai", "baseline_pop", "age_baseline", "sex"]
     d = data[cols].copy()
     n_exposure_missing_as_negative = int(d[c.name].isna().sum())
     d[c.name] = d[c.name].fillna(False).astype("boolean")
-    # Complete-case exclusion still applies to outcome, time, and adjustment
-    # covariates; only an empty comorbidity exposure is assigned to the negative
-    # reference group for Cox analyses.
+    # The baseline builder normally resolves empty absence-by-default fields;
+    # fill again here so callers supplying an older intermediate get the same
+    # clinical coding. Complete-case exclusion still applies to other fields.
     d = d.dropna().copy()
     counts.update({"n_complete_cases": len(d), "n_patients": len(d),
                    "n_events": int(d[event_col].sum()) if len(d) else 0})
     if importlib.util.find_spec("lifelines") is None:
         row = _empty_progression(c, outcome, "Baseline comorbidity", "lifelines is not installed; Cox model not executed", **counts)
-        row.update({"baseline_reference_group": "Comorbidity absent or undocumented",
+        row.update({"baseline_reference_group": "Comorbidity absent",
                     "n_exposure_missing_assigned_negative": n_exposure_missing_as_negative})
         return row, {"comorbidity": c.name, "outcome": outcome, "convergence": False,
                      "n_exposure_missing_assigned_negative": n_exposure_missing_as_negative,
@@ -577,7 +583,7 @@ def fit_cox_model(data: pd.DataFrame, c: Condition, event_col: str, outcome: str
     if len(d) < 5 or d[c.name].nunique() < 2 or counts["n_events"] < minimum_events:
         row = _empty_progression(c, outcome, "Baseline comorbidity", f"Insufficient events (<{minimum_events}) or exposure variation", **counts)
         row.update({"model_status": "insufficient_events",
-                    "baseline_reference_group": "Comorbidity absent or undocumented",
+                    "baseline_reference_group": "Comorbidity absent",
                     "n_exposure_missing_assigned_negative": n_exposure_missing_as_negative})
         return row, {"comorbidity": c.name, "outcome": outcome, "convergence": False,
                      "events": counts["n_events"],
@@ -597,11 +603,11 @@ def fit_cox_model(data: pd.DataFrame, c: Condition, event_col: str, outcome: str
         summary = fitter.summary.loc[c.name]; ph = proportional_hazard_test(fitter, d, time_transform="rank")
         ph_p = float(ph.summary.loc[c.name, "p"])
         warning_text = "Proportional-hazards assumption may be violated." if ph_p < .05 else ""
-        row = {**_empty_progression(c, outcome, "Baseline comorbidity", warning_text, **counts), "model_type": model_type, "effect_measure": "Hazard ratio", "estimate": float(summary["exp(coef)"]), "ci95_low": float(summary["exp(coef) lower 95%"]), "ci95_high": float(summary["exp(coef) upper 95%"]), "p_value": float(summary["p"]), "model_converged": True, "proportional_hazards_p": ph_p, "sparse_event_flag": reduced, "model_status": "reduced_adjustment" if reduced else "fitted", "baseline_reference_group": "Comorbidity absent or undocumented", "n_exposure_missing_assigned_negative": n_exposure_missing_as_negative, "interpretation": "Adjusted hazard association; undocumented comorbidity was coded as negative. This is not a causal effect."}
+        row = {**_empty_progression(c, outcome, "Baseline comorbidity", warning_text, **counts), "model_type": model_type, "effect_measure": "Hazard ratio", "estimate": float(summary["exp(coef)"]), "ci95_low": float(summary["exp(coef) lower 95%"]), "ci95_high": float(summary["exp(coef) upper 95%"]), "p_value": float(summary["p"]), "model_converged": True, "proportional_hazards_p": ph_p, "sparse_event_flag": reduced, "model_status": "reduced_adjustment" if reduced else "fitted", "baseline_reference_group": "Comorbidity absent", "n_exposure_missing_assigned_negative": n_exposure_missing_as_negative, "interpretation": "Adjusted hazard association using comorbidity absence as the reference. This is not a causal effect."}
         return row, {"comorbidity": c.name, "outcome": outcome, "convergence": True, "events": counts["n_events"], "events_per_parameter": counts["n_events"]/max(len(d.columns)-2, 1), "n_exposure_missing_assigned_negative": n_exposure_missing_as_negative, "proportional_hazards_p": ph_p, "warning": warning_text}
     except (ValueError, np.linalg.LinAlgError, RuntimeError) as exc:
         row = _empty_progression(c, outcome, "Baseline comorbidity", f"Cox model failed: {exc}", **counts)
-        row.update({"model_status": "failed", "baseline_reference_group": "Comorbidity absent or undocumented",
+        row.update({"model_status": "failed", "baseline_reference_group": "Comorbidity absent",
                     "n_exposure_missing_assigned_negative": n_exposure_missing_as_negative})
         return row, {"comorbidity": c.name, "outcome": outcome, "convergence": False,
                      "events": counts["n_events"],
@@ -647,9 +653,9 @@ def create_dotplot(overall: pd.DataFrame) -> None:
     finite = np.isfinite(estimate) & d["ci95_low"].notna().to_numpy() & d["ci95_high"].notna().to_numpy()
     errors = _nonnegative_interval_errors(estimate, d["ci95_low"], d["ci95_high"])
     ax.errorbar(estimate[finite], y[finite], xerr=errors[:, finite], fmt="o", color="#2c7fb8", capsize=3)
-    ax.set_yticks(y, d["display_label"]); ax.set_xlabel("Documented prevalence in total baseline cohort (%)"); ax.grid(axis="x", alpha=.25)
+    ax.set_yticks(y, d["display_label"]); ax.set_xlabel("Prevalence in total baseline cohort (%)"); ax.grid(axis="x", alpha=.25)
     for yy, (_, r) in zip(y, d.iterrows()): ax.annotate(f"{r.n_positive}/{r.n_total_cohort}", (r.pct_total_cohort, yy), xytext=(6, 4), textcoords="offset points", fontsize=8)
-    fig.text(.01, .01, "Points use the total baseline cohort denominator; Wilson 95% CIs. Missing documentation is not treated as evaluable absence.", fontsize=8)
+    fig.text(.01, .01, "Points use the total baseline cohort denominator; empty condition fields are coded as absent. Wilson 95% CIs.", fontsize=8)
     fig.subplots_adjust(bottom=.1, left=.3); _plot_save(fig, FIGURES_DIR/"07_comorbidities_dotplot.pdf")
 
 
@@ -663,8 +669,8 @@ def create_grouped_barplot(by_pop: pd.DataFrame) -> None:
         ax.errorbar(pct[finite], (y+off)[finite], xerr=errors[:, finite], fmt="o", label=f"Pop{i}", color=color, capsize=2)
         for x, yy, n, N in zip(pct, y+off, d[f"n_pop{i}"], d[f"N_pop{i}"]):
             if np.isfinite(x): ax.annotate(f"{n}/{N}", (x, yy), xytext=(5, 0), textcoords="offset points", va="center", fontsize=7)
-    ax.set_yticks(y, d["display_label"]); ax.set_xlabel("Prevalence among evaluable patients (%)"); ax.legend(ncol=3); ax.grid(axis="x", alpha=.2)
-    fig.text(.01, .01, "Independent, non-stacked conditions. Error bars are Wilson 95% CIs; labels show positive/evaluable.", fontsize=8)
+    ax.set_yticks(y, d["display_label"]); ax.set_xlabel("Prevalence in baseline Pop cohort (%)"); ax.legend(ncol=3); ax.grid(axis="x", alpha=.2)
+    fig.text(.01, .01, "Independent, non-stacked conditions. Empty condition fields are coded as absent; labels show positive/total. Error bars are Wilson 95% CIs.", fontsize=8)
     fig.subplots_adjust(left=.3, bottom=.1); _plot_save(fig, FIGURES_DIR/"07_comorbidities_grouped_bar.pdf")
 
 
@@ -682,7 +688,7 @@ def create_progression_forestplot(progression: pd.DataFrame) -> None:
         ax.axvline(null, color="black", ls="--", lw=.8); ax.set_title(title); ax.grid(axis="x", alpha=.2)
         if logscale: ax.set_xscale("log"); ax.set_xlabel("Hazard ratio (log scale)")
         else: ax.set_xlabel("Adjusted beta per year")
-    axes[0].set_yticks(range(len(order)), [labels[x] for x in order]); fig.text(.01,.01,"Models integrate patients across visits and adjust for baseline ESSDAI, baseline Pop, age, and sex when event support permits. In Cox models, undocumented comorbidity is coded as the negative case. X marks not estimable; red denotes reduced models. Associations are not causal.",fontsize=8)
+    axes[0].set_yticks(range(len(order)), [labels[x] for x in order]); fig.text(.01,.01,"Models integrate patients across visits and adjust for baseline ESSDAI, baseline Pop, age, and sex when event support permits. Comorbidity absence is the reference. X marks not estimable; red denotes reduced models. Associations are not causal.",fontsize=8)
     fig.subplots_adjust(left=.18,bottom=.1,wspace=.15); _plot_save(fig, FIGURES_DIR/"07_comorbidities_progression_forestplot.pdf")
 
 
@@ -718,7 +724,7 @@ def source_mapping(raw_columns: Iterable[str]) -> pd.DataFrame:
     rows=[]
     for c in CONDITIONS:
         present=[x for x in c.primary if x in raw_columns]
-        rows.append({"condition":c.name,"primary_source_columns":"|".join(c.primary),"sensitivity_source_columns":"|".join(c.sensitivity),"derivation_rule":"Nullable logical OR across available primary sources","definition_type":c.definition_type,"availability":"available" if present else "unavailable","n_unrecognized_values":int(counts["source_column"].isin(c.primary+c.sensitivity).sum()) if len(counts) else 0})
+        rows.append({"condition":c.name,"primary_source_columns":"|".join(c.primary),"sensitivity_source_columns":"|".join(c.sensitivity),"derivation_rule":"Logical OR across available primary sources; empty baseline condition coded absent","definition_type":c.definition_type,"availability":"available" if present else "unavailable","n_unrecognized_values":int(counts["source_column"].isin(c.primary+c.sensitivity).sum()) if len(counts) else 0})
     return pd.DataFrame(rows)
 
 
@@ -752,7 +758,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     pop_counts=base["baseline_pop"].fillna("Unclassifiable").value_counts(); classifiable=int(base["baseline_pop"].isin(["Pop1","Pop2","Pop3"]).sum()); with_followup=int(long.loc[(long.visit_number>0)&long.essdai_total_recoded.notna(),"patient_id"].nunique())
     qc={"input_path":str(args.input),"input_modification_time":datetime.fromtimestamp(args.input.stat().st_mtime,timezone.utc).isoformat(),"script_version":SCRIPT_VERSION,"run_timestamp":datetime.now(timezone.utc).isoformat(),"random_seed":args.random_seed,"n_input_rows":len(raw),"n_input_patients":int(raw[PATIENT_ID_COL].nunique()),"n_canonical_visits":len(spine),"n_baseline_patients":len(base),"n_duplicate_patient_dates":len(duplicates),"n_pipe_delimited_visit_dates":n_pipe,"n_pop_classifiable":classifiable,"n_pop_unclassifiable":len(base)-classifiable,"pop_counts":pop_counts.to_dict(),"n_with_followup_essdai":with_followup,"n_at_risk_severe5":len(severe),"n_severe5_events":int(severe.get("severe5_event",pd.Series(dtype=int)).sum()),"n_at_risk_new_domain":len(new_domain),"n_new_domain_events":int(new_domain.get("new_domain_event",pd.Series(dtype=int)).sum()),"severe_threshold_used":SEVERE_THRESHOLD,"essdai_primary_column":ESSDAI_PRIMARY_COL,"essdai_raw_qc_column":ESSDAI_RAW_QC_COL,"upstream_files_used":[str(p) for p in UPSTREAM],"upstream_file_timestamps":timestamps,"essdai_reconciliation":{"n_both":len(both),"n_concordant":int(diff.eq(0).sum()),"n_discordant":int(diff.ne(0).sum()),"mean_difference":float(diff.mean()) if len(diff) else None,"median_difference":float(diff.median()) if len(diff) else None,"maximum_absolute_difference":float(diff.abs().max()) if len(diff) else None},"warnings":["The deployed extract has only essdai__essdai_total_score; it is used as the primary longitudinal ESSDAI source and duplicated in the raw-QC compatibility field."],**qc_extra}
     (QC_DIR/"07_comorbidities_qc.json").write_text(json.dumps(qc,indent=2,default=str)+"\n")
-    claim=overall.head(3); ild=float(overall.loc[overall.condition.eq("ild"),"pct_total_cohort"].iloc[0]); logger.info("Claim: %s was the most prevalent documented baseline comorbidity (%.1f%%), followed by %s (%.1f%%) and %s (%.1f%%). Interstitial lung disease was documented in %.1f%% of patients.",claim.iloc[0].display_label,claim.iloc[0].pct_total_cohort,claim.iloc[1].display_label,claim.iloc[1].pct_total_cohort,claim.iloc[2].display_label,claim.iloc[2].pct_total_cohort,ild)
+    claim=overall.head(3); ild=float(overall.loc[overall.condition.eq("ild"),"pct_total_cohort"].iloc[0]); logger.info("Claim: %s was the most prevalent baseline comorbidity (%.1f%%), followed by %s (%.1f%%) and %s (%.1f%%). Interstitial lung disease was present in %.1f%% of patients. Empty condition fields were coded as absent.",claim.iloc[0].display_label,claim.iloc[0].pct_total_cohort,claim.iloc[1].display_label,claim.iloc[1].pct_total_cohort,claim.iloc[2].display_label,claim.iloc[2].pct_total_cohort,ild)
     fitted=int(progression.model_status.isin(["fitted","reduced_adjustment"]).sum()); not_est=len(progression)-fitted
     print(f"Total baseline patients: {len(base)}\nClassifiable Pop patients: {classifiable}\nPatients with follow-up ESSDAI: {with_followup}\nESSDAI >=5 progression events: {qc['n_severe5_events']}\nNew-domain events: {qc['n_new_domain_events']}\nNumber of models fitted: {fitted}\nNumber of models not estimable: {not_est}\nGenerated files:")
     for path in outputs+[QC_DIR/"07_comorbidities_qc.json",QC_DIR/"07_comorbidities_missingness.csv",QC_DIR/"07_comorbidities_source_mapping.csv",QC_DIR/"07_comorbidities_model_diagnostics.csv",QC_DIR/"07_comorbidities_patient_duplicates.csv",QC_DIR/"07_comorbidities_unavailable_conditions.csv",QC_DIR/"07_comorbidities_unrecognized_values.csv",LOG_PATH]: print(path.resolve())
