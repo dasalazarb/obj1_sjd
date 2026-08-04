@@ -55,7 +55,7 @@ ESSDAI_RAW_QC_COL = config.ESSDAI_TOTAL_RAW
 # Section 5 progression uses the same moderate-to-severe threshold as Pop 1.
 SEVERE_THRESHOLD = config.ESSDAI_SEVERE
 RANDOM_SEED = 20260728
-SCRIPT_VERSION = "1.2.0"
+SCRIPT_VERSION = "1.3.0"
 
 FIGURES_DIR = common.OUTPUTS_DIR / "figures" / "blockA"
 TABLES_DIR = common.OUTPUTS_DIR / "tables" / "blockA"
@@ -88,35 +88,93 @@ class Condition:
     sensitivity: tuple[str, ...] = ()
     definition_type: str = "primary"
     notes: str = ""
+    category: str = "rheumatological"
 
 
-CONDITIONS = [
-    Condition("fibromyalgia", "Fibromyalgia", ("rheumatological_comorbidities__fibromyalgia1", "rheumatological_comorbidities__fibromyalgia1_hx", "rheumatological_comorbidities__fibromyalgia1_confirm")),
-    Condition("osteoporosis", "Osteoporosis", ("rheumatological_comorbidities__osteoporosis1", "rheumatological_comorbidities__osteoporosis1_hx", "rheumatological_comorbidities__osteoporosis1_confirm")),
-    Condition("ild", "Interstitial lung disease", ("past_medical_history__respiratory_hx_lung", "past_medical_history__resp_hx_lung_fibro"), ("sjogren's_syndrome_disease_damage_index__fibrosis_interstitial",)),
-    Condition("thyroid_disease", "Thyroid disease", ("past_medical_history__thyroid_disease",), ("sjogren's_syndrome_history__thyroiditis",)),
-    Condition("depression", "Depression", ("past_medical_history__neuro_hx_depression",), ("systems_review_for_physician__psych_depr",)),
-    Condition("anxiety", "Physician-recorded anxiety symptoms", ("systems_review_for_physician__adr_q22_anxiety",), ("ans__anxiety", "ans__anxiety_severity", "autonomic_nervous_system_questionnaire__anxiety", "autonomic_nervous_system_questionnaire__anxiety_severity"), notes="Physician-recorded symptom indicator; not a confirmed anxiety diagnosis."),
-    Condition("raynaud", "Raynaud's phenomenon", ("rheumatological_comorbidities__integ_raynds", "rheumatological_comorbidities__integ_raynds_hx", "rheumatological_comorbidities__integ_raynds_confirm"), ("sjogren's_syndrome_history__raynaud_phenom",)),
-    Condition("peripheral_neuropathy", "Peripheral neuropathy", ("past_medical_history__neuro_hx_neuropathy",), ("sjogren's_syndrome_disease_damage_index__neuro_cran_periph",)),
-    Condition("renal_tubular_acidosis", "Renal tubular acidosis", ("past_medical_history__renal_hx_tubular_acid",)),
-    Condition("myositis", "Myositis", ("rheumatological_comorbidities__polymyositis", "rheumatological_comorbidities__polymyositis_hx", "rheumatological_comorbidities__polymyositis_confirm", "rheumatological_comorbidities__dermatomyositis", "rheumatological_comorbidities__dermatomyositis_hx", "rheumatological_comorbidities__dermatomyositis_confirm"), ("sjogren's_syndrome_history__myositis_myalgia",)),
-    Condition("cryoglobulinemia", "Cryoglobulinemia", ("rheumatological_comorbidities__cryoglobulinemia", "rheumatological_comorbidities__cryoglobulinemia_hx", "rheumatological_comorbidities__cryoglobulinemia_confirm")),
-    Condition("chronic_bronchitis", "Chronic bronchitis", ("past_medical_history__respiratory_hx_bronchitis",)),
-
-    Condition("sle", "Systemic lupus erythematosus", ("rheumatological_comorbidities__sle1", "rheumatological_comorbidities__sle_hx", "rheumatological_comorbidities__sle_confirmed")),
-    Condition("rheumatoid_arthritis", "Rheumatoid arthritis", ("rheumatological_comorbidities__ra", "rheumatological_comorbidities__ra_hx", "rheumatological_comorbidities__ra_confirm")),
-    Condition("systemic_sclerosis", "Systemic sclerosis", ("rheumatological_comorbidities__systemic_sclerosis", "rheumatological_comorbidities__systmc_sclerosis_hx", "rheumatological_comorbidities__systmc_sclerosis_confirm")),
-    Condition("mixed_connective_tissue_disease", "Mixed connective tissue disease", ("rheumatological_comorbidities__mixed_connective_tissue_disease", "rheumatological_comorbidities__mixed_connect_tissue_hx", "rheumatological_comorbidities__mixed_connect_tissue_confirm")),
-    Condition("antiphospholipid_syndrome", "Antiphospholipid syndrome", ("rheumatological_comorbidities__antiphospholipid_syndrome", "rheumatological_comorbidities__antiphospholipid_syn_hx", "rheumatological_comorbidities__antiphospholipid_syn_confirm")),
-    Condition("primary_biliary_cholangitis", "Primary biliary cholangitis", ("rheumatological_comorbidities__primary_billiary_cirrhosis", "rheumatological_comorbidities__prim_billiary_cirrhosis_hx", "rheumatological_comorbidities__prim_billiary_cirrhosis_confirm")),
-    Condition("osteopenia", "Osteopenia", ("rheumatological_comorbidities__osteopenia", "rheumatological_comorbidities__osteopenia_hx", "rheumatological_comorbidities__osteopenia_confirm")),
-    Condition("osteoarthritis", "Osteoarthritis", ("rheumatological_comorbidities__osteoarthritis", "rheumatological_comorbidities__osteoarthritis_hx", "rheumatological_comorbidities__osteoarthritis_confirm")),
-    Condition("sarcoidosis", "Sarcoidosis", ("rheumatological_comorbidities__sarcoidosis", "rheumatological_comorbidities__sarcoidosis_hx", "rheumatological_comorbidities__sarcoidosis_confirm")),
-    Condition("crystalline_arthropathy", "Crystalline arthropathy", ("rheumatological_comorbidities__crystalline_arthropathy", "rheumatological_comorbidities__crystalline_arthropathy_hx", "rheumatological_comorbidities__crystalline_arthro_confirm")),
-    Condition("inflammatory_bowel_disease", "Inflammatory bowel disease", ("rheumatological_comorbidities__inflam_bowel", "rheumatological_comorbidities__inflam_bowel_hx", "rheumatological_comorbidities__inflam_bowel_confirm")),
-    Condition("other_rheumatological_condition", "Other rheumatological condition", ("rheumatological_comorbidities__rheumatological_other", "rheumatological_comorbidities__rheumatological_other_hx", "rheumatological_comorbidities__rheumatological_other_confirm")),
+EXISTING_AND_RHEUMATOLOGICAL_CONDITIONS = [
+    Condition("fibromyalgia", "Fibromyalgia", ("rheumatological_comorbidities__fibromyalgia1", "rheumatological_comorbidities__fibromyalgia1_hx", "rheumatological_comorbidities__fibromyalgia1_confirm"), category="rheumatological"),
+    Condition("osteoporosis", "Osteoporosis", ("rheumatological_comorbidities__osteoporosis1", "rheumatological_comorbidities__osteoporosis1_hx", "rheumatological_comorbidities__osteoporosis1_confirm"), category="rheumatological"),
+    Condition("ild", "Interstitial lung disease", ("past_medical_history__respiratory_hx_lung", "past_medical_history__resp_hx_lung_fibro"), ("sjogren's_syndrome_disease_damage_index__fibrosis_interstitial",), category="pulmonary"),
+    Condition("thyroid_disease", "Thyroid disease", ("past_medical_history__thyroid_disease",), ("sjogren's_syndrome_history__thyroiditis",), category="endocrine"),
+    Condition("depression", "Depression", ("past_medical_history__neuro_hx_depression",), ("systems_review_for_physician__psych_depr",), category="neurologic"),
+    Condition("anxiety", "Physician-recorded anxiety symptoms", ("systems_review_for_physician__adr_q22_anxiety",), ("ans__anxiety", "ans__anxiety_severity", "autonomic_nervous_system_questionnaire__anxiety", "autonomic_nervous_system_questionnaire__anxiety_severity"), category="neurologic", notes="Physician-recorded symptom indicator; not a confirmed anxiety diagnosis."),
+    Condition("raynaud", "Raynaud's phenomenon", ("rheumatological_comorbidities__integ_raynds", "rheumatological_comorbidities__integ_raynds_hx", "rheumatological_comorbidities__integ_raynds_confirm"), ("sjogren's_syndrome_history__raynaud_phenom",), category="rheumatological"),
+    Condition("peripheral_neuropathy", "Peripheral neuropathy", ("past_medical_history__neuro_hx_neuropathy",), ("sjogren's_syndrome_disease_damage_index__neuro_cran_periph",), category="neurologic"),
+    Condition("renal_tubular_acidosis", "Renal tubular acidosis", ("past_medical_history__renal_hx_tubular_acid",), category="renal_urinary"),
+    Condition("myositis", "Myositis", ("rheumatological_comorbidities__polymyositis", "rheumatological_comorbidities__polymyositis_hx", "rheumatological_comorbidities__polymyositis_confirm", "rheumatological_comorbidities__dermatomyositis", "rheumatological_comorbidities__dermatomyositis_hx", "rheumatological_comorbidities__dermatomyositis_confirm"), ("sjogren's_syndrome_history__myositis_myalgia",), category="rheumatological"),
+    Condition("cryoglobulinemia", "Cryoglobulinemia", ("rheumatological_comorbidities__cryoglobulinemia", "rheumatological_comorbidities__cryoglobulinemia_hx", "rheumatological_comorbidities__cryoglobulinemia_confirm"), category="rheumatological"),
+    Condition("chronic_bronchitis", "Chronic bronchitis", ("past_medical_history__respiratory_hx_bronchitis",), category="pulmonary"),
+    Condition("sle", "Systemic lupus erythematosus", ("rheumatological_comorbidities__sle1", "rheumatological_comorbidities__sle_hx", "rheumatological_comorbidities__sle_confirmed"), category="rheumatological"),
+    Condition("rheumatoid_arthritis", "Rheumatoid arthritis", ("rheumatological_comorbidities__ra", "rheumatological_comorbidities__ra_hx", "rheumatological_comorbidities__ra_confirm"), category="rheumatological"),
+    Condition("systemic_sclerosis", "Systemic sclerosis", ("rheumatological_comorbidities__systemic_sclerosis", "rheumatological_comorbidities__systmc_sclerosis_hx", "rheumatological_comorbidities__systmc_sclerosis_confirm"), category="rheumatological"),
+    Condition("mixed_connective_tissue_disease", "Mixed connective tissue disease", ("rheumatological_comorbidities__mixed_connective_tissue_disease", "rheumatological_comorbidities__mixed_connect_tissue_hx", "rheumatological_comorbidities__mixed_connect_tissue_confirm"), category="rheumatological"),
+    Condition("antiphospholipid_syndrome", "Antiphospholipid syndrome", ("rheumatological_comorbidities__antiphospholipid_syndrome", "rheumatological_comorbidities__antiphospholipid_syn_hx", "rheumatological_comorbidities__antiphospholipid_syn_confirm"), category="rheumatological"),
+    Condition("primary_biliary_cholangitis", "Primary biliary cholangitis", ("rheumatological_comorbidities__primary_billiary_cirrhosis", "rheumatological_comorbidities__prim_billiary_cirrhosis_hx", "rheumatological_comorbidities__prim_billiary_cirrhosis_confirm", "past_medical_history__gi_hx_cirrhosis"), category="gastrointestinal"),
+    Condition("osteopenia", "Osteopenia", ("rheumatological_comorbidities__osteopenia", "rheumatological_comorbidities__osteopenia_hx", "rheumatological_comorbidities__osteopenia_confirm"), category="rheumatological"),
+    Condition("osteoarthritis", "Osteoarthritis", ("rheumatological_comorbidities__osteoarthritis", "rheumatological_comorbidities__osteoarthritis_hx", "rheumatological_comorbidities__osteoarthritis_confirm"), category="rheumatological"),
+    Condition("sarcoidosis", "Sarcoidosis", ("rheumatological_comorbidities__sarcoidosis", "rheumatological_comorbidities__sarcoidosis_hx", "rheumatological_comorbidities__sarcoidosis_confirm"), category="rheumatological"),
+    Condition("crystalline_arthropathy", "Crystalline arthropathy", ("rheumatological_comorbidities__crystalline_arthropathy", "rheumatological_comorbidities__crystalline_arthropathy_hx", "rheumatological_comorbidities__crystalline_arthro_confirm"), category="rheumatological"),
+    Condition("inflammatory_bowel_disease", "Inflammatory bowel disease", ("rheumatological_comorbidities__inflam_bowel", "rheumatological_comorbidities__inflam_bowel_hx", "rheumatological_comorbidities__inflam_bowel_confirm", "past_medical_history__inflam_bowel"), category="gastrointestinal"),
+    Condition("other_rheumatological_condition", "Other rheumatological condition", ("rheumatological_comorbidities__rheumatological_other", "rheumatological_comorbidities__rheumatological_other_hx", "rheumatological_comorbidities__rheumatological_other_confirm"), category="rheumatological"),
 ]
+
+PAST_MEDICAL_HISTORY_CONDITIONS = [
+    Condition("hypertension", "Hypertension", ("past_medical_history__hypertension_",), category="cardiovascular"),
+    Condition("hyperlipidemia", "Hyperlipidemia", ("past_medical_history__hyperlipidemia_",), category="cardiovascular"),
+    Condition("coronary_artery_disease", "Coronary artery disease", ("past_medical_history__cardio_hx_cad",), category="cardiovascular"),
+    Condition("myocardial_infarction", "Myocardial infarction", ("past_medical_history__cardio_hx_mycrdl",), category="cardiovascular"),
+    Condition("peripheral_vascular_disease", "Peripheral vascular disease", ("past_medical_history__cardio_hx_pvd",), category="cardiovascular"),
+    Condition("pericarditis", "Pericarditis", ("past_medical_history__cardio_hx_pericard",), category="cardiovascular"),
+    Condition("valvular_disease", "Valvular disease", ("past_medical_history__cardio_valve_disease",), category="cardiovascular"),
+    Condition("cerebrovascular_disease", "Cerebrovascular disease", ("past_medical_history__cva",), category="cardiovascular"),
+    Condition("pulmonary_embolism", "Pulmonary embolism", ("past_medical_history__pulmonary_embolism",), category="cardiovascular"),
+    Condition("diabetes_mellitus", "Diabetes mellitus", ("past_medical_history__endcrn_hx_mellitus_i", "past_medical_history__endcrn_hx_mellitus_ii"), category="endocrine"),
+    Condition("asthma", "Asthma", ("past_medical_history__asthma",), category="pulmonary"),
+    Condition("copd", "Emphysema or COPD", ("past_medical_history__respiratory_hx_copd",), category="pulmonary"),
+    Condition("pulmonary_hypertension", "Pulmonary hypertension", ("past_medical_history__resp_hx_pulm_hyper",), category="pulmonary"),
+    Condition("pulmonary_granulomas", "Pulmonary granulomas", ("past_medical_history__resp_hx_pulm_gran",), category="pulmonary"),
+    Condition("pleuritis", "Pleuritis", ("past_medical_history__respiratory_hx_pleuritis",), category="pulmonary"),
+    Condition("autoimmune_hepatitis", "Autoimmune hepatitis", ("past_medical_history__gi_hx_auto_hepat",), category="gastrointestinal"),
+    Condition("celiac_disease", "Celiac disease", ("past_medical_history__gi_hx_celiar",), category="gastrointestinal"),
+    Condition("primary_sclerosing_cholangitis", "Primary sclerosing cholangitis", ("past_medical_history__gi_hx_sclerosing",), category="gastrointestinal"),
+    Condition("gerd", "Gastroesophageal reflux disease", ("past_medical_history__gi_hx_gerd",), category="gastrointestinal"),
+    Condition("irritable_bowel_syndrome", "Irritable bowel syndrome", ("past_medical_history__gi_hx_ibs",), category="gastrointestinal"),
+    Condition("pancreatitis", "Pancreatitis", ("past_medical_history__pancreatitis",), category="gastrointestinal"),
+    Condition("hepatitis_b", "Hepatitis B", ("past_medical_history__gi_hx_hepatitis_b",), category="gastrointestinal"),
+    Condition("hepatitis_c", "Hepatitis C", ("past_medical_history__gi_hx_hepatitis_c",), category="gastrointestinal"),
+    Condition("psoriasis", "Psoriasis", ("past_medical_history__cutaneous_hx_psoriasis",), category="cutaneous_autoimmune"),
+    Condition("vitiligo", "Vitiligo", ("past_medical_history__cutaneous_hx_vitiligo",), category="cutaneous_autoimmune"),
+    Condition("vasculitis", "Vasculitis", ("past_medical_history__vasculitis",), category="cutaneous_autoimmune"),
+    Condition("multiple_sclerosis", "Multiple sclerosis", ("past_medical_history__neuro_hx_mult_sclerosis",), category="neurologic"),
+    Condition("seizures", "Seizures", ("past_medical_history__neuro_seizrs",), category="neurologic"),
+    Condition("chorea", "Chorea", ("past_medical_history__neuro_hx_chorea",), category="neurologic"),
+    Condition("cognitive_dysfunction", "Cognitive dysfunction", ("past_medical_history__neuro_hx_cog_dyfsfun",), category="neurologic"),
+    Condition("headaches", "Headaches", ("past_medical_history__neuro_hx_headaches",), category="neurologic"),
+    Condition("autonomic_dysfunction", "Autonomic dysfunction", ("past_medical_history__dysfunctn_autonomic",), category="neurologic"),
+    Condition("chronic_fatigue_syndrome", "Chronic fatigue syndrome", ("past_medical_history__chronic_fatigue_syndrome_dx",), category="neurologic"),
+    Condition("glomerulonephritis", "Glomerulonephritis", ("past_medical_history__renal_hx_glomer",), category="renal_urinary"),
+    Condition("nephrotic_syndrome", "Nephrotic syndrome", ("past_medical_history__renal_hx_nephrotic",), category="renal_urinary"),
+    Condition("kidney_stones", "Kidney stones", ("past_medical_history__renal_hx_kidney_stones",), category="renal_urinary"),
+    Condition("pyelonephritis", "Pyelonephritis", ("past_medical_history__renal_hx_pyelonephritis",), category="renal_urinary"),
+    Condition("recurrent_uti", "Recurrent urinary tract infections", ("past_medical_history__renal_hx_recurr_uti",), category="renal_urinary"),
+    Condition("interstitial_cystitis", "Interstitial cystitis", ("past_medical_history__interstitial_cyst",), category="renal_urinary"),
+    Condition("bladder_incontinence", "Bladder incontinence", ("past_medical_history__incontinence_",), category="renal_urinary"),
+    Condition("hiv_aids", "HIV/AIDS", ("past_medical_history__ec_aids",), category="infection"),
+    Condition("htlv_infection", "HTLV-I/II infection", ("past_medical_history__htlv_infection",), category="infection"),
+    Condition("infectious_mononucleosis", "Infectious mononucleosis", ("past_medical_history__infect_mononucleosis",), category="infection"),
+    Condition("lyme_disease", "Lyme disease", ("past_medical_history__lyme_disease",), category="infection"),
+    Condition("graft_versus_host_disease", "Graft-versus-host disease", ("past_medical_history__ec_graft_host_disease",), category="infection"),
+    Condition("recurrent_sinusitis", "Frequent or recurrent sinusitis", ("past_medical_history__sinusitis",), category="infection"),
+    Condition("lymphoma", "Lymphoma", ("past_medical_history__malignancy_hx_lymphoma",), category="malignancy"),
+    Condition("breast_cancer", "Breast cancer", ("past_medical_history__malignancy_hx_breast_ca",), category="malignancy"),
+    Condition("colon_cancer", "Colon cancer", ("past_medical_history__malignancy_hx_colon_ca",), category="malignancy"),
+    Condition("head_neck_cancer", "Head or neck cancer", ("past_medical_history__malignancy_hx_head_ca",), category="malignancy"),
+    Condition("lung_cancer", "Lung cancer", ("past_medical_history__malignancy_hx_lung_ca",), category="malignancy"),
+    Condition("thyroid_cancer", "Thyroid cancer", ("past_medical_history__malignancy_hx_thyroid_ca",), category="malignancy"),
+    Condition("other_malignancy", "Other malignancy", ("past_medical_history__malignancy_hx_other",), category="malignancy"),
+]
+
+CONDITIONS = EXISTING_AND_RHEUMATOLOGICAL_CONDITIONS + PAST_MEDICAL_HISTORY_CONDITIONS
 CONDITION_NAMES = [c.name for c in CONDITIONS]
 PROGRESSION_CONDITION_NAMES = {
     "fibromyalgia",
@@ -401,7 +459,7 @@ def summarize_overall_prevalence(base: pd.DataFrame) -> pd.DataFrame:
         s = base[c.name].fillna(False).astype("boolean")
         n_eval, n_pos = int(s.notna().sum()), int(s.eq(True).sum())
         rows.append({"condition": c.name, "display_label": c.label, "definition_type": c.definition_type,
-                     "source_columns": "|".join(c.primary), "n_total_cohort": n_total, "n_evaluable": n_eval,
+                     "category": c.category, "source_columns": "|".join(c.primary), "n_total_cohort": n_total, "n_evaluable": n_eval,
                      "n_positive": n_pos, "n_negative": int(s.eq(False).sum()), "n_missing": int(s.isna().sum()),
                      "pct_total_cohort": 100*n_pos/n_total if n_total else np.nan,
                      "pct_among_evaluable": 100*n_pos/n_eval if n_eval else np.nan,
@@ -437,7 +495,8 @@ def summarize_prevalence_by_pop(base: pd.DataFrame, replicates: int, seed: int) 
     rng = np.random.default_rng(seed); rows = []
     n_total = len(base)
     for c in CONDITIONS:
-        row: dict[str, Any] = {"condition": c.name, "display_label": c.label,
+        row: dict[str, Any] = {"condition": c.name, "display_label": c.label, "category": c.category,
+                                "n_positive_total_cohort": int(base[c.name].fillna(False).eq(True).sum()),
                                 "pct_total_cohort": 100*int(base[c.name].fillna(False).eq(True).sum())/n_total if n_total else np.nan}
         table = []
         for i, pop_name in enumerate(("Pop1", "Pop2", "Pop3"), 1):
@@ -466,6 +525,30 @@ def summarize_prevalence_by_pop(base: pd.DataFrame, replicates: int, seed: int) 
     out["fdr_bh_q_value"] = apply_fdr(out["global_p_value"])
     return out
 
+
+
+def summarize_overall_by_category(base: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    n_total = len(base)
+    for category in sorted({c.category for c in CONDITIONS}):
+        names = [c.name for c in CONDITIONS if c.category == category]
+        counts = base[names].fillna(False).astype(int).sum(axis=1)
+        n_positive = int((counts > 0).sum())
+        if len(counts):
+            q1, q3 = counts.quantile([.25, .75])
+            median = float(counts.median())
+            iqr = f"{q1:.1f}-{q3:.1f}"
+        else:
+            median, iqr = np.nan, ""
+        rows.append({
+            "category": category,
+            "n_patients_with_at_least_one_condition": n_positive,
+            "denominator": n_total,
+            "pct_patients": 100*n_positive/n_total if n_total else np.nan,
+            "median_conditions_per_patient": median,
+            "iqr_conditions_per_patient": iqr,
+        })
+    return pd.DataFrame(rows).sort_values(["pct_patients", "category"], ascending=[False, True]).reset_index(drop=True)
 
 def apply_fdr(p_values: pd.Series) -> pd.Series:
     out = pd.Series(np.nan, index=p_values.index, dtype=float); valid = p_values.notna()
@@ -668,7 +751,8 @@ def _nonnegative_interval_errors(
 
 
 def create_dotplot(overall: pd.DataFrame) -> None:
-    d = overall.sort_values(["pct_total_cohort", "display_label"], ascending=[True, False])
+    d = overall.sort_values(["pct_total_cohort", "display_label"], ascending=[False, True]).head(20)
+    d = d.sort_values(["pct_total_cohort", "display_label"], ascending=[True, False])
     fig, ax = plt.subplots(figsize=(10, max(6, .45*len(d))))
     y = np.arange(len(d)); pct = d["pct_total_cohort"].to_numpy(dtype=float)
     bars = ax.barh(y, pct, color="#2c7fb8")
@@ -679,12 +763,18 @@ def create_dotplot(overall: pd.DataFrame) -> None:
         ax.annotate(f"{int(r.n_positive)}/{int(r.n_total_cohort)} ({r.pct_total_cohort:.1f}%)",
                     (bar.get_width(), bar.get_y() + bar.get_height()/2),
                     xytext=(5, 0), textcoords="offset points", va="center", fontsize=8)
-    fig.text(.01, .01, "Bars use the total baseline cohort denominator; empty condition fields are coded as absent.", fontsize=8)
+    fig.text(.01, .01, "Top 20 conditions by baseline prevalence; complete results are provided in the accompanying table. Empty condition fields are coded as absent.", fontsize=8)
     fig.subplots_adjust(bottom=.1, left=.3); _plot_save(fig, FIGURES_DIR/"07_comorbidities_dotplot.pdf")
 
 
 def create_grouped_barplot(by_pop: pd.DataFrame) -> None:
-    d = by_pop.sort_values(["pct_total_cohort", "display_label"], ascending=[True, False]).reset_index(drop=True)
+    d = by_pop.loc[by_pop["n_positive_total_cohort"].ge(5)].sort_values(["pct_total_cohort", "display_label"], ascending=[False, True]).reset_index(drop=True)
+    if d.empty:
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.text(.5, .5, "No comorbidity had at least five positive patients.", ha="center", va="center")
+        ax.axis("off")
+        _plot_save(fig, FIGURES_DIR/"07_comorbidities_grouped_bar.pdf")
+        return
     values = d[[f"pct_pop{i}" for i in range(1, 4)]].to_numpy(dtype=float)
     masked = np.ma.masked_invalid(values)
     cmap = plt.get_cmap("Blues").copy()
@@ -696,7 +786,7 @@ def create_grouped_barplot(by_pop: pd.DataFrame) -> None:
     for row_idx, r in d.iterrows():
         for col_idx in range(3):
             pct = r[f"pct_pop{col_idx+1}"]; n = r[f"n_pop{col_idx+1}"]; N = r[f"N_pop{col_idx+1}"]
-            label = "Not estimable" if pd.isna(pct) else f"{pct:.1f}%\n({int(n)}/{int(N)})"
+            label = "Not estimable" if pd.isna(pct) else f"{pct:.1f}% ({int(n)}/{int(N)})"
             ax.text(col_idx, row_idx, label, ha="center", va="center", fontsize=7,
                     color="white" if pd.notna(pct) and pct > 0.6*np.nanmax(values) else "black")
     ax.set_title("Baseline comorbidity prevalence by Pop")
@@ -755,14 +845,14 @@ def source_mapping(raw_columns: Iterable[str]) -> pd.DataFrame:
     rows=[]
     for c in CONDITIONS:
         present=[x for x in c.primary if x in raw_columns]
-        rows.append({"condition":c.name,"primary_source_columns":"|".join(c.primary),"sensitivity_source_columns":"|".join(c.sensitivity),"derivation_rule":"Logical OR across available primary sources; empty baseline condition coded absent","definition_type":c.definition_type,"availability":"available" if present else "unavailable","n_unrecognized_values":int(counts["source_column"].isin(c.primary+c.sensitivity).sum()) if len(counts) else 0})
+        rows.append({"condition":c.name,"primary_source_columns":"|".join(c.primary),"sensitivity_source_columns":"|".join(c.sensitivity),"derivation_rule":"Logical OR across available primary sources; empty baseline condition coded absent","definition_type":c.definition_type,"category":c.category,"availability":"available" if present else "unavailable","n_unrecognized_values":int(counts["source_column"].isin(c.primary+c.sensitivity).sum()) if len(counts) else 0})
     return pd.DataFrame(rows)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args=parse_args(argv); ensure_directories(); np.random.seed(args.random_seed)
     intermediate_outputs = [path for parquet_path in INTERMEDIATE_PATHS for path in (parquet_path, parquet_path.with_suffix(".csv"))]
-    outputs=intermediate_outputs+[TABLES_DIR/"07_comorbidities_overall.csv",TABLES_DIR/"07_comorbidities_by_pop.csv",TABLES_DIR/"07_comorbidities_progression.csv",FIGURES_DIR/"07_comorbidities_dotplot.pdf",FIGURES_DIR/"07_comorbidities_grouped_bar.pdf",FIGURES_DIR/"07_comorbidities_progression_forestplot.pdf",QC_DIR/"07_comorbidities_qc.json",QC_DIR/"07_comorbidities_missingness.csv",QC_DIR/"07_comorbidities_source_mapping.csv",QC_DIR/"07_comorbidities_model_diagnostics.csv",QC_DIR/"07_comorbidities_patient_duplicates.csv",QC_DIR/"07_comorbidities_unavailable_conditions.csv",QC_DIR/"07_comorbidities_unrecognized_values.csv",LOG_PATH]
+    outputs=intermediate_outputs+[TABLES_DIR/"07_comorbidities_overall.csv",TABLES_DIR/"07_comorbidities_by_pop.csv",TABLES_DIR/"07_comorbidities_overall_by_category.csv",TABLES_DIR/"07_comorbidities_progression.csv",FIGURES_DIR/"07_comorbidities_dotplot.pdf",FIGURES_DIR/"07_comorbidities_grouped_bar.pdf",FIGURES_DIR/"07_comorbidities_progression_forestplot.pdf",QC_DIR/"07_comorbidities_qc.json",QC_DIR/"07_comorbidities_missingness.csv",QC_DIR/"07_comorbidities_source_mapping.csv",QC_DIR/"07_comorbidities_model_diagnostics.csv",QC_DIR/"07_comorbidities_patient_duplicates.csv",QC_DIR/"07_comorbidities_unavailable_conditions.csv",QC_DIR/"07_comorbidities_unrecognized_values.csv",LOG_PATH]
     existing = [p for p in outputs if p.exists()]
     logger=setup_logging()
     if existing:
@@ -772,7 +862,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     logger.info("[2/8] Building baseline comorbidity indicators")
     base,duplicates,n_pipe=build_baseline_comorbidity_dataset(raw,spine,pop)
     logger.info("[3/8] Writing baseline intermediate dataset"); write_intermediate_dataset(base,BASELINE_PATH)
-    logger.info("[4/8] Estimating overall prevalence"); overall=summarize_overall_prevalence(base); overall.to_csv(TABLES_DIR/"07_comorbidities_overall.csv",index=False); create_dotplot(overall)
+    logger.info("[4/8] Estimating overall prevalence"); overall=summarize_overall_prevalence(base); overall.to_csv(TABLES_DIR/"07_comorbidities_overall.csv",index=False); summarize_overall_by_category(base).to_csv(TABLES_DIR/"07_comorbidities_overall_by_category.csv",index=False); create_dotplot(overall)
     logger.info("[5/8] Comparing prevalence across Pop 1-3"); by_pop=summarize_prevalence_by_pop(base,args.monte_carlo_replicates,args.random_seed); by_pop.to_csv(TABLES_DIR/"07_comorbidities_by_pop.csv",index=False); create_grouped_barplot(by_pop)
     logger.info("[6/8] Building longitudinal outcomes"); long=build_longitudinal_essdai_dataset(raw,spine,pop,domains,base); write_intermediate_dataset(long,LONGITUDINAL_PATH); severe=build_severe5_survival_dataset(long,base); write_intermediate_dataset(severe,SEVERE_PATH); new_domain,domain_audit=build_new_domain_survival_dataset(long,base); write_intermediate_dataset(new_domain,NEW_DOMAIN_PATH); write_intermediate_dataset(domain_audit,DOMAIN_AUDIT_PATH)
     logger.info("[7/8] Fitting progression models"); progression_rows=[]; diagnostics=[]
