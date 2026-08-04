@@ -27,7 +27,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
-from scipy.stats import chi2_contingency, fisher_exact, norm
+from scipy.stats import chi2_contingency, fisher_exact
 from statsmodels.genmod.cov_struct import Exchangeable
 from statsmodels.genmod.families import Gaussian
 from statsmodels.genmod.generalized_estimating_equations import GEE
@@ -55,7 +55,7 @@ ESSDAI_RAW_QC_COL = config.ESSDAI_TOTAL_RAW
 # Section 5 progression uses the same moderate-to-severe threshold as Pop 1.
 SEVERE_THRESHOLD = config.ESSDAI_SEVERE
 RANDOM_SEED = 20260728
-SCRIPT_VERSION = "1.1.0"
+SCRIPT_VERSION = "1.2.0"
 
 FIGURES_DIR = common.OUTPUTS_DIR / "figures" / "blockA"
 TABLES_DIR = common.OUTPUTS_DIR / "tables" / "blockA"
@@ -103,8 +103,37 @@ CONDITIONS = [
     Condition("myositis", "Myositis", ("rheumatological_comorbidities__polymyositis", "rheumatological_comorbidities__polymyositis_hx", "rheumatological_comorbidities__polymyositis_confirm", "rheumatological_comorbidities__dermatomyositis", "rheumatological_comorbidities__dermatomyositis_hx", "rheumatological_comorbidities__dermatomyositis_confirm"), ("sjogren's_syndrome_history__myositis_myalgia",)),
     Condition("cryoglobulinemia", "Cryoglobulinemia", ("rheumatological_comorbidities__cryoglobulinemia", "rheumatological_comorbidities__cryoglobulinemia_hx", "rheumatological_comorbidities__cryoglobulinemia_confirm")),
     Condition("chronic_bronchitis", "Chronic bronchitis", ("past_medical_history__respiratory_hx_bronchitis",)),
+
+    Condition("sle", "Systemic lupus erythematosus", ("rheumatological_comorbidities__sle1", "rheumatological_comorbidities__sle_hx", "rheumatological_comorbidities__sle_confirmed")),
+    Condition("rheumatoid_arthritis", "Rheumatoid arthritis", ("rheumatological_comorbidities__ra", "rheumatological_comorbidities__ra_hx", "rheumatological_comorbidities__ra_confirm")),
+    Condition("systemic_sclerosis", "Systemic sclerosis", ("rheumatological_comorbidities__systemic_sclerosis", "rheumatological_comorbidities__systmc_sclerosis_hx", "rheumatological_comorbidities__systmc_sclerosis_confirm")),
+    Condition("mixed_connective_tissue_disease", "Mixed connective tissue disease", ("rheumatological_comorbidities__mixed_connective_tissue_disease", "rheumatological_comorbidities__mixed_connect_tissue_hx", "rheumatological_comorbidities__mixed_connect_tissue_confirm")),
+    Condition("antiphospholipid_syndrome", "Antiphospholipid syndrome", ("rheumatological_comorbidities__antiphospholipid_syndrome", "rheumatological_comorbidities__antiphospholipid_syn_hx", "rheumatological_comorbidities__antiphospholipid_syn_confirm")),
+    Condition("primary_biliary_cholangitis", "Primary biliary cholangitis", ("rheumatological_comorbidities__primary_billiary_cirrhosis", "rheumatological_comorbidities__prim_billiary_cirrhosis_hx", "rheumatological_comorbidities__prim_billiary_cirrhosis_confirm")),
+    Condition("osteopenia", "Osteopenia", ("rheumatological_comorbidities__osteopenia", "rheumatological_comorbidities__osteopenia_hx", "rheumatological_comorbidities__osteopenia_confirm")),
+    Condition("osteoarthritis", "Osteoarthritis", ("rheumatological_comorbidities__osteoarthritis", "rheumatological_comorbidities__osteoarthritis_hx", "rheumatological_comorbidities__osteoarthritis_confirm")),
+    Condition("sarcoidosis", "Sarcoidosis", ("rheumatological_comorbidities__sarcoidosis", "rheumatological_comorbidities__sarcoidosis_hx", "rheumatological_comorbidities__sarcoidosis_confirm")),
+    Condition("crystalline_arthropathy", "Crystalline arthropathy", ("rheumatological_comorbidities__crystalline_arthropathy", "rheumatological_comorbidities__crystalline_arthropathy_hx", "rheumatological_comorbidities__crystalline_arthro_confirm")),
+    Condition("inflammatory_bowel_disease", "Inflammatory bowel disease", ("rheumatological_comorbidities__inflam_bowel", "rheumatological_comorbidities__inflam_bowel_hx", "rheumatological_comorbidities__inflam_bowel_confirm")),
+    Condition("other_rheumatological_condition", "Other rheumatological condition", ("rheumatological_comorbidities__rheumatological_other", "rheumatological_comorbidities__rheumatological_other_hx", "rheumatological_comorbidities__rheumatological_other_confirm")),
 ]
 CONDITION_NAMES = [c.name for c in CONDITIONS]
+PROGRESSION_CONDITION_NAMES = {
+    "fibromyalgia",
+    "osteoporosis",
+    "ild",
+    "thyroid_disease",
+    "depression",
+    "anxiety",
+    "raynaud",
+    "peripheral_neuropathy",
+    "renal_tubular_acidosis",
+    "myositis",
+    "cryoglobulinemia",
+    "chronic_bronchitis",
+}
+PROGRESSION_CONDITIONS = [c for c in CONDITIONS if c.name in PROGRESSION_CONDITION_NAMES]
+PROGRESSION_CONDITION_NAMES_ORDERED = [c.name for c in PROGRESSION_CONDITIONS]
 SUBTYPE_COLS = ("past_medical_history__thyroid_disease_spfy", "past_medical_history__neuro_hx_neuropathy_spfy")
 
 UNAVAILABLE = {
@@ -365,28 +394,18 @@ def build_baseline_comorbidity_dataset(raw: pd.DataFrame, spine: pd.DataFrame, p
     return base, duplicate_audit, n_pipe
 
 
-def calculate_wilson_ci(n: int, denominator: int, alpha: float = .05) -> tuple[float, float]:
-    if denominator <= 0:
-        return np.nan, np.nan
-    z = norm.ppf(1 - alpha / 2); p = n / denominator; d = 1 + z*z/denominator
-    center = (p + z*z/(2*denominator)) / d
-    half = z * math.sqrt(p*(1-p)/denominator + z*z/(4*denominator**2)) / d
-    return 100*(center-half), 100*(center+half)
-
-
 def summarize_overall_prevalence(base: pd.DataFrame) -> pd.DataFrame:
     rows = []
     n_total = len(base)
     for c in CONDITIONS:
         s = base[c.name].fillna(False).astype("boolean")
         n_eval, n_pos = int(s.notna().sum()), int(s.eq(True).sum())
-        lo, hi = calculate_wilson_ci(n_pos, n_total)
         rows.append({"condition": c.name, "display_label": c.label, "definition_type": c.definition_type,
                      "source_columns": "|".join(c.primary), "n_total_cohort": n_total, "n_evaluable": n_eval,
                      "n_positive": n_pos, "n_negative": int(s.eq(False).sum()), "n_missing": int(s.isna().sum()),
                      "pct_total_cohort": 100*n_pos/n_total if n_total else np.nan,
                      "pct_among_evaluable": 100*n_pos/n_eval if n_eval else np.nan,
-                     "ci95_low": lo, "ci95_high": hi, "availability_status": "available", "notes": c.notes})
+                     "availability_status": "available", "notes": c.notes})
     out = pd.DataFrame(rows).sort_values(["pct_total_cohort", "display_label"], ascending=[False, True]).reset_index(drop=True)
     out["rank_by_prevalence"] = out["pct_total_cohort"].rank(method="min", ascending=False).astype("Int64")
     return out
@@ -416,13 +435,15 @@ def calculate_or_and_fisher(table: np.ndarray) -> dict[str, Any]:
 
 def summarize_prevalence_by_pop(base: pd.DataFrame, replicates: int, seed: int) -> pd.DataFrame:
     rng = np.random.default_rng(seed); rows = []
+    n_total = len(base)
     for c in CONDITIONS:
-        row: dict[str, Any] = {"condition": c.name, "display_label": c.label}
+        row: dict[str, Any] = {"condition": c.name, "display_label": c.label,
+                                "pct_total_cohort": 100*int(base[c.name].fillna(False).eq(True).sum())/n_total if n_total else np.nan}
         table = []
         for i, pop_name in enumerate(("Pop1", "Pop2", "Pop3"), 1):
             s = base.loc[base["baseline_pop"].eq(pop_name), c.name].fillna(False).astype("boolean")
-            n, N = int(s.eq(True).sum()), int(s.notna().sum()); lo, hi = calculate_wilson_ci(n, N)
-            row.update({f"n_pop{i}": n, f"N_pop{i}": N, f"pct_pop{i}": 100*n/N if N else np.nan, f"ci95_pop{i}_low": lo, f"ci95_pop{i}_high": hi})
+            n, N = int(s.eq(True).sum()), int(s.notna().sum())
+            row.update({f"n_pop{i}": n, f"N_pop{i}": N, f"pct_pop{i}": 100*n/N if N else np.nan})
             table.append([n, int(s.eq(False).sum())])
         arr = np.asarray(table)
         if (arr.sum(axis=1) == 0).any() or (arr.sum(axis=0) == 0).any():
@@ -633,8 +654,7 @@ def _nonnegative_interval_errors(
 ) -> np.ndarray:
     """Return matplotlib-compatible CI distances, guarding round-off error.
 
-    Matplotlib rejects even tiny negative error distances.  Wilson bounds can
-    differ from their displayed estimate at floating-point precision, so CI
+    Matplotlib rejects even tiny negative error distances. Confidence interval
     distances are clipped at zero after validating the bound ordering.
     """
     estimate_array = np.asarray(estimate, dtype=float)
@@ -648,35 +668,46 @@ def _nonnegative_interval_errors(
 
 
 def create_dotplot(overall: pd.DataFrame) -> None:
-    d = overall.iloc[::-1]; fig, ax = plt.subplots(figsize=(10, max(6, .55*len(d))))
-    y = np.arange(len(d)); estimate = d["pct_total_cohort"].to_numpy(dtype=float)
-    finite = np.isfinite(estimate) & d["ci95_low"].notna().to_numpy() & d["ci95_high"].notna().to_numpy()
-    errors = _nonnegative_interval_errors(estimate, d["ci95_low"], d["ci95_high"])
-    ax.errorbar(estimate[finite], y[finite], xerr=errors[:, finite], fmt="o", color="#2c7fb8", capsize=3)
-    ax.set_yticks(y, d["display_label"]); ax.set_xlabel("Prevalence in total baseline cohort (%)"); ax.grid(axis="x", alpha=.25)
-    for yy, (_, r) in zip(y, d.iterrows()): ax.annotate(f"{r.n_positive}/{r.n_total_cohort}", (r.pct_total_cohort, yy), xytext=(6, 4), textcoords="offset points", fontsize=8)
-    fig.text(.01, .01, "Points use the total baseline cohort denominator; empty condition fields are coded as absent. Wilson 95% CIs.", fontsize=8)
+    d = overall.sort_values(["pct_total_cohort", "display_label"], ascending=[True, False])
+    fig, ax = plt.subplots(figsize=(10, max(6, .45*len(d))))
+    y = np.arange(len(d)); pct = d["pct_total_cohort"].to_numpy(dtype=float)
+    bars = ax.barh(y, pct, color="#2c7fb8")
+    ax.set_yticks(y, d["display_label"]); ax.set_xlabel("Patients at baseline (%)"); ax.grid(axis="x", alpha=.25)
+    xmax = max(5.0, float(np.nanmax(pct)) if len(pct) else 5.0)
+    ax.set_xlim(0, xmax * 1.25)
+    for bar, (_, r) in zip(bars, d.iterrows()):
+        ax.annotate(f"{int(r.n_positive)}/{int(r.n_total_cohort)} ({r.pct_total_cohort:.1f}%)",
+                    (bar.get_width(), bar.get_y() + bar.get_height()/2),
+                    xytext=(5, 0), textcoords="offset points", va="center", fontsize=8)
+    fig.text(.01, .01, "Bars use the total baseline cohort denominator; empty condition fields are coded as absent.", fontsize=8)
     fig.subplots_adjust(bottom=.1, left=.3); _plot_save(fig, FIGURES_DIR/"07_comorbidities_dotplot.pdf")
 
 
 def create_grouped_barplot(by_pop: pd.DataFrame) -> None:
-    d = by_pop.merge(pd.DataFrame({"condition": CONDITION_NAMES, "order": range(len(CONDITION_NAMES))}), on="condition").sort_values("order").iloc[::-1]
-    fig, ax = plt.subplots(figsize=(11, max(7, .65*len(d)))); y = np.arange(len(d)); offsets = (-.22, 0, .22); colors = ("#1b9e77", "#d95f02", "#7570b3")
-    for i, (off, color) in enumerate(zip(offsets, colors), 1):
-        pct=d[f"pct_pop{i}"].to_numpy(dtype=float); lo=d[f"ci95_pop{i}_low"].to_numpy(dtype=float); hi=d[f"ci95_pop{i}_high"].to_numpy(dtype=float)
-        finite = np.isfinite(pct) & np.isfinite(lo) & np.isfinite(hi)
-        errors = _nonnegative_interval_errors(pct, lo, hi)
-        ax.errorbar(pct[finite], (y+off)[finite], xerr=errors[:, finite], fmt="o", label=f"Pop{i}", color=color, capsize=2)
-        for x, yy, n, N in zip(pct, y+off, d[f"n_pop{i}"], d[f"N_pop{i}"]):
-            if np.isfinite(x): ax.annotate(f"{n}/{N}", (x, yy), xytext=(5, 0), textcoords="offset points", va="center", fontsize=7)
-    ax.set_yticks(y, d["display_label"]); ax.set_xlabel("Prevalence in baseline Pop cohort (%)"); ax.legend(ncol=3); ax.grid(axis="x", alpha=.2)
-    fig.text(.01, .01, "Independent, non-stacked conditions. Empty condition fields are coded as absent; labels show positive/total. Error bars are Wilson 95% CIs.", fontsize=8)
-    fig.subplots_adjust(left=.3, bottom=.1); _plot_save(fig, FIGURES_DIR/"07_comorbidities_grouped_bar.pdf")
+    d = by_pop.sort_values(["pct_total_cohort", "display_label"], ascending=[True, False]).reset_index(drop=True)
+    values = d[[f"pct_pop{i}" for i in range(1, 4)]].to_numpy(dtype=float)
+    masked = np.ma.masked_invalid(values)
+    cmap = plt.get_cmap("Blues").copy()
+    cmap.set_bad("#d9d9d9")
+    fig, ax = plt.subplots(figsize=(8, max(7, .45*len(d))))
+    image = ax.imshow(masked, aspect="auto", cmap=cmap, vmin=0, vmax=max(1.0, float(np.nanmax(values)) if np.isfinite(values).any() else 1.0))
+    ax.set_xticks(range(3), ["Pop 1", "Pop 2", "Pop 3"])
+    ax.set_yticks(range(len(d)), d["display_label"])
+    for row_idx, r in d.iterrows():
+        for col_idx in range(3):
+            pct = r[f"pct_pop{col_idx+1}"]; n = r[f"n_pop{col_idx+1}"]; N = r[f"N_pop{col_idx+1}"]
+            label = "Not estimable" if pd.isna(pct) else f"{pct:.1f}%\n({int(n)}/{int(N)})"
+            ax.text(col_idx, row_idx, label, ha="center", va="center", fontsize=7,
+                    color="white" if pd.notna(pct) and pct > 0.6*np.nanmax(values) else "black")
+    ax.set_title("Baseline comorbidity prevalence by Pop")
+    cbar = fig.colorbar(image, ax=ax); cbar.set_label("Prevalence (%)")
+    fig.text(.01, .01, "Cells use baseline Pop denominators; empty condition fields are coded as absent. Grey cells are not estimable.", fontsize=8)
+    fig.subplots_adjust(left=.35, bottom=.12); _plot_save(fig, FIGURES_DIR/"07_comorbidities_grouped_bar.pdf")
 
 
 def create_progression_forestplot(progression: pd.DataFrame) -> None:
     panels = [("Longitudinal ESSDAI trajectory", "Difference in annual ESSDAI slope", 0, False), ("Progression to ESSDAI >=5", "Progression to ESSDAI ≥5", 1, True), ("New ESSDAI-domain involvement", "Development of new ESSDAI-domain involvement", 1, True)]
-    fig, axes = plt.subplots(1, 3, figsize=(18, max(7, .5*len(CONDITIONS))), sharey=True); order = CONDITION_NAMES[::-1]; labels={c.name:c.label for c in CONDITIONS}
+    fig, axes = plt.subplots(1, 3, figsize=(18, max(7, .5*len(PROGRESSION_CONDITIONS))), sharey=True); order = PROGRESSION_CONDITION_NAMES_ORDERED[::-1]; labels={c.name:c.label for c in PROGRESSION_CONDITIONS}
     for ax, (outcome, title, null, logscale) in zip(axes, panels):
         d = progression[(progression["outcome"] == outcome) & ((progression["effect_measure"] == "Beta per year") if "trajectory" in outcome else True)].set_index("comorbidity")
         for y, name in enumerate(order):
@@ -745,7 +776,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     logger.info("[5/8] Comparing prevalence across Pop 1-3"); by_pop=summarize_prevalence_by_pop(base,args.monte_carlo_replicates,args.random_seed); by_pop.to_csv(TABLES_DIR/"07_comorbidities_by_pop.csv",index=False); create_grouped_barplot(by_pop)
     logger.info("[6/8] Building longitudinal outcomes"); long=build_longitudinal_essdai_dataset(raw,spine,pop,domains,base); write_intermediate_dataset(long,LONGITUDINAL_PATH); severe=build_severe5_survival_dataset(long,base); write_intermediate_dataset(severe,SEVERE_PATH); new_domain,domain_audit=build_new_domain_survival_dataset(long,base); write_intermediate_dataset(new_domain,NEW_DOMAIN_PATH); write_intermediate_dataset(domain_audit,DOMAIN_AUDIT_PATH)
     logger.info("[7/8] Fitting progression models"); progression_rows=[]; diagnostics=[]
-    for c in CONDITIONS:
+    for c in PROGRESSION_CONDITIONS:
         rows,diag=fit_mixed_model(long,c); progression_rows.extend(rows); diagnostics.append(diag)
         row,diag=fit_cox_model(severe,c,"severe5_event","Progression to ESSDAI >=5",args.minimum_events); progression_rows.append(row); diagnostics.append(diag)
         row,diag=fit_cox_model(new_domain,c,"new_domain_event","New ESSDAI-domain involvement",args.minimum_events); progression_rows.append(row); diagnostics.append(diag)
