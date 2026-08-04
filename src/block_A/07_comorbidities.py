@@ -24,6 +24,7 @@ from typing import Any, Iterable, Sequence
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
@@ -55,7 +56,7 @@ ESSDAI_RAW_QC_COL = config.ESSDAI_TOTAL_RAW
 # Section 5 progression uses the same moderate-to-severe threshold as Pop 1.
 SEVERE_THRESHOLD = config.ESSDAI_SEVERE
 RANDOM_SEED = 20260728
-SCRIPT_VERSION = "1.3.0"
+SCRIPT_VERSION = "1.4.0"
 
 FIGURES_DIR = common.OUTPUTS_DIR / "figures" / "blockA"
 TABLES_DIR = common.OUTPUTS_DIR / "tables" / "blockA"
@@ -89,6 +90,7 @@ class Condition:
     definition_type: str = "primary"
     notes: str = ""
     category: str = "rheumatological"
+    model_eligible: bool = False
 
 
 EXISTING_AND_RHEUMATOLOGICAL_CONDITIONS = [
@@ -175,22 +177,77 @@ PAST_MEDICAL_HISTORY_CONDITIONS = [
 ]
 
 CONDITIONS = EXISTING_AND_RHEUMATOLOGICAL_CONDITIONS + PAST_MEDICAL_HISTORY_CONDITIONS
-CONDITION_NAMES = [c.name for c in CONDITIONS]
-PROGRESSION_CONDITION_NAMES = {
-    "fibromyalgia",
-    "osteoporosis",
-    "ild",
-    "thyroid_disease",
-    "depression",
-    "anxiety",
-    "raynaud",
-    "peripheral_neuropathy",
-    "renal_tubular_acidosis",
-    "myositis",
-    "cryoglobulinemia",
-    "chronic_bronchitis",
+
+CATEGORY_OVERRIDES = {
+    # Autoimmune/systemic history.
+    "sle": "autoimmune_systemic",
+    "rheumatoid_arthritis": "autoimmune_systemic",
+    "systemic_sclerosis": "autoimmune_systemic",
+    "mixed_connective_tissue_disease": "autoimmune_systemic",
+    "myositis": "autoimmune_systemic",
+    "antiphospholipid_syndrome": "autoimmune_systemic",
+    "cryoglobulinemia": "autoimmune_systemic",
+    "sarcoidosis": "autoimmune_systemic",
+    "vasculitis": "autoimmune_systemic",
+    "autoimmune_hepatitis": "autoimmune_systemic",
+    "celiac_disease": "autoimmune_systemic",
+    "primary_biliary_cholangitis": "autoimmune_systemic",
+    "primary_sclerosing_cholangitis": "autoimmune_systemic",
+    "inflammatory_bowel_disease": "autoimmune_systemic",
+    "psoriasis": "autoimmune_systemic",
+    "vitiligo": "autoimmune_systemic",
+    # Rheumatologic/musculoskeletal.
+    "fibromyalgia": "rheumatologic_musculoskeletal",
+    "osteoporosis": "rheumatologic_musculoskeletal",
+    "osteopenia": "rheumatologic_musculoskeletal",
+    "osteoarthritis": "rheumatologic_musculoskeletal",
+    "crystalline_arthropathy": "rheumatologic_musculoskeletal",
+    "raynaud": "rheumatologic_musculoskeletal",
+    "other_rheumatological_condition": "rheumatologic_musculoskeletal",
+    # Cardiometabolic/vascular.
+    "hypertension": "cardiometabolic",
+    "hyperlipidemia": "cardiometabolic",
+    "diabetes_mellitus": "cardiometabolic",
+    "coronary_artery_disease": "cardiometabolic",
+    "myocardial_infarction": "cardiometabolic",
+    "peripheral_vascular_disease": "cardiometabolic",
+    "pericarditis": "cardiometabolic",
+    "valvular_disease": "cardiometabolic",
+    "cerebrovascular_disease": "cardiometabolic",
+    "pulmonary_embolism": "cardiometabolic",
+    # Renamed legacy buckets.
+    "thyroid_disease": "cardiometabolic",
+    "depression": "neurologic_psychological",
+    "anxiety": "neurologic_psychological",
+    "peripheral_neuropathy": "neurologic_psychological",
+    "multiple_sclerosis": "neurologic_psychological",
+    "seizures": "neurologic_psychological",
+    "chorea": "neurologic_psychological",
+    "cognitive_dysfunction": "neurologic_psychological",
+    "headaches": "neurologic_psychological",
+    "autonomic_dysfunction": "neurologic_psychological",
+    "chronic_fatigue_syndrome": "neurologic_psychological",
+    "gerd": "gastrointestinal_hepatobiliary",
+    "irritable_bowel_syndrome": "gastrointestinal_hepatobiliary",
+    "pancreatitis": "gastrointestinal_hepatobiliary",
+    "hepatitis_b": "gastrointestinal_hepatobiliary",
+    "hepatitis_c": "gastrointestinal_hepatobiliary",
 }
-PROGRESSION_CONDITIONS = [c for c in CONDITIONS if c.name in PROGRESSION_CONDITION_NAMES]
+CONDITIONS = [
+    Condition(
+        c.name, c.label, c.primary, c.sensitivity, c.definition_type, c.notes,
+        CATEGORY_OVERRIDES.get(c.name, "gastrointestinal_hepatobiliary" if c.category == "gastrointestinal" else c.category),
+        model_eligible=(not any(source.startswith("past_medical_history__") for source in (*c.primary, *c.sensitivity)) and c.name != "other_rheumatological_condition"),
+    )
+    for c in CONDITIONS
+]
+CONDITION_NAMES = [c.name for c in CONDITIONS]
+PROGRESSION_CONDITIONS = [condition for condition in CONDITIONS if condition.model_eligible]
+assert not any(
+    source.startswith("past_medical_history__")
+    for condition in PROGRESSION_CONDITIONS
+    for source in condition.primary + condition.sensitivity
+)
 PROGRESSION_CONDITION_NAMES_ORDERED = [c.name for c in PROGRESSION_CONDITIONS]
 SUBTYPE_COLS = ("past_medical_history__thyroid_disease_spfy", "past_medical_history__neuro_hx_neuropathy_spfy")
 
@@ -452,6 +509,88 @@ def build_baseline_comorbidity_dataset(raw: pd.DataFrame, spine: pd.DataFrame, p
     return base, duplicate_audit, n_pipe
 
 
+
+def original_empty_counts(raw: pd.DataFrame) -> pd.DataFrame:
+    """Count original empty/NaN source values for extract-structure QC only."""
+    rows = []
+    missing_tokens = {str(x).strip().lower() for x in config.MISSING_STRINGS}
+    for condition in CONDITIONS:
+        for source in (*condition.primary, *condition.sensitivity):
+            if source not in raw:
+                continue
+            values = raw[source]
+            empty = values.isna() | values.astype("string").str.strip().str.lower().isin(missing_tokens | {""})
+            rows.append({
+                "condition": condition.name,
+                "source_column": source,
+                "n_original_empty": int(empty.sum()),
+                "n_rows": len(values),
+            })
+    return pd.DataFrame(rows)
+
+
+def build_longitudinal_comorbidity_history(raw: pd.DataFrame, spine: pd.DataFrame) -> pd.DataFrame:
+    """Derive per-visit and cumulative comorbidity history (Yes=True; empty/NaN=False)."""
+    parsed = add_parsed_visit_dates(raw, PATIENT_ID_COL, VISIT_DATE_COL)
+    derived = derive_comorbidity_indicators(parsed)
+    collapsed, _ = collapse_same_patient_date(derived)
+    keep = ["patient_id", "visit_date", *CONDITION_NAMES]
+    history = spine[["patient_id", "visit_id", "visit_date", "visit_number", "observed_baseline_date"]].merge(
+        collapsed[keep], on=["patient_id", "visit_date"], how="left", validate="one_to_one"
+    )
+    history[CONDITION_NAMES] = history[CONDITION_NAMES].fillna(False).astype("boolean")
+    history = history.sort_values(["patient_id", "visit_number", "visit_date"]).reset_index(drop=True)
+    for condition in CONDITIONS:
+        history[f"{condition.name}_documented_visit"] = history[condition.name].astype("boolean")
+        history[condition.name] = history.groupby("patient_id", sort=False)[condition.name].cummax().astype("boolean")
+    return history
+
+
+def summarize_ever_documented(history: pd.DataFrame, baseline: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    n_patients = baseline["patient_id"].nunique()
+    for c in CONDITIONS:
+        ever = history.groupby("patient_id")[c.name].max().reindex(baseline["patient_id"]).fillna(False).astype(bool)
+        base_pos = baseline.set_index("patient_id")[c.name].fillna(False).astype(bool)
+        first_after = history.loc[(history["visit_number"] > 0) & history[f"{c.name}_documented_visit"].eq(True)].groupby("patient_id")["visit_date"].min()
+        after_without_base = int(base_pos.eq(False).reindex(first_after.index).fillna(False).sum())
+        n_ever = int(ever.sum())
+        rows.append({"condition": c.name, "display_label": c.label, "category": c.category, "n_patients": n_patients,
+                     "n_ever_positive": n_ever, "pct_ever": 100*n_ever/n_patients if n_patients else np.nan,
+                     "n_baseline_positive": int(base_pos.sum()), "n_first_documented_after_baseline": after_without_base})
+    return pd.DataFrame(rows).sort_values(["pct_ever", "display_label"], ascending=[False, True]).reset_index(drop=True)
+
+
+def summarize_documented_incidence(history: pd.DataFrame, baseline: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    base_idx = baseline.set_index("patient_id")
+    for c in CONDITIONS:
+        condition_rows = []
+        for pid, g in history.sort_values("visit_date").groupby("patient_id"):
+            if pid not in base_idx.index:
+                continue
+            bpos = bool(base_idx.at[pid, c.name])
+            follow = g.loc[g["visit_number"] > 0]
+            if bpos or follow.empty:
+                continue
+            bdate = pd.to_datetime(base_idx.at[pid, "baseline_date"])
+            positives = follow.loc[follow[f"{c.name}_documented_visit"].eq(True), "visit_date"]
+            event_date = positives.min() if not positives.empty else pd.NaT
+            end = event_date if pd.notna(event_date) else follow["visit_date"].max()
+            years = (pd.to_datetime(end) - bdate).days / 365.25
+            if years < 0:
+                continue
+            condition_rows.append({"event": int(pd.notna(event_date)), "followup_years": years})
+        d = pd.DataFrame(condition_rows)
+        n_at_risk = len(d); n_incident = int(d["event"].sum()) if len(d) else 0
+        py = float(d["followup_years"].sum()) if len(d) else 0.0
+        event_times = d.loc[d["event"].eq(1), "followup_years"] if len(d) else pd.Series(dtype=float)
+        rows.append({"condition": c.name, "display_label": c.label, "category": c.category, "n_at_risk": n_at_risk,
+                     "n_incident": n_incident, "incidence_proportion_pct": 100*n_incident/n_at_risk if n_at_risk else np.nan,
+                     "person_years": py, "incidence_rate_per_100_person_years": 100*n_incident/py if py > 0 else np.nan,
+                     "median_time_to_first_documentation_years": float(event_times.median()) if len(event_times) else np.nan})
+    return pd.DataFrame(rows).sort_values(["incidence_rate_per_100_person_years", "display_label"], ascending=[False, True]).reset_index(drop=True)
+
 def summarize_overall_prevalence(base: pd.DataFrame) -> pd.DataFrame:
     rows = []
     n_total = len(base)
@@ -459,9 +598,9 @@ def summarize_overall_prevalence(base: pd.DataFrame) -> pd.DataFrame:
         s = base[c.name].fillna(False).astype("boolean")
         n_eval, n_pos = int(s.notna().sum()), int(s.eq(True).sum())
         rows.append({"condition": c.name, "display_label": c.label, "definition_type": c.definition_type,
-                     "category": c.category, "source_columns": "|".join(c.primary), "n_total_cohort": n_total, "n_evaluable": n_eval,
-                     "n_positive": n_pos, "n_negative": int(s.eq(False).sum()), "n_missing": int(s.isna().sum()),
-                     "pct_total_cohort": 100*n_pos/n_total if n_total else np.nan,
+                     "category": c.category, "source_columns": "|".join(c.primary), "n_baseline_total": n_total, "n_total_cohort": n_total, "n_evaluable": n_eval,
+                     "n_baseline_positive": n_pos, "n_positive": n_pos, "n_negative": int(s.eq(False).sum()), "n_missing_clinical": 0, "n_missing": 0,
+                     "pct_baseline": 100*n_pos/n_total if n_total else np.nan, "pct_total_cohort": 100*n_pos/n_total if n_total else np.nan,
                      "pct_among_evaluable": 100*n_pos/n_eval if n_eval else np.nan,
                      "availability_status": "available", "notes": c.notes})
     out = pd.DataFrame(rows).sort_values(["pct_total_cohort", "display_label"], ascending=[False, True]).reset_index(drop=True)
@@ -750,6 +889,87 @@ def _nonnegative_interval_errors(
                       np.maximum(upper_array - estimate_array, 0.0)))
 
 
+
+def _category_order() -> list[str]:
+    preferred = ["autoimmune_systemic", "rheumatologic_musculoskeletal", "cardiometabolic", "pulmonary",
+                 "gastrointestinal_hepatobiliary", "neurologic_psychological", "renal_urinary", "infection", "malignancy"]
+    observed = {c.category for c in CONDITIONS}
+    return [c for c in preferred if c in observed] + sorted(observed - set(preferred))
+
+
+def create_baseline_by_category_plot(overall: pd.DataFrame) -> None:
+    path = FIGURES_DIR/"07_comorbidities_baseline_by_category.pdf"
+    with PdfPages(path) as pdf:
+        for category in _category_order():
+            d = overall.loc[(overall["category"].eq(category)) & (overall["n_baseline_positive"] > 0)].sort_values("pct_baseline")
+            fig, ax = plt.subplots(figsize=(10, max(3, .42*len(d))))
+            if d.empty:
+                ax.text(.5, .5, "No baseline positives", ha="center", va="center"); ax.axis("off")
+            else:
+                bars = ax.barh(np.arange(len(d)), d["pct_baseline"], color="#2c7fb8")
+                ax.set_yticks(np.arange(len(d)), d["display_label"]); ax.set_xlabel("Baseline documented history (%)"); ax.set_title(category); ax.grid(axis="x", alpha=.25)
+                ax.set_xlim(0, max(5.0, float(d["pct_baseline"].max())*1.25))
+                for bar, (_, r) in zip(bars, d.iterrows()):
+                    ax.annotate(f"{int(r.n_baseline_positive)}/{int(r.n_baseline_total)} ({r.pct_baseline:.1f}%)", (bar.get_width(), bar.get_y()+bar.get_height()/2), xytext=(5,0), textcoords="offset points", va="center", fontsize=8)
+            fig.text(.01, .01, "Baseline documented history; empty original condition fields are coded absent, not clinical missingness.", fontsize=8)
+            fig.subplots_adjust(left=.35, bottom=.14); pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
+    if path.stat().st_size < 1000: raise IOError(f"Generated figure appears empty: {path}")
+
+
+def create_by_pop_by_category_plot(by_pop: pd.DataFrame) -> None:
+    path = FIGURES_DIR/"07_comorbidities_by_pop_by_category.pdf"
+    with PdfPages(path) as pdf:
+        for category in _category_order():
+            d = by_pop.loc[by_pop["category"].eq(category)].copy()
+            d = d.loc[[sum(row[f"n_pop{i}"] for i in range(1,4)) > 0 for _, row in d.iterrows()]].sort_values("display_label")
+            fig, ax = plt.subplots(figsize=(9, max(3, .45*len(d))))
+            if d.empty:
+                ax.text(.5, .5, "No baseline positives", ha="center", va="center"); ax.axis("off")
+            else:
+                vals = d[[f"pct_pop{i}" for i in range(1,4)]].to_numpy(float); masked=np.ma.masked_invalid(vals); cmap=plt.get_cmap("Blues").copy(); cmap.set_bad("#d9d9d9")
+                image=ax.imshow(masked, aspect="auto", cmap=cmap, vmin=0, vmax=max(1.0, float(np.nanmax(vals)) if np.isfinite(vals).any() else 1.0))
+                ax.set_xticks(range(3), ["Pop1", "Pop2", "Pop3"]); ax.set_yticks(range(len(d)), d["display_label"]); ax.set_title(category)
+                for ri, r in d.reset_index(drop=True).iterrows():
+                    for ci in range(3):
+                        pct,n,N = r[f"pct_pop{ci+1}"], r[f"n_pop{ci+1}"], r[f"N_pop{ci+1}"]
+                        ax.text(ci, ri, "Not estimable" if pd.isna(pct) else f"{pct:.1f}% ({int(n)}/{int(N)})", ha="center", va="center", fontsize=7)
+                fig.colorbar(image, ax=ax, label="Baseline documented history (%)")
+            fig.subplots_adjust(left=.35, bottom=.12); pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
+    if path.stat().st_size < 1000: raise IOError(f"Generated figure appears empty: {path}")
+
+
+def create_ever_by_category_plot(ever: pd.DataFrame) -> None:
+    path = FIGURES_DIR/"07_comorbidities_ever_by_category.pdf"
+    with PdfPages(path) as pdf:
+        for category in _category_order():
+            d = ever.loc[(ever["category"].eq(category)) & (ever["n_ever_positive"] > 0)].sort_values("pct_ever")
+            fig, ax = plt.subplots(figsize=(10, max(3, .42*len(d))))
+            if d.empty:
+                ax.text(.5, .5, "No ever documented positives", ha="center", va="center"); ax.axis("off")
+            else:
+                bars=ax.barh(np.arange(len(d)), d["pct_ever"], color="#41ab5d"); ax.set_yticks(np.arange(len(d)), d["display_label"]); ax.set_xlabel("Ever documented (%)"); ax.set_title(category); ax.grid(axis="x", alpha=.25)
+                ax.set_xlim(0, max(5.0, float(d["pct_ever"].max())*1.25))
+                for bar, (_, r) in zip(bars, d.iterrows()): ax.annotate(f"{int(r.n_ever_positive)}/{int(r.n_patients)} ({r.pct_ever:.1f}%)", (bar.get_width(), bar.get_y()+bar.get_height()/2), xytext=(5,0), textcoords="offset points", va="center", fontsize=8)
+            fig.subplots_adjust(left=.35, bottom=.12); pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
+    if path.stat().st_size < 1000: raise IOError(f"Generated figure appears empty: {path}")
+
+
+def create_incidence_by_category_plot(incidence: pd.DataFrame) -> None:
+    path = FIGURES_DIR/"07_comorbidities_incidence_by_category.pdf"
+    with PdfPages(path) as pdf:
+        for category in _category_order():
+            d = incidence.loc[incidence["category"].eq(category) & incidence["n_at_risk"].gt(0) & incidence["n_incident"].gt(0) & incidence["person_years"].gt(0)].sort_values("incidence_rate_per_100_person_years")
+            fig, ax = plt.subplots(figsize=(10, max(3, .42*len(d))))
+            if d.empty:
+                ax.text(.5, .5, "No newly documented during follow-up events", ha="center", va="center"); ax.axis("off")
+            else:
+                bars=ax.barh(np.arange(len(d)), d["incidence_rate_per_100_person_years"], color="#fb6a4a"); ax.set_yticks(np.arange(len(d)), d["display_label"]); ax.set_xlabel("Newly documented during follow-up per 100 person-years"); ax.set_title(category); ax.grid(axis="x", alpha=.25)
+                ax.set_xlim(0, max(1.0, float(d["incidence_rate_per_100_person_years"].max())*1.25))
+                for bar, (_, r) in zip(bars, d.iterrows()): ax.annotate(f"{int(r.n_incident)}/{r.person_years:.1f} PY", (bar.get_width(), bar.get_y()+bar.get_height()/2), xytext=(5,0), textcoords="offset points", va="center", fontsize=8)
+            fig.text(.01, .01, "Operational/documented incidence: first positive visit date may not equal the true clinical onset date.", fontsize=8)
+            fig.subplots_adjust(left=.35, bottom=.14); pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
+    if path.stat().st_size < 1000: raise IOError(f"Generated figure appears empty: {path}")
+
 def create_dotplot(overall: pd.DataFrame) -> None:
     d = overall.sort_values(["pct_total_cohort", "display_label"], ascending=[False, True]).head(20)
     d = d.sort_values(["pct_total_cohort", "display_label"], ascending=[True, False])
@@ -797,21 +1017,30 @@ def create_grouped_barplot(by_pop: pd.DataFrame) -> None:
 
 def create_progression_forestplot(progression: pd.DataFrame) -> None:
     panels = [("Longitudinal ESSDAI trajectory", "Difference in annual ESSDAI slope", 0, False), ("Progression to ESSDAI >=5", "Progression to ESSDAI ≥5", 1, True), ("New ESSDAI-domain involvement", "Development of new ESSDAI-domain involvement", 1, True)]
-    fig, axes = plt.subplots(1, 3, figsize=(18, max(7, .5*len(PROGRESSION_CONDITIONS))), sharey=True); order = PROGRESSION_CONDITION_NAMES_ORDERED[::-1]; labels={c.name:c.label for c in PROGRESSION_CONDITIONS}
+    fig, axes = plt.subplots(1, 3, figsize=(18, max(5, .35*len(PROGRESSION_CONDITIONS))), sharey=False)
+    labels = {c.name: c.label for c in PROGRESSION_CONDITIONS}
+    estimable_status = {"fitted", "reduced_adjustment"}
     for ax, (outcome, title, null, logscale) in zip(axes, panels):
-        d = progression[(progression["outcome"] == outcome) & ((progression["effect_measure"] == "Beta per year") if "trajectory" in outcome else True)].set_index("comorbidity")
-        for y, name in enumerate(order):
-            if name in d.index and np.isfinite(d.loc[name, ["estimate", "ci95_low", "ci95_high"]].astype(float)).all():
-                r=d.loc[name]; errors = _nonnegative_interval_errors([r.estimate], [r.ci95_low], [r.ci95_high])
-                ax.errorbar(r.estimate, y, xerr=errors, fmt="o", color="#2166ac" if r.model_status=="fitted" else "#b2182b", capsize=2)
-                ax.annotate(f"n={int(r.n_patients)}" + (f", e={int(r.n_events)}" if pd.notna(r.n_events) else ""), (r.estimate,y), xytext=(5,4), textcoords="offset points", fontsize=6)
-            else: ax.plot(null, y, marker="x", color="gray")
+        d = progression[(progression["outcome"] == outcome) & ((progression["effect_measure"] == "Beta per year") if "trajectory" in outcome else True)].copy()
+        finite = np.isfinite(d[["estimate", "ci95_low", "ci95_high"]].astype(float)).all(axis=1)
+        ordered = d["ci95_low"].astype(float).le(d["estimate"].astype(float)) & d["estimate"].astype(float).le(d["ci95_high"].astype(float))
+        d = d.loc[d["model_status"].isin(estimable_status) & finite & ordered].sort_values("display_label")
+        if d.empty:
+            ax.text(.5, .5, "No estimable models", ha="center", va="center", transform=ax.transAxes)
+            ax.axis("off")
+            ax.set_title(title)
+            continue
+        y = np.arange(len(d))
+        for yi, (_, r) in zip(y, d.iterrows()):
+            errors = _nonnegative_interval_errors([r.estimate], [r.ci95_low], [r.ci95_high])
+            ax.errorbar(r.estimate, yi, xerr=errors, fmt="o", color="#2166ac" if r.model_status == "fitted" else "#b2182b", capsize=2)
+            ax.annotate(f"n={int(r.n_patients)}" + (f", e={int(r.n_events)}" if pd.notna(r.n_events) else ""), (r.estimate, yi), xytext=(5, 4), textcoords="offset points", fontsize=6)
+        ax.set_yticks(y, [labels.get(x, x) for x in d["comorbidity"]])
         ax.axvline(null, color="black", ls="--", lw=.8); ax.set_title(title); ax.grid(axis="x", alpha=.2)
         if logscale: ax.set_xscale("log"); ax.set_xlabel("Hazard ratio (log scale)")
         else: ax.set_xlabel("Adjusted beta per year")
-    axes[0].set_yticks(range(len(order)), [labels[x] for x in order]); fig.text(.01,.01,"Models integrate patients across visits and adjust for baseline ESSDAI, baseline Pop, age, and sex when event support permits. Comorbidity absence is the reference. X marks not estimable; red denotes reduced models. Associations are not causal.",fontsize=8)
-    fig.subplots_adjust(left=.18,bottom=.1,wspace=.15); _plot_save(fig, FIGURES_DIR/"07_comorbidities_progression_forestplot.pdf")
-
+    fig.text(.01,.01,"Only fitted or reduced-adjustment models with finite, ordered estimates are shown; complete audit rows remain in the CSV. Red denotes reduced models. Associations are not causal.",fontsize=8)
+    fig.subplots_adjust(left=.18,bottom=.12,wspace=.45); _plot_save(fig, FIGURES_DIR/"07_comorbidities_progression_forestplot.pdf")
 
 def run_qc_checks(base: pd.DataFrame, long: pd.DataFrame, severe: pd.DataFrame, new_domain: pd.DataFrame, domain_audit: pd.DataFrame) -> dict[str, Any]:
     if base["patient_id"].isna().any() or base["patient_id"].duplicated().any(): raise ValueError("Invalid baseline patient identity")
@@ -822,6 +1051,7 @@ def run_qc_checks(base: pd.DataFrame, long: pd.DataFrame, severe: pd.DataFrame, 
     # Subtype implication is an enforceable invariant.
     for subtype in ("sensory_neuropathy", "motor_neuropathy", "cranial_nerve_involvement", "sensory_motor_neuropathy"):
         if subtype in base and (base[subtype].eq(True) & ~base["peripheral_neuropathy"].eq(True)).any(): raise ValueError(f"Positive {subtype} without peripheral neuropathy")
+    if any(source.startswith("past_medical_history__") for condition in PROGRESSION_CONDITIONS for source in condition.primary + condition.sensitivity): raise ValueError("Progression conditions include Past Medical History sources")
     if len(domain_audit):
         if ((domain_audit["baseline_state"] == True) & domain_audit["domain_event_date"].notna()).any(): raise ValueError("Baseline-active domain counted as new")  # noqa: E712
         if ((~domain_audit["baseline_evaluable"]) & domain_audit["at_risk"]).any():
@@ -845,14 +1075,14 @@ def source_mapping(raw_columns: Iterable[str]) -> pd.DataFrame:
     rows=[]
     for c in CONDITIONS:
         present=[x for x in c.primary if x in raw_columns]
-        rows.append({"condition":c.name,"primary_source_columns":"|".join(c.primary),"sensitivity_source_columns":"|".join(c.sensitivity),"derivation_rule":"Logical OR across available primary sources; empty baseline condition coded absent","definition_type":c.definition_type,"category":c.category,"availability":"available" if present else "unavailable","n_unrecognized_values":int(counts["source_column"].isin(c.primary+c.sensitivity).sum()) if len(counts) else 0})
+        rows.append({"condition":c.name,"primary_source_columns":"|".join(c.primary),"sensitivity_source_columns":"|".join(c.sensitivity),"derivation_rule":"Logical OR across available sources; Yes=True and empty/NaN=False at baseline and follow-up; cumulative history uses patient-level cummax","definition_type":c.definition_type,"category":c.category,"availability":"available" if present else "unavailable","n_unrecognized_values":int(counts["source_column"].isin(c.primary+c.sensitivity).sum()) if len(counts) else 0})
     return pd.DataFrame(rows)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args=parse_args(argv); ensure_directories(); np.random.seed(args.random_seed)
     intermediate_outputs = [path for parquet_path in INTERMEDIATE_PATHS for path in (parquet_path, parquet_path.with_suffix(".csv"))]
-    outputs=intermediate_outputs+[TABLES_DIR/"07_comorbidities_overall.csv",TABLES_DIR/"07_comorbidities_by_pop.csv",TABLES_DIR/"07_comorbidities_overall_by_category.csv",TABLES_DIR/"07_comorbidities_progression.csv",FIGURES_DIR/"07_comorbidities_dotplot.pdf",FIGURES_DIR/"07_comorbidities_grouped_bar.pdf",FIGURES_DIR/"07_comorbidities_progression_forestplot.pdf",QC_DIR/"07_comorbidities_qc.json",QC_DIR/"07_comorbidities_missingness.csv",QC_DIR/"07_comorbidities_source_mapping.csv",QC_DIR/"07_comorbidities_model_diagnostics.csv",QC_DIR/"07_comorbidities_patient_duplicates.csv",QC_DIR/"07_comorbidities_unavailable_conditions.csv",QC_DIR/"07_comorbidities_unrecognized_values.csv",LOG_PATH]
+    outputs=intermediate_outputs+[TABLES_DIR/"07_comorbidities_overall.csv",TABLES_DIR/"07_comorbidities_by_pop.csv",TABLES_DIR/"07_comorbidities_overall_by_category.csv",TABLES_DIR/"07_comorbidities_ever.csv",TABLES_DIR/"07_comorbidities_incidence.csv",TABLES_DIR/"07_comorbidities_progression.csv",FIGURES_DIR/"07_comorbidities_dotplot.pdf",FIGURES_DIR/"07_comorbidities_grouped_bar.pdf",FIGURES_DIR/"07_comorbidities_baseline_by_category.pdf",FIGURES_DIR/"07_comorbidities_by_pop_by_category.pdf",FIGURES_DIR/"07_comorbidities_ever_by_category.pdf",FIGURES_DIR/"07_comorbidities_incidence_by_category.pdf",FIGURES_DIR/"07_comorbidities_progression_forestplot.pdf",QC_DIR/"07_comorbidities_qc.json",QC_DIR/"07_comorbidities_missingness.csv",QC_DIR/"07_comorbidities_source_mapping.csv",QC_DIR/"07_comorbidities_model_diagnostics.csv",QC_DIR/"07_comorbidities_patient_duplicates.csv",QC_DIR/"07_comorbidities_unavailable_conditions.csv",QC_DIR/"07_comorbidities_unrecognized_values.csv",QC_DIR/"07_comorbidities_original_empty_counts.csv",LOG_PATH]
     existing = [p for p in outputs if p.exists()]
     logger=setup_logging()
     if existing:
@@ -860,11 +1090,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     logger.info("[1/8] Loading canonical sources")
     timestamps=check_upstream_artifacts(args.input,args.rebuild_upstream,logger); spine=load_visit_spine(); pop=load_pop_classification(); domains=load_domain_flags(); raw=load_selected_raw_columns(args.input)
     logger.info("[2/8] Building baseline comorbidity indicators")
-    base,duplicates,n_pipe=build_baseline_comorbidity_dataset(raw,spine,pop)
+    base,duplicates,n_pipe=build_baseline_comorbidity_dataset(raw,spine,pop); comorbidity_history=build_longitudinal_comorbidity_history(raw,spine)
     logger.info("[3/8] Writing baseline intermediate dataset"); write_intermediate_dataset(base,BASELINE_PATH)
-    logger.info("[4/8] Estimating overall prevalence"); overall=summarize_overall_prevalence(base); overall.to_csv(TABLES_DIR/"07_comorbidities_overall.csv",index=False); summarize_overall_by_category(base).to_csv(TABLES_DIR/"07_comorbidities_overall_by_category.csv",index=False); create_dotplot(overall)
-    logger.info("[5/8] Comparing prevalence across Pop 1-3"); by_pop=summarize_prevalence_by_pop(base,args.monte_carlo_replicates,args.random_seed); by_pop.to_csv(TABLES_DIR/"07_comorbidities_by_pop.csv",index=False); create_grouped_barplot(by_pop)
-    logger.info("[6/8] Building longitudinal outcomes"); long=build_longitudinal_essdai_dataset(raw,spine,pop,domains,base); write_intermediate_dataset(long,LONGITUDINAL_PATH); severe=build_severe5_survival_dataset(long,base); write_intermediate_dataset(severe,SEVERE_PATH); new_domain,domain_audit=build_new_domain_survival_dataset(long,base); write_intermediate_dataset(new_domain,NEW_DOMAIN_PATH); write_intermediate_dataset(domain_audit,DOMAIN_AUDIT_PATH)
+    logger.info("[4/8] Estimating overall prevalence"); overall=summarize_overall_prevalence(base); overall.to_csv(TABLES_DIR/"07_comorbidities_overall.csv",index=False); summarize_overall_by_category(base).to_csv(TABLES_DIR/"07_comorbidities_overall_by_category.csv",index=False); create_dotplot(overall); create_baseline_by_category_plot(overall)
+    logger.info("[5/8] Comparing prevalence across Pop 1-3"); by_pop=summarize_prevalence_by_pop(base,args.monte_carlo_replicates,args.random_seed); by_pop.to_csv(TABLES_DIR/"07_comorbidities_by_pop.csv",index=False); create_grouped_barplot(by_pop); create_by_pop_by_category_plot(by_pop)
+    logger.info("[6/8] Building cumulative history and longitudinal outcomes"); ever=summarize_ever_documented(comorbidity_history,base); ever.to_csv(TABLES_DIR/"07_comorbidities_ever.csv",index=False); create_ever_by_category_plot(ever); incidence=summarize_documented_incidence(comorbidity_history,base); incidence.to_csv(TABLES_DIR/"07_comorbidities_incidence.csv",index=False); create_incidence_by_category_plot(incidence); long=build_longitudinal_essdai_dataset(raw,spine,pop,domains,base); write_intermediate_dataset(long,LONGITUDINAL_PATH); severe=build_severe5_survival_dataset(long,base); write_intermediate_dataset(severe,SEVERE_PATH); new_domain,domain_audit=build_new_domain_survival_dataset(long,base); write_intermediate_dataset(new_domain,NEW_DOMAIN_PATH); write_intermediate_dataset(domain_audit,DOMAIN_AUDIT_PATH)
     logger.info("[7/8] Fitting progression models"); progression_rows=[]; diagnostics=[]
     for c in PROGRESSION_CONDITIONS:
         rows,diag=fit_mixed_model(long,c); progression_rows.extend(rows); diagnostics.append(diag)
@@ -874,15 +1104,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     logger.info("[8/8] Writing tables, figures, and QC"); create_progression_forestplot(progression); qc_extra=run_qc_checks(base,long,severe,new_domain,domain_audit)
     missingness_table(base).to_csv(QC_DIR/"07_comorbidities_missingness.csv",index=False); source_mapping(raw.columns).to_csv(QC_DIR/"07_comorbidities_source_mapping.csv",index=False); pd.DataFrame(diagnostics).to_csv(QC_DIR/"07_comorbidities_model_diagnostics.csv",index=False); duplicates.to_csv(QC_DIR/"07_comorbidities_patient_duplicates.csv",index=False)
     pd.DataFrame([{"condition":k,"availability_status":"unavailable","reason":v} for k,v in UNAVAILABLE.items()]).to_csv(QC_DIR/"07_comorbidities_unavailable_conditions.csv",index=False)
-    pd.DataFrame(_UNRECOGNIZED,columns=["source_column","original_value","row_index"]).drop_duplicates().to_csv(QC_DIR/"07_comorbidities_unrecognized_values.csv",index=False)
+    pd.DataFrame(_UNRECOGNIZED,columns=["source_column","original_value","row_index"]).drop_duplicates().to_csv(QC_DIR/"07_comorbidities_unrecognized_values.csv",index=False); original_empty_counts(raw).to_csv(QC_DIR/"07_comorbidities_original_empty_counts.csv",index=False)
     both=long[["essdai_total_recoded","essdai_total_raw_qc"]].dropna(); diff=both["essdai_total_recoded"]-both["essdai_total_raw_qc"]
     pop_counts=base["baseline_pop"].fillna("Unclassifiable").value_counts(); classifiable=int(base["baseline_pop"].isin(["Pop1","Pop2","Pop3"]).sum()); with_followup=int(long.loc[(long.visit_number>0)&long.essdai_total_recoded.notna(),"patient_id"].nunique())
-    qc={"input_path":str(args.input),"input_modification_time":datetime.fromtimestamp(args.input.stat().st_mtime,timezone.utc).isoformat(),"script_version":SCRIPT_VERSION,"run_timestamp":datetime.now(timezone.utc).isoformat(),"random_seed":args.random_seed,"n_input_rows":len(raw),"n_input_patients":int(raw[PATIENT_ID_COL].nunique()),"n_canonical_visits":len(spine),"n_baseline_patients":len(base),"n_duplicate_patient_dates":len(duplicates),"n_pipe_delimited_visit_dates":n_pipe,"n_pop_classifiable":classifiable,"n_pop_unclassifiable":len(base)-classifiable,"pop_counts":pop_counts.to_dict(),"n_with_followup_essdai":with_followup,"n_at_risk_severe5":len(severe),"n_severe5_events":int(severe.get("severe5_event",pd.Series(dtype=int)).sum()),"n_at_risk_new_domain":len(new_domain),"n_new_domain_events":int(new_domain.get("new_domain_event",pd.Series(dtype=int)).sum()),"severe_threshold_used":SEVERE_THRESHOLD,"essdai_primary_column":ESSDAI_PRIMARY_COL,"essdai_raw_qc_column":ESSDAI_RAW_QC_COL,"upstream_files_used":[str(p) for p in UPSTREAM],"upstream_file_timestamps":timestamps,"essdai_reconciliation":{"n_both":len(both),"n_concordant":int(diff.eq(0).sum()),"n_discordant":int(diff.ne(0).sum()),"mean_difference":float(diff.mean()) if len(diff) else None,"median_difference":float(diff.median()) if len(diff) else None,"maximum_absolute_difference":float(diff.abs().max()) if len(diff) else None},"warnings":["The deployed extract has only essdai__essdai_total_score; it is used as the primary longitudinal ESSDAI source and duplicated in the raw-QC compatibility field."],**qc_extra}
+    qc={"input_path":str(args.input),"input_modification_time":datetime.fromtimestamp(args.input.stat().st_mtime,timezone.utc).isoformat(),"script_version":SCRIPT_VERSION,"run_timestamp":datetime.now(timezone.utc).isoformat(),"random_seed":args.random_seed,"n_input_rows":len(raw),"n_input_patients":int(raw[PATIENT_ID_COL].nunique()),"n_canonical_visits":len(spine),"n_baseline_patients":len(base),"n_duplicate_patient_dates":len(duplicates),"n_pipe_delimited_visit_dates":n_pipe,"n_pop_classifiable":classifiable,"n_pop_unclassifiable":len(base)-classifiable,"pop_counts":pop_counts.to_dict(),"n_with_followup_essdai":with_followup,"n_at_risk_severe5":len(severe),"n_severe5_events":int(severe.get("severe5_event",pd.Series(dtype=int)).sum()),"n_at_risk_new_domain":len(new_domain),"n_new_domain_events":int(new_domain.get("new_domain_event",pd.Series(dtype=int)).sum()),"n_conditions_total":len(CONDITIONS),"n_conditions_with_baseline_positive":int((overall["n_baseline_positive"]>0).sum()),"n_conditions_with_ever_positive":int((ever["n_ever_positive"]>0).sum()),"n_conditions_with_incident_cases":int((incidence["n_incident"]>0).sum()),"n_progression_conditions":len(PROGRESSION_CONDITIONS),"n_progression_conditions_using_past_medical_history":int(any(source.startswith("past_medical_history__") for condition in PROGRESSION_CONDITIONS for source in condition.primary + condition.sensitivity)),"severe_threshold_used":SEVERE_THRESHOLD,"essdai_primary_column":ESSDAI_PRIMARY_COL,"essdai_raw_qc_column":ESSDAI_RAW_QC_COL,"upstream_files_used":[str(p) for p in UPSTREAM],"upstream_file_timestamps":timestamps,"essdai_reconciliation":{"n_both":len(both),"n_concordant":int(diff.eq(0).sum()),"n_discordant":int(diff.ne(0).sum()),"mean_difference":float(diff.mean()) if len(diff) else None,"median_difference":float(diff.median()) if len(diff) else None,"maximum_absolute_difference":float(diff.abs().max()) if len(diff) else None},"warnings":["The deployed extract has only essdai__essdai_total_score; it is used as the primary longitudinal ESSDAI source and duplicated in the raw-QC compatibility field.","Comorbidity source fields are absence-by-default: Yes=True and empty/NaN=False. Original empty source counts are retained in QC, not treated as clinical missingness.","Newly documented during follow-up is an operational/documented incidence measure; first positive visit may not be true onset."],**qc_extra}
     (QC_DIR/"07_comorbidities_qc.json").write_text(json.dumps(qc,indent=2,default=str)+"\n")
     claim=overall.head(3); ild=float(overall.loc[overall.condition.eq("ild"),"pct_total_cohort"].iloc[0]); logger.info("Claim: %s was the most prevalent baseline comorbidity (%.1f%%), followed by %s (%.1f%%) and %s (%.1f%%). Interstitial lung disease was present in %.1f%% of patients. Empty condition fields were coded as absent.",claim.iloc[0].display_label,claim.iloc[0].pct_total_cohort,claim.iloc[1].display_label,claim.iloc[1].pct_total_cohort,claim.iloc[2].display_label,claim.iloc[2].pct_total_cohort,ild)
     fitted=int(progression.model_status.isin(["fitted","reduced_adjustment"]).sum()); not_est=len(progression)-fitted
     print(f"Total baseline patients: {len(base)}\nClassifiable Pop patients: {classifiable}\nPatients with follow-up ESSDAI: {with_followup}\nESSDAI >=5 progression events: {qc['n_severe5_events']}\nNew-domain events: {qc['n_new_domain_events']}\nNumber of models fitted: {fitted}\nNumber of models not estimable: {not_est}\nGenerated files:")
-    for path in outputs+[QC_DIR/"07_comorbidities_qc.json",QC_DIR/"07_comorbidities_missingness.csv",QC_DIR/"07_comorbidities_source_mapping.csv",QC_DIR/"07_comorbidities_model_diagnostics.csv",QC_DIR/"07_comorbidities_patient_duplicates.csv",QC_DIR/"07_comorbidities_unavailable_conditions.csv",QC_DIR/"07_comorbidities_unrecognized_values.csv",LOG_PATH]: print(path.resolve())
+    for path in outputs+[QC_DIR/"07_comorbidities_qc.json",QC_DIR/"07_comorbidities_missingness.csv",QC_DIR/"07_comorbidities_source_mapping.csv",QC_DIR/"07_comorbidities_model_diagnostics.csv",QC_DIR/"07_comorbidities_patient_duplicates.csv",QC_DIR/"07_comorbidities_unavailable_conditions.csv",QC_DIR/"07_comorbidities_unrecognized_values.csv",QC_DIR/"07_comorbidities_original_empty_counts.csv",LOG_PATH]: print(path.resolve())
     return 0
 
 
