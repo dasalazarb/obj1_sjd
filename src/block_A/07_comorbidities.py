@@ -111,7 +111,7 @@ _UNRECOGNIZED: list[dict[str, Any]] = []
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser()
-    p.add_argument("--input", type=Path, default=common.DATA_ANALYTIC_DIR / "10_integrated_longitudinal_patient_visit.parquet")
+    p.add_argument("--input", type=Path, default=common.INTEGRATED_LONGITUDINAL_PARQUET)
     p.add_argument("--rebuild-upstream", action="store_true")
     p.add_argument("--monte-carlo-replicates", type=int, default=2000)
     p.add_argument("--minimum-events", type=int, default=5)
