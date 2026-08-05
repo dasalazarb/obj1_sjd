@@ -24,3 +24,13 @@ Analyze patient data, prepare clean datasets, and generate reproducible results 
 ## Important note
 
 Do not edit the original raw data. Keep all changes reproducible through scripts.
+
+
+## Section 5 comorbidity analysis
+
+Section 5 now treats the project Codebook as the source of truth for variable semantics.
+`rheumatological_comorbidities__` fields are summarized at baseline with mutually exclusive documented-status categories: confirmed/present, history only, documented with unspecified status, and not documented. Only confirmed/present records contribute to rheumatological prevalence summaries or non-causal progression associations.
+
+`past_medical_history__` fields and `sjogren's_syndrome_history__` fields are summarized separately as documented historical information. They are not used as baseline rheumatological prevalence inputs, longitudinal comorbidity events, risk-set definitions, event dates, cumulative histories, or progression-model exposures.
+
+The required Section 5 outputs are written to `outputs/tables/blockA`, `outputs/figures/blockA`, `outputs/qc/blockA`, and `outputs/logs`. The legacy comorbidity event-rate outputs are intentionally not produced.
