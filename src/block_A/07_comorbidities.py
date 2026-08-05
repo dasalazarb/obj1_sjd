@@ -214,13 +214,17 @@ def summarize_prevalence_by_pop(base: pd.DataFrame, replicates:int=2000, seed:in
         rows.append(row)
     return pd.DataFrame(rows)
 
+PAST_MEDICAL_HISTORY_COLUMNS = ["history_item", "display_label", "clinical_category", "n_patients_with_documented_history", "pct_documented_history_frequency", "n_patients_without_positive_record", "source_columns_used", "interpretation_label"]
+SJOGREN_HISTORY_COLUMNS = ["history_item", "display_label", "history_group", "n_patients_with_documented_history", "pct_documented_history_frequency", "n_patients_without_positive_record", "source_columns_used", "date_source_columns", "interpretation_label"]
+SJOGREN_DATE_COLUMNS = ["history_item", "display_label", "date_source_column", "n_rows_with_valid_date", "n_missing_or_unparseable_date", "n_dates_before_birth", "n_dates_after_visit", "median_date", "q1_date", "q3_date", "min_date", "max_date"]
+
 def descriptive_past_medical_history(raw: pd.DataFrame) -> pd.DataFrame:
     df=_prepare_ids(raw); cols=[c for c in df if c.startswith("past_medical_history__")]; N=df["patient_id"].nunique(); rows=[]
     for col in sorted(cols):
         patient=_any_flag(df,[col]).groupby(df["patient_id"]).max().reindex(df["patient_id"].drop_duplicates()).fillna(False)
         n=int(patient.sum()); name=col.removeprefix("past_medical_history__")
         rows.append({"history_item":name,"display_label":name.replace("_"," ").title(),"clinical_category":name.split("_hx_")[0].split("_")[0],"n_patients_with_documented_history":n,"pct_documented_history_frequency":100*n/N if N else np.nan,"n_patients_without_positive_record":N-n,"source_columns_used":col,"interpretation_label":"Documented past medical history frequency"})
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=PAST_MEDICAL_HISTORY_COLUMNS)
 
 def descriptive_sjogren_history(raw: pd.DataFrame) -> tuple[pd.DataFrame,pd.DataFrame]:
     df=_prepare_ids(raw); N=df["patient_id"].nunique(); rows=[]; date_rows=[]; birth=next((c for c in BIRTH_DATE_CANDIDATES if c in df), None)
@@ -234,7 +238,7 @@ def descriptive_sjogren_history(raw: pd.DataFrame) -> tuple[pd.DataFrame,pd.Data
             parsed=pd.to_datetime(df[dc], errors="coerce"); valid=parsed.notna(); before_birth=int((valid & (pd.to_datetime(df[birth],errors="coerce")>parsed)).sum()) if birth else 0; after_visit=int((valid & (parsed>df["visit_date"])).sum())
             vals=parsed.loc[valid & (before_birth==0 if False else True)]
             date_rows.append({"history_item":name,"display_label":label,"date_source_column":dc,"n_rows_with_valid_date":int(valid.sum()),"n_missing_or_unparseable_date":int((~valid).sum()),"n_dates_before_birth":before_birth,"n_dates_after_visit":after_visit,"median_date":vals.median(),"q1_date":vals.quantile(.25) if len(vals) else pd.NaT,"q3_date":vals.quantile(.75) if len(vals) else pd.NaT,"min_date":vals.min() if len(vals) else pd.NaT,"max_date":vals.max() if len(vals) else pd.NaT})
-    return pd.DataFrame(rows), pd.DataFrame(date_rows)
+    return pd.DataFrame(rows, columns=SJOGREN_HISTORY_COLUMNS), pd.DataFrame(date_rows, columns=SJOGREN_DATE_COLUMNS)
 
 def source_mapping(raw_columns: Iterable[str]) -> pd.DataFrame:
     raw=set(raw_columns); rows=[]
@@ -264,8 +268,18 @@ def create_status_plot(overall: pd.DataFrame):
     ax.set_yticks(y,d["display_label"]); ax.set_xlabel("Patients at baseline"); ax.set_title("Documented status of rheumatological conditions at baseline"); ax.legend(); fig.tight_layout(); fig.savefig(FIGURES_DIR/"07_rheumatological_conditions_status.pdf",bbox_inches="tight"); plt.close(fig)
 
 def create_sjogren_history_plot(desc: pd.DataFrame):
-    d=desc.sort_values("pct_documented_history_frequency").tail(25); fig,ax=plt.subplots(figsize=(10,max(5,.35*len(d))))
-    ax.barh(np.arange(len(d)),d["pct_documented_history_frequency"],color="#41ab5d"); ax.set_yticks(np.arange(len(d)),d["display_label"]); ax.set_xlabel("Patients with documented history (%)"); ax.set_title("Documented Sjögren's syndrome history"); fig.tight_layout(); fig.savefig(FIGURES_DIR/"07_sjogren_history_descriptive.pdf",bbox_inches="tight"); plt.close(fig)
+    fig,ax=plt.subplots(figsize=(10,5))
+    if desc.empty or "pct_documented_history_frequency" not in desc:
+        ax.text(.5,.5,"No clinically interpretable Sjögren history variables were available in the input.",ha="center",va="center",wrap=True)
+        ax.axis("off")
+    else:
+        d=desc.sort_values("pct_documented_history_frequency").tail(25)
+        fig.set_size_inches(10,max(5,.35*len(d)))
+        ax.barh(np.arange(len(d)),d["pct_documented_history_frequency"],color="#41ab5d")
+        ax.set_yticks(np.arange(len(d)),d["display_label"])
+        ax.set_xlabel("Patients with documented history (%)")
+        ax.set_title("Documented Sjögren's syndrome history")
+    fig.tight_layout(); fig.savefig(FIGURES_DIR/"07_sjogren_history_descriptive.pdf",bbox_inches="tight"); plt.close(fig)
 
 def write_baseline_outputs(base: pd.DataFrame):
     try: base.to_parquet(BASELINE_PATH,index=False)
