@@ -163,3 +163,31 @@ def test_empty_population_table_is_not_sent_to_chi_square(monkeypatch):
 
     assert result["global_test"].eq("not estimable").all()
     assert result["global_p_value"].isna().all()
+
+
+def test_new_domain_audit_is_returned_without_dataframe_attrs():
+    visit_dates = pd.to_datetime(["2020-01-01", "2021-01-01"])
+    long_data = {
+        "patient_id": ["P1", "P1"],
+        "visit_date": visit_dates,
+        "visit_number": [0, 1],
+    }
+    for domain in comorbidities.DOMAIN_COLS:
+        long_data[domain] = pd.Series([False, domain == "eg_renal_active"], dtype="boolean")
+    longdf = pd.DataFrame(long_data)
+    baseline_data = {
+        "patient_id": ["P1"], "baseline_date": [visit_dates[0]],
+        "baseline_essdai": [0.0], "baseline_pop": ["Pop3"],
+        "age_baseline": [50.0], "sex": ["Female"],
+    }
+    baseline_data.update({name: pd.Series([False], dtype="boolean") for name in comorbidities.CONDITION_NAMES})
+    baseline = pd.DataFrame(baseline_data)
+
+    survival, audit = comorbidities.build_new_domain_survival_dataset(
+        longdf, baseline, return_audit=True
+    )
+
+    assert survival.attrs == {}
+    assert audit.attrs == {}
+    assert survival.loc[0, "first_new_domain_name"] == "renal"
+    assert set(audit.columns) == {"patient_id", "domain", "baseline_active", "event_date"}

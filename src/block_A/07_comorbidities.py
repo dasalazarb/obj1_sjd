@@ -488,7 +488,7 @@ def build_severe14_survival_dataset(longdf, baseline):
     return pd.DataFrame(rows)
 
 
-def build_new_domain_survival_dataset(longdf, baseline):
+def build_new_domain_survival_dataset(longdf, baseline, return_audit: bool = False):
     rows=[]; audit=[]
     for pid,g in longdf.sort_values("visit_date").groupby("patient_id"):
         b=baseline[baseline.patient_id.eq(pid)].iloc[0]; bg=g[g.visit_number.eq(0)]; fg=g[g.visit_number>0]
@@ -506,7 +506,9 @@ def build_new_domain_survival_dataset(longdf, baseline):
         if inact==0: continue
         fd,name=min(events, default=(pd.NaT,pd.NA), key=lambda x:x[0] if pd.notna(x[0]) else pd.Timestamp.max); last=fg.visit_date.max(); end=fd if pd.notna(fd) else last
         rows.append({"patient_id":pid,"baseline_date":b.baseline_date,"first_new_domain_date":fd,"first_new_domain_name":name,"new_domain_event":int(pd.notna(fd)),"n_domains_inactive_at_baseline":inact,"n_domains_evaluable_at_baseline":evaln,"followup_days":(end-b.baseline_date).days,"followup_years":(end-b.baseline_date).days/365.25, **b[["baseline_essdai","baseline_pop","age_baseline","sex"]+CONDITION_NAMES].to_dict()})
-    out=pd.DataFrame(rows); out.attrs["patient_domain_audit"]=pd.DataFrame(audit); return out
+    out = pd.DataFrame(rows)
+    audit_df = pd.DataFrame(audit)
+    return (out, audit_df) if return_audit else out
 
 
 def _base_progression_row(spec,outcome,estimand):
@@ -579,7 +581,7 @@ def main() -> None:
     logging.info("[3/8] Writing baseline intermediate dataset"); baseline.to_parquet(common.INTERMEDIATE_DATA_DIR/"07_comorbidities_baseline_patient.parquet",index=False)
     logging.info("[4/8] Estimating overall prevalence"); overall=summarize_overall_prevalence(baseline)
     logging.info("[5/8] Comparing prevalence across Pop 1–3"); bypop=summarize_prevalence_by_pop(baseline,args.monte_carlo_replicates,args.random_seed)
-    logging.info("[6/8] Building longitudinal outcomes"); longdf=build_longitudinal_essdai_dataset(spine,pop,raw,baseline,domains); severe=build_severe14_survival_dataset(longdf,baseline); newdom=build_new_domain_survival_dataset(longdf,baseline)
+    logging.info("[6/8] Building longitudinal outcomes"); longdf=build_longitudinal_essdai_dataset(spine,pop,raw,baseline,domains); severe=build_severe14_survival_dataset(longdf,baseline); newdom,newdom_audit=build_new_domain_survival_dataset(longdf,baseline,return_audit=True)
     longdf.to_parquet(common.INTERMEDIATE_DATA_DIR/"07_comorbidities_analysis_longitudinal.parquet",index=False); severe.to_parquet(common.INTERMEDIATE_DATA_DIR/"07_comorbidity_severe14_survival.parquet",index=False); newdom.to_parquet(common.INTERMEDIATE_DATA_DIR/"07_comorbidity_new_domain_survival.parquet",index=False)
     logging.info("[7/8] Fitting progression models"); rows=[]
     for spec in CONDITIONS:
@@ -596,7 +598,7 @@ def main() -> None:
     pd.DataFrame([{ "condition":k,"availability_status":"unavailable","reason":v} for k,v in UNAVAILABLE_CONDITIONS.items()]).to_csv(QC_DIR/"07_comorbidities_unavailable_conditions.csv",index=False)
     source.to_csv(QC_DIR/"07_comorbidities_source_mapping.csv",index=False)
     miss=baseline[["baseline_pop","baseline_essdai","age_baseline","sex"]+CONDITION_NAMES].isna().sum().reset_index(); miss.columns=["variable","n_missing"]; miss.to_csv(QC_DIR/"07_comorbidities_missingness.csv",index=False)
-    dup.to_csv(QC_DIR/"07_comorbidities_patient_duplicates.csv",index=False); prog.to_csv(QC_DIR/"07_comorbidities_model_diagnostics.csv",index=False)
+    dup.to_csv(QC_DIR/"07_comorbidities_patient_duplicates.csv",index=False); newdom_audit.to_csv(QC_DIR/"07_comorbidities_new_domain_patient_audit.csv",index=False); prog.to_csv(QC_DIR/"07_comorbidities_model_diagnostics.csv",index=False)
     raw_ess=longdf.dropna(subset=["essdai_total_recoded","essdai_total_raw_qc"]); diff=pd.to_numeric(raw_ess.essdai_total_recoded,errors='coerce')-pd.to_numeric(raw_ess.essdai_total_raw_qc,errors='coerce')
     qc={"input_path":str(args.input),"input_modification_time":datetime.fromtimestamp(args.input.stat().st_mtime,timezone.utc).isoformat(),"script_version":SCRIPT_VERSION,"run_timestamp":datetime.now(timezone.utc).isoformat(),"random_seed":args.random_seed,"n_input_rows":int(len(raw)),"n_input_patients":int(raw.patient_id.nunique()),"n_canonical_visits":int(len(spine)),"n_baseline_patients":int(len(baseline)),"n_duplicate_patient_dates":int(len(dup)),"n_pipe_delimited_visit_dates":int(raw.get('had_pipe_delimited_date',pd.Series(dtype=bool)).sum()),"n_pop_classifiable":int(baseline.baseline_pop.isin(['Pop1','Pop2','Pop3']).sum()),"n_pop_unclassifiable":int((~baseline.baseline_pop.isin(['Pop1','Pop2','Pop3'])).sum()),"n_with_followup_essdai":int(longdf[longdf.visit_number.gt(0)&longdf.essdai_total_recoded.notna()].patient_id.nunique()),"n_at_risk_severe14":int(len(severe)),"n_severe14_events":int(severe.severe14_event.sum()) if not severe.empty else 0,"n_at_risk_new_domain":int(len(newdom)),"n_new_domain_events":int(newdom.new_domain_event.sum()) if not newdom.empty else 0,"severe_threshold_used":SEVERE_ACTIVITY_THRESHOLD_SECTION5,"essdai_primary_column":f"{common.POP_LONGITUDINAL_PARQUET.name}::{ESSDAI_CANONICAL_COL}","essdai_raw_qc_column":ESSDAI_RAW_QC_COL,"upstream_files_used":list(upstream.keys()),"upstream_file_timestamps":upstream,"warnings":["lifelines unavailable; Cox models not run"] if not LIFELINES_AVAILABLE else [],"essdai_reconciliation":{"n_concordant":int((diff==0).sum()),"n_discordant":int((diff!=0).sum()),"mean_difference":float(diff.mean()) if len(diff) else None,"median_difference":float(diff.median()) if len(diff) else None,"maximum_absolute_difference":float(diff.abs().max()) if len(diff) else None}}
     (QC_DIR/"07_comorbidities_qc.json").write_text(json.dumps(qc,indent=2,default=str))
