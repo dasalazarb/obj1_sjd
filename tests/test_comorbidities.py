@@ -209,3 +209,26 @@ def test_grouped_plot_clips_rounding_induced_negative_error_bars(tmp_path):
 
     assert output.exists()
     assert output.stat().st_size > 0
+
+
+def test_essdai_ge5_survival_uses_activity_threshold_five():
+    visit_dates = pd.to_datetime(["2020-01-01", "2021-01-01"])
+    longdf = pd.DataFrame({
+        "patient_id": ["P1", "P1"],
+        "visit_date": visit_dates,
+        "visit_number": [0, 1],
+        "essdai_total_recoded": [4.0, 5.0],
+    })
+    baseline_data = {
+        "patient_id": ["P1"], "baseline_date": [visit_dates[0]],
+        "baseline_essdai": [4.0], "baseline_pop": ["Pop3"],
+        "age_baseline": [50.0], "sex": ["Female"],
+    }
+    baseline_data.update({name: pd.Series([False], dtype="boolean") for name in comorbidities.CONDITION_NAMES})
+    baseline = pd.DataFrame(baseline_data)
+
+    result = comorbidities.build_essdai_ge5_survival_dataset(longdf, baseline)
+
+    assert comorbidities.ACTIVITY_THRESHOLD_SECTION5 == 5
+    assert result.loc[0, "essdai_ge5_event"] == 1
+    assert result.loc[0, "event_date"] == visit_dates[1]

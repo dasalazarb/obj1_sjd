@@ -54,7 +54,7 @@ AGE_COL = "ids__age_at_visit"
 SEX_COL = "ids__sex"
 ESSDAI_RAW_QC_COL = "essdai__essdai_total_score"
 ESSDAI_CANONICAL_COL = "essdai_total"
-SEVERE_ACTIVITY_THRESHOLD_SECTION5 = 14
+ACTIVITY_THRESHOLD_SECTION5 = 5
 FIGURES_DIR = common.OUTPUTS_DIR / "figures" / "blockA"
 LOG_PATH = common.OUTPUTS_DIR / "logs" / "07_comorbidities.log"
 TABLES_DIR = common.OUTPUTS_DIR / "tables" / "blockA"
@@ -475,16 +475,16 @@ def build_longitudinal_essdai_dataset(spine,pop,raw,baseline,domains):
     return df.merge(baseline[bcols],on="patient_id",how="left",suffixes=("","_baseline"))
 
 
-def build_severe14_survival_dataset(longdf, baseline):
+def build_essdai_ge5_survival_dataset(longdf, baseline):
     rows=[]
     for pid,g in longdf.dropna(subset=["essdai_total_recoded"]).sort_values("visit_date").groupby("patient_id"):
         b=baseline[baseline.patient_id.eq(pid)].iloc[0]; base=float(b.baseline_essdai) if pd.notna(b.baseline_essdai) else np.nan
-        if pd.isna(base) or base>=SEVERE_ACTIVITY_THRESHOLD_SECTION5: continue
+        if pd.isna(base) or base>=ACTIVITY_THRESHOLD_SECTION5: continue
         f=g[g.visit_number>0]
         if f.empty: continue
-        ev=f[f.essdai_total_recoded>=SEVERE_ACTIVITY_THRESHOLD_SECTION5]
+        ev=f[f.essdai_total_recoded>=ACTIVITY_THRESHOLD_SECTION5]
         ed=ev.visit_date.min() if not ev.empty else pd.NaT; last=f.visit_date.max(); end=ed if pd.notna(ed) else last
-        rows.append({"patient_id":pid,"baseline_date":b.baseline_date,"last_evaluable_date":last,"event_date":ed,"followup_days":(end-b.baseline_date).days,"followup_years":(end-b.baseline_date).days/365.25,"severe14_event":int(pd.notna(ed)), **b[["baseline_essdai","baseline_pop","age_baseline","sex"]+CONDITION_NAMES].to_dict()})
+        rows.append({"patient_id":pid,"baseline_date":b.baseline_date,"last_evaluable_date":last,"event_date":ed,"followup_days":(end-b.baseline_date).days,"followup_years":(end-b.baseline_date).days/365.25,"essdai_ge5_event":int(pd.notna(ed)), **b[["baseline_essdai","baseline_pop","age_baseline","sex"]+CONDITION_NAMES].to_dict()})
     return pd.DataFrame(rows)
 
 
@@ -562,7 +562,7 @@ def create_grouped_barplot(bypop,path):
 
 
 def create_progression_forestplot(prog, order, path):
-    panels=[('ESSDAI trajectory','Difference in annual ESSDAI slope',0,'Beta per year'),('Progression to ESSDAI ≥14','Progression to ESSDAI ≥14',1,'Hazard ratio'),('New ESSDAI-domain involvement','Development of new ESSDAI-domain involvement',1,'Hazard ratio')]
+    panels=[('ESSDAI trajectory','Difference in annual ESSDAI slope',0,'Beta per year'),('Progression to ESSDAI ≥5','Progression to ESSDAI ≥5',1,'Hazard ratio'),('New ESSDAI-domain involvement','Development of new ESSDAI-domain involvement',1,'Hazard ratio')]
     fig,axs=plt.subplots(1,3,figsize=(16,max(6,.45*len(order)+1)),sharey=True); y=np.arange(len(order))
     for ax,(out,title,ref,measure) in zip(axs,panels):
         sub=prog[(prog.outcome==out)&(prog.effect_measure==measure)].set_index('comorbidity').reindex(order); ax.axvline(ref,color='grey',ls='--'); ax.set_title(title); ax.set_yticks(y,[next(c.label for c in CONDITIONS if c.name==n) for n in order])
@@ -570,7 +570,7 @@ def create_progression_forestplot(prog, order, path):
             if pd.notna(r.get('estimate')) and pd.notna(r.get('ci95_low')) and pd.notna(r.get('ci95_high')): ax.errorbar(r.estimate,i,xerr=[[max(0,r.estimate-r.ci95_low)],[max(0,r.ci95_high-r.estimate)]],fmt='o')
             else: ax.text(ref,i,'NE',ha='center',va='center',fontsize=8)
         if ref==1: ax.set_xscale('log')
-    fig.text(.01,.01,"Adjusted for baseline ESSDAI, baseline Pop, age, and sex when estimable. Outcomes: follow-up ESSDAI slope, first ESSDAI ≥14, and first new inactive-at-baseline organ-domain activation.",fontsize=8); fig.tight_layout(rect=(0,0.04,1,1)); fig.savefig(path); plt.close(fig)
+    fig.text(.01,.01,"Adjusted for baseline ESSDAI, baseline Pop, age, and sex when estimable. Outcomes: follow-up ESSDAI slope, first ESSDAI ≥5, and first new inactive-at-baseline organ-domain activation.",fontsize=8); fig.tight_layout(rect=(0,0.04,1,1)); fig.savefig(path); plt.close(fig)
 
 
 def main() -> None:
@@ -581,12 +581,12 @@ def main() -> None:
     logging.info("[3/8] Writing baseline intermediate dataset"); baseline.to_parquet(common.INTERMEDIATE_DATA_DIR/"07_comorbidities_baseline_patient.parquet",index=False)
     logging.info("[4/8] Estimating overall prevalence"); overall=summarize_overall_prevalence(baseline)
     logging.info("[5/8] Comparing prevalence across Pop 1–3"); bypop=summarize_prevalence_by_pop(baseline,args.monte_carlo_replicates,args.random_seed)
-    logging.info("[6/8] Building longitudinal outcomes"); longdf=build_longitudinal_essdai_dataset(spine,pop,raw,baseline,domains); severe=build_severe14_survival_dataset(longdf,baseline); newdom,newdom_audit=build_new_domain_survival_dataset(longdf,baseline,return_audit=True)
-    longdf.to_parquet(common.INTERMEDIATE_DATA_DIR/"07_comorbidities_analysis_longitudinal.parquet",index=False); severe.to_parquet(common.INTERMEDIATE_DATA_DIR/"07_comorbidity_severe14_survival.parquet",index=False); newdom.to_parquet(common.INTERMEDIATE_DATA_DIR/"07_comorbidity_new_domain_survival.parquet",index=False)
+    logging.info("[6/8] Building longitudinal outcomes"); longdf=build_longitudinal_essdai_dataset(spine,pop,raw,baseline,domains); essdai_ge5=build_essdai_ge5_survival_dataset(longdf,baseline); newdom,newdom_audit=build_new_domain_survival_dataset(longdf,baseline,return_audit=True)
+    longdf.to_parquet(common.INTERMEDIATE_DATA_DIR/"07_comorbidities_analysis_longitudinal.parquet",index=False); essdai_ge5.to_parquet(common.INTERMEDIATE_DATA_DIR/"07_comorbidity_essdai_ge5_survival.parquet",index=False); newdom.to_parquet(common.INTERMEDIATE_DATA_DIR/"07_comorbidity_new_domain_survival.parquet",index=False)
     logging.info("[7/8] Fitting progression models"); rows=[]
     for spec in CONDITIONS:
         rows += fit_mixed_model(longdf,spec)
-        rows.append(fit_cox_model(severe,spec,"Progression to ESSDAI ≥14","severe14_event",SEVERE_ACTIVITY_THRESHOLD_SECTION5,args.minimum_events))
+        rows.append(fit_cox_model(essdai_ge5,spec,"Progression to ESSDAI ≥5","essdai_ge5_event",ACTIVITY_THRESHOLD_SECTION5,args.minimum_events))
         rows.append(fit_cox_model(newdom,spec,"New ESSDAI-domain involvement","new_domain_event","new inactive-at-baseline domain",args.minimum_events))
     prog=pd.DataFrame(rows); prog["fdr_bh_q_value"]=prog.groupby("outcome")["p_value"].transform(lambda s: apply_fdr(s))
     logging.info("[8/8] Writing tables, figures, and QC")
@@ -600,13 +600,13 @@ def main() -> None:
     miss=baseline[["baseline_pop","baseline_essdai","age_baseline","sex"]+CONDITION_NAMES].isna().sum().reset_index(); miss.columns=["variable","n_missing"]; miss.to_csv(QC_DIR/"07_comorbidities_missingness.csv",index=False)
     dup.to_csv(QC_DIR/"07_comorbidities_patient_duplicates.csv",index=False); newdom_audit.to_csv(QC_DIR/"07_comorbidities_new_domain_patient_audit.csv",index=False); prog.to_csv(QC_DIR/"07_comorbidities_model_diagnostics.csv",index=False)
     raw_ess=longdf.dropna(subset=["essdai_total_recoded","essdai_total_raw_qc"]); diff=pd.to_numeric(raw_ess.essdai_total_recoded,errors='coerce')-pd.to_numeric(raw_ess.essdai_total_raw_qc,errors='coerce')
-    qc={"input_path":str(args.input),"input_modification_time":datetime.fromtimestamp(args.input.stat().st_mtime,timezone.utc).isoformat(),"script_version":SCRIPT_VERSION,"run_timestamp":datetime.now(timezone.utc).isoformat(),"random_seed":args.random_seed,"n_input_rows":int(len(raw)),"n_input_patients":int(raw.patient_id.nunique()),"n_canonical_visits":int(len(spine)),"n_baseline_patients":int(len(baseline)),"n_duplicate_patient_dates":int(len(dup)),"n_pipe_delimited_visit_dates":int(raw.get('had_pipe_delimited_date',pd.Series(dtype=bool)).sum()),"n_pop_classifiable":int(baseline.baseline_pop.isin(['Pop1','Pop2','Pop3']).sum()),"n_pop_unclassifiable":int((~baseline.baseline_pop.isin(['Pop1','Pop2','Pop3'])).sum()),"n_with_followup_essdai":int(longdf[longdf.visit_number.gt(0)&longdf.essdai_total_recoded.notna()].patient_id.nunique()),"n_at_risk_severe14":int(len(severe)),"n_severe14_events":int(severe.severe14_event.sum()) if not severe.empty else 0,"n_at_risk_new_domain":int(len(newdom)),"n_new_domain_events":int(newdom.new_domain_event.sum()) if not newdom.empty else 0,"severe_threshold_used":SEVERE_ACTIVITY_THRESHOLD_SECTION5,"essdai_primary_column":f"{common.POP_LONGITUDINAL_PARQUET.name}::{ESSDAI_CANONICAL_COL}","essdai_raw_qc_column":ESSDAI_RAW_QC_COL,"upstream_files_used":list(upstream.keys()),"upstream_file_timestamps":upstream,"warnings":["lifelines unavailable; Cox models not run"] if not LIFELINES_AVAILABLE else [],"essdai_reconciliation":{"n_concordant":int((diff==0).sum()),"n_discordant":int((diff!=0).sum()),"mean_difference":float(diff.mean()) if len(diff) else None,"median_difference":float(diff.median()) if len(diff) else None,"maximum_absolute_difference":float(diff.abs().max()) if len(diff) else None}}
+    qc={"input_path":str(args.input),"input_modification_time":datetime.fromtimestamp(args.input.stat().st_mtime,timezone.utc).isoformat(),"script_version":SCRIPT_VERSION,"run_timestamp":datetime.now(timezone.utc).isoformat(),"random_seed":args.random_seed,"n_input_rows":int(len(raw)),"n_input_patients":int(raw.patient_id.nunique()),"n_canonical_visits":int(len(spine)),"n_baseline_patients":int(len(baseline)),"n_duplicate_patient_dates":int(len(dup)),"n_pipe_delimited_visit_dates":int(raw.get('had_pipe_delimited_date',pd.Series(dtype=bool)).sum()),"n_pop_classifiable":int(baseline.baseline_pop.isin(['Pop1','Pop2','Pop3']).sum()),"n_pop_unclassifiable":int((~baseline.baseline_pop.isin(['Pop1','Pop2','Pop3'])).sum()),"n_with_followup_essdai":int(longdf[longdf.visit_number.gt(0)&longdf.essdai_total_recoded.notna()].patient_id.nunique()),"n_at_risk_essdai_ge5":int(len(essdai_ge5)),"n_essdai_ge5_events":int(essdai_ge5.essdai_ge5_event.sum()) if not essdai_ge5.empty else 0,"n_at_risk_new_domain":int(len(newdom)),"n_new_domain_events":int(newdom.new_domain_event.sum()) if not newdom.empty else 0,"essdai_activity_threshold_used":ACTIVITY_THRESHOLD_SECTION5,"essdai_primary_column":f"{common.POP_LONGITUDINAL_PARQUET.name}::{ESSDAI_CANONICAL_COL}","essdai_raw_qc_column":ESSDAI_RAW_QC_COL,"upstream_files_used":list(upstream.keys()),"upstream_file_timestamps":upstream,"warnings":["lifelines unavailable; Cox models not run"] if not LIFELINES_AVAILABLE else [],"essdai_reconciliation":{"n_concordant":int((diff==0).sum()),"n_discordant":int((diff!=0).sum()),"mean_difference":float(diff.mean()) if len(diff) else None,"median_difference":float(diff.median()) if len(diff) else None,"maximum_absolute_difference":float(diff.abs().max()) if len(diff) else None}}
     (QC_DIR/"07_comorbidities_qc.json").write_text(json.dumps(qc,indent=2,default=str))
     top=overall.head(3)
     claim=f"Confirmed-present rheumatological conditions were summarized using confirmation fields only; historical medical and Sjögren-related fields were exported descriptively and excluded from models. The leading confirmed-present rows were {top.iloc[0].display_label if len(top)>0 else 'NA'}, {top.iloc[1].display_label if len(top)>1 else 'NA'}, and {top.iloc[2].display_label if len(top)>2 else 'NA'}."
     logging.info(claim)
     generated=[TABLES_DIR/"07_comorbidities_overall.csv",TABLES_DIR/"07_comorbidities_by_pop.csv",TABLES_DIR/"07_comorbidities_progression.csv",FIGURES_DIR/"07_comorbidities_dotplot.pdf",FIGURES_DIR/"07_comorbidities_grouped_bar.pdf",FIGURES_DIR/"07_comorbidities_progression_forestplot.pdf"]
-    summary=f"Total baseline patients: {len(baseline)}\nClassifiable Pop patients: {qc['n_pop_classifiable']}\nPatients with follow-up ESSDAI: {qc['n_with_followup_essdai']}\nSevere14 events: {qc['n_severe14_events']}\nNew-domain events: {qc['n_new_domain_events']}\nNumber of models fitted: {int(prog.model_status.isin(['adjusted','fallback_gee']).sum())}\nNumber of models not estimable: {int(~prog.model_status.isin(['adjusted','fallback_gee']).sum())}\nGenerated files:\n"+"\n".join(str(p) for p in generated)
+    summary=f"Total baseline patients: {len(baseline)}\nClassifiable Pop patients: {qc['n_pop_classifiable']}\nPatients with follow-up ESSDAI: {qc['n_with_followup_essdai']}\nESSDAI >=5 events: {qc['n_essdai_ge5_events']}\nNew-domain events: {qc['n_new_domain_events']}\nNumber of models fitted: {int(prog.model_status.isin(['adjusted','fallback_gee']).sum())}\nNumber of models not estimable: {int(~prog.model_status.isin(['adjusted','fallback_gee']).sum())}\nGenerated files:\n"+"\n".join(str(p) for p in generated)
     print(summary); logging.info("\n"+summary)
 
 if __name__ == "__main__":
