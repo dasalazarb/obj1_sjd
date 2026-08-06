@@ -14,6 +14,7 @@ import math
 import os
 import subprocess
 import sys
+import textwrap
 import warnings
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -49,7 +50,7 @@ import common  # noqa: E402
 import config  # noqa: E402
 from src.derivations.visit_dates import add_parsed_visit_dates  # noqa: E402
 
-SCRIPT_VERSION = "2026-08-06.section5.v2"
+SCRIPT_VERSION = "2026-08-06.section5.v4"
 PATIENT_ID_COL = "ids__patient_record_number"
 VISIT_DATE_COL = "ids__visit_date"
 AGE_COL = "ids__age_at_visit"
@@ -364,18 +365,12 @@ def derive_comorbidity_indicators(raw: pd.DataFrame) -> tuple[pd.DataFrame, pd.D
     return collapsed, source_mapping_table(), pd.DataFrame(conflict_rows), dup
 
 
-def calculate_wilson_ci(k: int, n: int) -> tuple[float, float]:
-    if n <= 0: return (np.nan, np.nan)
-    z=1.959963984540054; p=k/n; den=1+z*z/n; cen=(p+z*z/(2*n))/den; half=z*math.sqrt((p*(1-p)+z*z/(4*n))/n)/den
-    return max(0, (cen-half)*100), min(100, (cen+half)*100)
-
-
 def summarize_historical_family(baseline: pd.DataFrame, specs: list[HistoricalConditionSpec], family_label: str) -> pd.DataFrame:
     rows=[]; N=len(baseline)
     for spec in specs:
         ser = baseline[spec.name].astype("boolean") if spec.name in baseline else pd.Series(pd.NA,index=baseline.index,dtype="boolean")
         n_doc=int(ser.eq(True).sum()); nmiss=int(ser.isna().sum()); neval=int(ser.notna().sum())
-        rows.append({"analytic_name":spec.name,"clinical_label":spec.label,"source_variable":spec.source,"source_family":spec.family,"clinical_group":spec.clinical_group,"temporal_interpretation":spec.temporal_interpretation,"n_total_patients":N,"n_evaluable":neval,"n_documented_history":n_doc,"n_missing":nmiss,"proportion_documented_among_evaluable":n_doc/neval if neval else np.nan,"percent_documented_among_evaluable":100*n_doc/neval if neval else np.nan,"allowed_analysis":spec.allowed_analysis,"model_inclusion":spec.model_inclusion,"justification":spec.justification,"ambiguous":spec.ambiguous,"summary_label":"Proportion with documented antecedent"})
+        rows.append({"analytic_name":spec.name,"clinical_label":spec.label,"source_variable":spec.source,"source_family":spec.family,"clinical_group":spec.clinical_group,"temporal_interpretation":spec.temporal_interpretation,"n_total_patients":N,"n_evaluable":neval,"n_documented_history":n_doc,"n_missing":nmiss,"proportion_documented_among_evaluable":n_doc/neval if neval else np.nan,"percent_documented_among_evaluable":100*n_doc/neval if neval else np.nan,"proportion_documented_total_cohort":n_doc/N if N else np.nan,"percent_documented_total_cohort":100*n_doc/N if N else np.nan,"allowed_analysis":spec.allowed_analysis,"model_inclusion":spec.model_inclusion,"justification":spec.justification,"ambiguous":spec.ambiguous,"summary_label":"Minimum documented proportion in the baseline cohort"})
     out=pd.DataFrame(rows).sort_values(["clinical_group","n_documented_history"], ascending=[True,False])
     if len(out): out["documented_history_count_variable"] = "documented_past_history_count" if family_label=="past" else "sjogren_history_manifestation_count"
     return out
@@ -411,8 +406,7 @@ def summarize_overall_prevalence(baseline: pd.DataFrame) -> pd.DataFrame:
         status=canonicalize_comorbidity_status(baseline.get(f"{spec.name}_status",pd.Series("no_comorbidity",index=baseline.index)))
         counts={state:int(status.eq(state).sum()) for state in ["confirmed_present","no_comorbidity","history_only","status_uncertain","missing"]}
         neval=counts["confirmed_present"]+counts["no_comorbidity"]
-        lo,hi=calculate_wilson_ci(counts["confirmed_present"],neval)
-        rows.append({"condition":spec.name,"display_label":spec.label,"exposure_definition":"confirmed_present vs no_comorbidity","source_columns":spec.confirmed,"n_total_cohort":N,"n_confirmed_present":counts["confirmed_present"],"n_no_comorbidity":counts["no_comorbidity"],"n_history_only":counts["history_only"],"n_status_uncertain":counts["status_uncertain"],"n_missing":counts["missing"],"n_evaluable_primary":neval,"pct_confirmed_among_evaluable":100*counts["confirmed_present"]/neval if neval else np.nan,"ci95_low":lo,"ci95_high":hi,"pct_confirmed_total_cohort":100*counts["confirmed_present"]/N if N else np.nan,"total_cohort_measure_label":"minimum documented proportion; not primary prevalence","availability_status":"available","notes":spec.notes})
+        rows.append({"condition":spec.name,"display_label":spec.label,"exposure_definition":"confirmed_present vs no_comorbidity","source_columns":spec.confirmed,"n_total_cohort":N,"n_confirmed_present":counts["confirmed_present"],"n_no_comorbidity":counts["no_comorbidity"],"n_history_only":counts["history_only"],"n_status_uncertain":counts["status_uncertain"],"n_missing":counts["missing"],"n_evaluable_primary":neval,"pct_confirmed_among_evaluable":100*counts["confirmed_present"]/neval if neval else np.nan,"pct_confirmed_total_cohort":100*counts["confirmed_present"]/N if N else np.nan,"total_cohort_measure_label":"minimum documented proportion; not primary prevalence","availability_status":"available","notes":spec.notes})
     out=pd.DataFrame(rows).sort_values("pct_confirmed_among_evaluable",ascending=False).reset_index(drop=True); out["rank_by_prevalence"]=np.arange(1,len(out)+1); return out
 
 
@@ -445,7 +439,7 @@ def summarize_prevalence_by_pop(baseline: pd.DataFrame, replicates:int=100000, s
     for spec in CONDITIONS:
         row={"condition":spec.name,"display_label":spec.label}; s=baseline[spec.name].astype("boolean"); tables=[]
         for pop in pops:
-            ss=s[baseline["baseline_pop"].eq(pop)]; ev=ss.notna(); n=int((ss[ev]==True).sum()); N=int(ev.sum()); lo,hi=calculate_wilson_ci(n,N); key=pop.lower(); row.update({f"n_{key}":n,f"N_{key}":N,f"pct_{key}":100*n/N if N else np.nan,f"ci95_{key}_low":lo,f"ci95_{key}_high":hi}); tables.append([n, N-n])
+            ss=s[baseline["baseline_pop"].eq(pop)]; ev=ss.notna(); n=int((ss[ev]==True).sum()); N=int(ev.sum()); key=pop.lower(); row.update({f"n_{key}":n,f"N_{key}":N,f"pct_{key}":100*n/N if N else np.nan}); tables.append([n, N-n])
         table=np.array(tables)
         if table.sum() == 0 or (table.sum(axis=1) == 0).any() or (table.sum(axis=0) == 0).any():
             row.update({"global_test":"not estimable", "global_p_value":np.nan, "minimum_expected_cell":np.nan, "sparse_table_flag":True})
@@ -598,7 +592,13 @@ def prepare_complete_cases(df: pd.DataFrame, required: list[str], exposure_col: 
 
 
 def base_model_row(spec: ConditionSpec, outcome: str, definition: str, variant: str, formula: str, estimand: str, effect_measure: str) -> dict[str, Any]:
-    return {"outcome":outcome,"comorbidity":spec.name,"display_label":spec.label,"exposure_definition":definition,"reference_group":"no_comorbidity (blank/negative rheumatological fields coded False)","model_variant":variant,"hypothesis_family":variant,"formula":formula,"estimand":estimand,"effect_measure":effect_measure,"estimate":np.nan,"standard_error":np.nan,"ci95_low":np.nan,"ci95_high":np.nan,"p_value":np.nan,"fdr_bh_q_value":np.nan,"n_patients":0,"n_exposed_patients":0,"n_reference_patients":0,"n_events":np.nan,"n_events_exposed":np.nan,"n_events_reference":np.nan,"n_observations":0,"n_complete_cases":0,"covariates":"","model_converged":False,"model_status":"not_run","warning":"","interpretation":"Association only; no causal interpretation."}
+    if variant.startswith("primary_discrete_time"):
+        model_name, model_type = "Discrete-time proportional hazards model", "Complementary log-log binomial GLM"
+    elif variant == "sensitivity_cox":
+        model_name, model_type = "Cox proportional hazards sensitivity model", "Semiparametric time-to-event model"
+    else:
+        model_name, model_type = "Longitudinal ESSDAI mixed-effects model", "Linear mixed-effects regression"
+    return {"outcome":outcome,"comorbidity":spec.name,"display_label":spec.label,"exposure_definition":definition,"reference_group":"no_comorbidity (blank/negative rheumatological fields coded False)","model_name":model_name,"model_type":model_type,"model_variant":variant,"hypothesis_family":variant,"formula":formula,"estimand":estimand,"effect_measure":effect_measure,"estimate":np.nan,"standard_error":np.nan,"ci95_low":np.nan,"ci95_high":np.nan,"p_value":np.nan,"fdr_bh_q_value":np.nan,"n_patients":0,"n_exposed_patients":0,"n_reference_patients":0,"n_events":np.nan,"n_events_exposed":np.nan,"n_events_reference":np.nan,"n_observations":0,"n_complete_cases":0,"covariates":"","model_converged":False,"model_status":"not_run","warning":"","interpretation":"Association only; no causal interpretation."}
 
 
 def fit_mixed_models(longdf: pd.DataFrame, spec: ConditionSpec) -> tuple[list[dict[str,Any]],list[dict[str,Any]]]:
@@ -681,29 +681,47 @@ def apply_grouped_fdr(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def create_dotplot(overall, path):
-    df=overall.iloc[::-1]; fig,ax=plt.subplots(figsize=(9,max(5,.4*len(df)+1))); y=np.arange(len(df)); lower=(df.pct_confirmed_among_evaluable-df.ci95_low).clip(lower=0); upper=(df.ci95_high-df.pct_confirmed_among_evaluable).clip(lower=0); ax.errorbar(df.pct_confirmed_among_evaluable,y,xerr=[lower,upper],fmt='o',color='#1f77b4'); ax.set_yticks(y,df.display_label); ax.set_xlabel('Confirmed present among primary-evaluable patients, %');
-    for yi,r in zip(y,df.itertuples()): ax.text(r.ci95_high+1,yi,f"{r.n_confirmed_present}/{r.n_evaluable_primary}",va='center',fontsize=8)
-    fig.text(.01,.01,"Primary denominator = confirmed_present + no_comorbidity. Blank rheumatological fields are coded as no_comorbidity (False); history-only and uncertain states are excluded.",fontsize=8); fig.tight_layout(rect=(0,0.04,1,1)); fig.savefig(path); plt.close(fig)
+    df=overall.iloc[::-1]; fig,ax=plt.subplots(figsize=(10,max(6,.42*len(df)+1))); y=np.arange(len(df)); values=df.pct_confirmed_among_evaluable; ax.barh(y,values,color='#4c78a8'); ax.set_yticks(y,df.display_label); ax.set_xlabel('Patients with confirmed current condition, %'); ax.set_title('Rheumatological conditions — confirmed current status',weight='bold',pad=12)
+    for yi,r in zip(y,df.itertuples()):
+        if r.n_confirmed_present > 0: ax.text(r.pct_confirmed_among_evaluable+.15,yi,f"{r.n_confirmed_present}/{r.n_evaluable_primary} ({r.pct_confirmed_among_evaluable:.1f}%)",va='center',fontsize=8)
+    ax.set_xlim(0,max(3,float(values.max())*1.25)); ax.grid(axis='x',alpha=.2); ax.set_axisbelow(True)
+    caption="Values are n/N (%): numerator (n) = patients confirmed present; denominator (N) = patients confirmed present + patients coded as no comorbidity. History-only and uncertain states are excluded. Zero-event bars are left unlabelled to reduce clutter."
+    fig.text(.01,.012,textwrap.fill(caption,145),fontsize=8,va='bottom'); fig.tight_layout(rect=(0,0.065,1,1)); fig.savefig(path,bbox_inches='tight'); plt.close(fig)
+
+
+def create_historical_barplot(summary, title, path):
+    """Plot one historical source family without mixing it with current disease."""
+    df=summary.sort_values(["percent_documented_total_cohort","n_documented_history"],ascending=True); fig,ax=plt.subplots(figsize=(11,max(7,.34*len(df)+1))); y=np.arange(len(df)); values=df.percent_documented_total_cohort; ax.barh(y,values,color='#72b7b2'); ax.set_yticks(y,df.clinical_label); ax.set_xlabel('Baseline cohort with a documented history, %'); ax.set_title(title,weight='bold',pad=12)
+    for yi,r in zip(y,df.itertuples()):
+        if r.n_documented_history > 0: ax.text(r.percent_documented_total_cohort+.25,yi,f"{r.n_documented_history}/{r.n_total_patients} ({r.percent_documented_total_cohort:.1f}%)",va='center',fontsize=7)
+    ax.set_xlim(0,max(5,float(values.max())*1.28 if values.notna().any() else 5)); ax.grid(axis='x',alpha=.2); ax.set_axisbelow(True)
+    caption="Values are n/N (%): numerator (n) = baseline patients with a positive documented antecedent; denominator (N) = the full baseline cohort. Blank source fields mean that no history was documented, not that the condition was clinically ruled out; percentages are therefore minimum documented proportions, not current prevalence."
+    fig.text(.01,.012,textwrap.fill(caption,150),fontsize=8,va='bottom'); fig.tight_layout(rect=(0,0.065,1,1)); fig.savefig(path,bbox_inches='tight'); plt.close(fig)
 
 
 def create_grouped_barplot(bypop,path):
-    df=bypop.iloc[::-1]; fig,ax=plt.subplots(figsize=(10,max(5,.5*len(df)+1))); y=np.arange(len(df)); offs=[-.22,0,.22]; colors=['#4c78a8','#f58518','#54a24b']
+    sort_value=bypop[["pct_pop1","pct_pop2","pct_pop3"]].max(axis=1); df=bypop.assign(_sort_value=sort_value).sort_values(["_sort_value","display_label"],ascending=[True,False]); fig,ax=plt.subplots(figsize=(11,max(6,.55*len(df)+1))); y=np.arange(len(df)); height=.22; offs=[-height,0,height]; colors=['#4c78a8','#f58518','#54a24b']
     for pop,off,col in zip(['pop1','pop2','pop3'],offs,colors):
-        pct=df[f'pct_{pop}']; lo=df[f'ci95_{pop}_low']; hi=df[f'ci95_{pop}_high']; lower=(pct-lo).clip(lower=0); upper=(hi-pct).clip(lower=0); ax.errorbar(pct,y+off,xerr=[lower,upper],fmt='o',label=pop.capitalize(),color=col)
-        for yi,r in zip(y+off,df.itertuples()): ax.text((getattr(r,f'pct_{pop}') or 0)+1, yi, f"{getattr(r,f'n_{pop}')}/{getattr(r,f'N_{pop}')}", fontsize=7, va='center')
-    ax.set_yticks(y,df.display_label); ax.set_xlabel('Prevalence among evaluable patients within Pop, %'); ax.legend(); fig.text(.01,.01,"Pop denominators are condition-evaluable Pop1/Pop2/Pop3 patients; unclassifiable patients are excluded from tests.",fontsize=8); fig.tight_layout(rect=(0,0.04,1,1)); fig.savefig(path); plt.close(fig)
+        pct=df[f'pct_{pop}']; ax.barh(y+off,pct,height=height,label=pop.capitalize(),color=col)
+        for yi,r in zip(y+off,df.itertuples()):
+            n,N,value=getattr(r,f'n_{pop}'),getattr(r,f'N_{pop}'),getattr(r,f'pct_{pop}')
+            if n > 0: ax.text(value+.2,yi,f"{n}/{N} ({value:.1f}%)",fontsize=7,va='center')
+    max_pct=float(df[["pct_pop1","pct_pop2","pct_pop3"]].max().max()); ax.set_xlim(0,max(5,max_pct*1.28)); ax.set_yticks(y,df.display_label); ax.set_xlabel('Patients with confirmed current condition within population, %'); ax.set_title('Rheumatological conditions by baseline population',weight='bold',pad=42); ax.legend(loc='lower center',bbox_to_anchor=(.5,1.01),ncol=3,frameon=False); ax.grid(axis='x',alpha=.2); ax.set_axisbelow(True)
+    caption="Conditions are ordered by their highest observed percentage across Pop1–Pop3 (largest at top). Values are n/N (%): numerator (n) = patients in that Pop with confirmed current condition; denominator (N) = condition-evaluable patients in that Pop. Zero-event bars are left unlabelled to reduce clutter."
+    fig.text(.01,.012,textwrap.fill(caption,150),fontsize=8,va='bottom'); fig.tight_layout(rect=(0,0.07,1,.96)); fig.savefig(path,bbox_inches='tight'); plt.close(fig)
 
 
 def create_progression_forestplot(prog, order, path):
     panels=[('ESSDAI trajectory','primary_all_visits','Difference in annual ESSDAI slope',0,'Beta difference in annual ESSDAI change'),('first observed ESSDAI >= 5','primary_discrete_time_cloglog','First observed ESSDAI ≥5',1,'Hazard ratio (discrete-time complementary log-log)'),('First observed new ESSDAI domain','primary_discrete_time_cloglog','First observed new ESSDAI domain',1,'Hazard ratio (discrete-time complementary log-log)')]
     fig,axs=plt.subplots(1,3,figsize=(16,max(6,.45*len(order)+1)),sharey=True); y=np.arange(len(order))
     for ax,(out,variant,title,ref,measure) in zip(axs,panels):
-        sub=prog[(prog.outcome==out)&(prog.model_variant==variant)&(prog.exposure_definition.eq("confirmed_present_vs_no_comorbidity"))].set_index('comorbidity').reindex(order); ax.axvline(ref,color='grey',ls='--'); ax.set_title(title); ax.set_yticks(y,[next(c.label for c in CONDITIONS if c.name==n) for n in order])
+        sub=prog[(prog.outcome==out)&(prog.model_variant==variant)&(prog.exposure_definition.eq("confirmed_present_vs_no_comorbidity"))].set_index('comorbidity').reindex(order); ax.axvline(ref,color='grey',ls='--'); model_label="Linear mixed-effects model" if ref==0 else "Discrete-time complementary log-log model"; ax.set_title(f"{title}\n{model_label}"); ax.set_yticks(y,[next(c.label for c in CONDITIONS if c.name==n) for n in order])
         for i,(name,r) in enumerate(sub.iterrows()):
-            if pd.notna(r.get('estimate')) and pd.notna(r.get('ci95_low')) and pd.notna(r.get('ci95_high')): ax.errorbar(r.estimate,i,xerr=[[max(0,r.estimate-r.ci95_low)],[max(0,r.ci95_high-r.estimate)]],fmt='o')
+            if pd.notna(r.get('estimate')) and pd.notna(r.get('ci95_low')) and pd.notna(r.get('ci95_high')):
+                ax.errorbar(r.estimate,i,xerr=[[max(0,r.estimate-r.ci95_low)],[max(0,r.ci95_high-r.estimate)]],fmt='o'); ax.annotate(f"{'HR' if ref==1 else 'β'}={r.estimate:.2f}",(r.estimate,i),xytext=(5,4),textcoords='offset points',fontsize=7)
             else: ax.text(ref,i,'NE',ha='center',va='center',fontsize=8)
         if ref==1: ax.set_xscale('log')
-    fig.text(.01,.01,"Adjusted for baseline ESSDAI, baseline Pop, age, and sex when estimable. Outcomes: follow-up ESSDAI slope, first ESSDAI ≥5, and first new inactive-at-baseline organ-domain activation.",fontsize=8); fig.tight_layout(rect=(0,0.04,1,1)); fig.savefig(path); plt.close(fig)
+    fig.text(.01,.01,"Model types: linear mixed-effects regression for ESSDAI trajectory; discrete-time proportional hazards regression with complementary log-log link for event outcomes. HR = hazard ratio; β = difference in annual ESSDAI change. Models adjust for the covariates specified in their output rows.",fontsize=8); fig.tight_layout(rect=(0,0.06,1,1)); fig.savefig(path); plt.close(fig)
 
 
 def main() -> None:
@@ -730,11 +748,15 @@ def main() -> None:
         extras=[c for c in residual_diagnostics.columns if c not in keys and c not in model_diagnostics.columns]
         model_diagnostics=model_diagnostics.merge(residual_diagnostics[keys+extras],on=keys,how="left")
     logging.info("[8/8] Writing tables, figures, and QC")
+    past_history_summary=summarize_historical_family(baseline, PAST_MEDICAL_HISTORY_CONDITIONS, "past")
+    sjogren_history_summary=summarize_historical_family(baseline, SJOGREN_HISTORY_MANIFESTATIONS, "sjogren")
     overall.to_csv(TABLES_DIR/"07_comorbidities_prevalence.csv",index=False); bypop.to_csv(TABLES_DIR/"07_comorbidities_pop_comparisons.csv",index=False); mixed.to_csv(TABLES_DIR/"07_comorbidities_essdai_mixed_models.csv",index=False); discrete.to_csv(TABLES_DIR/"07_comorbidities_discrete_time_models.csv",index=False); cox.to_csv(TABLES_DIR/"07_comorbidities_cox_sensitivity.csv",index=False); model_diagnostics.to_csv(TABLES_DIR/"07_comorbidities_model_diagnostics.csv",index=False); newdom_audit.to_csv(TABLES_DIR/"07_comorbidities_new_domain_audit.csv",index=False)
     overall.to_csv(TABLES_DIR/"07_comorbidities_overall.csv",index=False); bypop.to_csv(TABLES_DIR/"07_comorbidities_by_pop.csv",index=False); prog.to_csv(TABLES_DIR/"07_comorbidities_progression.csv",index=False)
     overall.to_csv(TABLES_DIR/"07_rheumatological_conditions_current.csv",index=False); summarize_rheumatological_history(baseline).to_csv(TABLES_DIR/"07_rheumatological_conditions_history.csv",index=False); bypop.to_csv(TABLES_DIR/"07_rheumatological_conditions_by_pop.csv",index=False); model_diagnostics.to_csv(TABLES_DIR/"07_rheumatological_model_diagnostics.csv",index=False)
-    summarize_historical_family(baseline, PAST_MEDICAL_HISTORY_CONDITIONS, "past").to_csv(TABLES_DIR/"07_past_medical_history_descriptive.csv",index=False); summarize_historical_family(baseline, SJOGREN_HISTORY_MANIFESTATIONS, "sjogren").to_csv(TABLES_DIR/"07_sjogren_history_descriptive.csv",index=False); summarize_other_immune_conditions(baseline).to_csv(TABLES_DIR/"07_other_immune_conditions.csv",index=False); conflicts.to_csv(QC_DIR/"07_condition_status_conflicts.csv",index=False); source.to_csv(QC_DIR/"07_condition_source_mapping.csv",index=False); condition_status_sensitivity(baseline).to_csv(QC_DIR/"07_condition_status_sensitivity.csv",index=False)
-    create_dotplot(overall,FIGURES_DIR/"07_comorbidities_dotplot.pdf"); create_grouped_barplot(bypop,FIGURES_DIR/"07_comorbidities_grouped_bar.pdf"); create_progression_forestplot(prog, overall.condition.tolist(), FIGURES_DIR/"07_rheumatological_forest_plot.pdf")
+    past_history_summary.to_csv(TABLES_DIR/"07_past_medical_history_descriptive.csv",index=False); sjogren_history_summary.to_csv(TABLES_DIR/"07_sjogren_history_descriptive.csv",index=False); summarize_other_immune_conditions(baseline).to_csv(TABLES_DIR/"07_other_immune_conditions.csv",index=False); conflicts.to_csv(QC_DIR/"07_condition_status_conflicts.csv",index=False); source.to_csv(QC_DIR/"07_condition_source_mapping.csv",index=False); condition_status_sensitivity(baseline).to_csv(QC_DIR/"07_condition_status_sensitivity.csv",index=False)
+    create_historical_barplot(past_history_summary,"Past medical history",FIGURES_DIR/"07_past_medical_history_descriptive.pdf")
+    create_historical_barplot(sjogren_history_summary,"Sjögren history manifestations",FIGURES_DIR/"07_sjogren_history_manifestations_descriptive.pdf")
+    create_dotplot(overall,FIGURES_DIR/"07_rheumatological_conditions_descriptive.pdf"); create_grouped_barplot(bypop,FIGURES_DIR/"07_rheumatological_conditions_by_population.pdf"); create_progression_forestplot(prog, overall.condition.tolist(), FIGURES_DIR/"07_rheumatological_forest_plot.pdf")
     pd.DataFrame(UNRECOGNIZED).groupby(["column","value"],as_index=False).n.sum().to_csv(QC_DIR/"07_comorbidities_unrecognized_values.csv",index=False) if UNRECOGNIZED else pd.DataFrame(columns=["column","value","n"]).to_csv(QC_DIR/"07_comorbidities_unrecognized_values.csv",index=False)
     pd.DataFrame([{ "condition":k,"availability_status":"unavailable","reason":v} for k,v in UNAVAILABLE_CONDITIONS.items()]).to_csv(QC_DIR/"07_comorbidities_unavailable_conditions.csv",index=False)
     source.to_csv(QC_DIR/"07_comorbidities_source_mapping.csv",index=False)
