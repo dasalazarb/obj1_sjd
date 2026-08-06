@@ -52,8 +52,8 @@ PATIENT_ID_COL = "ids__patient_record_number"
 VISIT_DATE_COL = "ids__visit_date"
 AGE_COL = "ids__age_at_visit"
 SEX_COL = "ids__sex"
-ESSDAI_PRIMARY_COL = "essdai-_r__essdai_total_score"
 ESSDAI_RAW_QC_COL = "essdai__essdai_total_score"
+ESSDAI_CANONICAL_COL = "essdai_total"
 SEVERE_ACTIVITY_THRESHOLD_SECTION5 = 14
 FIGURES_DIR = common.OUTPUTS_DIR / "figures" / "blockA"
 LOG_PATH = common.OUTPUTS_DIR / "logs" / "07_comorbidities.log"
@@ -224,7 +224,7 @@ def available_columns(path: Path) -> set[str]:
 
 
 def load_selected_raw_columns(path: Path) -> pd.DataFrame:
-    needed = {PATIENT_ID_COL, VISIT_DATE_COL, AGE_COL, SEX_COL, ESSDAI_PRIMARY_COL, ESSDAI_RAW_QC_COL,
+    needed = {PATIENT_ID_COL, VISIT_DATE_COL, AGE_COL, SEX_COL, ESSDAI_RAW_QC_COL,
               "past_medical_history__thyroid_disease_spfy", "past_medical_history__neuro_hx_neuropathy_spfy",
               "visit_summary_-_2016_classification_criteria__autoantibodies", "visit_summary_form__autoantibodies"}
     for c in RHEUMATOLOGICAL_CONDITIONS:
@@ -242,7 +242,7 @@ def load_selected_raw_columns(path: Path) -> pd.DataFrame:
 def load_visit_spine() -> pd.DataFrame:
     cols = ["patient_id", "visit_id", "visit_date", "visit_number", "observed_baseline_date", "time_since_observed_baseline_days", "time_since_observed_baseline_years", "age_at_visit", "sex", "interval_name"]
     have = available_columns(common.VISIT_SPINE_PARQUET)
-    required = {"patient_id", "visit_id", "visit_date", "visit_number"}
+    required = {"patient_id", "visit_id", "visit_date", "visit_number", "observed_baseline_date", "time_since_observed_baseline_years", "age_at_visit", "sex"}
     missing = sorted(required - have)
     if missing:
         raise ValueError(f"Canonical visit spine is missing required columns: {', '.join(missing)}")
@@ -250,13 +250,18 @@ def load_visit_spine() -> pd.DataFrame:
 
 
 def load_pop_classification() -> pd.DataFrame:
-    return pd.read_parquet(common.POP_LONGITUDINAL_PARQUET)
+    cols = ["patient_id", "visit_id", "visit_date", "visit_number", ESSDAI_CANONICAL_COL, "pop_status", "baseline_pop_status"]
+    have = available_columns(common.POP_LONGITUDINAL_PARQUET)
+    missing = sorted(set(cols) - have)
+    if missing:
+        raise ValueError(f"Population longitudinal data are missing required columns: {', '.join(missing)}")
+    return pd.read_parquet(common.POP_LONGITUDINAL_PARQUET, columns=cols)
 
 
 def load_domain_flags() -> pd.DataFrame:
     cols = ["patient_id", "visit_id", "visit_date", "visit_number"] + DOMAIN_COLS + [SENSITIVITY_DOMAIN_COL, "n_extraglandular_domains_active"]
     have = available_columns(common.OVERLAP_LONGITUDINAL_PARQUET)
-    required = {"patient_id", "visit_id", "visit_date", "visit_number"}
+    required = {"patient_id", "visit_id", "visit_date", "visit_number", *DOMAIN_COLS}
     missing = sorted(required - have)
     if missing:
         raise ValueError(f"Overlap longitudinal data are missing required columns: {', '.join(missing)}")
@@ -428,11 +433,14 @@ def summarize_prevalence_by_pop(baseline: pd.DataFrame, replicates:int=100000, s
         for pop in pops:
             ss=s[baseline["baseline_pop"].eq(pop)]; ev=ss.notna(); n=int((ss[ev]==True).sum()); N=int(ev.sum()); lo,hi=calculate_wilson_ci(n,N); key=pop.lower(); row.update({f"n_{key}":n,f"N_{key}":N,f"pct_{key}":100*n/N if N else np.nan,f"ci95_{key}_low":lo,f"ci95_{key}_high":hi}); tables.append([n, N-n])
         table=np.array(tables)
-        try:
-            chi,p,_,exp=stats.chi2_contingency(table, correction=False); mn=float(exp.min()); sparse=mn<5
-            row.update({"global_test":"Monte Carlo chi-square" if sparse else "Chi-square", "global_p_value": monte_carlo_chi2(table, min(replicates,20000), seed) if sparse else p, "minimum_expected_cell":mn, "sparse_table_flag":sparse})
-        except ValueError as e:
+        if table.sum() == 0 or (table.sum(axis=1) == 0).any() or (table.sum(axis=0) == 0).any():
             row.update({"global_test":"not estimable", "global_p_value":np.nan, "minimum_expected_cell":np.nan, "sparse_table_flag":True})
+        else:
+            try:
+                chi,p,_,exp=stats.chi2_contingency(table, correction=False); mn=float(exp.min()); sparse=mn<5
+                row.update({"global_test":"Monte Carlo chi-square" if sparse else "Chi-square", "global_p_value": monte_carlo_chi2(table, min(replicates,20000), seed) if sparse else p, "minimum_expected_cell":mn, "sparse_table_flag":sparse})
+            except ValueError:
+                row.update({"global_test":"not estimable", "global_p_value":np.nan, "minimum_expected_cell":np.nan, "sparse_table_flag":True})
         row.update(calculate_or_and_fisher(table[1,0], table[1,1], table[2,0], table[2,1]))
         row["interpretation_status"] = "clear_evidence" if (pd.notna(row["fisher_exact_p_value"]) and row["fisher_exact_p_value"]<0.05 and row["or_ci95_low"]>1) else "imprecise_or_no_clear_evidence"
         rows.append(row)
@@ -456,8 +464,12 @@ def build_baseline_comorbidity_dataset(raw_ind:pd.DataFrame, spine:pd.DataFrame,
 
 
 def build_longitudinal_essdai_dataset(spine,pop,raw,baseline,domains):
-    ess=raw[["patient_id","visit_date"]+[c for c in [ESSDAI_PRIMARY_COL,ESSDAI_RAW_QC_COL] if c in raw]].drop_duplicates(["patient_id","visit_date"]).rename(columns={ESSDAI_PRIMARY_COL:"essdai_total_recoded",ESSDAI_RAW_QC_COL:"essdai_total_raw_qc"})
-    df=spine.merge(ess,on=["patient_id","visit_date"],how="left").merge(pop[["patient_id","visit_id","essdai_total","pop_status"]],on=["patient_id","visit_id"],how="left",suffixes=("","_popfile"))
+    ess=raw[["patient_id","visit_date"]+[c for c in [ESSDAI_RAW_QC_COL] if c in raw]].drop_duplicates(["patient_id","visit_date"]).rename(columns={ESSDAI_RAW_QC_COL:"essdai_total_raw_qc"})
+    df=spine.merge(ess,on=["patient_id","visit_date"],how="left").merge(pop[["patient_id","visit_id",ESSDAI_CANONICAL_COL,"pop_status"]],on=["patient_id","visit_id"],how="left",suffixes=("","_popfile"))
+    df["essdai_total_recoded"] = pd.to_numeric(df[ESSDAI_CANONICAL_COL], errors="coerce")
+    df["essdai_total_source"] = np.where(df["essdai_total_recoded"].notna(), "population_longitudinal__essdai_total", pd.NA)
+    if "essdai_total_raw_qc" not in df:
+        df["essdai_total_raw_qc"] = pd.Series(np.nan, index=df.index, dtype="float64")
     df=df.merge(domains,on=["patient_id","visit_id","visit_date","visit_number"],how="left")
     bcols=["patient_id","baseline_essdai","baseline_pop","age_baseline","sex"]+CONDITION_NAMES
     return df.merge(baseline[bcols],on="patient_id",how="left",suffixes=("","_baseline"))
@@ -586,7 +598,7 @@ def main() -> None:
     miss=baseline[["baseline_pop","baseline_essdai","age_baseline","sex"]+CONDITION_NAMES].isna().sum().reset_index(); miss.columns=["variable","n_missing"]; miss.to_csv(QC_DIR/"07_comorbidities_missingness.csv",index=False)
     dup.to_csv(QC_DIR/"07_comorbidities_patient_duplicates.csv",index=False); prog.to_csv(QC_DIR/"07_comorbidities_model_diagnostics.csv",index=False)
     raw_ess=longdf.dropna(subset=["essdai_total_recoded","essdai_total_raw_qc"]); diff=pd.to_numeric(raw_ess.essdai_total_recoded,errors='coerce')-pd.to_numeric(raw_ess.essdai_total_raw_qc,errors='coerce')
-    qc={"input_path":str(args.input),"input_modification_time":datetime.fromtimestamp(args.input.stat().st_mtime,timezone.utc).isoformat(),"script_version":SCRIPT_VERSION,"run_timestamp":datetime.now(timezone.utc).isoformat(),"random_seed":args.random_seed,"n_input_rows":int(len(raw)),"n_input_patients":int(raw.patient_id.nunique()),"n_canonical_visits":int(len(spine)),"n_baseline_patients":int(len(baseline)),"n_duplicate_patient_dates":int(len(dup)),"n_pipe_delimited_visit_dates":int(raw.get('had_pipe_delimited_date',pd.Series(dtype=bool)).sum()),"n_pop_classifiable":int(baseline.baseline_pop.isin(['Pop1','Pop2','Pop3']).sum()),"n_pop_unclassifiable":int((~baseline.baseline_pop.isin(['Pop1','Pop2','Pop3'])).sum()),"n_with_followup_essdai":int(longdf[longdf.visit_number.gt(0)&longdf.essdai_total_recoded.notna()].patient_id.nunique()),"n_at_risk_severe14":int(len(severe)),"n_severe14_events":int(severe.severe14_event.sum()) if not severe.empty else 0,"n_at_risk_new_domain":int(len(newdom)),"n_new_domain_events":int(newdom.new_domain_event.sum()) if not newdom.empty else 0,"severe_threshold_used":SEVERE_ACTIVITY_THRESHOLD_SECTION5,"essdai_primary_column":ESSDAI_PRIMARY_COL,"essdai_raw_qc_column":ESSDAI_RAW_QC_COL,"upstream_files_used":list(upstream.keys()),"upstream_file_timestamps":upstream,"warnings":["lifelines unavailable; Cox models not run"] if not LIFELINES_AVAILABLE else [],"essdai_reconciliation":{"n_concordant":int((diff==0).sum()),"n_discordant":int((diff!=0).sum()),"mean_difference":float(diff.mean()) if len(diff) else None,"median_difference":float(diff.median()) if len(diff) else None,"maximum_absolute_difference":float(diff.abs().max()) if len(diff) else None}}
+    qc={"input_path":str(args.input),"input_modification_time":datetime.fromtimestamp(args.input.stat().st_mtime,timezone.utc).isoformat(),"script_version":SCRIPT_VERSION,"run_timestamp":datetime.now(timezone.utc).isoformat(),"random_seed":args.random_seed,"n_input_rows":int(len(raw)),"n_input_patients":int(raw.patient_id.nunique()),"n_canonical_visits":int(len(spine)),"n_baseline_patients":int(len(baseline)),"n_duplicate_patient_dates":int(len(dup)),"n_pipe_delimited_visit_dates":int(raw.get('had_pipe_delimited_date',pd.Series(dtype=bool)).sum()),"n_pop_classifiable":int(baseline.baseline_pop.isin(['Pop1','Pop2','Pop3']).sum()),"n_pop_unclassifiable":int((~baseline.baseline_pop.isin(['Pop1','Pop2','Pop3'])).sum()),"n_with_followup_essdai":int(longdf[longdf.visit_number.gt(0)&longdf.essdai_total_recoded.notna()].patient_id.nunique()),"n_at_risk_severe14":int(len(severe)),"n_severe14_events":int(severe.severe14_event.sum()) if not severe.empty else 0,"n_at_risk_new_domain":int(len(newdom)),"n_new_domain_events":int(newdom.new_domain_event.sum()) if not newdom.empty else 0,"severe_threshold_used":SEVERE_ACTIVITY_THRESHOLD_SECTION5,"essdai_primary_column":f"{common.POP_LONGITUDINAL_PARQUET.name}::{ESSDAI_CANONICAL_COL}","essdai_raw_qc_column":ESSDAI_RAW_QC_COL,"upstream_files_used":list(upstream.keys()),"upstream_file_timestamps":upstream,"warnings":["lifelines unavailable; Cox models not run"] if not LIFELINES_AVAILABLE else [],"essdai_reconciliation":{"n_concordant":int((diff==0).sum()),"n_discordant":int((diff!=0).sum()),"mean_difference":float(diff.mean()) if len(diff) else None,"median_difference":float(diff.median()) if len(diff) else None,"maximum_absolute_difference":float(diff.abs().max()) if len(diff) else None}}
     (QC_DIR/"07_comorbidities_qc.json").write_text(json.dumps(qc,indent=2,default=str))
     top=overall.head(3)
     claim=f"Confirmed-present rheumatological conditions were summarized using confirmation fields only; historical medical and Sjögren-related fields were exported descriptively and excluded from models. The leading confirmed-present rows were {top.iloc[0].display_label if len(top)>0 else 'NA'}, {top.iloc[1].display_label if len(top)>1 else 'NA'}, and {top.iloc[2].display_label if len(top)>2 else 'NA'}."
