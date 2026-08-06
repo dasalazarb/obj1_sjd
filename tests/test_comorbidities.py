@@ -45,6 +45,18 @@ def test_pop_prevalence_uses_evaluable_denominator():
     assert fibromyalgia["pct_pop1"] == 100 / 3
 
 
+def test_historical_summary_uses_full_baseline_cohort_for_plotted_percentage():
+    spec = comorbidities.PAST_MEDICAL_HISTORY_CONDITIONS[0]
+    baseline = pd.DataFrame({spec.name: pd.Series([True, pd.NA, False, pd.NA], dtype="boolean")})
+
+    result = comorbidities.summarize_historical_family(baseline, [spec], "past").iloc[0]
+
+    assert result["n_documented_history"] == 1
+    assert result["n_total_patients"] == 4
+    assert result["percent_documented_total_cohort"] == 25.0
+    assert result["summary_label"] == "Minimum documented proportion in the baseline cohort"
+
+
 def test_condition_statuses_are_mutually_exclusive_and_prioritized():
     general = pd.Series([True, True, False, pd.NA, pd.NA], dtype="boolean")
     history = pd.Series([True, False, True, False, pd.NA], dtype="boolean")

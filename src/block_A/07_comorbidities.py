@@ -14,6 +14,7 @@ import math
 import os
 import subprocess
 import sys
+import textwrap
 import warnings
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -49,7 +50,7 @@ import common  # noqa: E402
 import config  # noqa: E402
 from src.derivations.visit_dates import add_parsed_visit_dates  # noqa: E402
 
-SCRIPT_VERSION = "2026-08-06.section5.v3"
+SCRIPT_VERSION = "2026-08-06.section5.v4"
 PATIENT_ID_COL = "ids__patient_record_number"
 VISIT_DATE_COL = "ids__visit_date"
 AGE_COL = "ids__age_at_visit"
@@ -369,7 +370,7 @@ def summarize_historical_family(baseline: pd.DataFrame, specs: list[HistoricalCo
     for spec in specs:
         ser = baseline[spec.name].astype("boolean") if spec.name in baseline else pd.Series(pd.NA,index=baseline.index,dtype="boolean")
         n_doc=int(ser.eq(True).sum()); nmiss=int(ser.isna().sum()); neval=int(ser.notna().sum())
-        rows.append({"analytic_name":spec.name,"clinical_label":spec.label,"source_variable":spec.source,"source_family":spec.family,"clinical_group":spec.clinical_group,"temporal_interpretation":spec.temporal_interpretation,"n_total_patients":N,"n_evaluable":neval,"n_documented_history":n_doc,"n_missing":nmiss,"proportion_documented_among_evaluable":n_doc/neval if neval else np.nan,"percent_documented_among_evaluable":100*n_doc/neval if neval else np.nan,"allowed_analysis":spec.allowed_analysis,"model_inclusion":spec.model_inclusion,"justification":spec.justification,"ambiguous":spec.ambiguous,"summary_label":"Proportion with documented antecedent"})
+        rows.append({"analytic_name":spec.name,"clinical_label":spec.label,"source_variable":spec.source,"source_family":spec.family,"clinical_group":spec.clinical_group,"temporal_interpretation":spec.temporal_interpretation,"n_total_patients":N,"n_evaluable":neval,"n_documented_history":n_doc,"n_missing":nmiss,"proportion_documented_among_evaluable":n_doc/neval if neval else np.nan,"percent_documented_among_evaluable":100*n_doc/neval if neval else np.nan,"proportion_documented_total_cohort":n_doc/N if N else np.nan,"percent_documented_total_cohort":100*n_doc/N if N else np.nan,"allowed_analysis":spec.allowed_analysis,"model_inclusion":spec.model_inclusion,"justification":spec.justification,"ambiguous":spec.ambiguous,"summary_label":"Minimum documented proportion in the baseline cohort"})
     out=pd.DataFrame(rows).sort_values(["clinical_group","n_documented_history"], ascending=[True,False])
     if len(out): out["documented_history_count_variable"] = "documented_past_history_count" if family_label=="past" else "sjogren_history_manifestation_count"
     return out
@@ -680,24 +681,34 @@ def apply_grouped_fdr(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def create_dotplot(overall, path):
-    df=overall.iloc[::-1]; fig,ax=plt.subplots(figsize=(10,max(5,.4*len(df)+1))); y=np.arange(len(df)); ax.barh(y,df.pct_confirmed_among_evaluable,color='#4c78a8'); ax.set_yticks(y,df.display_label); ax.set_xlabel('Patients with confirmed current condition, %'); ax.set_title('Rheumatological conditions — confirmed current status')
-    for yi,r in zip(y,df.itertuples()): ax.text(r.pct_confirmed_among_evaluable+0.4,yi,f"{r.n_confirmed_present}/{r.n_evaluable_primary}",va='center',fontsize=8)
-    ax.margins(x=.16); fig.text(.01,.01,"Values are n/N (%): numerator (n) = patients confirmed present; denominator (N) = patients confirmed present + patients with no comorbidity. History-only and uncertain states are excluded; blank rheumatological fields are coded as no comorbidity.",fontsize=8); fig.tight_layout(rect=(0,0.055,1,1)); fig.savefig(path); plt.close(fig)
+    df=overall.iloc[::-1]; fig,ax=plt.subplots(figsize=(10,max(6,.42*len(df)+1))); y=np.arange(len(df)); values=df.pct_confirmed_among_evaluable; ax.barh(y,values,color='#4c78a8'); ax.set_yticks(y,df.display_label); ax.set_xlabel('Patients with confirmed current condition, %'); ax.set_title('Rheumatological conditions — confirmed current status',weight='bold',pad=12)
+    for yi,r in zip(y,df.itertuples()):
+        if r.n_confirmed_present > 0: ax.text(r.pct_confirmed_among_evaluable+.15,yi,f"{r.n_confirmed_present}/{r.n_evaluable_primary} ({r.pct_confirmed_among_evaluable:.1f}%)",va='center',fontsize=8)
+    ax.set_xlim(0,max(3,float(values.max())*1.25)); ax.grid(axis='x',alpha=.2); ax.set_axisbelow(True)
+    caption="Values are n/N (%): numerator (n) = patients confirmed present; denominator (N) = patients confirmed present + patients coded as no comorbidity. History-only and uncertain states are excluded. Zero-event bars are left unlabelled to reduce clutter."
+    fig.text(.01,.012,textwrap.fill(caption,145),fontsize=8,va='bottom'); fig.tight_layout(rect=(0,0.065,1,1)); fig.savefig(path,bbox_inches='tight'); plt.close(fig)
 
 
 def create_historical_barplot(summary, title, path):
     """Plot one historical source family without mixing it with current disease."""
-    df=summary.sort_values("percent_documented_among_evaluable",ascending=True); fig,ax=plt.subplots(figsize=(11,max(6,.3*len(df)+1))); y=np.arange(len(df)); ax.barh(y,df.percent_documented_among_evaluable,color='#72b7b2'); ax.set_yticks(y,df.clinical_label); ax.set_xlabel('Patients with a documented history, %'); ax.set_title(title)
-    for yi,r in zip(y,df.itertuples()): ax.text((r.percent_documented_among_evaluable if pd.notna(r.percent_documented_among_evaluable) else 0)+.4,yi,f"{r.n_documented_history}/{r.n_evaluable}",va='center',fontsize=7)
-    ax.margins(x=.16); fig.text(.01,.01,"Values are n/N (%): numerator (n) = patients with a positive documented antecedent; denominator (N) = patients with a non-missing source field. These are historical descriptions, not current prevalence, and are excluded from progression models.",fontsize=8); fig.tight_layout(rect=(0,0.05,1,1)); fig.savefig(path); plt.close(fig)
+    df=summary.sort_values(["percent_documented_total_cohort","n_documented_history"],ascending=True); fig,ax=plt.subplots(figsize=(11,max(7,.34*len(df)+1))); y=np.arange(len(df)); values=df.percent_documented_total_cohort; ax.barh(y,values,color='#72b7b2'); ax.set_yticks(y,df.clinical_label); ax.set_xlabel('Baseline cohort with a documented history, %'); ax.set_title(title,weight='bold',pad=12)
+    for yi,r in zip(y,df.itertuples()):
+        if r.n_documented_history > 0: ax.text(r.percent_documented_total_cohort+.25,yi,f"{r.n_documented_history}/{r.n_total_patients} ({r.percent_documented_total_cohort:.1f}%)",va='center',fontsize=7)
+    ax.set_xlim(0,max(5,float(values.max())*1.28 if values.notna().any() else 5)); ax.grid(axis='x',alpha=.2); ax.set_axisbelow(True)
+    caption="Values are n/N (%): numerator (n) = baseline patients with a positive documented antecedent; denominator (N) = the full baseline cohort. Blank source fields mean that no history was documented, not that the condition was clinically ruled out; percentages are therefore minimum documented proportions, not current prevalence."
+    fig.text(.01,.012,textwrap.fill(caption,150),fontsize=8,va='bottom'); fig.tight_layout(rect=(0,0.065,1,1)); fig.savefig(path,bbox_inches='tight'); plt.close(fig)
 
 
 def create_grouped_barplot(bypop,path):
-    df=bypop.iloc[::-1]; fig,ax=plt.subplots(figsize=(11,max(5,.55*len(df)+1))); y=np.arange(len(df)); height=.22; offs=[-height,0,height]; colors=['#4c78a8','#f58518','#54a24b']
+    sort_value=bypop[["pct_pop1","pct_pop2","pct_pop3"]].max(axis=1); df=bypop.assign(_sort_value=sort_value).sort_values(["_sort_value","display_label"],ascending=[True,False]); fig,ax=plt.subplots(figsize=(11,max(6,.55*len(df)+1))); y=np.arange(len(df)); height=.22; offs=[-height,0,height]; colors=['#4c78a8','#f58518','#54a24b']
     for pop,off,col in zip(['pop1','pop2','pop3'],offs,colors):
         pct=df[f'pct_{pop}']; ax.barh(y+off,pct,height=height,label=pop.capitalize(),color=col)
-        for yi,r in zip(y+off,df.itertuples()): ax.text((getattr(r,f'pct_{pop}') or 0)+1, yi, f"{getattr(r,f'n_{pop}')}/{getattr(r,f'N_{pop}')}", fontsize=7, va='center')
-    ax.set_yticks(y,df.display_label); ax.set_xlabel('Patients with confirmed current condition within population, %'); ax.set_title('Rheumatological conditions by baseline population'); ax.legend(); ax.margins(x=.18); fig.text(.01,.01,"Values are n/N (%): numerator (n) = patients in that Pop with confirmed current condition; denominator (N) = condition-evaluable patients in that Pop. Unclassifiable patients, history-only, and uncertain states are excluded.",fontsize=8); fig.tight_layout(rect=(0,0.055,1,1)); fig.savefig(path); plt.close(fig)
+        for yi,r in zip(y+off,df.itertuples()):
+            n,N,value=getattr(r,f'n_{pop}'),getattr(r,f'N_{pop}'),getattr(r,f'pct_{pop}')
+            if n > 0: ax.text(value+.2,yi,f"{n}/{N} ({value:.1f}%)",fontsize=7,va='center')
+    max_pct=float(df[["pct_pop1","pct_pop2","pct_pop3"]].max().max()); ax.set_xlim(0,max(5,max_pct*1.28)); ax.set_yticks(y,df.display_label); ax.set_xlabel('Patients with confirmed current condition within population, %'); ax.set_title('Rheumatological conditions by baseline population',weight='bold',pad=42); ax.legend(loc='lower center',bbox_to_anchor=(.5,1.01),ncol=3,frameon=False); ax.grid(axis='x',alpha=.2); ax.set_axisbelow(True)
+    caption="Conditions are ordered by their highest observed percentage across Pop1–Pop3 (largest at top). Values are n/N (%): numerator (n) = patients in that Pop with confirmed current condition; denominator (N) = condition-evaluable patients in that Pop. Zero-event bars are left unlabelled to reduce clutter."
+    fig.text(.01,.012,textwrap.fill(caption,150),fontsize=8,va='bottom'); fig.tight_layout(rect=(0,0.07,1,.96)); fig.savefig(path,bbox_inches='tight'); plt.close(fig)
 
 
 def create_progression_forestplot(prog, order, path):
