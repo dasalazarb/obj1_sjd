@@ -548,7 +548,7 @@ def fit_cox_model(surv, spec, outcome, event_col, threshold, min_events):
 
 
 def create_dotplot(overall, path):
-    df=overall.iloc[::-1]; fig,ax=plt.subplots(figsize=(9,max(5,.4*len(df)+1))); y=np.arange(len(df)); ax.errorbar(df.pct_total_cohort,y,xerr=[df.pct_total_cohort-df.ci95_low,df.ci95_high-df.pct_total_cohort],fmt='o',color='#1f77b4'); ax.set_yticks(y,df.display_label); ax.set_xlabel('Documented baseline prevalence, % of total cohort');
+    df=overall.iloc[::-1]; fig,ax=plt.subplots(figsize=(9,max(5,.4*len(df)+1))); y=np.arange(len(df)); lower=(df.pct_total_cohort-df.ci95_low).clip(lower=0); upper=(df.ci95_high-df.pct_total_cohort).clip(lower=0); ax.errorbar(df.pct_total_cohort,y,xerr=[lower,upper],fmt='o',color='#1f77b4'); ax.set_yticks(y,df.display_label); ax.set_xlabel('Documented baseline prevalence, % of total cohort');
     for yi,r in zip(y,df.itertuples()): ax.text(r.ci95_high+1,yi,f"{r.n_positive}/{r.n_total_cohort}",va='center',fontsize=8)
     fig.text(.01,.01,"Denominator is the total baseline cohort; Wilson 95% CIs use n positive / total cohort. Sensitivity definitions are documented in QC.",fontsize=8); fig.tight_layout(rect=(0,0.04,1,1)); fig.savefig(path); plt.close(fig)
 
@@ -556,7 +556,7 @@ def create_dotplot(overall, path):
 def create_grouped_barplot(bypop,path):
     df=bypop.iloc[::-1]; fig,ax=plt.subplots(figsize=(10,max(5,.5*len(df)+1))); y=np.arange(len(df)); offs=[-.22,0,.22]; colors=['#4c78a8','#f58518','#54a24b']
     for pop,off,col in zip(['pop1','pop2','pop3'],offs,colors):
-        pct=df[f'pct_{pop}']; lo=df[f'ci95_{pop}_low']; hi=df[f'ci95_{pop}_high']; ax.errorbar(pct,y+off,xerr=[pct-lo,hi-pct],fmt='o',label=pop.capitalize(),color=col)
+        pct=df[f'pct_{pop}']; lo=df[f'ci95_{pop}_low']; hi=df[f'ci95_{pop}_high']; lower=(pct-lo).clip(lower=0); upper=(hi-pct).clip(lower=0); ax.errorbar(pct,y+off,xerr=[lower,upper],fmt='o',label=pop.capitalize(),color=col)
         for yi,r in zip(y+off,df.itertuples()): ax.text((getattr(r,f'pct_{pop}') or 0)+1, yi, f"{getattr(r,f'n_{pop}')}/{getattr(r,f'N_{pop}')}", fontsize=7, va='center')
     ax.set_yticks(y,df.display_label); ax.set_xlabel('Prevalence among evaluable patients within Pop, %'); ax.legend(); fig.text(.01,.01,"Pop denominators are condition-evaluable Pop1/Pop2/Pop3 patients; unclassifiable patients are excluded from tests.",fontsize=8); fig.tight_layout(rect=(0,0.04,1,1)); fig.savefig(path); plt.close(fig)
 
@@ -567,7 +567,7 @@ def create_progression_forestplot(prog, order, path):
     for ax,(out,title,ref,measure) in zip(axs,panels):
         sub=prog[(prog.outcome==out)&(prog.effect_measure==measure)].set_index('comorbidity').reindex(order); ax.axvline(ref,color='grey',ls='--'); ax.set_title(title); ax.set_yticks(y,[next(c.label for c in CONDITIONS if c.name==n) for n in order])
         for i,(name,r) in enumerate(sub.iterrows()):
-            if pd.notna(r.get('estimate')) and pd.notna(r.get('ci95_low')) and pd.notna(r.get('ci95_high')): ax.errorbar(r.estimate,i,xerr=[[r.estimate-r.ci95_low],[r.ci95_high-r.estimate]],fmt='o')
+            if pd.notna(r.get('estimate')) and pd.notna(r.get('ci95_low')) and pd.notna(r.get('ci95_high')): ax.errorbar(r.estimate,i,xerr=[[max(0,r.estimate-r.ci95_low)],[max(0,r.ci95_high-r.estimate)]],fmt='o')
             else: ax.text(ref,i,'NE',ha='center',va='center',fontsize=8)
         if ref==1: ax.set_xscale('log')
     fig.text(.01,.01,"Adjusted for baseline ESSDAI, baseline Pop, age, and sex when estimable. Outcomes: follow-up ESSDAI slope, first ESSDAI ≥14, and first new inactive-at-baseline organ-domain activation.",fontsize=8); fig.tight_layout(rect=(0,0.04,1,1)); fig.savefig(path); plt.close(fig)

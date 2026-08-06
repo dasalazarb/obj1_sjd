@@ -191,3 +191,21 @@ def test_new_domain_audit_is_returned_without_dataframe_attrs():
     assert audit.attrs == {}
     assert survival.loc[0, "first_new_domain_name"] == "renal"
     assert set(audit.columns) == {"patient_id", "domain", "baseline_active", "event_date"}
+
+
+def test_grouped_plot_clips_rounding_induced_negative_error_bars(tmp_path):
+    row = {"display_label": "Test condition"}
+    for pop in ["pop1", "pop2", "pop3"]:
+        row.update({
+            f"pct_{pop}": 0.0,
+            f"ci95_{pop}_low": 1e-15,
+            f"ci95_{pop}_high": 0.0,
+            f"n_{pop}": 0,
+            f"N_{pop}": 10,
+        })
+    output = tmp_path / "grouped.pdf"
+
+    comorbidities.create_grouped_barplot(pd.DataFrame([row]), output)
+
+    assert output.exists()
+    assert output.stat().st_size > 0
