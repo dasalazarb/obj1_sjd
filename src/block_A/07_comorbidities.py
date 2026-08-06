@@ -241,7 +241,12 @@ def load_selected_raw_columns(path: Path) -> pd.DataFrame:
 
 def load_visit_spine() -> pd.DataFrame:
     cols = ["patient_id", "visit_id", "visit_date", "visit_number", "observed_baseline_date", "time_since_observed_baseline_days", "time_since_observed_baseline_years", "age_at_visit", "sex", "protocol", "interval_name"]
-    return pd.read_parquet(common.VISIT_SPINE_PARQUET, columns=[c for c in cols if c in pd.read_parquet(common.VISIT_SPINE_PARQUET, columns=[]).columns])
+    have = available_columns(common.VISIT_SPINE_PARQUET)
+    required = {"patient_id", "visit_id", "visit_date", "visit_number"}
+    missing = sorted(required - have)
+    if missing:
+        raise ValueError(f"Canonical visit spine is missing required columns: {', '.join(missing)}")
+    return pd.read_parquet(common.VISIT_SPINE_PARQUET, columns=[c for c in cols if c in have])
 
 
 def load_pop_classification() -> pd.DataFrame:
@@ -250,7 +255,11 @@ def load_pop_classification() -> pd.DataFrame:
 
 def load_domain_flags() -> pd.DataFrame:
     cols = ["patient_id", "visit_id", "visit_date", "visit_number"] + DOMAIN_COLS + [SENSITIVITY_DOMAIN_COL, "n_extraglandular_domains_active"]
-    have = set(pd.read_parquet(common.OVERLAP_LONGITUDINAL_PARQUET, columns=[]).columns)
+    have = available_columns(common.OVERLAP_LONGITUDINAL_PARQUET)
+    required = {"patient_id", "visit_id", "visit_date", "visit_number"}
+    missing = sorted(required - have)
+    if missing:
+        raise ValueError(f"Overlap longitudinal data are missing required columns: {', '.join(missing)}")
     return pd.read_parquet(common.OVERLAP_LONGITUDINAL_PARQUET, columns=[c for c in cols if c in have])
 
 
