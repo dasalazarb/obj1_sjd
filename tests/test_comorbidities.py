@@ -14,24 +14,24 @@ SPEC.loader.exec_module(comorbidities)
 
 
 def _prevalence_frame() -> pd.DataFrame:
-    data = {name: pd.Series([True, False, pd.NA], dtype="boolean")
+    data = {name: pd.Series([True, False, False], dtype="boolean")
             for name in comorbidities.CONDITION_NAMES}
-    data.update({f"{name}_status": ["confirmed_present", "not_documented", "missing"]
+    data.update({f"{name}_status": ["confirmed_present", "no_comorbidity", "missing"]
                  for name in comorbidities.CONDITION_NAMES})
     data["baseline_pop"] = ["Pop1", "Pop1", "Pop1"]
     return pd.DataFrame(data)
 
 
-def test_overall_prevalence_preserves_empty_condition_as_missing():
+def test_overall_prevalence_codes_blank_comorbidity_as_false():
     result = comorbidities.summarize_overall_prevalence(_prevalence_frame())
 
     fibromyalgia = result.loc[result["condition"].eq("fibromyalgia")].iloc[0]
     assert fibromyalgia["n_total_cohort"] == 3
-    assert fibromyalgia["n_evaluable_primary"] == 2
+    assert fibromyalgia["n_evaluable_primary"] == 3
     assert fibromyalgia["n_confirmed_present"] == 1
-    assert fibromyalgia["n_not_documented"] == 1
-    assert fibromyalgia["n_missing"] == 1
-    assert fibromyalgia["pct_confirmed_total_cohort"] != fibromyalgia["pct_confirmed_among_evaluable"]
+    assert fibromyalgia["n_no_comorbidity"] == 2
+    assert fibromyalgia["n_missing"] == 0
+    assert fibromyalgia["pct_confirmed_total_cohort"] == fibromyalgia["pct_confirmed_among_evaluable"]
 
 
 def test_pop_prevalence_uses_evaluable_denominator():
@@ -41,8 +41,8 @@ def test_pop_prevalence_uses_evaluable_denominator():
 
     fibromyalgia = result.loc[result["condition"].eq("fibromyalgia")].iloc[0]
     assert fibromyalgia["n_pop1"] == 1
-    assert fibromyalgia["N_pop1"] == 2
-    assert fibromyalgia["pct_pop1"] == 50
+    assert fibromyalgia["N_pop1"] == 3
+    assert fibromyalgia["pct_pop1"] == 100 / 3
 
 
 def test_condition_statuses_are_mutually_exclusive_and_prioritized():
@@ -57,27 +57,29 @@ def test_condition_statuses_are_mutually_exclusive_and_prioritized():
         "confirmed_present",
         "status_uncertain",
         "history_only",
-        "not_documented",
-        "missing",
+        "no_comorbidity",
+        "no_comorbidity",
     ]
 
 
-def test_primary_exposure_excludes_history_uncertain_and_missing():
+def test_primary_exposure_excludes_history_uncertain_and_codes_missing_false():
     spec = next(c for c in comorbidities.CONDITIONS if c.name == "fibromyalgia")
     frame = pd.DataFrame({
         "patient_id": ["P1", "P2", "P3", "P4", "P5"],
         "fibromyalgia_status": [
-            "confirmed_present", "not_documented", "history_only",
+            "confirmed_present", "no_comorbidity", "history_only",
             "status_uncertain", "missing",
         ],
     })
 
     result = comorbidities.apply_exposure_definition(
-        frame, spec, "confirmed_present_vs_not_documented"
+        frame, spec, "confirmed_present_vs_no_comorbidity"
     )
 
-    assert result["exposure"].tolist()[:2] == [1.0, 0.0]
-    assert result["exposure"].iloc[2:].isna().all()
+    assert result["exposure"].iloc[0] == 1.0
+    assert result["exposure"].iloc[1] == 0.0
+    assert result["exposure"].iloc[2:4].isna().all()
+    assert result["exposure"].iloc[4] == 0.0
 
 
 def test_complete_cases_reports_missing_and_group_sizes():
@@ -156,7 +158,7 @@ def test_longitudinal_essdai_falls_back_to_population_derivation():
         "baseline_pop": ["Pop1"], "age_baseline": [50.0], "sex": ["Female"],
     }
     baseline_data.update({name: pd.Series([False], dtype="boolean") for name in comorbidities.CONDITION_NAMES})
-    baseline_data.update({f"{name}_status": ["not_documented"] for name in comorbidities.CONDITION_NAMES})
+    baseline_data.update({f"{name}_status": ["no_comorbidity"] for name in comorbidities.CONDITION_NAMES})
     baseline = pd.DataFrame(baseline_data)
     domains = spine.copy()
 
@@ -222,7 +224,7 @@ def test_new_domain_audit_is_returned_without_dataframe_attrs():
         "age_baseline": [50.0], "sex": ["Female"],
     }
     baseline_data.update({name: pd.Series([False], dtype="boolean") for name in comorbidities.CONDITION_NAMES})
-    baseline_data.update({f"{name}_status": ["not_documented"] for name in comorbidities.CONDITION_NAMES})
+    baseline_data.update({f"{name}_status": ["no_comorbidity"] for name in comorbidities.CONDITION_NAMES})
     baseline = pd.DataFrame(baseline_data)
 
     survival, audit = comorbidities.build_new_domain_survival_dataset(
@@ -244,7 +246,7 @@ def test_new_domain_ignores_followup_with_all_risk_domains_missing():
     longdf=pd.DataFrame(data)
     baseline_data={"patient_id":["P1"],"baseline_date":[dates[0]],"baseline_essdai":[0.0],"baseline_pop":["Pop3"],"age_baseline":[50.0],"sex":["Female"]}
     baseline_data.update({name:pd.Series([False],dtype="boolean") for name in comorbidities.CONDITION_NAMES})
-    baseline_data.update({f"{name}_status":["not_documented"] for name in comorbidities.CONDITION_NAMES})
+    baseline_data.update({f"{name}_status":["no_comorbidity"] for name in comorbidities.CONDITION_NAMES})
 
     survival,audit=comorbidities.build_new_domain_survival_dataset(longdf,pd.DataFrame(baseline_data),return_audit=True)
 
@@ -285,7 +287,7 @@ def test_essdai_ge5_survival_uses_activity_threshold_five():
         "age_baseline": [50.0], "sex": ["Female"],
     }
     baseline_data.update({name: pd.Series([False], dtype="boolean") for name in comorbidities.CONDITION_NAMES})
-    baseline_data.update({f"{name}_status": ["not_documented"] for name in comorbidities.CONDITION_NAMES})
+    baseline_data.update({f"{name}_status": ["no_comorbidity"] for name in comorbidities.CONDITION_NAMES})
     baseline = pd.DataFrame(baseline_data)
 
     result = comorbidities.build_essdai_ge5_survival_dataset(longdf, baseline)
