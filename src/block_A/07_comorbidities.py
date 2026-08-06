@@ -240,7 +240,7 @@ def load_selected_raw_columns(path: Path) -> pd.DataFrame:
 
 
 def load_visit_spine() -> pd.DataFrame:
-    cols = ["patient_id", "visit_id", "visit_date", "visit_number", "observed_baseline_date", "time_since_observed_baseline_days", "time_since_observed_baseline_years", "age_at_visit", "sex", "protocol", "interval_name"]
+    cols = ["patient_id", "visit_id", "visit_date", "visit_number", "observed_baseline_date", "time_since_observed_baseline_days", "time_since_observed_baseline_years", "age_at_visit", "sex", "interval_name"]
     have = available_columns(common.VISIT_SPINE_PARQUET)
     required = {"patient_id", "visit_id", "visit_date", "visit_number"}
     missing = sorted(required - have)
@@ -459,7 +459,7 @@ def build_longitudinal_essdai_dataset(spine,pop,raw,baseline,domains):
     ess=raw[["patient_id","visit_date"]+[c for c in [ESSDAI_PRIMARY_COL,ESSDAI_RAW_QC_COL] if c in raw]].drop_duplicates(["patient_id","visit_date"]).rename(columns={ESSDAI_PRIMARY_COL:"essdai_total_recoded",ESSDAI_RAW_QC_COL:"essdai_total_raw_qc"})
     df=spine.merge(ess,on=["patient_id","visit_date"],how="left").merge(pop[["patient_id","visit_id","essdai_total","pop_status"]],on=["patient_id","visit_id"],how="left",suffixes=("","_popfile"))
     df=df.merge(domains,on=["patient_id","visit_id","visit_date","visit_number"],how="left")
-    bcols=["patient_id","baseline_essdai","baseline_pop","age_baseline","sex","protocol"]+CONDITION_NAMES
+    bcols=["patient_id","baseline_essdai","baseline_pop","age_baseline","sex"]+CONDITION_NAMES
     return df.merge(baseline[bcols],on="patient_id",how="left",suffixes=("","_baseline"))
 
 
@@ -472,7 +472,7 @@ def build_severe14_survival_dataset(longdf, baseline):
         if f.empty: continue
         ev=f[f.essdai_total_recoded>=SEVERE_ACTIVITY_THRESHOLD_SECTION5]
         ed=ev.visit_date.min() if not ev.empty else pd.NaT; last=f.visit_date.max(); end=ed if pd.notna(ed) else last
-        rows.append({"patient_id":pid,"baseline_date":b.baseline_date,"last_evaluable_date":last,"event_date":ed,"followup_days":(end-b.baseline_date).days,"followup_years":(end-b.baseline_date).days/365.25,"severe14_event":int(pd.notna(ed)), **b[["baseline_essdai","baseline_pop","age_baseline","sex","protocol"]+CONDITION_NAMES].to_dict()})
+        rows.append({"patient_id":pid,"baseline_date":b.baseline_date,"last_evaluable_date":last,"event_date":ed,"followup_days":(end-b.baseline_date).days,"followup_years":(end-b.baseline_date).days/365.25,"severe14_event":int(pd.notna(ed)), **b[["baseline_essdai","baseline_pop","age_baseline","sex"]+CONDITION_NAMES].to_dict()})
     return pd.DataFrame(rows)
 
 
@@ -493,12 +493,12 @@ def build_new_domain_survival_dataset(longdf, baseline):
             if pd.notna(date): events.append((date, DOMAIN_LABELS[col]))
         if inact==0: continue
         fd,name=min(events, default=(pd.NaT,pd.NA), key=lambda x:x[0] if pd.notna(x[0]) else pd.Timestamp.max); last=fg.visit_date.max(); end=fd if pd.notna(fd) else last
-        rows.append({"patient_id":pid,"baseline_date":b.baseline_date,"first_new_domain_date":fd,"first_new_domain_name":name,"new_domain_event":int(pd.notna(fd)),"n_domains_inactive_at_baseline":inact,"n_domains_evaluable_at_baseline":evaln,"followup_days":(end-b.baseline_date).days,"followup_years":(end-b.baseline_date).days/365.25, **b[["baseline_essdai","baseline_pop","age_baseline","sex","protocol"]+CONDITION_NAMES].to_dict()})
+        rows.append({"patient_id":pid,"baseline_date":b.baseline_date,"first_new_domain_date":fd,"first_new_domain_name":name,"new_domain_event":int(pd.notna(fd)),"n_domains_inactive_at_baseline":inact,"n_domains_evaluable_at_baseline":evaln,"followup_days":(end-b.baseline_date).days,"followup_years":(end-b.baseline_date).days/365.25, **b[["baseline_essdai","baseline_pop","age_baseline","sex"]+CONDITION_NAMES].to_dict()})
     out=pd.DataFrame(rows); out.attrs["patient_domain_audit"]=pd.DataFrame(audit); return out
 
 
 def _base_progression_row(spec,outcome,estimand):
-    return {"comorbidity":spec.name,"display_label":spec.label,"outcome":outcome,"estimand":estimand,"model_type":"not run","effect_measure":"Not estimable","estimate":np.nan,"ci95_low":np.nan,"ci95_high":np.nan,"p_value":np.nan,"n_patients":0,"n_followup_observations":0,"n_events":np.nan,"n_complete_cases":0,"baseline_reference_group":"comorbidity absent","adjustment_covariates":"baseline_ESSDAI, baseline_pop, age_baseline, sex, protocol","time_scale":"years","threshold":np.nan,"model_converged":False,"proportional_hazards_p":np.nan,"sparse_event_flag":False,"model_status":"not_run","warning":"","interpretation":"Association estimate only; not causal."}
+    return {"comorbidity":spec.name,"display_label":spec.label,"outcome":outcome,"estimand":estimand,"model_type":"not run","effect_measure":"Not estimable","estimate":np.nan,"ci95_low":np.nan,"ci95_high":np.nan,"p_value":np.nan,"n_patients":0,"n_followup_observations":0,"n_events":np.nan,"n_complete_cases":0,"baseline_reference_group":"comorbidity absent","adjustment_covariates":"baseline_ESSDAI, baseline_pop, age_baseline, sex","time_scale":"years","threshold":np.nan,"model_converged":False,"proportional_hazards_p":np.nan,"sparse_event_flag":False,"model_status":"not_run","warning":"","interpretation":"Association estimate only; not causal."}
 
 
 def fit_mixed_model(longdf, spec):
@@ -508,12 +508,12 @@ def fit_mixed_model(longdf, spec):
     try:
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            res=smf.mixedlm("essdai_total_recoded ~ time_since_observed_baseline_years*exposed + baseline_essdai + C(baseline_pop) + age_baseline + C(sex) + C(protocol)", df, groups=df["patient_id"]).fit(reml=False, method="lbfgs", disp=False)
+            res=smf.mixedlm("essdai_total_recoded ~ time_since_observed_baseline_years*exposed + baseline_essdai + C(baseline_pop) + age_baseline + C(sex)", df, groups=df["patient_id"]).fit(reml=False, method="lbfgs", disp=False)
         term="time_since_observed_baseline_years:exposed"; est=res.params.get(term,np.nan); se=res.bse.get(term,np.nan)
         row.update(model_type="linear mixed model", estimate=est, ci95_low=est-1.96*se, ci95_high=est+1.96*se, p_value=res.pvalues.get(term,np.nan), model_converged=bool(res.converged), model_status="adjusted", warning="; ".join(str(x.message) for x in w))
     except Exception as e:
         try:
-            fam=sm.families.Gaussian(); gee=smf.gee("essdai_total_recoded ~ time_since_observed_baseline_years*exposed + baseline_essdai + C(baseline_pop) + age_baseline + C(sex) + C(protocol)", groups="patient_id", data=df, family=fam, cov_struct=Exchangeable()).fit(); term="time_since_observed_baseline_years:exposed"; est=gee.params.get(term,np.nan); se=gee.bse.get(term,np.nan); row.update(model_type="GEE gaussian exchangeable fallback", estimate=est, ci95_low=est-1.96*se, ci95_high=est+1.96*se, p_value=gee.pvalues.get(term,np.nan), model_converged=True, model_status="fallback_gee", warning=f"MixedLM failed: {e}")
+            fam=sm.families.Gaussian(); gee=smf.gee("essdai_total_recoded ~ time_since_observed_baseline_years*exposed + baseline_essdai + C(baseline_pop) + age_baseline + C(sex)", groups="patient_id", data=df, family=fam, cov_struct=Exchangeable()).fit(); term="time_since_observed_baseline_years:exposed"; est=gee.params.get(term,np.nan); se=gee.bse.get(term,np.nan); row.update(model_type="GEE gaussian exchangeable fallback", estimate=est, ci95_low=est-1.96*se, ci95_high=est+1.96*se, p_value=gee.pvalues.get(term,np.nan), model_converged=True, model_status="fallback_gee", warning=f"MixedLM failed: {e}")
         except Exception as ee: row.update(model_status="failed", warning=f"MixedLM failed: {e}; GEE failed: {ee}")
     return [row]
 
@@ -524,7 +524,7 @@ def fit_cox_model(surv, spec, outcome, event_col, threshold, min_events):
     df=surv.dropna(subset=["followup_years",event_col,spec.name,"baseline_essdai","age_baseline"]).copy(); df=df[df.followup_years>0]; row.update(n_patients=len(df),n_complete_cases=len(df),n_events=int(df[event_col].sum()),sparse_event_flag=int(df[event_col].sum())<min_events)
     if len(df)<5 or df[event_col].sum()<min_events or df[spec.name].nunique()<2: row.update(model_status="insufficient_events", warning="Insufficient events, patients, or exposure variation"); return row
     try:
-        d=pd.get_dummies(df[["followup_years",event_col,spec.name,"baseline_essdai","age_baseline","baseline_pop","sex","protocol"]], columns=["baseline_pop","sex","protocol"], drop_first=True, dtype=float); d[spec.name]=d[spec.name].astype(float)
+        d=pd.get_dummies(df[["followup_years",event_col,spec.name,"baseline_essdai","age_baseline","baseline_pop","sex"]], columns=["baseline_pop","sex"], drop_first=True, dtype=float); d[spec.name]=d[spec.name].astype(float)
         cph=CoxPHFitter(); cph.fit(d, duration_col="followup_years", event_col=event_col)
         s=cph.summary.loc[spec.name]; row.update(model_type="Cox proportional hazards", estimate=float(s["exp(coef)"]), ci95_low=float(s["exp(coef) lower 95%"]), ci95_high=float(s["exp(coef) upper 95%"]), p_value=float(s["p"]), model_converged=True, model_status="adjusted")
         try: row["proportional_hazards_p"] = float(cph.check_assumptions(d, p_value_threshold=0.05, show_plots=False))
@@ -556,7 +556,7 @@ def create_progression_forestplot(prog, order, path):
             if pd.notna(r.get('estimate')) and pd.notna(r.get('ci95_low')) and pd.notna(r.get('ci95_high')): ax.errorbar(r.estimate,i,xerr=[[r.estimate-r.ci95_low],[r.ci95_high-r.estimate]],fmt='o')
             else: ax.text(ref,i,'NE',ha='center',va='center',fontsize=8)
         if ref==1: ax.set_xscale('log')
-    fig.text(.01,.01,"Adjusted for baseline ESSDAI, baseline Pop, age, sex, and protocol when estimable. Outcomes: follow-up ESSDAI slope, first ESSDAI ≥14, and first new inactive-at-baseline organ-domain activation.",fontsize=8); fig.tight_layout(rect=(0,0.04,1,1)); fig.savefig(path); plt.close(fig)
+    fig.text(.01,.01,"Adjusted for baseline ESSDAI, baseline Pop, age, and sex when estimable. Outcomes: follow-up ESSDAI slope, first ESSDAI ≥14, and first new inactive-at-baseline organ-domain activation.",fontsize=8); fig.tight_layout(rect=(0,0.04,1,1)); fig.savefig(path); plt.close(fig)
 
 
 def main() -> None:
@@ -583,7 +583,7 @@ def main() -> None:
     pd.DataFrame(UNRECOGNIZED).groupby(["column","value"],as_index=False).n.sum().to_csv(QC_DIR/"07_comorbidities_unrecognized_values.csv",index=False) if UNRECOGNIZED else pd.DataFrame(columns=["column","value","n"]).to_csv(QC_DIR/"07_comorbidities_unrecognized_values.csv",index=False)
     pd.DataFrame([{ "condition":k,"availability_status":"unavailable","reason":v} for k,v in UNAVAILABLE_CONDITIONS.items()]).to_csv(QC_DIR/"07_comorbidities_unavailable_conditions.csv",index=False)
     source.to_csv(QC_DIR/"07_comorbidities_source_mapping.csv",index=False)
-    miss=baseline[["baseline_pop","baseline_essdai","age_baseline","sex","protocol"]+CONDITION_NAMES].isna().sum().reset_index(); miss.columns=["variable","n_missing"]; miss.to_csv(QC_DIR/"07_comorbidities_missingness.csv",index=False)
+    miss=baseline[["baseline_pop","baseline_essdai","age_baseline","sex"]+CONDITION_NAMES].isna().sum().reset_index(); miss.columns=["variable","n_missing"]; miss.to_csv(QC_DIR/"07_comorbidities_missingness.csv",index=False)
     dup.to_csv(QC_DIR/"07_comorbidities_patient_duplicates.csv",index=False); prog.to_csv(QC_DIR/"07_comorbidities_model_diagnostics.csv",index=False)
     raw_ess=longdf.dropna(subset=["essdai_total_recoded","essdai_total_raw_qc"]); diff=pd.to_numeric(raw_ess.essdai_total_recoded,errors='coerce')-pd.to_numeric(raw_ess.essdai_total_raw_qc,errors='coerce')
     qc={"input_path":str(args.input),"input_modification_time":datetime.fromtimestamp(args.input.stat().st_mtime,timezone.utc).isoformat(),"script_version":SCRIPT_VERSION,"run_timestamp":datetime.now(timezone.utc).isoformat(),"random_seed":args.random_seed,"n_input_rows":int(len(raw)),"n_input_patients":int(raw.patient_id.nunique()),"n_canonical_visits":int(len(spine)),"n_baseline_patients":int(len(baseline)),"n_duplicate_patient_dates":int(len(dup)),"n_pipe_delimited_visit_dates":int(raw.get('had_pipe_delimited_date',pd.Series(dtype=bool)).sum()),"n_pop_classifiable":int(baseline.baseline_pop.isin(['Pop1','Pop2','Pop3']).sum()),"n_pop_unclassifiable":int((~baseline.baseline_pop.isin(['Pop1','Pop2','Pop3'])).sum()),"n_with_followup_essdai":int(longdf[longdf.visit_number.gt(0)&longdf.essdai_total_recoded.notna()].patient_id.nunique()),"n_at_risk_severe14":int(len(severe)),"n_severe14_events":int(severe.severe14_event.sum()) if not severe.empty else 0,"n_at_risk_new_domain":int(len(newdom)),"n_new_domain_events":int(newdom.new_domain_event.sum()) if not newdom.empty else 0,"severe_threshold_used":SEVERE_ACTIVITY_THRESHOLD_SECTION5,"essdai_primary_column":ESSDAI_PRIMARY_COL,"essdai_raw_qc_column":ESSDAI_RAW_QC_COL,"upstream_files_used":list(upstream.keys()),"upstream_file_timestamps":upstream,"warnings":["lifelines unavailable; Cox models not run"] if not LIFELINES_AVAILABLE else [],"essdai_reconciliation":{"n_concordant":int((diff==0).sum()),"n_discordant":int((diff!=0).sum()),"mean_difference":float(diff.mean()) if len(diff) else None,"median_difference":float(diff.median()) if len(diff) else None,"maximum_absolute_difference":float(diff.abs().max()) if len(diff) else None}}
