@@ -50,7 +50,7 @@ import common  # noqa: E402
 import config  # noqa: E402
 from src.derivations.visit_dates import add_parsed_visit_dates  # noqa: E402
 
-SCRIPT_VERSION = "2026-08-06.section5.v4"
+SCRIPT_VERSION = "2026-08-07.section5.v5"
 PATIENT_ID_COL = "ids__patient_record_number"
 VISIT_DATE_COL = "ids__visit_date"
 AGE_COL = "ids__age_at_visit"
@@ -193,7 +193,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--overwrite", action="store_true")
     p.add_argument("--random-seed", type=int, default=20260728)
     p.add_argument("--monte-carlo-replicates", type=int, default=100_000)
-    p.add_argument("--minimum-events", type=int, default=10)
     return p.parse_args()
 
 
@@ -630,7 +629,7 @@ def fit_mixed_models(longdf: pd.DataFrame, spec: ConditionSpec) -> tuple[list[di
     return rows,diagnostics
 
 
-def fit_discrete_time_model(period: pd.DataFrame, spec: ConditionSpec, outcome: str, event_col: str, include_domains: bool, minimum_events: int) -> list[dict[str,Any]]:
+def fit_discrete_time_model(period: pd.DataFrame, spec: ConditionSpec, outcome: str, event_col: str, include_domains: bool) -> list[dict[str,Any]]:
     rows=[]
     formula=f"{event_col} ~ exposure + baseline_essdai + " + ("n_domains_inactive_at_baseline + " if include_domains else "") + "age_baseline + C(sex) + C(interval_number)"
     required=["patient_id",event_col,"exposure","baseline_essdai","age_baseline","sex","interval_number","log_interval_years"]+(["n_domains_inactive_at_baseline"] if include_domains else [])
@@ -640,7 +639,7 @@ def fit_discrete_time_model(period: pd.DataFrame, spec: ConditionSpec, outcome: 
       try: df,audit=prepare_complete_cases(candidate,required,event_col=event_col)
       except Exception as e: row.update(model_status="missing_columns",warning=str(e)); rows.append(row); continue
       row.update(audit); row["covariates"]=", ".join(required[3:])
-      if df.exposure.nunique()<2 or audit["n_events"]<minimum_events: row.update(model_status="insufficient_events",warning="Insufficient events or exposure variation"); rows.append(row); continue
+      if df.exposure.nunique()<2: row.update(model_status="insufficient_exposure_variation",warning="Both exposure groups are required"); rows.append(row); continue
       try:
         with warnings.catch_warnings(record=True) as caught:
           warnings.simplefilter("always"); res=smf.glm(formula,df,family=sm.families.Binomial(link=sm.families.links.CLogLog()),offset=df.log_interval_years).fit(cov_type="cluster",cov_kwds={"groups":df.patient_id})
@@ -650,7 +649,7 @@ def fit_discrete_time_model(period: pd.DataFrame, spec: ConditionSpec, outcome: 
     return rows
 
 
-def fit_cox_sensitivity(surv: pd.DataFrame, spec: ConditionSpec, outcome: str, event_col: str, minimum_events: int) -> list[dict[str,Any]]:
+def fit_cox_sensitivity(surv: pd.DataFrame, spec: ConditionSpec, outcome: str, event_col: str) -> list[dict[str,Any]]:
     rows=[]; formula=f"Surv(followup_years, {event_col}) ~ exposure + baseline_essdai + age_baseline + C(sex)"
     for definition in EXPOSURE_DEFINITIONS:
       row=base_model_row(spec,outcome,definition,"sensitivity_cox",formula,"exposure","Hazard ratio")
@@ -659,9 +658,8 @@ def fit_cox_sensitivity(surv: pd.DataFrame, spec: ConditionSpec, outcome: str, e
       try: df,audit=prepare_complete_cases(candidate,required,event_col=event_col)
       except Exception as e: row.update(model_status="missing_columns",warning=str(e)); rows.append(row); continue
       row.update(audit); row["covariates"]="baseline_essdai, age_baseline, sex"
-      if df.exposure.nunique()<2 or int(df[event_col].sum())<minimum_events: row.update(model_status="insufficient_events",warning="Insufficient events or exposure variation"); rows.append(row); continue
-      sex_reference=sorted(df.sex.astype(str).unique())[0]; d=pd.get_dummies(df[["followup_years",event_col,"exposure","baseline_essdai","age_baseline","sex"]],columns=["sex"],drop_first=True,dtype=float); zero=[c for c in d.columns if c not in ["followup_years",event_col] and d[c].nunique()<2]; d=d.drop(columns=zero); degrees=max(1,len(d.columns)-2)
-      if int(d[event_col].sum())<10*degrees: row.update(model_status="insufficient_events_per_df",warning=f"{int(d[event_col].sum())} events for {degrees} effective degrees of freedom; model not fit"); rows.append(row); continue
+      if df.exposure.nunique()<2: row.update(model_status="insufficient_exposure_variation",warning="Both exposure groups are required"); rows.append(row); continue
+      sex_reference=sorted(df.sex.astype(str).unique())[0]; d=pd.get_dummies(df[["followup_years",event_col,"exposure","baseline_essdai","age_baseline","sex"]],columns=["sex"],drop_first=True,dtype=float); zero=[c for c in d.columns if c not in ["followup_years",event_col] and d[c].nunique()<2]; d=d.drop(columns=zero)
       try:
         with warnings.catch_warnings(record=True) as caught:
           warnings.simplefilter("always"); cph=CoxPHFitter(); cph.fit(d,duration_col="followup_years",event_col=event_col)
@@ -737,10 +735,10 @@ def main() -> None:
     logging.info("[7/8] Fitting progression models"); mixed_rows=[]; discrete_rows=[]; cox_rows=[]; diagnostic_rows=[]
     for spec in CONDITIONS:
         fitted,diagnostics=fit_mixed_models(longdf,spec); mixed_rows+=fitted; diagnostic_rows+=diagnostics
-        discrete_rows+=fit_discrete_time_model(essdai_period,spec,"first observed ESSDAI >= 5","event_interval",False,args.minimum_events)
-        discrete_rows+=fit_discrete_time_model(newdom_period,spec,"First observed new ESSDAI domain","new_domain_event_interval",True,args.minimum_events)
-        cox_rows+=fit_cox_sensitivity(essdai_ge5,spec,"first observed ESSDAI >= 5","essdai_ge5_event",args.minimum_events)
-        cox_rows+=fit_cox_sensitivity(newdom,spec,"First observed new ESSDAI domain","new_domain_event",args.minimum_events)
+        discrete_rows+=fit_discrete_time_model(essdai_period,spec,"first observed ESSDAI >= 5","event_interval",False)
+        discrete_rows+=fit_discrete_time_model(newdom_period,spec,"First observed new ESSDAI domain","new_domain_event_interval",True)
+        cox_rows+=fit_cox_sensitivity(essdai_ge5,spec,"first observed ESSDAI >= 5","essdai_ge5_event")
+        cox_rows+=fit_cox_sensitivity(newdom,spec,"First observed new ESSDAI domain","new_domain_event")
     mixed=apply_grouped_fdr(pd.DataFrame(mixed_rows)); discrete=apply_grouped_fdr(pd.DataFrame(discrete_rows)); cox=apply_grouped_fdr(pd.DataFrame(cox_rows)); prog=pd.concat([mixed,discrete,cox],ignore_index=True,sort=False)
     residual_diagnostics=pd.DataFrame(diagnostic_rows); model_diagnostics=prog.copy()
     if not residual_diagnostics.empty:
