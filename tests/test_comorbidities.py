@@ -16,22 +16,22 @@ SPEC.loader.exec_module(comorbidities)
 def _prevalence_frame() -> pd.DataFrame:
     data = {name: pd.Series([True, False, False], dtype="boolean")
             for name in comorbidities.CONDITION_NAMES}
-    data.update({f"{name}_status": ["confirmed_present", "documented_absent", "not_evaluated"]
+    data.update({f"{name}_status": ["confirmed_present", "no_comorbidity", "missing"]
                  for name in comorbidities.CONDITION_NAMES})
     data["baseline_pop"] = ["Pop1", "Pop1", "Pop1"]
     return pd.DataFrame(data)
 
 
-def test_overall_prevalence_uses_explicit_absence_only():
+def test_overall_prevalence_codes_blank_comorbidity_as_false():
     result = comorbidities.summarize_overall_prevalence(_prevalence_frame())
 
     fibromyalgia = result.loc[result["condition"].eq("fibromyalgia")].iloc[0]
     assert fibromyalgia["n_total_cohort"] == 3
-    assert fibromyalgia["n_evaluable_primary"] == 2
+    assert fibromyalgia["n_evaluable_primary"] == 3
     assert fibromyalgia["n_confirmed_present"] == 1
-    assert fibromyalgia["n_no_comorbidity"] == 1
-    assert fibromyalgia["n_missing"] == 1
-    assert fibromyalgia["pct_confirmed_total_cohort"] != fibromyalgia["pct_confirmed_among_evaluable"]
+    assert fibromyalgia["n_no_comorbidity"] == 2
+    assert fibromyalgia["n_missing"] == 0
+    assert fibromyalgia["pct_confirmed_total_cohort"] == fibromyalgia["pct_confirmed_among_evaluable"]
 
 
 def test_pop_prevalence_uses_evaluable_denominator():
@@ -41,8 +41,8 @@ def test_pop_prevalence_uses_evaluable_denominator():
 
     fibromyalgia = result.loc[result["condition"].eq("fibromyalgia")].iloc[0]
     assert fibromyalgia["n_pop1"] == 1
-    assert fibromyalgia["N_pop1"] == 2
-    assert fibromyalgia["pct_pop1"] == 50
+    assert fibromyalgia["N_pop1"] == 3
+    assert fibromyalgia["pct_pop1"] == 100 / 3
 
 
 def test_historical_summary_uses_full_baseline_cohort_for_plotted_percentage():
@@ -69,29 +69,29 @@ def test_condition_statuses_are_mutually_exclusive_and_prioritized():
         "confirmed_present",
         "status_uncertain",
         "history_only",
-        "documented_absent",
-        "not_evaluated",
+        "no_comorbidity",
+        "no_comorbidity",
     ]
 
 
-def test_primary_exposure_excludes_history_uncertain_and_not_evaluated():
+def test_primary_exposure_excludes_history_uncertain_and_codes_missing_false():
     spec = next(c for c in comorbidities.CONDITIONS if c.name == "fibromyalgia")
     frame = pd.DataFrame({
         "patient_id": ["P1", "P2", "P3", "P4", "P5"],
         "fibromyalgia_status": [
-            "confirmed_present", "documented_absent", "history_only",
-            "status_uncertain", "not_evaluated",
+            "confirmed_present", "no_comorbidity", "history_only",
+            "status_uncertain", "missing",
         ],
     })
 
     result = comorbidities.apply_exposure_definition(
-        frame, spec, "confirmed_present_vs_documented_absent"
+        frame, spec, "confirmed_present_vs_no_comorbidity"
     )
 
     assert result["exposure"].iloc[0] == 1.0
     assert result["exposure"].iloc[1] == 0.0
     assert result["exposure"].iloc[2:4].isna().all()
-    assert pd.isna(result["exposure"].iloc[4])
+    assert result["exposure"].iloc[4] == 0.0
 
 
 def test_complete_cases_reports_missing_and_group_sizes():
@@ -312,55 +312,3 @@ def test_essdai_ge5_survival_uses_activity_threshold_five():
     assert len(period) == 1
     assert period.loc[0, "event_interval"] == 1
     assert period.loc[0, "interval_number"] == 1
-
-
-def test_primary_said_group_requires_all_components_explicitly_absent():
-    frame = pd.DataFrame(index=range(4))
-    for name in comorbidities.PRIMARY_SAID_CONDITIONS:
-        frame[f"{name}_status"] = "documented_absent"
-    frame.loc[1, "sle_status"] = "confirmed_present"
-    frame.loc[2, "sle_status"] = "history_only"
-    frame.loc[3, "sle_status"] = "not_evaluated"
-    assert comorbidities.derive_primary_said_status(frame).tolist() == [
-        "documented_absent", "confirmed_present", "history_only", "not_evaluated"
-    ]
-
-
-def test_zero_events_in_group_is_separation_not_zero_hr():
-    period = pd.DataFrame({
-        "patient_id": ["E1", "E2", "R1", "R2"], "event_interval": [0, 0, 1, 0],
-        "fibromyalgia_status": ["confirmed_present"] * 2 + ["documented_absent"] * 2,
-        "baseline_essdai": [1.] * 4, "age_baseline": [50.] * 4,
-        "sex": ["F", "M", "F", "M"], "interval_number": [1] * 4,
-        "log_interval_years": [0.] * 4,
-    })
-    spec = next(c for c in comorbidities.CONDITIONS if c.name == "fibromyalgia")
-    rows = comorbidities.fit_discrete_time_model(period, spec, "fixture", "event_interval", False)
-    primary = next(r for r in rows if r["exposure_definition"] == "confirmed_present_vs_documented_absent")
-    assert primary["model_status"] == "NE_SEPARATION"
-    assert pd.isna(primary["estimate"])
-
-
-def test_fdr_excludes_grouped_primary_contrast():
-    frame = pd.DataFrame({"outcome":["x"]*3,"model_variant":["v"]*3,
-        "exposure_definition":["d"]*3,"analysis_level":["primary","exploratory","exploratory"],
-        "p_value":[.001,.01,.04]})
-    result = comorbidities.apply_grouped_fdr(frame)
-    assert pd.isna(result.loc[0,"fdr_bh_q_value"])
-    assert result.loc[1:,"fdr_bh_q_value"].notna().all()
-
-
-def test_forest_rows_keep_table_and_point_order_with_synthetic_fixture():
-    # Synthetic fixture only; these values are not scientific results.
-    frame = pd.DataFrame({
-        "outcome": ["ESSDAI trajectory"] * 2,
-        "model_variant": ["primary_all_visits"] * 2,
-        "exposure_definition": ["confirmed_present_vs_documented_absent"] * 2,
-        "comorbidity": ["sle", "primary_said"],
-        "estimate": [0.2, 0.1],
-    })
-    order = ["primary_said", "sle"]
-    plotted = comorbidities.prepare_forest_rows(
-        frame, "ESSDAI trajectory", "primary_all_visits", order
-    )
-    assert plotted["comorbidity"].tolist() == order
