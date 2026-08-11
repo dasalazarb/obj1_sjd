@@ -554,7 +554,9 @@ def build_longitudinal_essdai_dataset(raw: pd.DataFrame, spine: pd.DataFrame, po
     long = spine.merge(values, on=["patient_id", "visit_date"], how="left", validate="one_to_one")
     popcols = pop[["visit_id", "pop_status"]].drop_duplicates("visit_id")
     long = long.merge(popcols, on="visit_id", how="left", validate="one_to_one").merge(domains.drop(columns=["patient_id", "visit_date"]), on="visit_id", how="left", validate="one_to_one")
-    bcols = ["patient_id", "baseline_essdai", "baseline_pop", "age_baseline", "sex", *CONDITION_NAMES]
+    rheum_status_cols = [f"{c.name}_status" for c in RHEUMATOLOGIC_NON_SAID_CONDITIONS]
+    bcols = ["patient_id", "baseline_essdai", "baseline_pop", "age_baseline", "sex",
+             *CONDITION_NAMES, *rheum_status_cols]
     long = long.drop(columns=["sex"], errors="ignore").merge(base[bcols], on="patient_id", how="left", validate="many_to_one")
     if long["patient_id"].isna().any() or not long["visit_id"].is_unique:
         raise ValueError("Longitudinal analytic dataset violates identity constraints")
@@ -621,12 +623,28 @@ def _empty_progression(c: Condition, outcome: str, estimand: str, warning: str, 
     return {"comorbidity": c.name, "display_label": c.label, "outcome": outcome, "estimand": estimand, "model_type": "not fitted", "effect_measure": "Not estimable", "estimate": np.nan, "ci95_low": np.nan, "ci95_high": np.nan, "p_value": np.nan, "n_patients": counts.get("n_patients", 0), "n_followup_observations": counts.get("n_followup_observations", 0), "n_events": counts.get("n_events", np.nan), "n_complete_cases": counts.get("n_complete_cases", 0), "baseline_reference_group": "Comorbidity absent", "adjustment_covariates": "baseline ESSDAI; baseline Pop; age; sex", "time_scale": "years since observed baseline", "threshold": SEVERE_THRESHOLD if outcome == "Progression to ESSDAI >=5" else np.nan, "model_converged": False, "proportional_hazards_p": np.nan, "sparse_event_flag": True, "model_status": "not_estimable", "warning": warning, "interpretation": "Not estimable; no causal interpretation is warranted."}
 
 
+def restrict_to_primary_exposure(data: pd.DataFrame, c: Condition) -> pd.DataFrame:
+    """Keep only confirmed-present and no-comorbidity primary contrast rows."""
+    status_col = f"{c.name}_status"
+    if status_col not in data:
+        raise KeyError(f"Primary model input lacks {status_col}")
+    out = data.loc[data[status_col].isin(["confirmed_present", "no_comorbidity"])].copy()
+    out[c.name] = out[status_col].eq("confirmed_present").astype(int)
+    return out
+
+
 def fit_mixed_model(long: pd.DataFrame, c: Condition) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     import statsmodels.formula.api as smf
-    cols = ["patient_id", "essdai_total_recoded", "time_since_observed_baseline_years", c.name, "baseline_essdai", "baseline_pop", "age_baseline", "sex", "visit_number"]
-    data = long.loc[long["visit_number"] > 0, cols].dropna().copy(); data[c.name] = data[c.name].astype(int)
+    status_col = f"{c.name}_status"
+    cols = ["patient_id", "essdai_total_recoded", "time_since_observed_baseline_years",
+            status_col, "baseline_essdai", "baseline_pop", "age_baseline", "sex", "visit_number"]
+    data = restrict_to_primary_exposure(long.loc[long["visit_number"] > 0, cols], c)
+    data = data.dropna(subset=["patient_id", "essdai_total_recoded",
+                              "time_since_observed_baseline_years", "baseline_essdai",
+                              "baseline_pop", "age_baseline", "sex"])
     eligible = data.groupby("patient_id").size(); n = len(eligible)
-    if n < 5 or data[c.name].nunique() < 2:
+    exposure_counts = data.drop_duplicates("patient_id")[c.name].value_counts()
+    if n < 5 or data[c.name].nunique() < 2 or exposure_counts.get(1, 0) < 5:
         row = _empty_progression(c, "Longitudinal ESSDAI trajectory", "Time x comorbidity", "Too few complete patients or no exposure variation", n_patients=n, n_followup_observations=len(data), n_complete_cases=n)
         return [row], {"comorbidity": c.name, "outcome": "ESSDAI trajectory", "convergence": False, "warning": row["warning"]}
     formula = "essdai_total_recoded ~ time_since_observed_baseline_years * Q('%s') + baseline_essdai + C(baseline_pop) + age_baseline + C(sex)" % c.name
@@ -654,36 +672,35 @@ def fit_mixed_model(long: pd.DataFrame, c: Condition) -> tuple[list[dict[str, An
 
 
 def fit_cox_model(data: pd.DataFrame, c: Condition, event_col: str, outcome: str, minimum_events: int) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Fit a Cox model using condition absence as the reference exposure."""
-    counts = {"n_patients": len(data), "n_events": int(data[event_col].sum()) if len(data) else 0, "n_complete_cases": 0}
-    cols = ["followup_years", event_col, c.name, "baseline_essdai", "baseline_pop", "age_baseline", "sex"]
-    d = data[cols].copy()
-    n_exposure_missing_as_negative = int(d[c.name].isna().sum())
-    d[c.name] = d[c.name].fillna(False).astype("boolean")
-    # The baseline builder normally resolves empty absence-by-default fields;
-    # fill again here so callers supplying an older intermediate get the same
-    # clinical coding. Complete-case exclusion still applies to other fields.
+    """Fit confirmed-present versus no-comorbidity; exclude ambiguous statuses."""
+    status_col = f"{c.name}_status"
+    cols = ["followup_years", event_col, status_col, "baseline_essdai",
+            "baseline_pop", "age_baseline", "sex"]
+    d = restrict_to_primary_exposure(data[cols], c)
+    n_exposure_excluded = int(len(data) - len(d))
     d = d.dropna().copy()
-    counts.update({"n_complete_cases": len(d), "n_patients": len(d),
-                   "n_events": int(d[event_col].sum()) if len(d) else 0})
-    if importlib.util.find_spec("lifelines") is None:
-        row = _empty_progression(c, outcome, "Baseline comorbidity", "lifelines is not installed; Cox model not executed", **counts)
-        row.update({"baseline_reference_group": "Comorbidity absent",
-                    "n_exposure_missing_assigned_negative": n_exposure_missing_as_negative})
-        return row, {"comorbidity": c.name, "outcome": outcome, "convergence": False,
-                     "n_exposure_missing_assigned_negative": n_exposure_missing_as_negative,
-                     "warning": row["warning"]}
-    from lifelines import CoxPHFitter
-    from lifelines.statistics import proportional_hazard_test
-    if len(d) < 5 or d[c.name].nunique() < 2 or counts["n_events"] < minimum_events:
+    counts = {"n_patients": len(d), "n_events": int(d[event_col].sum()) if len(d) else 0,
+              "n_complete_cases": len(d)}
+    exposure_counts = d[c.name].value_counts()
+    if (len(d) < 5 or d[c.name].nunique() < 2 or counts["n_events"] < minimum_events
+            or exposure_counts.get(1, 0) < 5):
         row = _empty_progression(c, outcome, "Baseline comorbidity", f"Insufficient events (<{minimum_events}) or exposure variation", **counts)
         row.update({"model_status": "insufficient_events",
                     "baseline_reference_group": "Comorbidity absent",
-                    "n_exposure_missing_assigned_negative": n_exposure_missing_as_negative})
+                    "n_ambiguous_status_excluded": n_exposure_excluded})
         return row, {"comorbidity": c.name, "outcome": outcome, "convergence": False,
                      "events": counts["n_events"],
-                     "n_exposure_missing_assigned_negative": n_exposure_missing_as_negative,
+                     "n_ambiguous_status_excluded": n_exposure_excluded,
                      "warning": row["warning"]}
+    if importlib.util.find_spec("lifelines") is None:
+        row = _empty_progression(c, outcome, "Confirmed present vs no comorbidity", "lifelines is not installed; Cox model not executed", **counts)
+        row.update({"baseline_reference_group": "No comorbidity",
+                    "n_ambiguous_status_excluded": n_exposure_excluded})
+        return row, {"comorbidity": c.name, "outcome": outcome, "convergence": False,
+                     "n_ambiguous_status_excluded": n_exposure_excluded,
+                     "warning": row["warning"]}
+    from lifelines import CoxPHFitter
+    from lifelines.statistics import proportional_hazard_test
     d[c.name] = d[c.name].astype(int); d = pd.get_dummies(d, columns=["baseline_pop", "sex"], drop_first=True, dtype=float)
     # Full model only when event support is reasonable; otherwise preserve the
     # exposure and baseline ESSDAI in a prespecified reduced model.
@@ -698,15 +715,15 @@ def fit_cox_model(data: pd.DataFrame, c: Condition, event_col: str, outcome: str
         summary = fitter.summary.loc[c.name]; ph = proportional_hazard_test(fitter, d, time_transform="rank")
         ph_p = float(ph.summary.loc[c.name, "p"])
         warning_text = "Proportional-hazards assumption may be violated." if ph_p < .05 else ""
-        row = {**_empty_progression(c, outcome, "Baseline comorbidity", warning_text, **counts), "model_type": model_type, "effect_measure": "Hazard ratio", "estimate": float(summary["exp(coef)"]), "ci95_low": float(summary["exp(coef) lower 95%"]), "ci95_high": float(summary["exp(coef) upper 95%"]), "p_value": float(summary["p"]), "model_converged": True, "proportional_hazards_p": ph_p, "sparse_event_flag": reduced, "model_status": "reduced_adjustment" if reduced else "fitted", "baseline_reference_group": "Comorbidity absent", "n_exposure_missing_assigned_negative": n_exposure_missing_as_negative, "interpretation": "Adjusted hazard association using comorbidity absence as the reference. This is not a causal effect."}
-        return row, {"comorbidity": c.name, "outcome": outcome, "convergence": True, "events": counts["n_events"], "events_per_parameter": counts["n_events"]/max(len(d.columns)-2, 1), "n_exposure_missing_assigned_negative": n_exposure_missing_as_negative, "proportional_hazards_p": ph_p, "warning": warning_text}
+        row = {**_empty_progression(c, outcome, "Confirmed present vs no comorbidity", warning_text, **counts), "model_type": model_type, "effect_measure": "Hazard ratio", "estimate": float(summary["exp(coef)"]), "ci95_low": float(summary["exp(coef) lower 95%"]), "ci95_high": float(summary["exp(coef) upper 95%"]), "p_value": float(summary["p"]), "model_converged": True, "proportional_hazards_p": ph_p, "sparse_event_flag": reduced, "model_status": "reduced_adjustment" if reduced else "fitted", "baseline_reference_group": "No comorbidity", "n_ambiguous_status_excluded": n_exposure_excluded, "interpretation": "Adjusted confirmed-present versus no-comorbidity association; this is not a causal effect."}
+        return row, {"comorbidity": c.name, "outcome": outcome, "convergence": True, "events": counts["n_events"], "events_per_parameter": counts["n_events"]/max(len(d.columns)-2, 1), "n_ambiguous_status_excluded": n_exposure_excluded, "proportional_hazards_p": ph_p, "warning": warning_text}
     except (ValueError, np.linalg.LinAlgError, RuntimeError) as exc:
         row = _empty_progression(c, outcome, "Baseline comorbidity", f"Cox model failed: {exc}", **counts)
         row.update({"model_status": "failed", "baseline_reference_group": "Comorbidity absent",
-                    "n_exposure_missing_assigned_negative": n_exposure_missing_as_negative})
+                    "n_ambiguous_status_excluded": n_exposure_excluded})
         return row, {"comorbidity": c.name, "outcome": outcome, "convergence": False,
                      "events": counts["n_events"],
-                     "n_exposure_missing_assigned_negative": n_exposure_missing_as_negative,
+                     "n_ambiguous_status_excluded": n_exposure_excluded,
                      "warning": row["warning"]}
 
 
@@ -779,7 +796,7 @@ def create_grouped_barplot(by_pop: pd.DataFrame) -> None:
     fig.subplots_adjust(left=.35, bottom=.12); _plot_save(fig, FIGURES_DIR/"07_comorbidities_grouped_bar.pdf")
 
 
-def create_progression_forestplot(progression: pd.DataFrame) -> None:
+def create_progression_forestplot(progression: pd.DataFrame, path: Path | None = None) -> None:
     panels = [("Longitudinal ESSDAI trajectory", "Difference in annual ESSDAI slope", 0, False), ("Progression to ESSDAI >=5", "Progression to ESSDAI ≥5", 1, True), ("New ESSDAI-domain involvement", "Development of new ESSDAI-domain involvement", 1, True)]
     fig, axes = plt.subplots(1, 3, figsize=(18, max(7, .5*len(PROGRESSION_CONDITIONS))), sharey=True); order = PROGRESSION_CONDITION_NAMES_ORDERED[::-1]; labels={c.name:c.label for c in PROGRESSION_CONDITIONS}
     for ax, (outcome, title, null, logscale) in zip(axes, panels):
@@ -793,8 +810,8 @@ def create_progression_forestplot(progression: pd.DataFrame) -> None:
         ax.axvline(null, color="black", ls="--", lw=.8); ax.set_title(title); ax.grid(axis="x", alpha=.2)
         if logscale: ax.set_xscale("log"); ax.set_xlabel("Hazard ratio (log scale)")
         else: ax.set_xlabel("Adjusted beta per year")
-    axes[0].set_yticks(range(len(order)), [labels[x] for x in order]); fig.text(.01,.01,"Models integrate patients across visits and adjust for baseline ESSDAI, baseline Pop, age, and sex when event support permits. Comorbidity absence is the reference. X marks not estimable; red denotes reduced models. Associations are not causal.",fontsize=8)
-    fig.subplots_adjust(left=.18,bottom=.1,wspace=.15); _plot_save(fig, FIGURES_DIR/"07_comorbidities_progression_forestplot.pdf")
+    axes[0].set_yticks(range(len(order)), [labels[x] for x in order]); fig.text(.01,.01,"Models include only confirmed-present and no-comorbidity patients and adjust for baseline ESSDAI, baseline Pop, age, and sex when support permits. History-only and uncertain statuses are excluded. X marks not estimable; red denotes reduced models. Associations are not causal.",fontsize=8)
+    fig.subplots_adjust(left=.18,bottom=.1,wspace=.15); _plot_save(fig, path or FIGURES_DIR/"07_rheumatologic_comorbidities_progression_forestplot.pdf")
 
 
 def run_qc_checks(base: pd.DataFrame, long: pd.DataFrame, severe: pd.DataFrame, new_domain: pd.DataFrame, domain_audit: pd.DataFrame) -> dict[str, Any]:
@@ -845,15 +862,15 @@ def create_family_plot(table: pd.DataFrame, path: Path, historical: bool=False) 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args=parse_args(argv); ensure_directories(); logger=setup_logging(); np.random.seed(args.random_seed)
-    logger.info("[1/6] Loading canonical sources")
+    logger.info("[1/7] Loading canonical sources")
     timestamps=check_upstream_artifacts(args.input,args.rebuild_upstream,logger)
     spine=load_visit_spine(); pop=load_pop_classification(); domains=load_domain_flags(); raw=load_selected_raw_columns(args.input)
-    logger.info("[2/6] Deriving three separate baseline condition families")
+    logger.info("[2/7] Deriving three separate baseline condition families")
     base,duplicates,n_pipe=build_baseline_comorbidity_dataset(raw,spine,pop); write_intermediate_dataset(base,BASELINE_PATH)
     families=[("past_medical_history",PAST_MEDICAL_HISTORY_CONDITIONS,True),
       ("rheumatologic_comorbidities",RHEUMATOLOGIC_NON_SAID_CONDITIONS,False),
       ("concomitant_said",CONCOMITANT_SAID_CONDITIONS,False)]
-    logger.info("[3/6] Writing separate descriptive outputs")
+    logger.info("[3/7] Writing separate descriptive outputs")
     produced=[]
     for stem,conditions,historical in families:
         overall=(summarize_historical_family(base,conditions) if historical else summarize_confirmed_family(base,conditions))
@@ -862,11 +879,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         op=TABLES_DIR/f"07_{stem}_overall.csv"; bp=TABLES_DIR/f"07_{stem}_by_pop.csv"
         overall.to_csv(op,index=False); by_pop.to_csv(bp,index=False); produced.extend([op,bp])
         fp=FIGURES_DIR/f"07_{stem}.pdf"; create_family_plot(overall,fp,historical); produced.append(fp)
-    logger.info("[4/6] Preserving canonical longitudinal outcome datasets (no PMH/SAID generic models)")
+    logger.info("[4/7] Preserving canonical longitudinal outcome datasets")
     long=build_longitudinal_essdai_dataset(raw,spine,pop,domains,base); write_intermediate_dataset(long,LONGITUDINAL_PATH)
     severe=build_severe5_survival_dataset(long,base); write_intermediate_dataset(severe,SEVERE_PATH)
     new_domain,domain_audit=build_new_domain_survival_dataset(long,base); write_intermediate_dataset(new_domain,NEW_DOMAIN_PATH); write_intermediate_dataset(domain_audit,DOMAIN_AUDIT_PATH)
-    logger.info("[5/6] Writing auditable source map and QC")
+    logger.info("[5/7] Fitting confirmed non-SAiD rheumatologic progression models")
+    progression_rows: list[dict[str, Any]]=[]; diagnostics: list[dict[str, Any]]=[]
+    for condition in RHEUMATOLOGIC_NON_SAID_CONDITIONS:
+        rows,diagnostic=fit_mixed_model(long,condition); progression_rows.extend(rows); diagnostics.append(diagnostic)
+        row,diagnostic=fit_cox_model(severe,condition,"severe5_event","Progression to ESSDAI >=5",args.minimum_events); progression_rows.append(row); diagnostics.append(diagnostic)
+        row,diagnostic=fit_cox_model(new_domain,condition,"new_domain_event","New ESSDAI-domain involvement",args.minimum_events); progression_rows.append(row); diagnostics.append(diagnostic)
+    progression=pd.DataFrame(progression_rows)
+    progression["fdr_bh_q_value"]=progression.groupby(["outcome","estimand"])["p_value"].transform(apply_fdr)
+    progression_path=TABLES_DIR/"07_rheumatologic_comorbidities_progression.csv"
+    progression.to_csv(progression_path,index=False); produced.append(progression_path)
+    progression_plot=FIGURES_DIR/"07_rheumatologic_comorbidities_progression_forestplot.pdf"
+    create_progression_forestplot(progression, progression_plot); produced.append(progression_plot)
+    pd.DataFrame(diagnostics).to_csv(QC_DIR/"07_comorbidities_model_diagnostics.csv",index=False)
+    logger.info("[6/7] Writing auditable source map and QC")
     mapping=source_mapping(raw.columns); mapping.to_csv(QC_DIR/"07_comorbidities_source_mapping.csv",index=False)
     duplicates.to_csv(QC_DIR/"07_comorbidities_patient_duplicates.csv",index=False)
     missingness_table(base).to_csv(QC_DIR/"07_comorbidities_missingness.csv",index=False)
@@ -879,7 +909,7 @@ def main(argv: Sequence[str] | None = None) -> int:
       "monte_carlo_enabled":args.run_sparse_monte_carlo,"upstream_file_timestamps":timestamps,
       "separate_burden_columns":["n_general_medical_history","n_rheumatologic_non_said","n_concomitant_said"]}
     (QC_DIR/"07_comorbidities_qc.json").write_text(json.dumps(qc,indent=2,default=str)+"\n")
-    logger.info("[6/6] Complete: PMH is descriptive; generic progression models are not run for PMH or SAIDs")
+    logger.info("[7/7] Complete: progression models restricted to confirmed non-SAiD rheumatologic comorbidities")
     print("Generated files:"); [print(x.resolve()) for x in produced+[QC_DIR/"07_comorbidities_qc.json",QC_DIR/"07_comorbidities_source_mapping.csv"]]
     return 0
 

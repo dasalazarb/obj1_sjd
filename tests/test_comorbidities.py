@@ -71,6 +71,22 @@ def test_family_burdens_are_separate_and_no_combined_total_exists():
     assert forbidden_totals.isdisjoint(result.columns)
 
 
+def test_progression_models_retain_only_confirmed_non_said_primary_contrast():
+    spec = comorbidities.RHEUMATOLOGIC_NON_SAID_CONDITIONS[0]
+    frame = pd.DataFrame({
+        "patient_id": ["P1", "P2", "P3", "P4"],
+        f"{spec.name}_status": ["confirmed_present", "no_comorbidity",
+                                "history_only", "status_uncertain"],
+    })
+    result = comorbidities.restrict_to_primary_exposure(frame, spec)
+
+    assert result.patient_id.tolist() == ["P1", "P2"]
+    assert result[spec.name].tolist() == [1, 0]
+    assert comorbidities.PROGRESSION_CONDITIONS == comorbidities.RHEUMATOLOGIC_NON_SAID_CONDITIONS
+    assert all(c.condition_family == "rheumatologic_non_said"
+               for c in comorbidities.PROGRESSION_CONDITIONS)
+
+
 def _pop_frame(positives):
     rows=[]
     spec=comorbidities.RHEUMATOLOGIC_NON_SAID_CONDITIONS[0]
