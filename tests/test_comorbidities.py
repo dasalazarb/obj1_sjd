@@ -95,6 +95,20 @@ def test_pmh_progression_exposure_uses_documented_history_flag():
     result = comorbidities.restrict_to_primary_exposure(frame, spec)
     assert result.patient_id.tolist() == ["P1", "P2"]
     assert result[spec.name].tolist() == [1, 0]
+    assert comorbidities.progression_exposure_column(spec) == spec.name
+
+
+def test_progression_exposure_selection_does_not_depend_on_display_family_label():
+    pmh = comorbidities.PAST_MEDICAL_HISTORY_CONDITIONS[0]
+    renamed = comorbidities.Condition(
+        pmh.name, pmh.label, pmh.primary, "GENERAL_MEDICAL_COMORBIDITIES",
+        pmh.clinical_category, pmh.detail_columns, pmh.notes)
+    frame = pd.DataFrame({renamed.name: pd.Series([True, False], dtype="boolean")})
+
+    result = comorbidities.restrict_to_primary_exposure(frame, renamed)
+
+    assert comorbidities.progression_exposure_column(renamed) == renamed.name
+    assert result[renamed.name].tolist() == [1, 0]
 
 
 def _pop_frame(positives):

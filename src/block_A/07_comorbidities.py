@@ -167,6 +167,7 @@ PROGRESSION_FAMILIES = (
 PROGRESSION_CONDITIONS = list(iter_analysis_conditions())
 PROGRESSION_CONDITION_NAMES = {c.name for c in PROGRESSION_CONDITIONS}
 PROGRESSION_CONDITION_NAMES_ORDERED = [c.name for c in PROGRESSION_CONDITIONS]
+PAST_MEDICAL_HISTORY_CONDITION_NAMES = {c.name for c in PAST_MEDICAL_HISTORY_CONDITIONS}
 SUBTYPE_COLS = ("past_medical_history__thyroid_disease_spfy", "rheumatological_comorbidities__inflam_bowel_spfy")
 PROHIBITED_SOURCE_PREFIXES = ("sjogren's_syndrome_history__", "sjogren's_syndrome_disease_damage_index__", "systems_review_for_physician__", "ans__", "autonomic_nervous_system_questionnaire__")
 ACTIVITY_THRESHOLD_SECTION5 = SEVERE_THRESHOLD
@@ -634,7 +635,10 @@ def _empty_progression(c: Condition, outcome: str, estimand: str, warning: str, 
 
 def restrict_to_primary_exposure(data: pd.DataFrame, c: Condition) -> pd.DataFrame:
     """Apply the existing family-appropriate baseline exposure contrast."""
-    if c.condition_family == "past_medical_history":
+    # Use membership in the canonical PMH mapping rather than a display-family
+    # string.  This keeps the model input stable if family labels are renamed
+    # for tables/figures (for example, GENERAL_MEDICAL_COMORBIDITIES).
+    if c.name in PAST_MEDICAL_HISTORY_CONDITION_NAMES:
         if c.name not in data:
             raise KeyError(f"Primary model input lacks {c.name}")
         out = data.loc[data[c.name].notna()].copy()
@@ -648,19 +652,16 @@ def restrict_to_primary_exposure(data: pd.DataFrame, c: Condition) -> pd.DataFra
     return out
 
 
-def restrict_to_primary_exposure(data: pd.DataFrame, c: Condition) -> pd.DataFrame:
-    """Keep only confirmed-present and no-comorbidity primary contrast rows."""
-    status_col = f"{c.name}_status"
-    if status_col not in data:
-        raise KeyError(f"Primary model input lacks {status_col}")
-    out = data.loc[data[status_col].isin(["confirmed_present", "no_comorbidity"])].copy()
-    out[c.name] = out[status_col].eq("confirmed_present").astype(int)
-    return out
+def progression_exposure_column(c: Condition) -> str:
+    """Return the baseline exposure column required by progression models."""
+    if c.name in PAST_MEDICAL_HISTORY_CONDITION_NAMES:
+        return c.name
+    return f"{c.name}_status"
 
 
 def fit_mixed_model(long: pd.DataFrame, c: Condition) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     import statsmodels.formula.api as smf
-    exposure_col = c.name if c.condition_family == "past_medical_history" else f"{c.name}_status"
+    exposure_col = progression_exposure_column(c)
     cols = ["patient_id", "essdai_total_recoded", "time_since_observed_baseline_years",
             exposure_col, "baseline_essdai", "baseline_pop", "age_baseline", "sex", "visit_number"]
     data = restrict_to_primary_exposure(long.loc[long["visit_number"] > 0, cols], c)
@@ -700,7 +701,7 @@ def fit_mixed_model(long: pd.DataFrame, c: Condition) -> tuple[list[dict[str, An
 
 def fit_cox_model(data: pd.DataFrame, c: Condition, event_col: str, outcome: str, minimum_events: int) -> tuple[dict[str, Any], dict[str, Any]]:
     """Fit the existing Cox specification with a family-appropriate exposure."""
-    exposure_col = c.name if c.condition_family == "past_medical_history" else f"{c.name}_status"
+    exposure_col = progression_exposure_column(c)
     cols = ["followup_years", event_col, exposure_col, "baseline_essdai",
             "baseline_pop", "age_baseline", "sex"]
     d = restrict_to_primary_exposure(data[cols], c)
