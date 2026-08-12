@@ -167,7 +167,6 @@ PROGRESSION_FAMILIES = (
 PROGRESSION_CONDITIONS = list(iter_analysis_conditions())
 PROGRESSION_CONDITION_NAMES = {c.name for c in PROGRESSION_CONDITIONS}
 PROGRESSION_CONDITION_NAMES_ORDERED = [c.name for c in PROGRESSION_CONDITIONS]
-PAST_MEDICAL_HISTORY_CONDITION_NAMES = {c.name for c in PAST_MEDICAL_HISTORY_CONDITIONS}
 SUBTYPE_COLS = ("past_medical_history__thyroid_disease_spfy", "rheumatological_comorbidities__inflam_bowel_spfy")
 PROHIBITED_SOURCE_PREFIXES = ("sjogren's_syndrome_history__", "sjogren's_syndrome_disease_damage_index__", "systems_review_for_physician__", "ans__", "autonomic_nervous_system_questionnaire__")
 ACTIVITY_THRESHOLD_SECTION5 = SEVERE_THRESHOLD
@@ -372,20 +371,19 @@ def derive_comorbidity_indicators(raw: pd.DataFrame) -> pd.DataFrame:
         general, history, confirmed = [_source_flag(out, col) for col in condition.primary]
         status = derive_condition_status(general, history, confirmed)
         out[f"{condition.name}_status"] = status
-        out[condition.name] = status.eq("confirmed_present").astype("boolean")
-        out[f"{condition.name}_primary_exposure"] = status.map(
-            {"confirmed_present": 1.0, "no_comorbidity": 0.0}
-        ).astype(float)
+        exposed = (general.fillna(False) | history.fillna(False) |
+                   confirmed.fillna(False)).astype("boolean")
+        out[condition.name] = exposed
+        out[f"{condition.name}_primary_exposure"] = exposed.astype(float)
     return out
 
 
 def apply_exposure_definition(frame: pd.DataFrame, condition: Condition,
-                              definition: str = "confirmed_present_vs_no_comorbidity") -> pd.DataFrame:
-    if definition != "confirmed_present_vs_no_comorbidity":
+                              definition: str = "any_source_positive") -> pd.DataFrame:
+    if definition != "any_source_positive":
         raise ValueError(f"Unsupported exposure definition: {definition}")
     out = frame.copy()
-    status = out[f"{condition.name}_status"].astype("string")
-    out["exposure"] = status.map({"confirmed_present": 1.0, "no_comorbidity": 0.0})
+    out["exposure"] = out[condition.name].fillna(False).astype(int)
     return out
 
 def collapse_same_patient_date(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -448,9 +446,10 @@ def build_baseline_comorbidity_dataset(raw: pd.DataFrame, spine: pd.DataFrame, p
                  for col in condition.primary]
         status = derive_condition_status(*flags)
         base[f"{condition.name}_status"] = status
-        base[condition.name] = status.eq("confirmed_present").astype("boolean")
-        base[f"{condition.name}_primary_exposure"] = status.map(
-            {"confirmed_present": 1.0, "no_comorbidity": 0.0})
+        exposed = (flags[0].fillna(False) | flags[1].fillna(False) |
+                   flags[2].fillna(False)).astype("boolean")
+        base[condition.name] = exposed
+        base[f"{condition.name}_primary_exposure"] = exposed.astype(float)
     non_said = [c.name for c in RHEUMATOLOGIC_NON_SAID_CONDITIONS]
     said = [c.name for c in CONCOMITANT_SAID_CONDITIONS]
     base["n_general_medical_history"] = base[pmh_names].astype(int).sum(axis=1)
@@ -634,29 +633,17 @@ def _empty_progression(c: Condition, outcome: str, estimand: str, warning: str, 
 
 
 def restrict_to_primary_exposure(data: pd.DataFrame, c: Condition) -> pd.DataFrame:
-    """Apply the existing family-appropriate baseline exposure contrast."""
-    # Use membership in the canonical PMH mapping rather than a display-family
-    # string.  This keeps the model input stable if family labels are renamed
-    # for tables/figures (for example, GENERAL_MEDICAL_COMORBIDITIES).
-    if c.name in PAST_MEDICAL_HISTORY_CONDITION_NAMES:
-        if c.name not in data:
-            raise KeyError(f"Primary model input lacks {c.name}")
-        out = data.loc[data[c.name].notna()].copy()
-        out[c.name] = out[c.name].astype(int)
-        return out
-    status_col = f"{c.name}_status"
-    if status_col not in data:
-        raise KeyError(f"Primary model input lacks {status_col}")
-    out = data.loc[data[status_col].isin(["confirmed_present", "no_comorbidity"])].copy()
-    out[c.name] = out[status_col].eq("confirmed_present").astype(int)
+    """Use the canonical any-source exposure, treating blank as unexposed."""
+    if c.name not in data:
+        raise KeyError(f"Primary model input lacks {c.name}")
+    out = data.copy()
+    out[c.name] = out[c.name].fillna(False).astype(int)
     return out
 
 
 def progression_exposure_column(c: Condition) -> str:
     """Return the baseline exposure column required by progression models."""
-    if c.name in PAST_MEDICAL_HISTORY_CONDITION_NAMES:
-        return c.name
-    return f"{c.name}_status"
+    return c.name
 
 
 def fit_mixed_model(long: pd.DataFrame, c: Condition) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -705,7 +692,7 @@ def fit_cox_model(data: pd.DataFrame, c: Condition, event_col: str, outcome: str
     cols = ["followup_years", event_col, exposure_col, "baseline_essdai",
             "baseline_pop", "age_baseline", "sex"]
     d = restrict_to_primary_exposure(data[cols], c)
-    n_exposure_excluded = int(len(data) - len(d))
+    n_exposure_excluded = 0
     d = d.dropna().copy()
     counts = {"n_patients": len(d), "n_events": int(d[event_col].sum()) if len(d) else 0,
               "n_complete_cases": len(d), "n_exposed": int(d[c.name].sum()) if len(d) else 0,
@@ -722,7 +709,7 @@ def fit_cox_model(data: pd.DataFrame, c: Condition, event_col: str, outcome: str
                      "n_ambiguous_status_excluded": n_exposure_excluded,
                      "warning": row["warning"]}
     if importlib.util.find_spec("lifelines") is None:
-        row = _empty_progression(c, outcome, "Confirmed present vs no comorbidity", "lifelines is not installed; Cox model not executed", **counts)
+        row = _empty_progression(c, outcome, "Any source positive vs none positive", "lifelines is not installed; Cox model not executed", **counts)
         row.update({"baseline_reference_group": "No comorbidity",
                     "n_ambiguous_status_excluded": n_exposure_excluded})
         return row, {"comorbidity": c.name, "outcome": outcome, "convergence": False,
@@ -744,7 +731,7 @@ def fit_cox_model(data: pd.DataFrame, c: Condition, event_col: str, outcome: str
         summary = fitter.summary.loc[c.name]; ph = proportional_hazard_test(fitter, d, time_transform="rank")
         ph_p = float(ph.summary.loc[c.name, "p"])
         warning_text = "Proportional-hazards assumption may be violated." if ph_p < .05 else ""
-        row = {**_empty_progression(c, outcome, "Confirmed present vs no comorbidity", warning_text, **counts), "model_type": model_type, "effect_measure": "Hazard ratio", "estimate": float(summary["exp(coef)"]), "ci95_low": float(summary["exp(coef) lower 95%"]), "ci95_high": float(summary["exp(coef) upper 95%"]), "p_value": float(summary["p"]), "model_converged": True, "proportional_hazards_p": ph_p, "sparse_event_flag": reduced, "model_status": "reduced_adjustment" if reduced else "fitted", "baseline_reference_group": "No comorbidity", "n_ambiguous_status_excluded": n_exposure_excluded, "interpretation": "Adjusted confirmed-present versus no-comorbidity association; this is not a causal effect."}
+        row = {**_empty_progression(c, outcome, "Any source positive vs none positive", warning_text, **counts), "model_type": model_type, "effect_measure": "Hazard ratio", "estimate": float(summary["exp(coef)"]), "ci95_low": float(summary["exp(coef) lower 95%"]), "ci95_high": float(summary["exp(coef) upper 95%"]), "p_value": float(summary["p"]), "model_converged": True, "proportional_hazards_p": ph_p, "sparse_event_flag": reduced, "model_status": "reduced_adjustment" if reduced else "fitted", "baseline_reference_group": "No positive source", "n_ambiguous_status_excluded": n_exposure_excluded, "interpretation": "Adjusted any-source-positive versus no-positive-source association; this is not a causal effect."}
         return row, {"comorbidity": c.name, "outcome": outcome, "convergence": True, "events": counts["n_events"], "events_per_parameter": counts["n_events"]/max(len(d.columns)-2, 1), "n_ambiguous_status_excluded": n_exposure_excluded, "proportional_hazards_p": ph_p, "warning": warning_text}
     except (ValueError, np.linalg.LinAlgError, RuntimeError) as exc:
         row = _empty_progression(c, outcome, "Baseline comorbidity", f"Cox model failed: {exc}", **counts)
@@ -847,7 +834,7 @@ def create_progression_forestplot(progression: pd.DataFrame, conditions: Sequenc
         ax.axvline(null, color="black", ls="--", lw=.8); ax.set_title(title); ax.grid(axis="x", alpha=.2)
         if logscale: ax.set_xscale("log"); ax.set_xlabel("Hazard ratio (log scale)")
         else: ax.set_xlabel("Adjusted beta per year")
-    axes[0].set_yticks(range(len(order)), [labels[x] for x in order]); fig.text(.01,.01,"Models include only confirmed-present and no-comorbidity patients and adjust for baseline ESSDAI, baseline Pop, age, and sex when support permits. History-only and uncertain statuses are excluded. X marks not estimable; red denotes reduced models. Associations are not causal.",fontsize=8)
+    axes[0].set_yticks(range(len(order)), [labels[x] for x in order]); fig.text(.01,.01,"Rheumatologic exposure is general OR history OR confirmed, with blank source fields treated as false. Models adjust for baseline ESSDAI, baseline Pop, age, and sex when support permits. X marks not estimable; red denotes reduced models. Associations are not causal.",fontsize=8)
     fig.subplots_adjust(left=.18,bottom=.1,wspace=.15); _plot_save(fig, path)
 
 
