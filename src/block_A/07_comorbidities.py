@@ -156,7 +156,15 @@ def iter_analysis_conditions() -> Iterable[Condition]:
 
 
 CONDITION_NAMES = [c.name for c in iter_analysis_conditions()]
-PROGRESSION_CONDITIONS = RHEUMATOLOGIC_NON_SAID_CONDITIONS
+# These are presentation families only.  Every condition is passed through the
+# already-prespecified Cox and longitudinal model functions; no formula,
+# outcome, threshold, or adjustment set varies by family.
+PROGRESSION_FAMILIES = (
+    ("general_medical_comorbidities", PAST_MEDICAL_HISTORY_CONDITIONS),
+    ("rheumatologic_comorbidities", RHEUMATOLOGIC_NON_SAID_CONDITIONS),
+    ("concomitant_said", CONCOMITANT_SAID_CONDITIONS),
+)
+PROGRESSION_CONDITIONS = list(iter_analysis_conditions())
 PROGRESSION_CONDITION_NAMES = {c.name for c in PROGRESSION_CONDITIONS}
 PROGRESSION_CONDITION_NAMES_ORDERED = [c.name for c in PROGRESSION_CONDITIONS]
 SUBTYPE_COLS = ("past_medical_history__thyroid_disease_spfy", "rheumatological_comorbidities__inflam_bowel_spfy")
@@ -554,7 +562,8 @@ def build_longitudinal_essdai_dataset(raw: pd.DataFrame, spine: pd.DataFrame, po
     long = spine.merge(values, on=["patient_id", "visit_date"], how="left", validate="one_to_one")
     popcols = pop[["visit_id", "pop_status"]].drop_duplicates("visit_id")
     long = long.merge(popcols, on="visit_id", how="left", validate="one_to_one").merge(domains.drop(columns=["patient_id", "visit_date"]), on="visit_id", how="left", validate="one_to_one")
-    rheum_status_cols = [f"{c.name}_status" for c in RHEUMATOLOGIC_NON_SAID_CONDITIONS]
+    rheum_status_cols = [f"{c.name}_status" for c in
+                         [*RHEUMATOLOGIC_NON_SAID_CONDITIONS, *CONCOMITANT_SAID_CONDITIONS]]
     bcols = ["patient_id", "baseline_essdai", "baseline_pop", "age_baseline", "sex",
              *CONDITION_NAMES, *rheum_status_cols]
     long = long.drop(columns=["sex"], errors="ignore").merge(base[bcols], on="patient_id", how="left", validate="many_to_one")
@@ -620,7 +629,23 @@ def build_new_domain_survival_dataset(long: pd.DataFrame, base: pd.DataFrame) ->
 
 
 def _empty_progression(c: Condition, outcome: str, estimand: str, warning: str, **counts: Any) -> dict[str, Any]:
-    return {"comorbidity": c.name, "display_label": c.label, "outcome": outcome, "estimand": estimand, "model_type": "not fitted", "effect_measure": "Not estimable", "estimate": np.nan, "ci95_low": np.nan, "ci95_high": np.nan, "p_value": np.nan, "n_patients": counts.get("n_patients", 0), "n_followup_observations": counts.get("n_followup_observations", 0), "n_events": counts.get("n_events", np.nan), "n_complete_cases": counts.get("n_complete_cases", 0), "baseline_reference_group": "Comorbidity absent", "adjustment_covariates": "baseline ESSDAI; baseline Pop; age; sex", "time_scale": "years since observed baseline", "threshold": SEVERE_THRESHOLD if outcome == "Progression to ESSDAI >=5" else np.nan, "model_converged": False, "proportional_hazards_p": np.nan, "sparse_event_flag": True, "model_status": "not_estimable", "warning": warning, "interpretation": "Not estimable; no causal interpretation is warranted."}
+    return {"comorbidity": c.name, "display_label": c.label, "condition_family": c.condition_family, "outcome": outcome, "estimand": estimand, "model_type": "not fitted", "effect_measure": "Not estimable", "estimate": np.nan, "ci95_low": np.nan, "ci95_high": np.nan, "p_value": np.nan, "n_patients": counts.get("n_patients", 0), "n_followup_observations": counts.get("n_followup_observations", 0), "n_events": counts.get("n_events", np.nan), "n_exposed": counts.get("n_exposed", np.nan), "n_exposed_events": counts.get("n_exposed_events", np.nan), "n_complete_cases": counts.get("n_complete_cases", 0), "baseline_reference_group": "Comorbidity absent", "adjustment_covariates": "baseline ESSDAI; baseline Pop; age; sex", "time_scale": "years since observed baseline", "threshold": SEVERE_THRESHOLD if outcome == "Progression to ESSDAI >=5" else np.nan, "model_converged": False, "proportional_hazards_p": np.nan, "sparse_event_flag": True, "model_status": "not_estimable", "warning": warning, "interpretation": "Not estimable; no causal interpretation is warranted."}
+
+
+def restrict_to_primary_exposure(data: pd.DataFrame, c: Condition) -> pd.DataFrame:
+    """Apply the existing family-appropriate baseline exposure contrast."""
+    if c.condition_family == "past_medical_history":
+        if c.name not in data:
+            raise KeyError(f"Primary model input lacks {c.name}")
+        out = data.loc[data[c.name].notna()].copy()
+        out[c.name] = out[c.name].astype(int)
+        return out
+    status_col = f"{c.name}_status"
+    if status_col not in data:
+        raise KeyError(f"Primary model input lacks {status_col}")
+    out = data.loc[data[status_col].isin(["confirmed_present", "no_comorbidity"])].copy()
+    out[c.name] = out[status_col].eq("confirmed_present").astype(int)
+    return out
 
 
 def restrict_to_primary_exposure(data: pd.DataFrame, c: Condition) -> pd.DataFrame:
@@ -635,17 +660,19 @@ def restrict_to_primary_exposure(data: pd.DataFrame, c: Condition) -> pd.DataFra
 
 def fit_mixed_model(long: pd.DataFrame, c: Condition) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     import statsmodels.formula.api as smf
-    status_col = f"{c.name}_status"
+    exposure_col = c.name if c.condition_family == "past_medical_history" else f"{c.name}_status"
     cols = ["patient_id", "essdai_total_recoded", "time_since_observed_baseline_years",
-            status_col, "baseline_essdai", "baseline_pop", "age_baseline", "sex", "visit_number"]
+            exposure_col, "baseline_essdai", "baseline_pop", "age_baseline", "sex", "visit_number"]
     data = restrict_to_primary_exposure(long.loc[long["visit_number"] > 0, cols], c)
     data = data.dropna(subset=["patient_id", "essdai_total_recoded",
                               "time_since_observed_baseline_years", "baseline_essdai",
                               "baseline_pop", "age_baseline", "sex"])
     eligible = data.groupby("patient_id").size(); n = len(eligible)
     exposure_counts = data.drop_duplicates("patient_id")[c.name].value_counts()
+    model_counts = {"n_patients": n, "n_followup_observations": len(data),
+                    "n_complete_cases": n, "n_exposed": int(exposure_counts.get(1, 0))}
     if n < 5 or data[c.name].nunique() < 2 or exposure_counts.get(1, 0) < 5:
-        row = _empty_progression(c, "Longitudinal ESSDAI trajectory", "Time x comorbidity", "Too few complete patients or no exposure variation", n_patients=n, n_followup_observations=len(data), n_complete_cases=n)
+        row = _empty_progression(c, "Longitudinal ESSDAI trajectory", "Time x comorbidity", "Too few complete patients or no exposure variation", **model_counts)
         return [row], {"comorbidity": c.name, "outcome": "ESSDAI trajectory", "convergence": False, "warning": row["warning"]}
     formula = "essdai_total_recoded ~ time_since_observed_baseline_years * Q('%s') + baseline_essdai + C(baseline_pop) + age_baseline + C(sex)" % c.name
     model_type, fit, warning_text = "Linear mixed model (random intercept)", None, ""
@@ -660,27 +687,28 @@ def fit_mixed_model(long: pd.DataFrame, c: Condition) -> tuple[list[dict[str, An
         try:
             fit = GEE.from_formula(formula, groups="patient_id", data=data, family=Gaussian(), cov_struct=Exchangeable()).fit(); model_type = "Gaussian GEE (exchangeable)"
         except (ValueError, np.linalg.LinAlgError) as gee_exc:
-            row = _empty_progression(c, "Longitudinal ESSDAI trajectory", "Time x comorbidity", f"Mixed model and GEE failed: {gee_exc}", n_patients=n, n_followup_observations=len(data), n_complete_cases=n)
+            row = _empty_progression(c, "Longitudinal ESSDAI trajectory", "Time x comorbidity", f"Mixed model and GEE failed: {gee_exc}", **model_counts)
             return [row], {"comorbidity": c.name, "outcome": "ESSDAI trajectory", "convergence": False, "warning": row["warning"]}
     interaction = f"time_since_observed_baseline_years:Q('{c.name}')"
     exposure = f"Q('{c.name}')"
     result_rows = []
     for term, estimand, measure in ((interaction, "Difference in annual ESSDAI slope", "Beta per year"), (exposure, "Adjusted mean difference during follow-up", "Adjusted mean difference")):
         est, se, p = float(fit.params[term]), float(fit.bse[term]), float(fit.pvalues[term])
-        result_rows.append({**_empty_progression(c, "Longitudinal ESSDAI trajectory", estimand, warning_text, n_patients=n, n_followup_observations=len(data), n_complete_cases=n), "model_type": model_type, "effect_measure": measure, "estimate": est, "ci95_low": est-1.96*se, "ci95_high": est+1.96*se, "p_value": p, "model_converged": True, "sparse_event_flag": False, "model_status": "fitted", "interpretation": f"Adjusted association estimate ({measure}); this is not a causal effect."})
+        result_rows.append({**_empty_progression(c, "Longitudinal ESSDAI trajectory", estimand, warning_text, **model_counts), "model_type": model_type, "effect_measure": measure, "estimate": est, "ci95_low": est-1.96*se, "ci95_high": est+1.96*se, "p_value": p, "model_converged": True, "sparse_event_flag": False, "model_status": "fitted", "interpretation": f"Adjusted association estimate ({measure}); this is not a causal effect."})
     return result_rows, {"comorbidity": c.name, "outcome": "ESSDAI trajectory", "convergence": True, "model_type": model_type, "warning": warning_text}
 
 
 def fit_cox_model(data: pd.DataFrame, c: Condition, event_col: str, outcome: str, minimum_events: int) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Fit confirmed-present versus no-comorbidity; exclude ambiguous statuses."""
-    status_col = f"{c.name}_status"
-    cols = ["followup_years", event_col, status_col, "baseline_essdai",
+    """Fit the existing Cox specification with a family-appropriate exposure."""
+    exposure_col = c.name if c.condition_family == "past_medical_history" else f"{c.name}_status"
+    cols = ["followup_years", event_col, exposure_col, "baseline_essdai",
             "baseline_pop", "age_baseline", "sex"]
     d = restrict_to_primary_exposure(data[cols], c)
     n_exposure_excluded = int(len(data) - len(d))
     d = d.dropna().copy()
     counts = {"n_patients": len(d), "n_events": int(d[event_col].sum()) if len(d) else 0,
-              "n_complete_cases": len(d)}
+              "n_complete_cases": len(d), "n_exposed": int(d[c.name].sum()) if len(d) else 0,
+              "n_exposed_events": int(d.loc[d[c.name].eq(1), event_col].sum()) if len(d) else 0}
     exposure_counts = d[c.name].value_counts()
     if (len(d) < 5 or d[c.name].nunique() < 2 or counts["n_events"] < minimum_events
             or exposure_counts.get(1, 0) < 5):
@@ -796,22 +824,30 @@ def create_grouped_barplot(by_pop: pd.DataFrame) -> None:
     fig.subplots_adjust(left=.35, bottom=.12); _plot_save(fig, FIGURES_DIR/"07_comorbidities_grouped_bar.pdf")
 
 
-def create_progression_forestplot(progression: pd.DataFrame, path: Path | None = None) -> None:
+def create_progression_forestplot(progression: pd.DataFrame, conditions: Sequence[Condition], path: Path) -> None:
     panels = [("Longitudinal ESSDAI trajectory", "Difference in annual ESSDAI slope", 0, False), ("Progression to ESSDAI >=5", "Progression to ESSDAI ≥5", 1, True), ("New ESSDAI-domain involvement", "Development of new ESSDAI-domain involvement", 1, True)]
-    fig, axes = plt.subplots(1, 3, figsize=(18, max(7, .5*len(PROGRESSION_CONDITIONS))), sharey=True); order = PROGRESSION_CONDITION_NAMES_ORDERED[::-1]; labels={c.name:c.label for c in PROGRESSION_CONDITIONS}
+    fig, axes = plt.subplots(1, 3, figsize=(18, max(7, .5*len(conditions))), sharey=True); order = [c.name for c in conditions][::-1]; labels={c.name:c.label for c in conditions}
     for ax, (outcome, title, null, logscale) in zip(axes, panels):
         d = progression[(progression["outcome"] == outcome) & ((progression["effect_measure"] == "Beta per year") if "trajectory" in outcome else True)].set_index("comorbidity")
         for y, name in enumerate(order):
             if name in d.index and np.isfinite(d.loc[name, ["estimate", "ci95_low", "ci95_high"]].astype(float)).all():
                 r=d.loc[name]; errors = _nonnegative_interval_errors([r.estimate], [r.ci95_low], [r.ci95_high])
                 ax.errorbar(r.estimate, y, xerr=errors, fmt="o", color="#2166ac" if r.model_status=="fitted" else "#b2182b", capsize=2)
-                ax.annotate(f"n={int(r.n_patients)}" + (f", e={int(r.n_events)}" if pd.notna(r.n_events) else ""), (r.estimate,y), xytext=(5,4), textcoords="offset points", fontsize=6)
+                counts = (f"exposed={int(r.n_exposed)}" if pd.notna(r.n_exposed)
+                          else f"n={int(r.n_patients)}")
+                if pd.notna(r.n_exposed_events):
+                    counts += f", exposed events={int(r.n_exposed_events)}"
+                if pd.notna(r.get("fdr_bh_q_value", np.nan)):
+                    counts += f", q={float(r.fdr_bh_q_value):.3g}"
+                elif pd.notna(r.p_value):
+                    counts += f", p={float(r.p_value):.3g}"
+                ax.annotate(counts, (r.estimate,y), xytext=(5,4), textcoords="offset points", fontsize=6)
             else: ax.plot(null, y, marker="x", color="gray")
         ax.axvline(null, color="black", ls="--", lw=.8); ax.set_title(title); ax.grid(axis="x", alpha=.2)
         if logscale: ax.set_xscale("log"); ax.set_xlabel("Hazard ratio (log scale)")
         else: ax.set_xlabel("Adjusted beta per year")
     axes[0].set_yticks(range(len(order)), [labels[x] for x in order]); fig.text(.01,.01,"Models include only confirmed-present and no-comorbidity patients and adjust for baseline ESSDAI, baseline Pop, age, and sex when support permits. History-only and uncertain statuses are excluded. X marks not estimable; red denotes reduced models. Associations are not causal.",fontsize=8)
-    fig.subplots_adjust(left=.18,bottom=.1,wspace=.15); _plot_save(fig, path or FIGURES_DIR/"07_rheumatologic_comorbidities_progression_forestplot.pdf")
+    fig.subplots_adjust(left=.18,bottom=.1,wspace=.15); _plot_save(fig, path)
 
 
 def run_qc_checks(base: pd.DataFrame, long: pd.DataFrame, severe: pd.DataFrame, new_domain: pd.DataFrame, domain_audit: pd.DataFrame) -> dict[str, Any]:
@@ -883,18 +919,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     long=build_longitudinal_essdai_dataset(raw,spine,pop,domains,base); write_intermediate_dataset(long,LONGITUDINAL_PATH)
     severe=build_severe5_survival_dataset(long,base); write_intermediate_dataset(severe,SEVERE_PATH)
     new_domain,domain_audit=build_new_domain_survival_dataset(long,base); write_intermediate_dataset(new_domain,NEW_DOMAIN_PATH); write_intermediate_dataset(domain_audit,DOMAIN_AUDIT_PATH)
-    logger.info("[5/7] Fitting confirmed non-SAiD rheumatologic progression models")
+    logger.info("[5/7] Fitting existing progression models by comorbidity family")
     progression_rows: list[dict[str, Any]]=[]; diagnostics: list[dict[str, Any]]=[]
-    for condition in RHEUMATOLOGIC_NON_SAID_CONDITIONS:
+    for condition in PROGRESSION_CONDITIONS:
         rows,diagnostic=fit_mixed_model(long,condition); progression_rows.extend(rows); diagnostics.append(diagnostic)
         row,diagnostic=fit_cox_model(severe,condition,"severe5_event","Progression to ESSDAI >=5",args.minimum_events); progression_rows.append(row); diagnostics.append(diagnostic)
         row,diagnostic=fit_cox_model(new_domain,condition,"new_domain_event","New ESSDAI-domain involvement",args.minimum_events); progression_rows.append(row); diagnostics.append(diagnostic)
     progression=pd.DataFrame(progression_rows)
     progression["fdr_bh_q_value"]=progression.groupby(["outcome","estimand"])["p_value"].transform(apply_fdr)
-    progression_path=TABLES_DIR/"07_rheumatologic_comorbidities_progression.csv"
-    progression.to_csv(progression_path,index=False); produced.append(progression_path)
-    progression_plot=FIGURES_DIR/"07_rheumatologic_comorbidities_progression_forestplot.pdf"
-    create_progression_forestplot(progression, progression_plot); produced.append(progression_plot)
+    for stem, conditions in PROGRESSION_FAMILIES:
+        names = {c.name for c in conditions}
+        family_results = progression.loc[progression["comorbidity"].isin(names)].copy()
+        progression_path=TABLES_DIR/f"07_{stem}_progression.csv"
+        family_results.to_csv(progression_path,index=False); produced.append(progression_path)
+        progression_plot=FIGURES_DIR/f"07_{stem}_progression_forestplot.pdf"
+        create_progression_forestplot(family_results, conditions, progression_plot)
+        produced.append(progression_plot)
     pd.DataFrame(diagnostics).to_csv(QC_DIR/"07_comorbidities_model_diagnostics.csv",index=False)
     logger.info("[6/7] Writing auditable source map and QC")
     mapping=source_mapping(raw.columns); mapping.to_csv(QC_DIR/"07_comorbidities_source_mapping.csv",index=False)
@@ -909,7 +949,7 @@ def main(argv: Sequence[str] | None = None) -> int:
       "monte_carlo_enabled":args.run_sparse_monte_carlo,"upstream_file_timestamps":timestamps,
       "separate_burden_columns":["n_general_medical_history","n_rheumatologic_non_said","n_concomitant_said"]}
     (QC_DIR/"07_comorbidities_qc.json").write_text(json.dumps(qc,indent=2,default=str)+"\n")
-    logger.info("[7/7] Complete: progression models restricted to confirmed non-SAiD rheumatologic comorbidities")
+    logger.info("[7/7] Complete: progression results written separately for all three comorbidity families")
     print("Generated files:"); [print(x.resolve()) for x in produced+[QC_DIR/"07_comorbidities_qc.json",QC_DIR/"07_comorbidities_source_mapping.csv"]]
     return 0
 
