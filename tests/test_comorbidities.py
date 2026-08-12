@@ -66,12 +66,12 @@ def test_family_burdens_are_separate_and_no_combined_total_exists():
     raw = pd.DataFrame({pmh.primary[0]: [True], rheum.primary[2]: [True], said.primary[2]: [True]})
     result = comorbidities.derive_comorbidity_indicators(raw)
     assert result[pmh.name].iloc[0] and result[rheum.name].iloc[0] and result[said.name].iloc[0]
-    assert set(comorbidities.PROGRESSION_CONDITION_NAMES) == {c.name for c in comorbidities.RHEUMATOLOGIC_NON_SAID_CONDITIONS}
+    assert set(comorbidities.PROGRESSION_CONDITION_NAMES) == {c.name for c in all_conditions()}
     forbidden_totals = {"n_prespecified_comorbidities", "n_comorbidities", "total_comorbidity_burden"}
     assert forbidden_totals.isdisjoint(result.columns)
 
 
-def test_progression_models_retain_only_confirmed_non_said_primary_contrast():
+def test_progression_models_cover_all_families_and_retain_rheum_primary_contrast():
     spec = comorbidities.RHEUMATOLOGIC_NON_SAID_CONDITIONS[0]
     frame = pd.DataFrame({
         "patient_id": ["P1", "P2", "P3", "P4"],
@@ -82,9 +82,33 @@ def test_progression_models_retain_only_confirmed_non_said_primary_contrast():
 
     assert result.patient_id.tolist() == ["P1", "P2"]
     assert result[spec.name].tolist() == [1, 0]
-    assert comorbidities.PROGRESSION_CONDITIONS == comorbidities.RHEUMATOLOGIC_NON_SAID_CONDITIONS
-    assert all(c.condition_family == "rheumatologic_non_said"
-               for c in comorbidities.PROGRESSION_CONDITIONS)
+    assert comorbidities.PROGRESSION_CONDITIONS == all_conditions()
+    assert [stem for stem, _ in comorbidities.PROGRESSION_FAMILIES] == [
+        "general_medical_comorbidities", "rheumatologic_comorbidities",
+        "concomitant_said"]
+
+
+def test_pmh_progression_exposure_uses_documented_history_flag():
+    spec = comorbidities.PAST_MEDICAL_HISTORY_CONDITIONS[0]
+    frame = pd.DataFrame({"patient_id": ["P1", "P2", "P3"],
+                          spec.name: pd.Series([True, False, None], dtype="boolean")})
+    result = comorbidities.restrict_to_primary_exposure(frame, spec)
+    assert result.patient_id.tolist() == ["P1", "P2"]
+    assert result[spec.name].tolist() == [1, 0]
+    assert comorbidities.progression_exposure_column(spec) == spec.name
+
+
+def test_progression_exposure_selection_does_not_depend_on_display_family_label():
+    pmh = comorbidities.PAST_MEDICAL_HISTORY_CONDITIONS[0]
+    renamed = comorbidities.Condition(
+        pmh.name, pmh.label, pmh.primary, "GENERAL_MEDICAL_COMORBIDITIES",
+        pmh.clinical_category, pmh.detail_columns, pmh.notes)
+    frame = pd.DataFrame({renamed.name: pd.Series([True, False], dtype="boolean")})
+
+    result = comorbidities.restrict_to_primary_exposure(frame, renamed)
+
+    assert comorbidities.progression_exposure_column(renamed) == renamed.name
+    assert result[renamed.name].tolist() == [1, 0]
 
 
 def _pop_frame(positives):
