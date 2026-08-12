@@ -186,8 +186,9 @@ PROGRESSION_FAMILIES = (
     ("rheumatologic_comorbidities", RHEUMATOLOGIC_NON_SAID_CONDITIONS),
     ("concomitant_said", CONCOMITANT_SAID_CONDITIONS),
     ("other_immune_mediated_systemic", OTHER_IMMUNE_MEDIATED_SYSTEMIC_CONDITIONS),
+    ("rheumatologic_manifestations", RHEUMATOLOGIC_MANIFESTATIONS),
 )
-PROGRESSION_CONDITIONS = list(iter_analysis_conditions())
+PROGRESSION_CONDITIONS = [*iter_analysis_conditions(), *RHEUMATOLOGIC_MANIFESTATIONS]
 PROGRESSION_CONDITION_NAMES = {c.name for c in PROGRESSION_CONDITIONS}
 PROGRESSION_CONDITION_NAMES_ORDERED = [c.name for c in PROGRESSION_CONDITIONS]
 SUBTYPE_COLS = ("past_medical_history__thyroid_disease_spfy", "rheumatological_comorbidities__inflam_bowel_spfy")
@@ -592,7 +593,8 @@ def build_longitudinal_essdai_dataset(raw: pd.DataFrame, spine: pd.DataFrame, po
     rheum_status_cols = [f"{c.name}_status" for c in
                          RHEUMATOLOGIC_ANALYSIS_CONDITIONS]
     bcols = ["patient_id", "baseline_essdai", "baseline_pop", "age_baseline", "sex",
-             *CONDITION_NAMES, *rheum_status_cols]
+             *CONDITION_NAMES, *[c.name for c in RHEUMATOLOGIC_MANIFESTATIONS],
+             *rheum_status_cols]
     long = long.drop(columns=["sex"], errors="ignore").merge(base[bcols], on="patient_id", how="left", validate="many_to_one")
     if long["patient_id"].isna().any() or not long["visit_id"].is_unique:
         raise ValueError("Longitudinal analytic dataset violates identity constraints")
@@ -839,12 +841,26 @@ def create_grouped_barplot(by_pop: pd.DataFrame) -> None:
     fig.subplots_adjust(left=.35, bottom=.12); _plot_save(fig, FIGURES_DIR/"07_comorbidities_grouped_bar.pdf")
 
 
-def create_progression_forestplot(progression: pd.DataFrame, conditions: Sequence[Condition], path: Path) -> None:
+def create_progression_forestplot(
+    progression: pd.DataFrame,
+    sections: Sequence[tuple[str, Sequence[Condition]]],
+    path: Path,
+) -> None:
+    """Create one forest plot with clinical group headers and separators."""
     panels = [("Longitudinal ESSDAI trajectory", "Difference in annual ESSDAI slope", 0, False), ("Progression to ESSDAI >=5", "Progression to ESSDAI ≥5", 1, True), ("New ESSDAI-domain involvement", "Development of new ESSDAI-domain involvement", 1, True)]
-    fig, axes = plt.subplots(1, 3, figsize=(18, max(7, .5*len(conditions))), sharey=True); order = [c.name for c in conditions][::-1]; labels={c.name:c.label for c in conditions}
+    plot_rows: list[tuple[str, Condition | None]] = []
+    for section, conditions in sections:
+        plot_rows.append((section, None))
+        plot_rows.extend((condition.label, condition) for condition in conditions)
+    plot_rows = plot_rows[::-1]
+    fig, axes = plt.subplots(1, 3, figsize=(20, max(8, .42*len(plot_rows))), sharey=True)
     for ax, (outcome, title, null, logscale) in zip(axes, panels):
         d = progression[(progression["outcome"] == outcome) & ((progression["effect_measure"] == "Beta per year") if "trajectory" in outcome else True)].set_index("comorbidity")
-        for y, name in enumerate(order):
+        for y, (_, condition) in enumerate(plot_rows):
+            if condition is None:
+                ax.axhline(y - .5, color="#bdbdbd", lw=.8, zorder=0)
+                continue
+            name = condition.name
             if name in d.index and np.isfinite(d.loc[name, ["estimate", "ci95_low", "ci95_high"]].astype(float)).all():
                 r=d.loc[name]; errors = _nonnegative_interval_errors([r.estimate], [r.ci95_low], [r.ci95_high])
                 ax.errorbar(r.estimate, y, xerr=errors, fmt="o", color="#2166ac" if r.model_status=="fitted" else "#b2182b", capsize=2)
@@ -861,8 +877,12 @@ def create_progression_forestplot(progression: pd.DataFrame, conditions: Sequenc
         ax.axvline(null, color="black", ls="--", lw=.8); ax.set_title(title); ax.grid(axis="x", alpha=.2)
         if logscale: ax.set_xscale("log"); ax.set_xlabel("Hazard ratio (log scale)")
         else: ax.set_xlabel("Adjusted beta per year")
-    axes[0].set_yticks(range(len(order)), [labels[x] for x in order]); fig.text(.01,.01,"Rheumatologic exposure is general OR history OR confirmed, with blank source fields treated as false. Models adjust for baseline ESSDAI, baseline Pop, age, and sex when support permits. X marks not estimable; red denotes reduced models. Associations are not causal.",fontsize=8)
-    fig.subplots_adjust(left=.18,bottom=.1,wspace=.15); _plot_save(fig, path)
+    axes[0].set_yticks(range(len(plot_rows)), [label for label, _ in plot_rows])
+    for tick, (_, condition) in zip(axes[0].get_yticklabels(), plot_rows):
+        if condition is None:
+            tick.set_fontweight("bold"); tick.set_color("#333333")
+    fig.text(.01,.01,"Rheumatologic exposure is general OR history OR confirmed, with blank source fields treated as false. Models adjust for baseline ESSDAI, baseline Pop, age, and sex when support permits. X marks not estimable; red denotes reduced models. Associations are not causal.",fontsize=8)
+    fig.subplots_adjust(left=.24,bottom=.08,wspace=.12); _plot_save(fig, path)
 
 
 def run_qc_checks(base: pd.DataFrame, long: pd.DataFrame, severe: pd.DataFrame, new_domain: pd.DataFrame, domain_audit: pd.DataFrame) -> dict[str, Any]:
@@ -957,11 +977,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                                        replicates=args.monte_carlo_replicates,seed=args.random_seed)
         op=TABLES_DIR/f"07_{stem}_overall.csv"; bp=TABLES_DIR/f"07_{stem}_by_pop.csv"
         overall.to_csv(op,index=False); by_pop.to_csv(bp,index=False); produced.extend([op,bp])
-        fp=FIGURES_DIR/f"07_{stem}.pdf"
-        create_sectioned_comorbidity_plot(
-            base, [(conditions[0].clinical_category if conditions else stem, conditions)], fp,
-            "Patients with documented history (%)" if historical else "Patients exposed at baseline (%)")
-        produced.append(fp)
     pmh_section_order = [
         ("Cardiovascular / metabolic", "Cardiovascular/metabolic"),
         ("Respiratory", "Respiratory"), ("Endocrine", "Endocrine"),
@@ -1004,9 +1019,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         family_results = progression.loc[progression["comorbidity"].isin(names)].copy()
         progression_path=TABLES_DIR/f"07_{stem}_progression.csv"
         family_results.to_csv(progression_path,index=False); produced.append(progression_path)
-        progression_plot=FIGURES_DIR/f"07_{stem}_progression_forestplot.pdf"
-        create_progression_forestplot(family_results, conditions, progression_plot)
-        produced.append(progression_plot)
+    pmh_progression_plot = FIGURES_DIR / "07_past_medical_history_progression_forestplot.pdf"
+    create_progression_forestplot(
+        progression.loc[progression["comorbidity"].isin(
+            {c.name for c in PAST_MEDICAL_HISTORY_CONDITIONS})],
+        pmh_sections, pmh_progression_plot)
+    rheum_progression_plot = FIGURES_DIR / "07_rheumatological_comorbidities_progression_forestplot.pdf"
+    create_progression_forestplot(
+        progression.loc[progression["comorbidity"].isin(
+            {c.name for c in RHEUMATOLOGIC_DESCRIPTIVE_CONDITIONS})],
+        rheum_sections, rheum_progression_plot)
+    produced.extend([pmh_progression_plot, rheum_progression_plot])
     pd.DataFrame(diagnostics).to_csv(QC_DIR/"07_comorbidities_model_diagnostics.csv",index=False)
     logger.info("[6/7] Writing auditable source map and QC")
     mapping=source_mapping(raw.columns); mapping.to_csv(QC_DIR/"07_comorbidities_source_mapping.csv",index=False)

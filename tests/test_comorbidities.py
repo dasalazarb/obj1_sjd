@@ -99,10 +99,12 @@ def test_progression_models_cover_all_families_and_use_any_source_exposure():
 
     assert result.patient_id.tolist() == ["P1", "P2", "P3", "P4"]
     assert result[spec.name].tolist() == [1, 0, 1, 0]
-    assert comorbidities.PROGRESSION_CONDITIONS == all_conditions()
+    assert comorbidities.PROGRESSION_CONDITIONS == [
+        *all_conditions(), *comorbidities.RHEUMATOLOGIC_MANIFESTATIONS]
     assert [stem for stem, _ in comorbidities.PROGRESSION_FAMILIES] == [
         "general_medical_comorbidities", "rheumatologic_comorbidities",
-        "concomitant_said", "other_immune_mediated_systemic"]
+        "concomitant_said", "other_immune_mediated_systemic",
+        "rheumatologic_manifestations"]
 
 
 def test_pmh_progression_exposure_uses_documented_history_flag():
