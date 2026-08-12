@@ -84,6 +84,9 @@ def test_rheumatologic_conditions_are_in_requested_disjoint_groups():
         "inflammatory_bowel_disease"}
     assert {"raynaud", "cryoglobulinemia", "other_rheumatological_condition"}.isdisjoint(
         {c.name for c in comorbidities.RHEUMATOLOGIC_ANALYSIS_CONDITIONS})
+    assert {c.name for c in comorbidities.RHEUMATOLOGIC_MANIFESTATIONS} == {
+        "raynaud", "cryoglobulinemia"}
+    assert all(len(c.primary) == 3 for c in comorbidities.RHEUMATOLOGIC_DESCRIPTIVE_CONDITIONS)
 
 
 def test_progression_models_cover_all_families_and_use_any_source_exposure():

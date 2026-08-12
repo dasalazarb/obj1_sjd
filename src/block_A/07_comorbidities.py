@@ -163,7 +163,12 @@ _other_immune = [
     ("inflammatory_bowel_disease", "Inflammatory bowel disease", "inflam_bowel", "inflam_bowel_hx", "inflam_bowel_confirm"),
 ]
 OTHER_IMMUNE_MEDIATED_SYSTEMIC_CONDITIONS = [_rheum(n, l, *("rheumatological_comorbidities__" + x for x in (g, h, c)), "other_immune_mediated_systemic", "Other immune-mediated/systemic") for n, l, g, h, c in _other_immune]
+RHEUMATOLOGIC_MANIFESTATIONS = [
+    _rheum("raynaud", "Raynaud's phenomenon", "rheumatological_comorbidities__integ_raynds", "rheumatological_comorbidities__integ_raynds_hx", "rheumatological_comorbidities__integ_raynds_confirm", "rheumatologic_manifestation", "Rheumatologic manifestations / associated features"),
+    _rheum("cryoglobulinemia", "Cryoglobulinemia", "rheumatological_comorbidities__cryoglobulinemia", "rheumatological_comorbidities__cryoglobulinemia_hx", "rheumatological_comorbidities__cryoglobulinemia_confirm", "rheumatologic_manifestation", "Rheumatologic manifestations / associated features"),
+]
 RHEUMATOLOGIC_ANALYSIS_CONDITIONS = [*RHEUMATOLOGIC_NON_SAID_CONDITIONS, *CONCOMITANT_SAID_CONDITIONS, *OTHER_IMMUNE_MEDIATED_SYSTEMIC_CONDITIONS]
+RHEUMATOLOGIC_DESCRIPTIVE_CONDITIONS = [*RHEUMATOLOGIC_ANALYSIS_CONDITIONS, *RHEUMATOLOGIC_MANIFESTATIONS]
 
 def iter_analysis_conditions() -> Iterable[Condition]:
     yield from PAST_MEDICAL_HISTORY_CONDITIONS
@@ -308,7 +313,8 @@ def load_domain_flags() -> pd.DataFrame:
 def selected_raw_columns(input_path: Path) -> list[str]:
     schema = available_columns(input_path)
     desired = [PATIENT_ID_COL, VISIT_DATE_COL, AGE_COL, SEX_COL, ESSDAI_PRIMARY_COL, ESSDAI_RAW_QC_COL, *SUBTYPE_COLS]
-    desired.extend(col for c in iter_analysis_conditions() for col in (*c.primary, *c.detail_columns))
+    desired.extend(col for c in [*iter_analysis_conditions(), *RHEUMATOLOGIC_MANIFESTATIONS]
+                   for col in (*c.primary, *c.detail_columns))
     prohibited = [c for c in desired if c.startswith(PROHIBITED_SOURCE_PREFIXES)]
     if prohibited:
         raise AssertionError(f"Prohibited Section 5 source(s): {prohibited}")
@@ -385,7 +391,7 @@ def derive_comorbidity_indicators(raw: pd.DataFrame) -> pd.DataFrame:
         flag = _source_flag(out, condition.primary[0])
         out[condition.name] = flag.fillna(False).astype("boolean")
         out[f"{condition.name}_documented_history"] = out[condition.name]
-    for condition in RHEUMATOLOGIC_ANALYSIS_CONDITIONS:
+    for condition in RHEUMATOLOGIC_DESCRIPTIVE_CONDITIONS:
         general, history, confirmed = [_source_flag(out, col) for col in condition.primary]
         status = derive_condition_status(general, history, confirmed)
         out[f"{condition.name}_status"] = status
@@ -458,7 +464,7 @@ def build_baseline_comorbidity_dataset(raw: pd.DataFrame, spine: pd.DataFrame, p
     # full relevant cohort as their denominator/reference population.
     pmh_names = [c.name for c in PAST_MEDICAL_HISTORY_CONDITIONS]
     base[pmh_names] = base[pmh_names].fillna(False).astype("boolean")
-    for condition in RHEUMATOLOGIC_ANALYSIS_CONDITIONS:
+    for condition in RHEUMATOLOGIC_DESCRIPTIVE_CONDITIONS:
         flags = [base.get(f"source__{col}", pd.Series(pd.NA, index=base.index,
                                                      dtype="boolean"))
                  for col in condition.primary]
@@ -885,7 +891,7 @@ def missingness_table(base: pd.DataFrame) -> pd.DataFrame:
 
 def source_mapping(raw_columns: Iterable[str]) -> pd.DataFrame:
     raw_columns=set(raw_columns); rows=[]
-    for c in iter_analysis_conditions():
+    for c in [*iter_analysis_conditions(), *RHEUMATOLOGIC_MANIFESTATIONS]:
         prohibited=[x for x in (*c.primary,*c.detail_columns) if x.startswith(PROHIBITED_SOURCE_PREFIXES)]
         if prohibited: raise AssertionError(f"Prohibited source selected: {prohibited}")
         rows.append({"condition":c.name,"condition_family":c.condition_family,
@@ -905,6 +911,32 @@ def create_family_plot(table: pd.DataFrame, path: Path, historical: bool=False) 
     ax.grid(axis="x",alpha=.25); _plot_save(fig,path)
 
 
+def create_sectioned_comorbidity_plot(base: pd.DataFrame,
+                                      sections: Sequence[tuple[str, Sequence[Condition]]],
+                                      path: Path, xlabel: str) -> None:
+    """Plot one condition figure with labeled clinical sections and separators."""
+    rows: list[tuple[str, Condition | None, float]] = []
+    for section, conditions in sections:
+        rows.append((section, None, np.nan))
+        for condition in conditions:
+            prevalence = 100 * base[condition.name].fillna(False).astype(bool).mean() if len(base) else np.nan
+            rows.append((condition.label, condition, prevalence))
+    fig, ax = plt.subplots(figsize=(11, max(7, .34 * len(rows))))
+    y = np.arange(len(rows))[::-1]
+    for ypos, (label, condition, prevalence) in zip(y, rows):
+        if condition is None:
+            ax.text(0, ypos, label, va="center", ha="left", fontweight="bold",
+                    transform=ax.get_yaxis_transform())
+            ax.axhline(ypos - .5, color="#bdbdbd", lw=.7)
+        else:
+            ax.barh(ypos, prevalence, color="#2c7fb8", height=.72)
+    ax.set_yticks([pos for pos, (_, condition, _) in zip(y, rows) if condition is not None],
+                  [label for label, condition, _ in rows if condition is not None])
+    ax.set_xlabel(xlabel); ax.grid(axis="x", alpha=.25)
+    fig.subplots_adjust(left=.35, bottom=.08)
+    _plot_save(fig, path)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args=parse_args(argv); ensure_directories(); logger=setup_logging(); np.random.seed(args.random_seed)
     logger.info("[1/7] Loading canonical sources")
@@ -915,7 +947,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     families=[("past_medical_history",PAST_MEDICAL_HISTORY_CONDITIONS,True),
       ("rheumatologic_comorbidities",RHEUMATOLOGIC_NON_SAID_CONDITIONS,False),
       ("concomitant_said",CONCOMITANT_SAID_CONDITIONS,False),
-      ("other_immune_mediated_systemic",OTHER_IMMUNE_MEDIATED_SYSTEMIC_CONDITIONS,False)]
+      ("other_immune_mediated_systemic",OTHER_IMMUNE_MEDIATED_SYSTEMIC_CONDITIONS,False),
+      ("rheumatologic_manifestations",RHEUMATOLOGIC_MANIFESTATIONS,False)]
     logger.info("[3/7] Writing separate descriptive outputs")
     produced=[]
     for stem,conditions,historical in families:
@@ -924,7 +957,36 @@ def main(argv: Sequence[str] | None = None) -> int:
                                        replicates=args.monte_carlo_replicates,seed=args.random_seed)
         op=TABLES_DIR/f"07_{stem}_overall.csv"; bp=TABLES_DIR/f"07_{stem}_by_pop.csv"
         overall.to_csv(op,index=False); by_pop.to_csv(bp,index=False); produced.extend([op,bp])
-        fp=FIGURES_DIR/f"07_{stem}.pdf"; create_family_plot(overall,fp,historical); produced.append(fp)
+        fp=FIGURES_DIR/f"07_{stem}.pdf"
+        create_sectioned_comorbidity_plot(
+            base, [(conditions[0].clinical_category if conditions else stem, conditions)], fp,
+            "Patients with documented history (%)" if historical else "Patients exposed at baseline (%)")
+        produced.append(fp)
+    pmh_section_order = [
+        ("Cardiovascular / metabolic", "Cardiovascular/metabolic"),
+        ("Respiratory", "Respiratory"), ("Endocrine", "Endocrine"),
+        ("Gastrointestinal / hepatobiliary", "Gastrointestinal"),
+        ("Neurologic / psychiatric", "Neuropsychiatric"),
+        ("Renal / genitourinary", "Genitourinary"),
+        ("Dermatologic", "Dermatologic"), ("Malignancy", "Malignancy"),
+        ("Chronic infection", "Chronic infection"),
+    ]
+    pmh_sections = [(label, [c for c in PAST_MEDICAL_HISTORY_CONDITIONS
+                             if c.clinical_category == category])
+                    for label, category in pmh_section_order]
+    pmh_plot = FIGURES_DIR / "07_past_medical_history.pdf"
+    create_sectioned_comorbidity_plot(base, pmh_sections, pmh_plot,
+                                      "Patients with documented history (%)")
+    rheum_sections = [
+        ("Rheumatologic Non-SAiD", RHEUMATOLOGIC_NON_SAID_CONDITIONS),
+        ("Concomitant SAIDs", CONCOMITANT_SAID_CONDITIONS),
+        ("Other immune-mediated/systemic conditions", OTHER_IMMUNE_MEDIATED_SYSTEMIC_CONDITIONS),
+        ("Rheumatologic manifestations / associated features", RHEUMATOLOGIC_MANIFESTATIONS),
+    ]
+    rheum_plot = FIGURES_DIR / "07_rheumatological_comorbidities_all.pdf"
+    create_sectioned_comorbidity_plot(base, rheum_sections, rheum_plot,
+                                      "Patients exposed at baseline (%)")
+    produced.extend([pmh_plot, rheum_plot])
     logger.info("[4/7] Preserving canonical longitudinal outcome datasets")
     long=build_longitudinal_essdai_dataset(raw,spine,pop,domains,base); write_intermediate_dataset(long,LONGITUDINAL_PATH)
     severe=build_severe5_survival_dataset(long,base); write_intermediate_dataset(severe,SEVERE_PATH)
