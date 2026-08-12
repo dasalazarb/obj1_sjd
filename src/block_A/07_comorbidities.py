@@ -648,6 +648,16 @@ def restrict_to_primary_exposure(data: pd.DataFrame, c: Condition) -> pd.DataFra
     return out
 
 
+def restrict_to_primary_exposure(data: pd.DataFrame, c: Condition) -> pd.DataFrame:
+    """Keep only confirmed-present and no-comorbidity primary contrast rows."""
+    status_col = f"{c.name}_status"
+    if status_col not in data:
+        raise KeyError(f"Primary model input lacks {status_col}")
+    out = data.loc[data[status_col].isin(["confirmed_present", "no_comorbidity"])].copy()
+    out[c.name] = out[status_col].eq("confirmed_present").astype(int)
+    return out
+
+
 def fit_mixed_model(long: pd.DataFrame, c: Condition) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     import statsmodels.formula.api as smf
     exposure_col = c.name if c.condition_family == "past_medical_history" else f"{c.name}_status"
