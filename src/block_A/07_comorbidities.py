@@ -147,12 +147,29 @@ RHEUMATOLOGIC_NON_SAID_CONDITIONS = [
 ]
 
 _said = [
-("systemic_lupus_erythematosus","Systemic lupus erythematosus","sle1","sle_hx","sle_confirmed"),("rheumatoid_arthritis","Rheumatoid arthritis","ra","ra_hx","ra_confirm"),("systemic_sclerosis","Systemic sclerosis","systemic_sclerosis","systmc_sclerosis_hx","systmc_sclerosis_confirm"),("polymyositis","Polymyositis","polymyositis","polymyositis_hx","polymyositis_confirm"),("dermatomyositis","Dermatomyositis","dermatomyositis","dermatomyositis_hx","dermatomyositis_confirm"),("mixed_connective_tissue_disease","Mixed connective tissue disease","mixed_connective_tissue_disease","mixed_connect_tissue_hx","mixed_connect_tissue_confirm"),("antiphospholipid_syndrome","Antiphospholipid syndrome","antiphospholipid_syndrome","antiphospholipid_syn_hx","antiphospholipid_syn_confirm"),("primary_biliary_cholangitis","Primary biliary cholangitis","primary_billiary_cirrhosis","prim_billiary_cirrhosis_hx","prim_billiary_cirrhosis_confirm"),("inflammatory_bowel_disease","Inflammatory bowel disease","inflam_bowel","inflam_bowel_hx","inflam_bowel_confirm"),("sarcoidosis","Sarcoidosis","sarcoidosis","sarcoidosis_hx","sarcoidosis_confirm")]
-CONCOMITANT_SAID_CONDITIONS = [_rheum(n,l,*("rheumatological_comorbidities__"+x for x in (g,h,c)),"concomitant_said","Systemic autoimmune/inflammatory") for n,l,g,h,c in _said]
+    ("systemic_lupus_erythematosus", "Systemic lupus erythematosus", "sle1", "sle_hx", "sle_confirmed"),
+    ("rheumatoid_arthritis", "Rheumatoid arthritis", "ra", "ra_hx", "ra_confirm"),
+    ("systemic_sclerosis", "Systemic sclerosis", "systemic_sclerosis", "systmc_sclerosis_hx", "systmc_sclerosis_confirm"),
+    ("polymyositis", "Polymyositis", "polymyositis", "polymyositis_hx", "polymyositis_confirm"),
+    ("dermatomyositis", "Dermatomyositis", "dermatomyositis", "dermatomyositis_hx", "dermatomyositis_confirm"),
+    ("mixed_connective_tissue_disease", "Mixed connective tissue disease", "mixed_connective_tissue_disease", "mixed_connect_tissue_hx", "mixed_connect_tissue_confirm"),
+    ("antiphospholipid_syndrome", "Antiphospholipid syndrome", "antiphospholipid_syndrome", "antiphospholipid_syn_hx", "antiphospholipid_syn_confirm"),
+]
+CONCOMITANT_SAID_CONDITIONS = [_rheum(n, l, *("rheumatological_comorbidities__" + x for x in (g, h, c)), "concomitant_said", "Systemic autoimmune/inflammatory") for n, l, g, h, c in _said]
+
+_other_immune = [
+    ("primary_biliary_cholangitis", "Primary biliary cholangitis", "primary_billiary_cirrhosis", "prim_billiary_cirrhosis_hx", "prim_billiary_cirrhosis_confirm"),
+    ("sarcoidosis", "Sarcoidosis", "sarcoidosis", "sarcoidosis_hx", "sarcoidosis_confirm"),
+    ("inflammatory_bowel_disease", "Inflammatory bowel disease", "inflam_bowel", "inflam_bowel_hx", "inflam_bowel_confirm"),
+]
+OTHER_IMMUNE_MEDIATED_SYSTEMIC_CONDITIONS = [_rheum(n, l, *("rheumatological_comorbidities__" + x for x in (g, h, c)), "other_immune_mediated_systemic", "Other immune-mediated/systemic") for n, l, g, h, c in _other_immune]
+RHEUMATOLOGIC_ANALYSIS_CONDITIONS = [*RHEUMATOLOGIC_NON_SAID_CONDITIONS, *CONCOMITANT_SAID_CONDITIONS, *OTHER_IMMUNE_MEDIATED_SYSTEMIC_CONDITIONS]
+
 def iter_analysis_conditions() -> Iterable[Condition]:
     yield from PAST_MEDICAL_HISTORY_CONDITIONS
     yield from RHEUMATOLOGIC_NON_SAID_CONDITIONS
     yield from CONCOMITANT_SAID_CONDITIONS
+    yield from OTHER_IMMUNE_MEDIATED_SYSTEMIC_CONDITIONS
 
 
 CONDITION_NAMES = [c.name for c in iter_analysis_conditions()]
@@ -163,6 +180,7 @@ PROGRESSION_FAMILIES = (
     ("general_medical_comorbidities", PAST_MEDICAL_HISTORY_CONDITIONS),
     ("rheumatologic_comorbidities", RHEUMATOLOGIC_NON_SAID_CONDITIONS),
     ("concomitant_said", CONCOMITANT_SAID_CONDITIONS),
+    ("other_immune_mediated_systemic", OTHER_IMMUNE_MEDIATED_SYSTEMIC_CONDITIONS),
 )
 PROGRESSION_CONDITIONS = list(iter_analysis_conditions())
 PROGRESSION_CONDITION_NAMES = {c.name for c in PROGRESSION_CONDITIONS}
@@ -367,7 +385,7 @@ def derive_comorbidity_indicators(raw: pd.DataFrame) -> pd.DataFrame:
         flag = _source_flag(out, condition.primary[0])
         out[condition.name] = flag.fillna(False).astype("boolean")
         out[f"{condition.name}_documented_history"] = out[condition.name]
-    for condition in [*RHEUMATOLOGIC_NON_SAID_CONDITIONS, *CONCOMITANT_SAID_CONDITIONS]:
+    for condition in RHEUMATOLOGIC_ANALYSIS_CONDITIONS:
         general, history, confirmed = [_source_flag(out, col) for col in condition.primary]
         status = derive_condition_status(general, history, confirmed)
         out[f"{condition.name}_status"] = status
@@ -440,7 +458,7 @@ def build_baseline_comorbidity_dataset(raw: pd.DataFrame, spine: pd.DataFrame, p
     # full relevant cohort as their denominator/reference population.
     pmh_names = [c.name for c in PAST_MEDICAL_HISTORY_CONDITIONS]
     base[pmh_names] = base[pmh_names].fillna(False).astype("boolean")
-    for condition in [*RHEUMATOLOGIC_NON_SAID_CONDITIONS, *CONCOMITANT_SAID_CONDITIONS]:
+    for condition in RHEUMATOLOGIC_ANALYSIS_CONDITIONS:
         flags = [base.get(f"source__{col}", pd.Series(pd.NA, index=base.index,
                                                      dtype="boolean"))
                  for col in condition.primary]
@@ -452,12 +470,15 @@ def build_baseline_comorbidity_dataset(raw: pd.DataFrame, spine: pd.DataFrame, p
         base[f"{condition.name}_primary_exposure"] = exposed.astype(float)
     non_said = [c.name for c in RHEUMATOLOGIC_NON_SAID_CONDITIONS]
     said = [c.name for c in CONCOMITANT_SAID_CONDITIONS]
+    other_immune = [c.name for c in OTHER_IMMUNE_MEDIATED_SYSTEMIC_CONDITIONS]
     base["n_general_medical_history"] = base[pmh_names].astype(int).sum(axis=1)
     base["any_general_medical_history"] = base["n_general_medical_history"].gt(0).astype("boolean")
     base["n_rheumatologic_non_said"] = base[non_said].astype(int).sum(axis=1)
     base["any_rheumatologic_non_said"] = base["n_rheumatologic_non_said"].gt(0).astype("boolean")
     base["n_concomitant_said"] = base[said].astype(int).sum(axis=1)
     base["concomitant_said_any"] = base["n_concomitant_said"].gt(0).astype("boolean")
+    base["n_other_immune_mediated_systemic"] = base[other_immune].astype(int).sum(axis=1)
+    base["any_other_immune_mediated_systemic"] = base["n_other_immune_mediated_systemic"].gt(0).astype("boolean")
     malignancies = ["breast_cancer", "lung_cancer", "colon_cancer", "thyroid_cancer",
                     "head_neck_cancer", "other_malignancy"]
     base["any_non_lymphoma_malignancy_history"] = base[malignancies].any(axis=1).astype("boolean")
@@ -498,7 +519,7 @@ def summarize_confirmed_family(base: pd.DataFrame, conditions: Sequence[Conditio
 
 def summarize_overall_prevalence(base: pd.DataFrame) -> pd.DataFrame:
     """Compatibility wrapper: confirmed rheumatologic conditions only."""
-    out=summarize_confirmed_family(base,[*RHEUMATOLOGIC_NON_SAID_CONDITIONS,*CONCOMITANT_SAID_CONDITIONS])
+    out=summarize_confirmed_family(base,RHEUMATOLOGIC_ANALYSIS_CONDITIONS)
     return out.rename(columns={"N_evaluable":"n_evaluable_primary","pct_confirmed":"pct_confirmed_among_evaluable"}).assign(
       n_total_cohort=len(base),n_missing=0,pct_confirmed_total_cohort=lambda x:100*x.n_confirmed_present/len(base) if len(base) else np.nan)
 
@@ -547,7 +568,7 @@ def summarize_family_by_pop(base: pd.DataFrame, conditions: Sequence[Condition],
 
 def summarize_prevalence_by_pop(base: pd.DataFrame, replicates: int=10_000, seed: int=RANDOM_SEED,
                                 run_sparse_monte_carlo: bool=False) -> pd.DataFrame:
-    return summarize_family_by_pop(base,[*RHEUMATOLOGIC_NON_SAID_CONDITIONS,*CONCOMITANT_SAID_CONDITIONS],run_sparse_monte_carlo=run_sparse_monte_carlo,replicates=replicates,seed=seed)
+    return summarize_family_by_pop(base,RHEUMATOLOGIC_ANALYSIS_CONDITIONS,run_sparse_monte_carlo=run_sparse_monte_carlo,replicates=replicates,seed=seed)
 
 
 def apply_fdr(p_values: pd.Series) -> pd.Series:
@@ -563,7 +584,7 @@ def build_longitudinal_essdai_dataset(raw: pd.DataFrame, spine: pd.DataFrame, po
     popcols = pop[["visit_id", "pop_status"]].drop_duplicates("visit_id")
     long = long.merge(popcols, on="visit_id", how="left", validate="one_to_one").merge(domains.drop(columns=["patient_id", "visit_date"]), on="visit_id", how="left", validate="one_to_one")
     rheum_status_cols = [f"{c.name}_status" for c in
-                         [*RHEUMATOLOGIC_NON_SAID_CONDITIONS, *CONCOMITANT_SAID_CONDITIONS]]
+                         RHEUMATOLOGIC_ANALYSIS_CONDITIONS]
     bcols = ["patient_id", "baseline_essdai", "baseline_pop", "age_baseline", "sex",
              *CONDITION_NAMES, *rheum_status_cols]
     long = long.drop(columns=["sex"], errors="ignore").merge(base[bcols], on="patient_id", how="left", validate="many_to_one")
@@ -893,7 +914,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     base,duplicates,n_pipe=build_baseline_comorbidity_dataset(raw,spine,pop); write_intermediate_dataset(base,BASELINE_PATH)
     families=[("past_medical_history",PAST_MEDICAL_HISTORY_CONDITIONS,True),
       ("rheumatologic_comorbidities",RHEUMATOLOGIC_NON_SAID_CONDITIONS,False),
-      ("concomitant_said",CONCOMITANT_SAID_CONDITIONS,False)]
+      ("concomitant_said",CONCOMITANT_SAID_CONDITIONS,False),
+      ("other_immune_mediated_systemic",OTHER_IMMUNE_MEDIATED_SYSTEMIC_CONDITIONS,False)]
     logger.info("[3/7] Writing separate descriptive outputs")
     produced=[]
     for stem,conditions,historical in families:
@@ -932,12 +954,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     prohibited_used=sorted(x for c in iter_analysis_conditions() for x in (*c.primary,*c.detail_columns) if x.startswith(PROHIBITED_SOURCE_PREFIXES))
     qc={"input_path":str(args.input),"script_version":SCRIPT_VERSION,"run_timestamp":datetime.now(timezone.utc).isoformat(),
       "n_baseline_patients":len(base),"n_pipe_delimited_visit_dates":n_pipe,"essdai_threshold":SEVERE_THRESHOLD,
-      "condition_family_counts":{f:sum(c.condition_family==f for c in iter_analysis_conditions()) for f in ("past_medical_history","rheumatologic_non_said","concomitant_said")},
+      "condition_family_counts":{f:sum(c.condition_family==f for c in iter_analysis_conditions()) for f in ("past_medical_history","rheumatologic_non_said","concomitant_said","other_immune_mediated_systemic")},
       "prohibited_sources_used":prohibited_used,"prohibited_source_check_passed":not prohibited_used,
       "monte_carlo_enabled":args.run_sparse_monte_carlo,"upstream_file_timestamps":timestamps,
-      "separate_burden_columns":["n_general_medical_history","n_rheumatologic_non_said","n_concomitant_said"]}
+      "separate_burden_columns":["n_general_medical_history","n_rheumatologic_non_said","n_concomitant_said","n_other_immune_mediated_systemic"]}
     (QC_DIR/"07_comorbidities_qc.json").write_text(json.dumps(qc,indent=2,default=str)+"\n")
-    logger.info("[7/7] Complete: progression results written separately for all three comorbidity families")
+    logger.info("[7/7] Complete: progression results written separately by comorbidity family")
     print("Generated files:"); [print(x.resolve()) for x in produced+[QC_DIR/"07_comorbidities_qc.json",QC_DIR/"07_comorbidities_source_mapping.csv"]]
     return 0
 

@@ -16,7 +16,8 @@ SPEC.loader.exec_module(comorbidities)
 def all_conditions():
     return [*comorbidities.PAST_MEDICAL_HISTORY_CONDITIONS,
             *comorbidities.RHEUMATOLOGIC_NON_SAID_CONDITIONS,
-            *comorbidities.CONCOMITANT_SAID_CONDITIONS]
+            *comorbidities.CONCOMITANT_SAID_CONDITIONS,
+            *comorbidities.OTHER_IMMUNE_MEDIATED_SYSTEMIC_CONDITIONS]
 
 
 def test_families_exclude_anxiety_sjd_manifestations_and_prohibited_sources():
@@ -70,6 +71,21 @@ def test_family_burdens_are_separate_and_no_combined_total_exists():
     assert forbidden_totals.isdisjoint(result.columns)
 
 
+def test_rheumatologic_conditions_are_in_requested_disjoint_groups():
+    assert {c.name for c in comorbidities.RHEUMATOLOGIC_NON_SAID_CONDITIONS} == {
+        "fibromyalgia", "osteoporosis", "osteopenia", "osteoarthritis",
+        "crystalline_arthropathy"}
+    assert {c.name for c in comorbidities.CONCOMITANT_SAID_CONDITIONS} == {
+        "systemic_lupus_erythematosus", "rheumatoid_arthritis",
+        "systemic_sclerosis", "polymyositis", "dermatomyositis",
+        "mixed_connective_tissue_disease", "antiphospholipid_syndrome"}
+    assert {c.name for c in comorbidities.OTHER_IMMUNE_MEDIATED_SYSTEMIC_CONDITIONS} == {
+        "primary_biliary_cholangitis", "sarcoidosis",
+        "inflammatory_bowel_disease"}
+    assert {"raynaud", "cryoglobulinemia", "other_rheumatological_condition"}.isdisjoint(
+        {c.name for c in comorbidities.RHEUMATOLOGIC_ANALYSIS_CONDITIONS})
+
+
 def test_progression_models_cover_all_families_and_use_any_source_exposure():
     spec = comorbidities.RHEUMATOLOGIC_NON_SAID_CONDITIONS[0]
     frame = pd.DataFrame({
@@ -83,7 +99,7 @@ def test_progression_models_cover_all_families_and_use_any_source_exposure():
     assert comorbidities.PROGRESSION_CONDITIONS == all_conditions()
     assert [stem for stem, _ in comorbidities.PROGRESSION_FAMILIES] == [
         "general_medical_comorbidities", "rheumatologic_comorbidities",
-        "concomitant_said"]
+        "concomitant_said", "other_immune_mediated_systemic"]
 
 
 def test_pmh_progression_exposure_uses_documented_history_flag():
