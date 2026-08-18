@@ -6,6 +6,9 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from scipy.linalg import expm
+from scipy.optimize import minimize
+from scipy.stats import norm
 
 PROJECT_ROOT=Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path: sys.path.insert(0,str(PROJECT_ROOT))
@@ -20,6 +23,8 @@ OUTPUTS_DIR=Path(getattr(common,'OUTPUTS_DIR',PROJECT_ROOT/'outputs'))
 TABLES_DIR=Path(getattr(common,'BLOCKA_TABLES_DIR',OUTPUTS_DIR/'tables'/'blockA'))
 FIGURES_DIR=Path(getattr(common,'BLOCKA_FIGURES_DIR',OUTPUTS_DIR/'figures'/'blockA'))
 QC_DIR=OUTPUTS_DIR/'qc'/'blockA'
+MODEL_STATES=["Pop1","Pop2","Pop3"]
+SPARSE_THRESHOLD=5
 
 def write_json(obj,path): path.write_text(json.dumps(obj, indent=2, default=str))
 def pct(n,d): return n/d*100 if d else np.nan
@@ -109,6 +114,138 @@ def plot_diagram(rates_df,path):
     for p,(x,y) in pos.items(): ax.scatter([x],[y],s=1800,c=COLORS[p]); ax.text(x,y,DISPLAY[p],ha='center',va='center',color='white',weight='bold')
     ax.set_axis_off(); ax.set_title('Descriptive multi-state transition diagram'); fig.text(.01,.01,'Rates are descriptive transition intensities estimated from consecutive observed visit intervals. Transitions involving Unclassifiable may reflect missing data.',fontsize=8); fig.savefig(path); plt.close(fig)
 
+def prepare_multistate_data(vis: pd.DataFrame) -> tuple[pd.DataFrame,dict]:
+    """Create panel-observation intervals without bridging excluded observations.
+
+    Pairing is performed *before* removing Unclassifiable visits.  Consequently,
+    Pop1 -> Unclassifiable -> Pop2 contributes no Pop1 -> Pop2 interval.
+    """
+    required={'patient_id','visit_number','visit_date_clean','time_since_baseline_years','pop_status'}
+    missing=required-set(vis.columns)
+    if missing: raise ValueError(f"Missing multi-state columns: {sorted(missing)}")
+    ordered=vis.copy(); ordered['visit_date_clean']=pd.to_datetime(ordered.visit_date_clean, errors='coerce')
+    ordered=ordered.sort_values(['patient_id','visit_date_clean','visit_number'])
+    rows=[]; nonpositive=0; excluded_unclassifiable=0
+    for pid,g in ordered.groupby('patient_id', sort=False):
+        rec=g.to_dict('records')
+        for a,b in zip(rec[:-1],rec[1:]):
+            dt=(b['visit_date_clean']-a['visit_date_clean']).total_seconds()/(365.25*86400) if pd.notna(a['visit_date_clean']) and pd.notna(b['visit_date_clean']) else np.nan
+            if a['pop_status'] not in MODEL_STATES or b['pop_status'] not in MODEL_STATES:
+                excluded_unclassifiable+=1; continue
+            if not np.isfinite(dt) or dt<=0:
+                nonpositive+=1; continue
+            rows.append({'patient_id':pid,'from_pop':a['pop_status'],'to_pop':b['pop_status'],
+                         'interval_years':float(dt),'from_visit_number':a['visit_number'],
+                         'to_visit_number':b['visit_number']})
+    out=pd.DataFrame(rows, columns=['patient_id','from_pop','to_pop','interval_years','from_visit_number','to_visit_number'])
+    counts={(f'{a} -> {b}'):int(((out.from_pop==a)&(out.to_pop==b)).sum()) for a in MODEL_STATES for b in MODEL_STATES if a!=b}
+    state_counts=ordered.loc[ordered.pop_status.isin(MODEL_STATES),'pop_status'].value_counts().reindex(MODEL_STATES,fill_value=0)
+    used_visits=(set(zip(out.patient_id,out.from_visit_number))|set(zip(out.patient_id,out.to_visit_number))) if len(out) else set()
+    info={'n_patients_total':int(ordered.patient_id.nunique()),
+          'n_patients_with_ge2_visits':int(ordered.groupby('patient_id').size().ge(2).sum()),
+          'n_patients_used':int(out.patient_id.nunique()),'n_observations_used':len(used_visits),
+          'n_intervals':int(len(out)),'n_intervals_excluded_nonpositive_time':nonpositive,
+          'n_adjacent_intervals_excluded_unclassifiable':excluded_unclassifiable,
+          'observations_by_state':{k:int(v) for k,v in state_counts.items()},'transitions_by_pair':counts,
+          'median_time_between_visits_years':float(out.interval_years.median()) if len(out) else None}
+    return out,info
+
+def build_q_matrix(theta: np.ndarray, n_states: int=3) -> np.ndarray:
+    q=np.zeros((n_states,n_states)); k=0
+    for i in range(n_states):
+        for j in range(n_states):
+            if i!=j: q[i,j]=np.exp(np.clip(theta[k],-30,30)); k+=1
+        q[i,i]=-q[i].sum()
+    return q
+
+def multistate_loglik(theta: np.ndarray, trajectories: list[tuple[np.ndarray,np.ndarray]]) -> float:
+    """Negative panel likelihood, summed as complete patient trajectories."""
+    q=build_q_matrix(theta); total=0.0
+    for times,pairs in trajectories:
+        for dt,(r,s) in zip(times,pairs):
+            probability=expm(q*dt)[r,s]
+            if not np.isfinite(probability) or probability<=0: return 1e100
+            total+=np.log(max(probability,1e-300))
+    return -total
+
+def _trajectories(intervals: pd.DataFrame):
+    index={s:i for i,s in enumerate(MODEL_STATES)}
+    return [(g.interval_years.to_numpy(float),np.array([(index[a],index[b]) for a,b in zip(g.from_pop,g.to_pop)],int))
+            for _,g in intervals.groupby('patient_id',sort=False)]
+
+def fit_multistate_model(intervals: pd.DataFrame) -> dict:
+    if intervals.empty: raise ValueError('No usable intervals for the continuous-time multi-state model')
+    exposure=intervals.groupby('from_pop').interval_years.sum().reindex(MODEL_STATES,fill_value=0.0)
+    theta=[]
+    for a in MODEL_STATES:
+        for b in MODEL_STATES:
+            if a!=b:
+                n=((intervals.from_pop==a)&(intervals.to_pop==b)).sum()
+                theta.append(np.log(max(n,0.25)/max(float(exposure[a]),0.25)))
+    trajectories=_trajectories(intervals)
+    result=minimize(multistate_loglik,np.array(theta),args=(trajectories,),method='L-BFGS-B',bounds=[(-20,10)]*6,
+                    options={'maxiter':2000,'ftol':1e-12,'gtol':1e-7})
+    q=build_q_matrix(result.x); warnings=[]; ci_method='inverse Hessian (delta method)'
+    try:
+        covariance=np.asarray(result.hess_inv.todense())
+        if covariance.shape!=(6,6) or not np.isfinite(covariance).all() or np.any(np.diag(covariance)<=0) or np.linalg.cond(covariance)>1e12:
+            raise ValueError('unstable inverse Hessian')
+        se=np.sqrt(np.diag(covariance)); lo=np.exp(np.clip(result.x-norm.ppf(.975)*se,-30,30)); hi=np.exp(np.clip(result.x+norm.ppf(.975)*se,-30,30))
+    except Exception as exc:
+        # A cluster bootstrap is deliberately patient-level: every sampled unit
+        # contains all of that patient's adjacent intervals.
+        ci_method='patient-level bootstrap'; warnings.append(f'Hessian unreliable ({exc}); patient bootstrap used.')
+        rng=np.random.default_rng(20260818); patients=list(intervals.patient_id.unique()); estimates=[]
+        for _ in range(200):
+            sampled=rng.choice(patients,len(patients),replace=True); pieces=[]
+            for sample_id,pid in enumerate(sampled):
+                piece=intervals[intervals.patient_id==pid].copy(); piece['patient_id']=sample_id; pieces.append(piece)
+            boot=pd.concat(pieces,ignore_index=True); br=minimize(multistate_loglik,result.x,args=(_trajectories(boot),),method='L-BFGS-B',bounds=[(-20,10)]*6)
+            if br.success and np.isfinite(br.x).all(): estimates.append(np.exp(br.x))
+        if len(estimates)<100: warnings.append(f'Only {len(estimates)}/200 bootstrap fits converged; confidence intervals are unreliable.')
+        arr=np.asarray(estimates); lo=np.quantile(arr,.025,axis=0) if len(arr) else np.full(6,np.nan); hi=np.quantile(arr,.975,axis=0) if len(arr) else np.full(6,np.nan)
+    if not result.success: warnings.append(f'Optimizer did not converge: {result.message}. Estimates must not be treated as valid.')
+    if np.any(np.abs(result.x)>15): warnings.append('One or more log-intensities are extreme (absolute value >15).')
+    return {'result':result,'Q':q,'ci_low':lo,'ci_high':hi,'ci_method':ci_method,'warnings':warnings}
+
+def transition_probability_matrix(q: np.ndarray,t: float) -> pd.DataFrame:
+    return pd.DataFrame(expm(q*t),index=MODEL_STATES,columns=MODEL_STATES).rename_axis('From')
+
+def multistate_sojourn_times(q: np.ndarray) -> pd.DataFrame:
+    return pd.DataFrame({'pop':MODEL_STATES,'mean_sojourn_time_years':[-1/q[i,i] for i in range(3)]})
+
+def plot_multistate_model(q: np.ndarray,path: Path):
+    pos={'Pop1':(0.5,.9),'Pop2':(.1,.15),'Pop3':(.9,.15)}; maximum=max(q[i,j] for i in range(3) for j in range(3) if i!=j)
+    fig,ax=plt.subplots(figsize=(7,6))
+    for i,a in enumerate(MODEL_STATES):
+        for j,b in enumerate(MODEL_STATES):
+            if i==j: continue
+            rad=.16 if i<j else -.16; ax.annotate('',pos[b],pos[a],arrowprops={'arrowstyle':'->','lw':.7+4*q[i,j]/maximum,'color':'#555','connectionstyle':f'arc3,rad={rad}'})
+            x=(pos[a][0]+pos[b][0])/2; y=(pos[a][1]+pos[b][1])/2 + rad*.35
+            ax.text(x,y,f'q={q[i,j]:.3g}',ha='center',va='center',fontsize=8,bbox={'fc':'white','ec':'none','alpha':.8})
+    for s,(x,y) in pos.items(): ax.scatter(x,y,s=2200,color=COLORS[s],zorder=3); ax.text(x,y,s,color='white',weight='bold',ha='center',va='center',zorder=4)
+    ax.set(xlim=(-.15,1.15),ylim=(-.05,1.08)); ax.axis('off'); ax.set_title('Continuous-time multi-state model\n(arrow width represents intensity)'); fig.tight_layout(); fig.savefig(path); plt.close(fig)
+
+def plot_probability_heatmap(p: pd.DataFrame,t: float,path: Path):
+    fig,ax=plt.subplots(figsize=(6,5)); im=ax.imshow(p.values,cmap='Blues',vmin=0,vmax=1)
+    ax.set_xticks(range(3),MODEL_STATES); ax.set_yticks(range(3),MODEL_STATES); ax.set_xlabel('To state'); ax.set_ylabel('From state'); ax.set_title(f'Estimated transition probabilities at {t:g} years')
+    for i in range(3):
+        for j in range(3): ax.text(j,i,f'{p.iloc[i,j]:.3f}\n({p.iloc[i,j]:.1%})',ha='center',va='center')
+    fig.colorbar(im,ax=ax,label='Probability'); fig.tight_layout(); fig.savefig(path); plt.close(fig)
+
+def multistate_qc(prep: dict,fit: dict,intervals: pd.DataFrame) -> dict:
+    q=fit['Q']; p1=expm(q); res=fit['result']; warnings=list(fit['warnings'])
+    checks={'intensities_finite':bool(np.isfinite(q).all()),'off_diagonal_nonnegative':bool(np.all(q[~np.eye(3,dtype=bool)]>=0)),
+            'diagonal_negative':bool(np.all(np.diag(q)<0)),'q_rows_sum_to_zero':bool(np.allclose(q.sum(1),0,atol=1e-8)),
+            'p_1y_rows_sum_to_one':bool(np.allclose(p1.sum(1),1,atol=1e-8)),'p_1y_finite':bool(np.isfinite(p1).all())}
+    sparse=[pair for pair,n in prep['transitions_by_pair'].items() if n<SPARSE_THRESHOLD]
+    if sparse: warnings.append(f'Sparse observed transitions (<{SPARSE_THRESHOLD}): {", ".join(sparse)}.')
+    return {**prep,'model_type':'Continuous-time homogeneous Markov multi-state panel model (state ~ time; no covariates)',
+            'unclassifiable_treatment':'Excluded as potentially missing; intervals adjacent to it are excluded and visits on either side are not joined.',
+            'Q':q.tolist(),'convergence':bool(res.success),'optimizer_message':str(res.message),'log_likelihood':float(-res.fun),
+            'AIC':float(2*len(res.x)+2*res.fun),'n_parameters':len(res.x),'ci_method':fit['ci_method'],
+            'sparse_transitions':sparse,'checks':checks,'warnings':warnings}
+
 def main():
     ap=argparse.ArgumentParser(); ap.add_argument('--input', type=Path, default=None); args=ap.parse_args()
     for d in [INTERMEDIATE_DIR,TABLES_DIR,FIGURES_DIR,QC_DIR]: d.mkdir(parents=True, exist_ok=True)
@@ -129,5 +266,30 @@ def main():
     pt=intervals.groupby('from_pop').interval_years.sum().reindex(POP_ORDER, fill_value=0.0)
     mqc={'model_type':'descriptive transition intensity per person-year from consecutive observed intervals','exploratory_flag':True,'person_time_by_state':{k:float(v) for k,v in pt.items()},'n_transitions_by_pair':{f"{x.from_pop} -> {x.to_pop}":int(x.n_transitions) for x in r.itertuples()},'sparse_transition_pairs':[f"{x.from_pop} -> {x.to_pop}" for x in r.itertuples() if x.sparse_flag],'states_with_zero_person_time':[k for k,v in pt.items() if v==0],'transitions_involving_unclassifiable_note':'May reflect missing ESSDAI/ESSPRI data rather than true clinical change.','warnings':[]}
     write_json(mqc, QC_DIR/'10_multistate_transition_qc.json')
+    # Complementary analysis: panel-observed continuous-time Markov model.  This
+    # is intentionally separate from the observed consecutive-visit summaries.
+    model_intervals,prep=prepare_multistate_data(vis); fit=fit_multistate_model(model_intervals); q=fit['Q']
+    intensity_rows=[]; k=0
+    for i,a in enumerate(MODEL_STATES):
+        for j,b in enumerate(MODEL_STATES):
+            if i==j: continue
+            n=prep['transitions_by_pair'][f'{a} -> {b}']
+            intensity_rows.append({'from_pop':a,'to_pop':b,'n_observed_transitions':n,'intensity':q[i,j],
+                                   'ci95_low':fit['ci_low'][k],'ci95_high':fit['ci_high'][k],
+                                   'sparse_flag':n<SPARSE_THRESHOLD}); k+=1
+    pd.DataFrame(intensity_rows).to_csv(TABLES_DIR/'10_multistate_intensity_matrix.csv',index=False)
+    probabilities={}
+    for horizon,label in [(.5,'0.5'),(1,'1'),(2,'2'),(5,'5')]:
+        probabilities[horizon]=transition_probability_matrix(q,horizon)
+        probabilities[horizon].to_csv(TABLES_DIR/f'10_multistate_transition_probabilities_{label}y.csv')
+    multistate_sojourn_times(q).to_csv(TABLES_DIR/'10_multistate_sojourn_times.csv',index=False)
+    plot_multistate_model(q,FIGURES_DIR/'10_multistate_model_diagram.pdf')
+    plot_probability_heatmap(probabilities[1],1,FIGURES_DIR/'10_multistate_probability_heatmap_1y.pdf')
+    plot_probability_heatmap(probabilities[2],2,FIGURES_DIR/'10_multistate_probability_heatmap_2y.pdf')
+    model_qc=multistate_qc(prep,fit,model_intervals); write_json(model_qc,QC_DIR/'10_multistate_model_qc.json')
     print(f'Wrote {INTERVALS} and transition outputs')
+    print(f"Continuous-time multi-state model converged: {fit['result'].success}")
+    print('Q =\n',q); print('P(1 year) =\n',probabilities[1].to_string())
+    print('Sparse transitions:',', '.join(model_qc['sparse_transitions']) or 'none')
+    if model_qc['warnings']: print('Warnings:',*model_qc['warnings'],sep='\n- ')
 if __name__=='__main__': main()
