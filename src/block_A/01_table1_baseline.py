@@ -92,7 +92,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--intermediate-dir",
         type=Path,
-        default=common.PROJECT_ROOT / "data_intermediate" / "block_A",
+        default=common.INTERMEDIATE_DATA_DIR / "block_A",
         help="Directory for patient-level intermediate files used to manually audit Table 1 metrics.",
     )
     parser.add_argument("--eligibility", type=Path, default=common.BLOCKA_TABLES_DIR / "00_analytic_cohort_ids.csv", help="Optional prior eligibility patient ID file.")
