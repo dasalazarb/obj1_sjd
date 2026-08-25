@@ -36,7 +36,7 @@ ESSPRI_COMPONENTS = {
 TABLE_DIR = common.OUTPUTS_DIR / "tables" / "blockA"
 FIGURE_DIR = common.OUTPUTS_DIR / "figures" / "blockA"
 QC_DIR = TABLE_DIR / "qc"
-INTERMEDIATE_DIR = common.PROJECT_ROOT / "data_intermediate" / "block_A"
+INTERMEDIATE_DIR = common.INTERMEDIATE_DATA_DIR
 
 
 def ensure_dirs():
