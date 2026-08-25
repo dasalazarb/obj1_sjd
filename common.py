@@ -20,6 +20,10 @@ OUTPUTS_DIR = PROJECT_ROOT / "outputs"
 # Canonical input defaults. CLI arguments in scripts may override these.
 DEFAULT_ANALYTIC_DATASET = Path("/data/salazarda/data/obj1_sjd/data/raw") / "visits_long_collapsed_by_interval_codebook_corrected.parquet"
 DEFAULT_POP_DISTRIBUTION_INPUT = DEFAULT_ANALYTIC_DATASET
+SOURCE_EPISODE_SPINE = (
+    Path("/data/salazarda/data/obj1_sjd/data/raw")
+    / "clinical_episode_spine_sjd.parquet"
+)
 DEFAULT_CODEBOOK = METADATA_DIR / "Consolidated_Codebook_all_columns.xlsx"
 
 # Block A outputs.
@@ -33,6 +37,13 @@ BLOCKB_QC_DIR = OUTPUTS_DIR / "qc" / "blockB"
 BLOCKB_LOGS_DIR = OUTPUTS_DIR / "logs"
 VISIT_SPINE_PARQUET = INTERMEDIATE_DATA_DIR / "00_patient_visit_spine.parquet"
 VISIT_SPINE_CSV = INTERMEDIATE_DATA_DIR / "00_patient_visit_spine.csv"
+# Episode-based Step 00 outputs.  The legacy VISIT_SPINE_* paths above remain
+# unchanged temporarily so that unmigrated downstream scripts do not start
+# consuming the episode spine implicitly.
+EPISODE_SPINE_PARQUET = INTERMEDIATE_DATA_DIR / "00_episode_spine_all.parquet"
+EPISODE_SPINE_CSV = INTERMEDIATE_DATA_DIR / "00_episode_spine_all.csv"
+CLINICAL_VISIT_SPINE_PARQUET = INTERMEDIATE_DATA_DIR / "00_clinical_visit_spine.parquet"
+CLINICAL_VISIT_SPINE_CSV = INTERMEDIATE_DATA_DIR / "00_clinical_visit_spine.csv"
 POP_LONGITUDINAL_PARQUET = INTERMEDIATE_DATA_DIR / "01_visit_level_classification.parquet"
 OVERLAP_LONGITUDINAL_PARQUET = (
     INTERMEDIATE_DATA_DIR / "06_overlap_longitudinal_dx_temporal_anchor_patient_visit.parquet"
