@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """ITEM 1.1 — Overall cohort demographics for Sjögren's disease.
 
-Generates a one-row-per-patient baseline table internally, then exports a tidy
-Table 1 plus QC files. No identifiers or dates of birth are exported.
+Consumes the authoritative clinical episode spine, then exports a tidy Table 1
+plus patient-level provenance and QC files.
 """
 
 from __future__ import annotations
@@ -29,8 +29,14 @@ LOG = logging.getLogger(__name__)
 
 PATIENT_ID_COL = "ids__patient_record_number"
 FALLBACK_PATIENT_ID_COL = "ids__subject_number"
-VISIT_DATE_COL = "ids__visit_date"
-INTERVAL_COL = "ids__interval_name"
+CANONICAL_PATIENT_ID_COL = "patient_id"
+CLINICAL_EPISODE_COL = "clinical_episode_id"
+CLINICAL_ANCHOR_DATE_COL = "clinical_anchor_date"
+CLINICAL_VISIT_COL = "clinical_visit"
+CLINICAL_BASELINE_EPISODE_COL = "clinical_baseline_episode_id"
+CLINICAL_BASELINE_DATE_COL = "clinical_baseline_date"
+IS_CLINICAL_BASELINE_COL = "is_clinical_baseline"
+SJD_COHORT_COL = "sjd_ever_1_2_4"
 SEX_COL = "ids__sex"
 RACE_COL = "ids__race"
 DOB_COL = "ids__dob"
@@ -49,13 +55,26 @@ REQUIRED_DATASET_VARS = {
     DX_YES_COL,
     *SYMPTOM_ONSET_CANDIDATES,
     SJOGREN_CLASS_COL,
-    PATIENT_ID_COL,
-    FALLBACK_PATIENT_ID_COL,
-    VISIT_DATE_COL,
+    CLINICAL_EPISODE_COL,
+    CLINICAL_ANCHOR_DATE_COL,
+    CLINICAL_VISIT_COL,
+    CLINICAL_BASELINE_EPISODE_COL,
+    CLINICAL_BASELINE_DATE_COL,
+    IS_CLINICAL_BASELINE_COL,
+    SJD_COHORT_COL,
     SEX_COL,
     RACE_COL,
     DOB_COL,
     AGE_AT_VISIT_COL,
+}
+REQUIRED_SPINE_VARS = {
+    CLINICAL_EPISODE_COL,
+    CLINICAL_ANCHOR_DATE_COL,
+    CLINICAL_VISIT_COL,
+    CLINICAL_BASELINE_EPISODE_COL,
+    CLINICAL_BASELINE_DATE_COL,
+    IS_CLINICAL_BASELINE_COL,
+    SJD_COHORT_COL,
 }
 
 MISSING_STRINGS = config.MISSING_STRINGS
@@ -66,8 +85,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--input",
         type=Path,
-        default=Path("/data/salazarda/data/obj1_sjd/data/raw") / "visits_long_collapsed_by_interval_codebook_corrected.parquet",
-        help="Analytic visit-level CSV/Parquet/XLSX file.",
+        default=common.SOURCE_EPISODE_SPINE,
+        help="Authoritative SjD clinical episode spine (CSV/Parquet/XLSX).",
     )
     parser.add_argument("--outdir", type=Path, default=common.BLOCKA_TABLES_DIR, help="Output directory for Block A tables.")
     parser.add_argument(
@@ -109,14 +128,17 @@ def read_table(path: Path) -> pd.DataFrame:
 
 
 def validate_hardcoded_vars(df: pd.DataFrame) -> list[str]:
+    missing_spine = sorted(REQUIRED_SPINE_VARS - set(df.columns))
+    if missing_spine:
+        raise ValueError("Authoritative clinical episode spine columns missing: " + ", ".join(missing_spine))
     missing = sorted(REQUIRED_DATASET_VARS - set(df.columns))
-    if PATIENT_ID_COL in missing and FALLBACK_PATIENT_ID_COL in missing:
-        raise ValueError(f"No patient identifier column found: tried {PATIENT_ID_COL}, {FALLBACK_PATIENT_ID_COL}")
+    if not ({CANONICAL_PATIENT_ID_COL, PATIENT_ID_COL, FALLBACK_PATIENT_ID_COL} & set(df.columns)):
+        raise ValueError("No patient identifier column found")
     return missing
 
 
 def select_patient_id_col(df: pd.DataFrame) -> str:
-    for col in (PATIENT_ID_COL, FALLBACK_PATIENT_ID_COL):
+    for col in (CANONICAL_PATIENT_ID_COL, PATIENT_ID_COL, FALLBACK_PATIENT_ID_COL):
         if col in df.columns and df[col].map(lambda x: not is_missing_value(x)).any():
             return col
     raise ValueError(f"No usable patient identifier found: tried {PATIENT_ID_COL}, {FALLBACK_PATIENT_ID_COL}")
@@ -174,74 +196,55 @@ def normalize_sjogren_class(x: object) -> str:
     return mapping.get(s, "unknown")
 
 
-def filter_to_target_sjogren_class_patients(df: pd.DataFrame) -> pd.DataFrame:
-    """Keep patients whose modal Sjögren class is primary, secondary, or incomplete."""
-    patient_id_source = select_patient_id_col(df)
-    work = df.copy()
-    work["patient_id"] = work[patient_id_source].astype("string")
-    target_patient_ids = set()
-    work["_visit_date_parsed"] = work[VISIT_DATE_COL].map(parse_partial_date) if VISIT_DATE_COL in work else pd.NaT
-    for patient_id, g in work.groupby("patient_id", sort=True, dropna=True):
-        g = g.sort_values("_visit_date_parsed", na_position="last")
-        _, class_norm = modal_sjogren_class_value(g[SJOGREN_CLASS_COL])
-        if class_norm in {"primary_sjd", "secondary_sjd", "incomplete"}:
-            target_patient_ids.add(patient_id)
-    return work[work["patient_id"].isin(target_patient_ids)].drop(columns=["patient_id", "_visit_date_parsed"]).copy()
-
-
-def modal_sjogren_class_value(values: Iterable[object]) -> tuple[object, str]:
-    """Return the modal non-missing Sjögren classification raw value and normalized label.
-
-    When there is a tie, keep the first tied class observed in the patient's
-    visit order so the result is deterministic without inventing a priority.
-    """
-    counts: dict[str, int] = {}
-    first_raw_by_norm: dict[str, object] = {}
-    first_order_by_norm: dict[str, int] = {}
-    for order, value in enumerate(values):
-        if is_missing_value(value):
-            continue
-        norm = normalize_sjogren_class(value)
-        if norm == "unknown":
-            continue
-        counts[norm] = counts.get(norm, 0) + 1
-        if norm not in first_raw_by_norm:
-            first_raw_by_norm[norm] = value
-            first_order_by_norm[norm] = order
-    if not counts:
-        return np.nan, "unknown"
-    modal_norm = max(counts, key=lambda norm: (counts[norm], -first_order_by_norm[norm]))
-    return first_raw_by_norm[modal_norm], modal_norm
-
-
-def coalesce_same_date(group: pd.DataFrame) -> pd.Series:
-    return group.apply(first_nonmissing, axis=0)
-
-
 def build_baseline_patient_table(df: pd.DataFrame) -> pd.DataFrame:
+    """Take the upstream-designated clinical baseline episode without fallback."""
     patient_id_source = select_patient_id_col(df)
     work = df.copy()
     work["patient_id"] = work[patient_id_source].astype("string")
-    work["_visit_date_parsed"] = work[VISIT_DATE_COL].map(parse_partial_date) if VISIT_DATE_COL in work else pd.NaT
-    rows = []
-    for patient_id, g in work.groupby("patient_id", sort=True, dropna=True):
-        g = g.copy().sort_values("_visit_date_parsed", na_position="last")
-        valid_dates = g["_visit_date_parsed"].dropna()
-        if not valid_dates.empty:
-            baseline_date = valid_dates.min()
-            baseline_rows = g[g["_visit_date_parsed"] == baseline_date]
-        else:
-            baseline_date = pd.NaT
-            baseline_rows = g.head(1)
-        baseline = coalesce_same_date(baseline_rows)
+    baseline_flag = work[IS_CLINICAL_BASELINE_COL].eq(True).fillna(False)  # noqa: E712
+    clinical_flag = work[CLINICAL_VISIT_COL].eq(True).fillna(False)  # noqa: E712
+    flagged = work.loc[baseline_flag].copy()
 
+    counts = flagged.groupby("patient_id", dropna=True).size()
+    multiple = counts[counts > 1]
+    episode_mismatch = ~flagged[CLINICAL_EPISODE_COL].eq(flagged[CLINICAL_BASELINE_EPISODE_COL])
+    anchor_dates = pd.to_datetime(flagged[CLINICAL_ANCHOR_DATE_COL], errors="coerce")
+    baseline_dates = pd.to_datetime(flagged[CLINICAL_BASELINE_DATE_COL], errors="coerce")
+    date_mismatch = ~anchor_dates.eq(baseline_dates)
+    nonclinical = ~clinical_flag.loc[flagged.index]
+    qc = {
+        "n_patients_input": int(work["patient_id"].nunique()),
+        "n_patients_with_clinical_baseline": int(flagged["patient_id"].nunique()),
+        "n_patients_without_clinical_baseline": int(work["patient_id"].nunique() - flagged["patient_id"].nunique()),
+        "n_baseline_rows": int(len(flagged)),
+        "n_patients_with_multiple_baselines": int(len(multiple)),
+        "n_baseline_episode_mismatches": int(episode_mismatch.sum()),
+        "n_baseline_date_mismatches": int(date_mismatch.sum()),
+        "n_baseline_nonclinical_episodes": int(nonclinical.sum()),
+    }
+    structural_failures = {key: value for key, value in qc.items() if key in {
+        "n_patients_with_multiple_baselines", "n_baseline_episode_mismatches",
+        "n_baseline_date_mismatches", "n_baseline_nonclinical_episodes",
+    } and value}
+    if structural_failures:
+        raise ValueError(f"Invalid authoritative clinical baseline structure: {structural_failures}; QC={qc}")
+
+    # Both predicates are intentionally explicit: clinical state comes only from
+    # the episode that upstream marked as the clinical baseline.
+    selected = work.loc[clinical_flag & baseline_flag].copy()
+    rows = []
+    for _, baseline in selected.iterrows():
+        patient_id = baseline["patient_id"]
+        g = work.loc[work["patient_id"].eq(patient_id)]
         dx_date = earliest_nonmissing_date(g[DX_DATE_COL]) if DX_DATE_COL in g else pd.NaT
         symptom_dates = [parse_partial_date(first_nonmissing(g[c])) for c in SYMPTOM_ONSET_CANDIDATES if c in g]
         symptom_dates = [d for d in symptom_dates if pd.notna(d)]
         symptom_onset = min(symptom_dates) if symptom_dates else pd.NaT
         dob = parse_partial_date(first_nonmissing(g[DOB_COL])) if DOB_COL in g else pd.NaT
-        age_at_visit = pd.to_numeric(pd.Series([first_nonmissing(g[AGE_AT_VISIT_COL])]), errors="coerce").iloc[0] if AGE_AT_VISIT_COL in g else np.nan
-        visit_date_for_age = baseline_date
+        age_at_visit = pd.to_numeric(
+            pd.Series([baseline.get(AGE_AT_VISIT_COL, np.nan)]), errors="coerce"
+        ).iloc[0]
+        visit_date_for_age = parse_partial_date(baseline[CLINICAL_ANCHOR_DATE_COL])
 
         age_dx = np.nan
         if pd.notna(dx_date) and pd.notna(dob):
@@ -253,22 +256,21 @@ def build_baseline_patient_table(df: pd.DataFrame) -> pd.DataFrame:
         if pd.notna(dx_date) and pd.notna(symptom_onset):
             dx_delay = (dx_date - symptom_onset).days / 365.25
 
-        if SJOGREN_CLASS_COL in g:
-            class_raw, class_norm = modal_sjogren_class_value(g[SJOGREN_CLASS_COL])
-        else:
-            class_raw, class_norm = np.nan, "unknown"
+        class_raw = baseline.get(SJOGREN_CLASS_COL, np.nan)
+        class_norm = normalize_sjogren_class(class_raw)
 
         sex_raw = first_nonmissing([baseline.get(SEX_COL, np.nan)])
-        if is_missing_value(sex_raw) and SEX_COL in g:
-            sex_raw = first_nonmissing(g[SEX_COL])
-
         race_raw = first_nonmissing([baseline.get(RACE_COL, np.nan)])
-        if is_missing_value(race_raw) and RACE_COL in g:
-            race_raw = first_nonmissing(g[RACE_COL])
 
         rows.append({
             "patient_id": patient_id,
-            "baseline_visit_date": baseline_date,
+            CLINICAL_EPISODE_COL: baseline[CLINICAL_EPISODE_COL],
+            CLINICAL_ANCHOR_DATE_COL: baseline[CLINICAL_ANCHOR_DATE_COL],
+            CLINICAL_BASELINE_EPISODE_COL: baseline[CLINICAL_BASELINE_EPISODE_COL],
+            CLINICAL_BASELINE_DATE_COL: baseline[CLINICAL_BASELINE_DATE_COL],
+            IS_CLINICAL_BASELINE_COL: baseline[IS_CLINICAL_BASELINE_COL],
+            CLINICAL_VISIT_COL: baseline[CLINICAL_VISIT_COL],
+            "baseline_status": "with_clinical_baseline",
             "sex_raw": sex_raw,
             "sex_norm": normalize_sex(sex_raw),
             "race": np.nan if is_missing_value(race_raw) else str(race_raw).strip(),
@@ -285,7 +287,10 @@ def build_baseline_patient_table(df: pd.DataFrame) -> pd.DataFrame:
         })
     baseline_df = pd.DataFrame(rows)
     if baseline_df.empty:
-        raise ValueError("Could not create any baseline patient rows")
+        baseline_df = pd.DataFrame(columns=["patient_id", CLINICAL_EPISODE_COL, CLINICAL_ANCHOR_DATE_COL,
+                                            CLINICAL_BASELINE_EPISODE_COL, CLINICAL_BASELINE_DATE_COL,
+                                            IS_CLINICAL_BASELINE_COL, CLINICAL_VISIT_COL])
+    baseline_df.attrs["baseline_qc"] = qc
     return baseline_df
 
 
@@ -302,18 +307,6 @@ def median_iqr(series: pd.Series, digits: int = 1) -> tuple[str, dict[str, float
     q1, med, q3 = np.percentile(s, [25, 50, 75])
     raw = {"median": round(float(med), digits), "q1": round(float(q1), digits), "q3": round(float(q3), digits)}
     return f"{raw['median']:.{digits}f} ({raw['q1']:.{digits}f}–{raw['q3']:.{digits}f})", raw
-
-
-def apply_eligibility(baseline: pd.DataFrame, eligibility_path: Path) -> tuple[pd.DataFrame, str]:
-    if not eligibility_path.exists():
-        return baseline, "No prior eligibility file found; used all unique patients."
-    elig = read_table(eligibility_path)
-    candidate_cols = ["patient_id", PATIENT_ID_COL, FALLBACK_PATIENT_ID_COL]
-    id_col = next((c for c in candidate_cols if c in elig.columns), None)
-    if id_col is None:
-        return baseline, f"Eligibility file {eligibility_path} lacked an ID column; used all unique patients."
-    ids = set(elig[id_col].dropna().astype("string"))
-    return baseline[baseline["patient_id"].astype("string").isin(ids)].copy(), f"Filtered to {len(ids)} IDs from {eligibility_path}."
 
 
 def safe_file_stem(path: Path) -> str:
@@ -349,7 +342,13 @@ def write_metric_intermediates(
     source_stem = safe_file_stem(input_path)
     columns_for_audit = [
         "patient_id",
-        "baseline_visit_date",
+        CLINICAL_EPISODE_COL,
+        CLINICAL_ANCHOR_DATE_COL,
+        CLINICAL_BASELINE_EPISODE_COL,
+        CLINICAL_BASELINE_DATE_COL,
+        IS_CLINICAL_BASELINE_COL,
+        CLINICAL_VISIT_COL,
+        "baseline_status",
         "sex_raw",
         "sex_norm",
         "race",
@@ -384,6 +383,23 @@ def write_metric_intermediates(
         audit.to_csv(path, index=False)
         outputs.append(path)
     return outputs
+
+
+def build_patient_audit(df: pd.DataFrame, baseline: pd.DataFrame) -> pd.DataFrame:
+    """Include baseline provenance and explicitly list patients lacking one."""
+    patient_id_source = select_patient_id_col(df)
+    input_ids = pd.Index(df[patient_id_source].dropna().astype("string").unique(), name="patient_id")
+    baseline_ids = pd.Index(baseline["patient_id"].astype("string"))
+    without_ids = input_ids.difference(baseline_ids, sort=False)
+    missing = pd.DataFrame({"patient_id": without_ids, "baseline_status": "without_clinical_baseline"})
+    audit = pd.concat([baseline.copy(), missing], ignore_index=True, sort=False)
+    required = [
+        "patient_id", CLINICAL_EPISODE_COL, CLINICAL_ANCHOR_DATE_COL,
+        CLINICAL_BASELINE_EPISODE_COL, CLINICAL_BASELINE_DATE_COL,
+        IS_CLINICAL_BASELINE_COL, CLINICAL_VISIT_COL, "baseline_status",
+        "sex_raw", "age_dx", "dx_date", "symptom_onset_date",
+    ]
+    return audit[[column for column in required if column in audit.columns]]
 
 
 def build_outputs(baseline: pd.DataFrame, dataset_missing: list[str], eligibility_detail: str) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -481,20 +497,14 @@ def main() -> None:
             if col not in {PATIENT_ID_COL, FALLBACK_PATIENT_ID_COL}:  # patient ID handled explicitly
                 df[col] = np.nan
 
-    df = filter_to_target_sjogren_class_patients(df)
-    if df.empty:
-        raise ValueError(f"No patients have {SJOGREN_CLASS_COL} equal to 1, 2, or 4")
-    LOG.info(
-        "Filtered to patients with %s in {1, 2, 4}: %s rows",
-        SJOGREN_CLASS_COL,
-        df.shape[0],
-    )
-
     baseline = build_baseline_patient_table(df)
+    baseline_qc = baseline.attrs["baseline_qc"]
     baseline_pre_eligibility = baseline.copy()
-    baseline, eligibility_detail = apply_eligibility(baseline, args.eligibility)
+    # The SjD spine is already the authoritative cohort.  The legacy eligibility
+    # argument remains accepted for CLI compatibility but is deliberately ignored.
+    eligibility_detail = "Authoritative SjD spine used without downstream cohort reselection."
     if baseline.empty:
-        raise ValueError("No patients remain after baseline construction/eligibility filtering")
+        raise ValueError(f"No patients have an authoritative clinical baseline; QC={baseline_qc}")
     LOG.info("Built baseline patient table: %s unique patients", baseline["patient_id"].nunique())
 
     intermediate_paths = write_metric_intermediates(baseline_pre_eligibility, baseline, args.input, args.intermediate_dir)
@@ -502,14 +512,29 @@ def main() -> None:
         LOG.info("Wrote %s", intermediate_path.relative_to(common.PROJECT_ROOT) if intermediate_path.is_relative_to(common.PROJECT_ROOT) else intermediate_path)
 
     table, qc = build_outputs(baseline, dataset_missing, eligibility_detail)
+    structural_qc = pd.DataFrame([
+        {
+            "qc_check": key,
+            "value": value,
+            "status": "pass" if key not in {
+                "n_patients_with_multiple_baselines", "n_baseline_episode_mismatches",
+                "n_baseline_date_mismatches", "n_baseline_nonclinical_episodes",
+            } or value == 0 else "fail",
+            "details": "Authoritative clinical episode spine baseline selection.",
+        }
+        for key, value in baseline_qc.items()
+    ])
+    qc = pd.concat([structural_qc, qc], ignore_index=True)
     if dataset_missing:
         qc = pd.concat([qc, pd.DataFrame([{"qc_check": "dataset_columns_missing_but_allowed", "value": len(dataset_missing), "status": "warning", "details": ", ".join(dataset_missing)}])], ignore_index=True)
 
     csv_path = args.outdir / "01_table1_overall.csv"
     xlsx_path = args.outdir / "01_table1_overall.xlsx"
     qc_path = args.outdir / "01_table1_overall_qc.csv"
+    audit_path = args.outdir / "01_table1_baseline_patient_audit.csv"
     table.to_csv(csv_path, index=False)
     qc.to_csv(qc_path, index=False)
+    build_patient_audit(df, baseline).to_csv(audit_path, index=False)
     with pd.ExcelWriter(xlsx_path) as writer:
         table.to_excel(writer, sheet_name="Table1_Overall", index=False)
         qc.to_excel(writer, sheet_name="QC", index=False)
@@ -517,6 +542,7 @@ def main() -> None:
     LOG.info("Wrote %s", csv_path.relative_to(common.PROJECT_ROOT) if csv_path.is_relative_to(common.PROJECT_ROOT) else csv_path)
     LOG.info("Wrote %s", xlsx_path.relative_to(common.PROJECT_ROOT) if xlsx_path.is_relative_to(common.PROJECT_ROOT) else xlsx_path)
     LOG.info("Wrote %s", qc_path.relative_to(common.PROJECT_ROOT) if qc_path.is_relative_to(common.PROJECT_ROOT) else qc_path)
+    LOG.info("Wrote %s", audit_path.relative_to(common.PROJECT_ROOT) if audit_path.is_relative_to(common.PROJECT_ROOT) else audit_path)
     LOG.info("QC warnings: %s", int((qc["status"] == "warning").sum()))
 
 
