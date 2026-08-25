@@ -129,6 +129,12 @@ def build_episode_spines(
         "H_clinical_visit_count_preserved": len(clinical_spine)
         == int(source["clinical_visit"].eq(True).sum()),  # noqa: E712
     }
+    # Pandas reductions can return numpy.bool_, which the standard JSON encoder
+    # cannot serialize.  Normalize every assertion result to a native bool so
+    # both QC_JSON and the command-line JSON summary are always writable.
+    hard_assertions = {
+        name: bool(passed) for name, passed in hard_assertions.items()
+    }
 
     all_patients = set(episode_spine["patient_id"].dropna().tolist())
     baseline_patients = set(
