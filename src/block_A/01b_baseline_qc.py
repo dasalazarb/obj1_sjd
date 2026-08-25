@@ -25,6 +25,8 @@ import common  # noqa: E402
 
 LOG = logging.getLogger(__name__)
 VALID_POP = {"Pop1", "Pop2", "Pop3"}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--clinical-spine", type=Path, default=common.CLINICAL_VISIT_SPINE_PARQUET)
@@ -57,6 +59,11 @@ def require_columns(df: pd.DataFrame, columns: set[str], artifact: str) -> None:
 def as_true(series: pd.Series) -> pd.Series:
     """Interpret only explicit boolean/boolean-like true values as true."""
     return series.eq(True) | series.astype("string").str.strip().str.lower().isin({"true", "1", "yes"})  # noqa: E712
+
+
+def missing_as_false(series: pd.Series) -> pd.Series:
+    """Return a non-nullable bool Series without object downcasting warnings."""
+    return series.astype("boolean").fillna(False).astype(bool)
 
 
 def ids_equal(left: pd.Series, right: pd.Series) -> pd.Series:
@@ -116,18 +123,26 @@ def build_audit(
         # Retain a deterministic row so that the audit can still be emitted before hard failure.
         pop_episode = pop_episode.drop_duplicates("patient_id")
     pop_episode = pop_episode[["patient_id", "pop_baseline_clinical_visit"]]
-    clinical_pop = pop.loc[as_true(pop["is_clinical_baseline"])].copy()
-    clinical_pop = clinical_pop.rename(columns={"pop_status": "clinical_baseline_pop_status"})
+    clinical_pop_rows = pop.loc[as_true(pop["is_clinical_baseline"])].copy()
+    # The longitudinal Pop artifact already carries a propagated column named
+    # ``clinical_baseline_pop_status``.  Construct a fresh frame instead of
+    # renaming ``pop_status`` to that name, which would create duplicate labels.
+    clinical_pop = pd.DataFrame(index=clinical_pop_rows.index)
+    clinical_pop["patient_id"] = clinical_pop_rows["patient_id"]
+    clinical_pop["clinical_baseline_pop_status"] = clinical_pop_rows["pop_status"]
     clinical_pop["clinical_baseline_essdai_available"] = pd.to_numeric(
-        clinical_pop["essdai_total"], errors="coerce"
+        clinical_pop_rows["essdai_total"], errors="coerce"
     ).notna()
     clinical_pop["clinical_baseline_esspri_complete"] = pd.to_numeric(
-        clinical_pop["esspri_total_observed"], errors="coerce"
+        clinical_pop_rows["esspri_total_observed"], errors="coerce"
     ).notna()
-    clinical_pop = first_patient_rows(clinical_pop, [
-        "patient_id", "clinical_baseline_pop_status", "clinical_baseline_essdai_available",
-        "clinical_baseline_esspri_complete",
-    ])
+    clinical_pop = first_patient_rows(
+        clinical_pop,
+        [
+            "patient_id", "clinical_baseline_pop_status",
+            "clinical_baseline_essdai_available", "clinical_baseline_esspri_complete",
+        ],
+    )
 
     patients = pd.DataFrame({"patient_id": pd.concat([
         clinical["patient_id"], table1["patient_id"], pop["patient_id"]
@@ -151,14 +166,16 @@ def build_audit(
     )
 
     no_pop = audit["pop_baseline_episode_id"].isna()
+    essdai_available = missing_as_false(audit["clinical_baseline_essdai_available"])
+    esspri_complete = missing_as_false(audit["clinical_baseline_esspri_complete"])
     low_missing_esspri = (
         audit["clinical_baseline_pop_status"].eq("Unclassifiable")
-        & audit["clinical_baseline_essdai_available"].fillna(False)
-        & ~audit["clinical_baseline_esspri_complete"].fillna(False)
+        & essdai_available
+        & ~esspri_complete
     )
     audit["pop_baseline_shift_reason"] = np.select(
         [audit["pop_matches_clinical_baseline"], no_pop,
-         ~audit["clinical_baseline_essdai_available"].fillna(False), low_missing_esspri],
+         ~essdai_available, low_missing_esspri],
         ["same_episode", "no_pop_classifiable_episode", "clinical_baseline_missing_essdai",
          "clinical_baseline_low_essdai_missing_esspri"],
         default="clinical_baseline_unclassifiable_other",
