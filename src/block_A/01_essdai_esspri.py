@@ -35,7 +35,7 @@ ESSPRI_COMPONENTS = {
 }
 TABLE_DIR = common.OUTPUTS_DIR / "tables" / "blockA"
 FIGURE_DIR = common.OUTPUTS_DIR / "figures" / "blockA"
-QC_DIR = TABLE_DIR / "qc"
+QC_DIR = common.BLOCKA_QC_DIR
 INTERMEDIATE_DIR = common.INTERMEDIATE_DATA_DIR
 
 
