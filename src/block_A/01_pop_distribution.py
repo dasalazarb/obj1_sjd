@@ -29,12 +29,9 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import common  # noqa: E402
 import config  # noqa: E402
-from src.derivations.visit_dates import add_parsed_visit_dates
-
-PATIENT_ID_COL = "ids__patient_record_number"
-VISIT_DATE_COL = "ids__visit_date"
+PATIENT_ID_COL = "patient_id"
 CODEBOOK_COLUMN = "FORM_NAME__QUESTION_NAME"
-DEFAULT_INPUT = Path("/data/salazarda/data/obj1_sjd/data/raw") / "visits_long_collapsed_by_interval_codebook_corrected.parquet"
+DEFAULT_INPUT = Path(common.CLINICAL_VISIT_SPINE_PARQUET)
 
 ESSDAI_TOTAL_CANDIDATES = ["essdai__essdai_total_score"]
 ESSPRI_OBSERVED_COMPONENTS = {
@@ -144,7 +141,7 @@ DEFAULT_CODEBOOK = Path(getattr(common, "DEFAULT_CODEBOOK", PROJECT_ROOT / "meta
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate ITEM 1.4 Pop1/Pop2/Pop3 baseline and longitudinal outputs.")
-    parser.add_argument("--input", type=Path, default=Path(getattr(common, "DEFAULT_POP_DISTRIBUTION_INPUT", DEFAULT_INPUT)))
+    parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
     parser.add_argument("--codebook", type=Path, default=DEFAULT_CODEBOOK)
     return parser.parse_args()
 
@@ -188,7 +185,14 @@ def select_first_available(df: pd.DataFrame, candidates: Iterable[str], codebook
 
 
 def validate_columns(df: pd.DataFrame) -> dict[str, list[str]]:
-    missing_required = [col for col in (PATIENT_ID_COL, VISIT_DATE_COL) if col not in df.columns]
+    required = [
+        "patient_id", "clinical_episode_id", "clinical_anchor_date",
+        "clinical_visit_number", "clinical_baseline_episode_id",
+        "clinical_baseline_date", "is_clinical_baseline",
+        "time_since_clinical_baseline_days",
+        "time_since_clinical_baseline_years", *ESSDAI_TOTAL_CANDIDATES,
+    ]
+    missing_required = [col for col in required if col not in df.columns]
     if missing_required:
         raise ValueError(f"Missing required columns: {missing_required}")
     essdai_cols = [col for col in ESSDAI_TOTAL_CANDIDATES if col in df.columns]
@@ -201,15 +205,6 @@ def validate_columns(df: pd.DataFrame) -> dict[str, list[str]]:
 def numeric_from_first_number(series: pd.Series) -> pd.Series:
     extracted = series.astype("string").str.extract(r"([-+]?\d*\.?\d+)", expand=False)
     return pd.to_numeric(extracted, errors="coerce")
-
-
-def coalesce_essdai(df: pd.DataFrame) -> pd.Series:
-    result = pd.Series(np.nan, index=df.index, dtype="float64")
-    for col in ESSDAI_TOTAL_CANDIDATES:
-        if col in df.columns:
-            result = result.combine_first(numeric_from_first_number(df[col]))
-    return result
-
 
 
 def first_nonmissing(s: pd.Series) -> Any:
@@ -468,84 +463,70 @@ def normalize_visit_level_dtypes(vis: pd.DataFrame) -> pd.DataFrame:
 
 
 
-def _detect_duplicate_conflicts(work: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
-    rows = []
-    dup = work[work.duplicated(["patient_id", "visit_date"], keep=False)]
-    for (pid, vdate), g in dup.groupby(["patient_id", "visit_date"], dropna=False):
-        for col in cols:
-            if col not in g.columns:
-                continue
-            n = count_distinct_nonmissing(g[col])
-            if n > 1:
-                vals = pd.to_numeric(g[col], errors="coerce").dropna()
-                distinct = sorted(vals.unique().tolist()) if len(vals) else sorted(g[col].dropna().astype(str).unique().tolist())
-                rows.append({"patient_id": pid, "visit_date": vdate, "variable_name": col, "n_distinct_values": n, "distinct_values": " | ".join(map(str, distinct)), "selected_value": first_nonmissing(g[col])})
-    return pd.DataFrame(rows, columns=["patient_id", "visit_date", "variable_name", "n_distinct_values", "distinct_values", "selected_value"])
-
-
 def build_longitudinal_pop_dataset(df: pd.DataFrame, codebook: pd.DataFrame | None = None) -> tuple[pd.DataFrame, dict[str, Any], list[str]]:
+    """Classify the authoritative clinical spine without rebuilding its episodes."""
     work = df.copy()
+    input_episode_ids = work["clinical_episode_id"].copy()
     qc_counts: dict[str, Any] = {"n_input_rows": int(len(work))}
     warnings: list[str] = []
 
-    work = add_parsed_visit_dates(work, patient_id_col=PATIENT_ID_COL, visit_date_col=VISIT_DATE_COL)
-    valid_patient_id = ~work["patient_id"].map(is_missing)
-    qc_counts["n_rows_with_valid_patient_id"] = int(valid_patient_id.sum())
-    qc_counts["n_rows_excluded_missing_patient_id"] = int((~valid_patient_id).sum())
-    work["row_date_original"] = work["visit_date_raw"]
-    work["row_date_min"] = work["visit_date_min"]
-    work["row_date_max"] = work["visit_date_max"]
-    work["visit_date_clean"] = work["visit_date"]  # compatibility alias
-    valid_visit_date = work["visit_date"].notna()
-    qc_counts["n_rows_with_valid_visit_date"] = int(valid_visit_date.sum())
-    qc_counts["n_rows_excluded_missing_visit_date"] = int((~valid_visit_date).sum())
-    work["essdai_total"] = coalesce_essdai(work)
-    work = prepare_raw_esspri_proxy_inputs(work, qc_counts)
+    if work[["patient_id", "clinical_episode_id"]].duplicated().any():
+        raise AssertionError("patient_id + clinical_episode_id must be unique")
+    if work["patient_id"].map(is_missing).any() or work["clinical_episode_id"].map(is_missing).any():
+        raise AssertionError("Authoritative patient and clinical episode IDs cannot be missing")
+    work["clinical_anchor_date"] = pd.to_datetime(work["clinical_anchor_date"], errors="coerce")
+    work["clinical_baseline_date"] = pd.to_datetime(work["clinical_baseline_date"], errors="coerce")
+    if work["clinical_anchor_date"].isna().any():
+        raise AssertionError("clinical_anchor_date cannot be missing or invalid")
+    work["is_clinical_baseline"] = work["is_clinical_baseline"].fillna(False).astype(bool)
+    if work.groupby("patient_id")["is_clinical_baseline"].sum().gt(1).any():
+        raise AssertionError("More than one clinical baseline for a patient")
 
+    # Compatibility aliases are direct copies of the authoritative spine fields.
+    work["visit_id"] = work["clinical_episode_id"]
+    work["visit_date"] = work["clinical_anchor_date"]
+    work["visit_date_clean"] = work["clinical_anchor_date"]
+    work["event_date"] = work["clinical_anchor_date"]
+    work["visit_number"] = work["clinical_visit_number"]
+    work["baseline_date"] = work["clinical_baseline_date"]
+    work["observed_baseline_date"] = work["clinical_baseline_date"]
+    work["time_since_observed_baseline_days"] = work["time_since_clinical_baseline_days"]
+    work["time_since_observed_baseline_years"] = work["time_since_clinical_baseline_years"]
+    work["time_since_baseline_days"] = work["time_since_clinical_baseline_days"]
+    work["time_since_baseline_years"] = work["time_since_clinical_baseline_years"]
+    work["time_years"] = work["time_since_clinical_baseline_years"]
+    work["row_date_original"] = work["clinical_anchor_date"]
+    work["row_date_min"] = work["clinical_anchor_date"]
+    work["row_date_max"] = work["clinical_anchor_date"]
     protocol_col = select_first_available(work, PROTOCOL_CANDIDATES, codebook)
     qc_counts["selected_protocol_column"] = protocol_col
-    if protocol_col is None:
-        warnings.append("Variable not found: protocol; protocol-stratified proxy validations omitted.")
-    selected_demo = {
-        "age_raw": select_first_available(work, AGE_CANDIDATES, codebook),
-        "sex_raw": select_first_available(work, SEX_CANDIDATES, codebook),
-        "race_raw": select_first_available(work, RACE_CANDIDATES, codebook),
-    }
-    for k, v in selected_demo.items():
-        qc_counts[f"selected_{k}_column"] = v
-        if v is None:
-            warnings.append(f"Variable not found before collapse: {k.replace('_raw','')}")
-
-    work = work[valid_patient_id & valid_visit_date].copy()
-    qc_counts["n_unique_patients"] = int(work["patient_id"].nunique())
-    qc_counts["n_patient_visit_rows_before_collapse"] = int(len(work))
-    qc_counts["n_duplicate_patient_visit_rows"] = int(work.duplicated(["patient_id", "visit_date"]).sum())
-    qc_counts["n_duplicate_patient_event_dates"] = qc_counts["n_duplicate_patient_visit_rows"]
-    raw_cols = ["essdai_total", "esspri_dryness_observed", "esspri_fatigue_observed", "esspri_pain_observed"] + [c for c in work.columns if c.startswith("raw_")]
-    conflict_df = _detect_duplicate_conflicts(work, raw_cols)
-    qc_counts["n_patient_visits_with_conflicts"] = int(conflict_df[["patient_id", "visit_date"]].drop_duplicates().shape[0]) if not conflict_df.empty else 0
-    qc_counts["n_conflicting_variable_values"] = int(len(conflict_df))
-    BLOCKA_QC_DIR.mkdir(parents=True, exist_ok=True)
-    conflict_df.to_csv(BLOCKA_QC_DIR / "01_esspri_proxy_duplicate_conflicts.csv", index=False)
-    pd.DataFrame(qc_counts.get("invalid_value_rows", [])).to_csv(BLOCKA_QC_DIR / "01_esspri_proxy_invalid_values.csv", index=False)
-
-    agg = {
-        "row_date_original": ("row_date_original", lambda s: " | ".join(pd.Series(s).dropna().astype(str).unique())),
-        "row_date_min": ("row_date_min", "min"), "row_date_max": ("row_date_max", "max"),
-        "essdai_total": ("essdai_total", first_nonmissing),
-    }
-    for c in raw_cols:
-        if c != "essdai_total" and c in work.columns:
-            agg[c] = (c, first_nonmissing)
     if protocol_col:
-        agg["protocol"] = (protocol_col, first_nonmissing)
-    for std, src in selected_demo.items():
-        if src:
-            agg[std.replace("_raw", "")] = (src, first_nonmissing)
-    work = work.groupby(["patient_id", "visit_date"], as_index=False).agg(**agg).sort_values(["patient_id", "visit_date"]).reset_index(drop=True)
-    work["visit_date_clean"] = work["visit_date"]  # compatibility alias
-    work = derive_esspri_proxies_from_collapsed_visit(work, qc_counts)
+        work["protocol"] = work[protocol_col]
+    elif "protocol" not in work:
+        warnings.append("Variable not found: protocol; protocol-stratified proxy validations omitted.")
 
+    invalid_rows: list[dict[str, Any]] = qc_counts.setdefault("invalid_value_rows", [])
+    # Canonical ESSDAI is parsed directly; no candidate coalescing or pipe resolution.
+    work["essdai_total"] = pd.to_numeric(work["essdai__essdai_total_score"], errors="coerce")
+    invalid_essdai = work["essdai_total"].notna() & ~work["essdai_total"].between(0, 123)
+    for idx in work.index[invalid_essdai]:
+        invalid_rows.append({"patient_id": work.at[idx, "patient_id"], "clinical_episode_id": work.at[idx, "clinical_episode_id"], "variable_name": "essdai__essdai_total_score", "invalid_value": work.at[idx, "essdai_total"], "expected_min": 0, "expected_max": 123})
+    work.loc[invalid_essdai, "essdai_total"] = np.nan
+    qc_counts["n_invalid_essdai"] = int(invalid_essdai.sum())
+
+    invalid_components = pd.Series(False, index=work.index)
+    for component, source in ESSPRI_OBSERVED_COMPONENTS.items():
+        raw = pd.to_numeric(work[source], errors="coerce") if source in work else pd.Series(np.nan, index=work.index)
+        invalid = raw.notna() & ~raw.between(0, 10)
+        invalid_components |= invalid
+        for idx in work.index[invalid]:
+            invalid_rows.append({"patient_id": work.at[idx, "patient_id"], "clinical_episode_id": work.at[idx, "clinical_episode_id"], "variable_name": source, "invalid_value": raw.at[idx], "expected_min": 0, "expected_max": 10})
+        work[f"esspri_{component}_observed"] = raw.mask(invalid).astype(float)
+    qc_counts["n_invalid_esspri_components"] = int(invalid_components.sum())
+
+    # Proxy derivation remains sensitivity-only and operates one authoritative episode per row.
+    work = prepare_raw_esspri_proxy_inputs(work, qc_counts)
+    work = derive_esspri_proxies_from_collapsed_visit(work, qc_counts)
     work["esspri_dryness"] = work["esspri_dryness_observed"]
     work["esspri_fatigue"] = work["esspri_fatigue_observed"]
     work["esspri_pain"] = work["esspri_pain_observed"]
@@ -553,67 +534,64 @@ def build_longitudinal_pop_dataset(df: pd.DataFrame, codebook: pd.DataFrame | No
     work["esspri_total_s0_observed"] = work["esspri_total_observed"]
     for comp, src_col in [("dryness", "dryness_proxy_hierarchical_source"), ("fatigue", "fatigue_proxy_hierarchical_source"), ("pain", "pain_proxy_hierarchical_source")]:
         work[f"esspri_{comp}_final_source"] = work[src_col]
-    mask_s1 = work["esspri_n_observed_components"].ge(2) & work["esspri_n_available_components"].eq(3)
-    mask_s2 = work["esspri_n_observed_components"].ge(1) & work["esspri_n_available_components"].eq(3)
-    mask_s3 = work["esspri_n_available_components"].eq(3)
-    work["esspri_total_s1_one_proxy"] = work["esspri_total_proxy"].where(mask_s1)
-    work["esspri_total_s2_up_to_two_proxies"] = work["esspri_total_proxy"].where(mask_s2)
-    work["esspri_total_s3_all_available"] = work["esspri_total_proxy"].where(mask_s3)
-    work["esspri_total_s3_all_available_label"] = pd.Series(pd.NA, index=work.index, dtype="string")
-    work.loc[work["esspri_total_s3_all_available"].notna(), "esspri_total_s3_all_available_label"] = "exploratory_only"
-    mask_s1r = work["esspri_n_observed_components_relaxed"].ge(2) & work["esspri_n_available_components_relaxed"].eq(3)
-    mask_s2r = work["esspri_n_observed_components_relaxed"].ge(1) & work["esspri_n_available_components_relaxed"].eq(3)
-    work["esspri_total_s1_one_proxy_relaxed"] = work["esspri_total_proxy_relaxed"].where(mask_s1r)
-    work["esspri_total_s2_up_to_two_proxies_relaxed"] = work["esspri_total_proxy_relaxed"].where(mask_s2r)
-    for label in ["s1_one_proxy", "s2_up_to_two_proxies", "s3_all_available", "s1_one_proxy_relaxed", "s2_up_to_two_proxies_relaxed"]:
-        total_col = f"esspri_total_{label}"
-        work[f"pop_status_{label}"] = [classify_pop(e, p) for e, p in zip(work["essdai_total"], work[total_col])]
-
+    scenarios = {
+        "s1_one_proxy": work["esspri_n_observed_components"].ge(2) & work["esspri_n_available_components"].eq(3),
+        "s2_up_to_two_proxies": work["esspri_n_observed_components"].ge(1) & work["esspri_n_available_components"].eq(3),
+        "s3_all_available": work["esspri_n_available_components"].eq(3),
+        "s1_one_proxy_relaxed": work["esspri_n_observed_components_relaxed"].ge(2) & work["esspri_n_available_components_relaxed"].eq(3),
+        "s2_up_to_two_proxies_relaxed": work["esspri_n_observed_components_relaxed"].ge(1) & work["esspri_n_available_components_relaxed"].eq(3),
+    }
+    for label, mask in scenarios.items():
+        source = "esspri_total_proxy_relaxed" if label.endswith("relaxed") else "esspri_total_proxy"
+        work[f"esspri_total_{label}"] = work[source].where(mask)
+        work[f"pop_status_{label}"] = [classify_pop(e, p) for e, p in zip(work["essdai_total"], work[f"esspri_total_{label}"])]
+    work["esspri_total_s3_all_available_label"] = np.where(work["esspri_total_s3_all_available"].notna(), "exploratory_only", pd.NA)
     for name, comp, proxy in PROXY_CANDIDATES_S5:
-        d = pd.to_numeric(work["esspri_dryness_observed"], errors="coerce").astype("float64")
-        f = pd.to_numeric(work["esspri_fatigue_observed"], errors="coerce").astype("float64")
-        p = pd.to_numeric(work["esspri_pain_observed"], errors="coerce").astype("float64")
-        proxy_value = pd.to_numeric(work[proxy], errors="coerce").astype("float64")
-        if comp == "dryness": d = proxy_value
-        elif comp == "fatigue": f = proxy_value
-        else: p = proxy_value
-        work[f"esspri_total_replace_{name}"] = compute_esspri_from_components(d, f, p)
-    if int(((work["esspri_total_observed"] < 0) | (work["esspri_total_observed"] > 10)).sum()):
-        raise ValueError("ESSPRI observed total values outside range 0-10")
-    work["pop_status"] = [classify_pop(e, p) for e, p in zip(work["essdai_total"], work["esspri_total_observed"])]
+        components = {k: work[f"esspri_{k}_observed"].copy() for k in ("dryness", "fatigue", "pain")}
+        components[comp] = pd.to_numeric(work[proxy], errors="coerce")
+        work[f"esspri_total_replace_{name}"] = compute_esspri_from_components(components["dryness"], components["fatigue"], components["pain"])
+
+    e, ptotal = work["essdai_total"], work["esspri_total_observed"]
+    work["pop_status_detailed"] = np.select(
+        [e.ge(5), e.lt(5) & ptotal.ge(5), e.lt(5) & ptotal.lt(5), e.lt(5) & ptotal.isna()],
+        ["Pop1", "Pop2", "Pop3", "Unclassified_low_ESSDAI_missing_ESSPRI"],
+        default="Unclassified_missing_ESSDAI",
+    )
+    work["pop_status"] = work["pop_status_detailed"].where(work["pop_status_detailed"].isin(["Pop1", "Pop2", "Pop3"]), "Unclassifiable")
     work["pop_status_display"] = work["pop_status"].map(DISPLAY)
-    work["pop_missingness_label"] = [visit_missingness_label(e, p) for e, p in zip(work["essdai_total"], work["esspri_total_observed"])]
-    spine = pd.read_parquet(common.VISIT_SPINE_PARQUET)[["patient_id", "visit_id", "visit_date", "observed_baseline_date", "time_since_observed_baseline_days", "time_since_observed_baseline_years", "visit_number"]]
-    work = work.merge(spine, on=["patient_id", "visit_date"], how="left", validate="one_to_one")
-    if work["visit_id"].isna().any(): raise ValueError("clinical Pop visits missing from canonical spine")
-    work["baseline_date"] = work["observed_baseline_date"]  # compatibility aliases
-    work["event_date"] = work["visit_date"]
-    work["time_since_baseline_days"] = work["time_since_observed_baseline_days"]
-    work["time_since_baseline_years"] = work["time_since_observed_baseline_years"]
-    work["time_years"] = work["time_since_observed_baseline_years"]
-    baseline_status = work.loc[work["visit_number"].eq(0), ["patient_id", "pop_status", "pop_status_display"]].rename(columns={"pop_status": "baseline_pop_status", "pop_status_display": "baseline_pop_status_display"})
-    work = work.merge(baseline_status, on="patient_id", how="left")
-    qc_counts["n_patient_visit_rows_after_collapse"] = int(len(work))
-    qc_counts["n_rows_missing_visit_date"] = int(work["event_date"].isna().sum())
-    qc_counts["n_rows_missing_essdai"] = int(work["essdai_total"].isna().sum())
-    qc_counts["n_rows_missing_esspri"] = int(work["esspri_total"].isna().sum())
-    qc_counts["n_rows_negative_time"] = int((work["time_years"] < 0).sum())
+    work["pop_missingness_label"] = [visit_missingness_label(x, y) for x, y in zip(e, ptotal)]
+
+    classifiable = work[work["pop_status"].isin(["Pop1", "Pop2", "Pop3"])].sort_values(["patient_id", "clinical_anchor_date", "clinical_episode_id"])
+    pop_base = classifiable.drop_duplicates("patient_id")[["patient_id", "clinical_episode_id", "clinical_anchor_date", "pop_status"]].rename(columns={"clinical_episode_id": "pop_baseline_episode_id", "clinical_anchor_date": "pop_baseline_date", "pop_status": "pop_baseline_status"})
+    work = work.merge(pop_base, on="patient_id", how="left", validate="many_to_one")
+    work["is_pop_baseline"] = work["clinical_episode_id"].eq(work["pop_baseline_episode_id"]) & work["pop_baseline_episode_id"].notna()
+    work["time_since_pop_baseline_days"] = (work["clinical_anchor_date"] - work["pop_baseline_date"]).dt.days.astype("Int64")
+    work["time_since_pop_baseline_years"] = work["time_since_pop_baseline_days"] / 365.25
+
+    clinical_base = work.loc[work["is_clinical_baseline"], ["patient_id", "pop_status", "pop_status_detailed"]].rename(columns={"pop_status": "clinical_baseline_pop_status", "pop_status_detailed": "clinical_baseline_pop_status_detailed"})
+    work = work.merge(clinical_base, on="patient_id", how="left", validate="many_to_one")
+    work["baseline_pop_status"] = work["clinical_baseline_pop_status"]
+    work["baseline_pop_status_display"] = work["baseline_pop_status"].map(DISPLAY)
+
+    qc_counts.update({"n_unique_patients": int(work["patient_id"].nunique()), "n_rows_missing_essdai": int(e.isna().sum()), "n_rows_missing_esspri": int(ptotal.isna().sum()), "n_rows_negative_time": int(pd.to_numeric(work["time_since_clinical_baseline_days"], errors="coerce").lt(0).sum())})
     if qc_counts["n_rows_negative_time"]:
-        warnings.append(f"Excluded {qc_counts['n_rows_negative_time']} rows with negative time_years.")
-        work = work[~(work["time_years"] < 0)].copy()
+        warnings.append(f"QC error: {qc_counts['n_rows_negative_time']} clinical episodes have negative time since clinical baseline; rows retained.")
+    if len(work) != len(df): raise AssertionError("Input and longitudinal output row counts differ")
+    if not work["clinical_episode_id"].reset_index(drop=True).equals(input_episode_ids.reset_index(drop=True)): raise AssertionError("clinical_episode_id changed during processing")
+    if not work["visit_id"].eq(work["clinical_episode_id"]).all(): raise AssertionError("visit_id differs from clinical_episode_id")
+    if work.groupby("patient_id")["is_pop_baseline"].sum().gt(1).any(): raise AssertionError("More than one Pop baseline for a patient")
+    if (work.loc[work["is_pop_baseline"], "pop_status"] == "Unclassifiable").any(): raise AssertionError("Unclassifiable episode selected as Pop baseline")
+    if ((work["pop_status"] == "Pop1") & (~e.ge(5))).any(): raise AssertionError("Invalid Pop1 classification")
+    if ((work["pop_status"] == "Pop2") & (~e.lt(5) | ~ptotal.ge(5))).any(): raise AssertionError("Invalid Pop2 classification")
+    if ((work["pop_status"] == "Pop3") & (~e.lt(5) | ~ptotal.lt(5))).any(): raise AssertionError("Invalid Pop3 classification")
     return normalize_visit_level_dtypes(work), qc_counts, warnings
 
 def build_baseline_dataset(longitudinal: pd.DataFrame) -> pd.DataFrame:
-    rows = []
-    for _, g in longitudinal.groupby("patient_id", dropna=True, sort=True):
-        baseline_rows = g[g["visit_number"].eq(0)].copy()
-        if len(baseline_rows) != 1: raise ValueError("Expected exactly one canonical baseline visit per patient")
-        baseline_rows["_has_essdai"] = baseline_rows["essdai_total"].notna().astype(int)
-        baseline_rows["_has_esspri"] = baseline_rows["esspri_total"].notna().astype(int)
-        baseline_rows = baseline_rows.sort_values(["_has_essdai", "_has_esspri", "row_date_max"], ascending=[False, False, True], na_position="last")
-        rows.append(baseline_rows.iloc[0].drop(labels=["_has_essdai", "_has_esspri"], errors="ignore"))
-    return pd.DataFrame(rows).reset_index(drop=True)
-
+    """Return the upstream-defined clinical baseline (never the Pop baseline)."""
+    baseline = longitudinal.loc[longitudinal["is_clinical_baseline"]].copy()
+    if baseline["patient_id"].duplicated().any():
+        raise AssertionError("More than one clinical baseline for a patient")
+    return baseline.reset_index(drop=True)
 
 def fmt_median_iqr(values: pd.Series) -> str:
     vals = pd.to_numeric(values, errors="coerce").dropna()
@@ -1219,6 +1197,46 @@ def write_outputs(
     write_parquet_with_csv(longitudinal, INTERMEDIATE_DIR / "01_visit_level_classification.parquet")
     write_parquet_with_csv(longitudinal, INTERMEDIATE_DIR / "01_visit_level_esspri_proxy.parquet")
     write_parquet_with_csv(baseline, INTERMEDIATE_DIR / "01_baseline_classification.parquet")
+    pop_baseline = longitudinal.loc[longitudinal["is_pop_baseline"]].copy()
+    write_parquet_with_csv(pop_baseline, INTERMEDIATE_DIR / "01_pop_baseline_classification.parquet")
+    discrepancy_columns = [
+        "patient_id", "clinical_baseline_episode_id", "clinical_baseline_date",
+        "clinical_baseline_pop_status", "clinical_baseline_pop_status_detailed",
+        "pop_baseline_episode_id", "pop_baseline_date", "pop_baseline_status",
+    ]
+    discrepancy = longitudinal.sort_values(["patient_id", "clinical_anchor_date", "clinical_episode_id"]).drop_duplicates("patient_id")[discrepancy_columns].copy()
+    discrepancy["same_episode"] = discrepancy["clinical_baseline_episode_id"].eq(discrepancy["pop_baseline_episode_id"]) & discrepancy["pop_baseline_episode_id"].notna()
+    discrepancy["days_between_clinical_and_pop_baseline"] = (pd.to_datetime(discrepancy["pop_baseline_date"]) - pd.to_datetime(discrepancy["clinical_baseline_date"])).dt.days
+    discrepancy.to_csv(BLOCKA_QC_DIR / "01_clinical_vs_pop_baseline.csv", index=False)
+    detailed_counts = longitudinal["pop_status_detailed"].value_counts()
+    clinical_status = discrepancy["clinical_baseline_pop_status"]
+    migration_qc = {
+        "n_patients": int(longitudinal["patient_id"].nunique()),
+        "n_clinical_visits_input": int(qc["n_input_rows"]),
+        "n_clinical_visits_output": int(len(longitudinal)),
+        "n_unique_clinical_episode_ids": int(longitudinal["clinical_episode_id"].nunique()),
+        "n_duplicate_patient_episode_ids": int(longitudinal.duplicated(["patient_id", "clinical_episode_id"]).sum()),
+        "n_essdai_available": int(longitudinal["essdai_total"].notna().sum()),
+        "n_esspri_dryness_available": int(longitudinal["esspri_dryness_observed"].notna().sum()),
+        "n_esspri_fatigue_available": int(longitudinal["esspri_fatigue_observed"].notna().sum()),
+        "n_esspri_pain_available": int(longitudinal["esspri_pain_observed"].notna().sum()),
+        "n_esspri_complete": int(longitudinal["esspri_total_observed"].notna().sum()),
+        "n_pop1": int(detailed_counts.get("Pop1", 0)), "n_pop2": int(detailed_counts.get("Pop2", 0)), "n_pop3": int(detailed_counts.get("Pop3", 0)),
+        "n_unclassified_low_essdai_missing_esspri": int(detailed_counts.get("Unclassified_low_ESSDAI_missing_ESSPRI", 0)),
+        "n_unclassified_missing_essdai": int(detailed_counts.get("Unclassified_missing_ESSDAI", 0)),
+        "n_patients_with_clinical_baseline": int(discrepancy["clinical_baseline_episode_id"].notna().sum()),
+        "n_patients_with_classifiable_clinical_baseline": int(clinical_status.isin(["Pop1", "Pop2", "Pop3"]).sum()),
+        "n_patients_with_unclassifiable_clinical_baseline": int(clinical_status.eq("Unclassifiable").sum()),
+        "n_patients_with_pop_baseline": int(discrepancy["pop_baseline_episode_id"].notna().sum()),
+        "n_patients_without_pop_baseline": int(discrepancy["pop_baseline_episode_id"].isna().sum()),
+        "n_patients_clinical_baseline_equals_pop_baseline": int(discrepancy["same_episode"].sum()),
+        "n_patients_clinical_baseline_differs_from_pop_baseline": int((discrepancy["pop_baseline_episode_id"].notna() & ~discrepancy["same_episode"]).sum()),
+        "n_invalid_essdai": int(qc.get("n_invalid_essdai", 0)),
+        "n_invalid_esspri_components": int(qc.get("n_invalid_esspri_components", 0)),
+    }
+    pd.DataFrame([migration_qc]).to_csv(BLOCKA_QC_DIR / "01_pop_migration_qc.csv", index=False)
+    with (BLOCKA_QC_DIR / "01_pop_migration_qc.json").open("w", encoding="utf-8") as f:
+        json.dump(migration_qc, f, indent=2)
     table1.to_csv(BLOCKA_TABLES_DIR / "01_table1_by_pop.csv", index=False)
     longitudinal[["patient_id", "visit_id", "visit_date", "observed_baseline_date", "time_since_observed_baseline_days", "time_since_observed_baseline_years", "baseline_date", "event_date", "visit_date_clean", "visit_number", "baseline_pop_status", "baseline_pop_status_display", "time_since_baseline_days", "time_since_baseline_years", "time_years", "essdai_total", "esspri_total", "pop_status", "pop_status_display", "row_date_original", "row_date_min", "row_date_max"]].to_csv(BLOCKA_TABLES_DIR / "01_pop_longitudinal_status.csv", index=False)
     counts = longitudinal.groupby(["pop_status"]).size().reindex(POP_ORDER, fill_value=0).rename("n_visits").reset_index()
@@ -1246,6 +1264,7 @@ def write_outputs(
     proxy_ranking.to_csv(BLOCKA_TABLES_DIR / "01_esspri_proxy_candidate_ranking.csv", index=False)
     make_proxy_figures(longitudinal, proxy_validation, threshold_agreement, proxy_sensitivity)
     pd.DataFrame({"variable": longitudinal.columns, "n_nonmissing": [int(longitudinal[c].notna().sum()) for c in longitudinal.columns]}).to_csv(BLOCKA_QC_DIR / "01_esspri_proxy_variable_availability.csv", index=False)
+    pd.DataFrame(qc.get("invalid_value_rows", [])).to_csv(BLOCKA_QC_DIR / "01_esspri_proxy_invalid_values.csv", index=False)
     with (BLOCKA_QC_DIR / "01_esspri_proxy_qc.json").open("w", encoding="utf-8") as f: json.dump(qc, f, indent=2, default=str)
     visit_unclassifiable_counts.to_csv(BLOCKA_TABLES_DIR / "01_pop_unclassifiable_reason_counts_by_visit.csv", index=False)
     write_parquet_with_csv(visit_unclassifiable_rows, INTERMEDIATE_DIR / "01_unclassifiable_reasons_visit_level.parquet")
@@ -1281,8 +1300,6 @@ def main() -> None:
     n_classifiable = int(baseline_counts[["Pop1", "Pop2", "Pop3"]].sum())
     if int(baseline_counts["Pop1"] + baseline_counts["Pop2"] + baseline_counts["Pop3"]) != n_classifiable:
         raise AssertionError("Pop1 + Pop2 + Pop3 does not equal n_classifiable_baseline")
-    if (longitudinal["time_years"] < 0).any():
-        raise AssertionError("Negative time_years remains after filtering")
     pct = {pop: (100 * int(baseline_counts[pop]) / n_classifiable if n_classifiable else 0.0) for pop in ["Pop1", "Pop2", "Pop3"]}
     claim = (
         f"At baseline, {pct['Pop1']:.1f}% of classifiable patients were classified as Pop 1 (ESSDAI ≥5), "
