@@ -16,7 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 import common  # noqa: E402
 
-INPUT_PATH = common.SOURCE_EPISODE_SPINE
+INPUT_PATH = common.EPISODE_SPINE_PARQUET
 ID_COL = "patient_id"
 ESSDAI_TOTAL_COL = "essdai__essdai_total_score"
 VISIT_NUMBER_COL = "clinical_visit_number"
@@ -234,6 +234,11 @@ def write_outputs(clinical_df, baseline_df, activity, domains, by_visit, domains
 
 def main():
     ensure_dirs()
+    if not INPUT_PATH.exists():
+        raise FileNotFoundError(
+            f"Step 00 episode spine not found: {INPUT_PATH}. "
+            "Run src/00_build_visit_spine.py before this analysis."
+        )
     df = pd.read_parquet(INPUT_PATH); require_spine_columns(df)
     df["clinical_visit_bool"] = _as_bool(df["clinical_visit"])
     df["is_clinical_baseline_bool"] = _as_bool(df["is_clinical_baseline"])
