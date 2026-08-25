@@ -1092,7 +1092,7 @@ def build_pop2_pop3_reclassification(longitudinal: pd.DataFrame) -> tuple[pd.Dat
 def build_proxy_sensitivity_summary(longitudinal: pd.DataFrame) -> pd.DataFrame:
     scenarios=[("S0_observed_official","esspri_total_s0_observed","pop_status"),("S1_one_proxy","esspri_total_s1_one_proxy","pop_status_s1_one_proxy"),("S2_up_to_two_proxies","esspri_total_s2_up_to_two_proxies","pop_status_s2_up_to_two_proxies"),("S3_all_available_exploratory_only","esspri_total_s3_all_available","pop_status_s3_all_available"),("S4_S1_one_proxy_relaxed","esspri_total_s1_one_proxy_relaxed","pop_status_s1_one_proxy_relaxed"),("S4_S2_up_to_two_proxies_relaxed","esspri_total_s2_up_to_two_proxies_relaxed","pop_status_s2_up_to_two_proxies_relaxed")]
     rows=[]
-    for scope,df in [("all_visits",longitudinal),("baseline",longitudinal[longitudinal["visit_number"].eq(0)])]:
+    for scope,df in [("all_visits",longitudinal),("baseline",longitudinal[longitudinal["is_clinical_baseline"].eq(True)])]:
         denom=len(df); s0=None
         for scenario,total_col,pop_col in scenarios:
             pop=df[pop_col] if pop_col in df else pd.Series("Unclassifiable",index=df.index); nclass=int(pop.isin(["Pop1","Pop2","Pop3"]).sum())
