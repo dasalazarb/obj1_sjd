@@ -70,11 +70,16 @@ INVALID_MAPPING = re.compile(
     r"unmapped|invalid|excluded|reject|no[_ ]?mapping|ambiguous", re.I
 )
 QC_DETAIL = [
+    "_lab_record_id",
     "patient_id",
+    "patient_id__eda_source",
     "clinical_episode_id",
     "clinical_anchor_date",
+    "clinical_visit",
+    "visit_type",
     "canonical_analyte",
     "lab_family",
+    "analytic_role",
     "lab_date",
     "days_from_clinical_anchor",
     "result_raw",
@@ -84,12 +89,61 @@ QC_DETAIL = [
     "result_text",
     "unit",
     "reference_range_raw",
+    "reference_low",
+    "reference_high",
     "reported_interpretation",
     "order_identifier",
     "specimen_datetime",
     "assay",
     "reason_for_review",
 ]
+LEGACY_QC_DETAIL = [
+    column
+    for column in QC_DETAIL
+    if column
+    not in {
+        "_lab_record_id",
+        "patient_id__eda_source",
+        "clinical_visit",
+        "visit_type",
+        "analytic_role",
+        "reference_low",
+        "reference_high",
+    }
+]
+
+# This is deliberately a small, auditable nomenclature map, not an inferred
+# conversion table.  Keys and values are normalized by ``_normal_unit``.
+UNIT_ALIASES = {
+    "k/mcl": "k/ul",
+    "k/ul": "k/ul",
+    "m/mcl": "m/ul",
+    "m/ul": "m/ul",
+    "mciu/ml": "uiu/ml",
+    "uiu/ml": "uiu/ml",
+}
+
+# Canonical units are explicitly declared for safe aliases.  An analyte/unit
+# combination absent here is retained, but is not made cross-unit comparable.
+CANONICAL_UNIT_MAP = {
+    ("wbc", "k/mcl"): "k/ul",
+    ("wbc", "k/ul"): "k/ul",
+    ("rbc", "m/mcl"): "m/ul",
+    ("rbc", "m/ul"): "m/ul",
+}
+UNIT_CONVERSIONS: dict[tuple[str, str, str], float] = {}
+METHOD_DEPENDENT_ANALYTES = {
+    "ana",
+    "anti-dsdna",
+    "anti_dsdna",
+    "anti-tpo",
+    "anti_tpo",
+    "urine rbc",
+    "urine_rbc",
+    "urine wbc",
+    "urine_wbc",
+    "urobilinogen",
+}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -161,10 +215,16 @@ def _coerce_analyte_output_schema(frame: pd.DataFrame) -> pd.DataFrame:
         "episode_numeric_min",
         "episode_numeric_max",
         "episode_numeric_median",
+        "episode_numeric_range",
+        "selected_value_numeric_original",
+        "selected_value_numeric_harmonized",
     ]
     boolean_columns = [
         "clinical_visit",
         "same_day_conflict",
+        "same_day_multiple_measurements",
+        "repeated_numeric_measurement",
+        "true_result_conflict",
         "unit_conflict",
         "result_conflict",
     ]
@@ -185,6 +245,9 @@ def _coerce_analyte_output_schema(frame: pd.DataFrame) -> pd.DataFrame:
         "selected_value_text",
         "selected_reported_interpretation",
         "selected_unit",
+        "selected_unit_original",
+        "selected_unit_harmonized",
+        "unit_harmonization_status",
         "selected_reference_range_raw",
         "selected_reference_operator",
         "selected_reference_status",
@@ -287,6 +350,79 @@ def _normal_unit(value: Any) -> Any:
         if pd.isna(value) or not str(value).strip()
         else re.sub(r"\s+", " ", str(value).strip()).casefold()
     )
+
+
+def _comparable_unit(value: Any) -> Any:
+    unit = _normal_unit(value)
+    return UNIT_ALIASES.get(unit, unit) if pd.notna(unit) else pd.NA
+
+
+def harmonize_selected_units(selected: pd.DataFrame) -> pd.DataFrame:
+    """Add provenance-preserving, explicitly governed numeric harmonization."""
+    out = selected.copy()
+    original_unit = _column(out, "selected_unit").astype("string")
+    original_value = pd.to_numeric(
+        _column(out, "selected_value_numeric"), errors="coerce"
+    )
+    harmonized_units, harmonized_values, statuses = [], [], []
+    for analyte, unit_raw, value, conflict in zip(
+        _column(out, "canonical_analyte"),
+        original_unit,
+        original_value,
+        _column(out, "unit_conflict", False),
+    ):
+        analyte_key = str(analyte).strip().casefold()
+        unit = _normal_unit(unit_raw)
+        if bool(conflict):
+            canonical, converted, status = pd.NA, np.nan, "unit_conflict"
+        elif pd.isna(unit):
+            canonical, converted, status = pd.NA, np.nan, "missing_unit"
+        else:
+            canonical = CANONICAL_UNIT_MAP.get((analyte_key, unit))
+            if canonical is not None:
+                converted = value
+                status = "alias_normalized" if canonical != unit else "same_as_canonical"
+            elif analyte_key in METHOD_DEPENDENT_ANALYTES:
+                converted, status = np.nan, "not_convertible"
+                canonical = pd.NA
+            else:
+                # A sole observed unit is its own canonical unit.  Cross-unit
+                # analytes are invalidated below, unless every unit is a safe alias.
+                canonical = UNIT_ALIASES.get(unit, unit)
+                converted = value
+                status = (
+                    "alias_normalized" if canonical != unit else "same_as_canonical"
+                )
+        harmonized_units.append(canonical)
+        harmonized_values.append(converted)
+        statuses.append(status)
+    out["selected_unit_original"] = original_unit
+    out["selected_value_numeric_original"] = original_value
+    out["selected_unit_harmonized"] = pd.Series(harmonized_units, index=out.index)
+    out["selected_value_numeric_harmonized"] = pd.Series(
+        harmonized_values, index=out.index
+    )
+    out["unit_harmonization_status"] = pd.Series(statuses, index=out.index)
+
+    # Never silently choose among genuinely different units across episodes.
+    for analyte, indexes in out.groupby("canonical_analyte", dropna=False).groups.items():
+        units = {
+            _normal_unit(x)
+            for x in out.loc[indexes, "selected_unit_original"].dropna()
+        }
+        comparable = {UNIT_ALIASES.get(x, x) for x in units}
+        if len(comparable) > 1:
+            safe = out.loc[indexes, "unit_harmonization_status"].isin(
+                ["converted"]
+            ) | out.loc[indexes, "selected_unit_original"].map(
+                lambda x: (str(analyte).strip().casefold(), _normal_unit(x))
+                in CANONICAL_UNIT_MAP
+            )
+            unsafe = pd.Index(indexes)[~safe.to_numpy()]
+            out.loc[unsafe, "selected_unit_harmonized"] = pd.NA
+            out.loc[unsafe, "selected_value_numeric_harmonized"] = np.nan
+            out.loc[unsafe, "unit_harmonization_status"] = "not_convertible"
+    return _coerce_analyte_output_schema(out)
 
 
 def _text(row: pd.Series, name: str) -> str:
@@ -403,130 +539,120 @@ def _signature(row: pd.Series) -> tuple[Any, ...]:
     return kind, value, _normal_unit(row.get("unit"))
 
 
+def _semantic_signature(row: pd.Series) -> tuple[Any, ...]:
+    """Represent meaning, without treating repeated exact values as categories."""
+    kind = _value_type(row)
+    if kind == "qualitative":
+        status = _reference_status(row)
+        return (kind, status) if status != "uninterpretable" else _signature(row)[:2]
+    if kind == "censored_numeric":
+        return _signature(row)[:2]
+    return (kind,)
+
+
 def select_episode_analytes(
     usable: pd.DataFrame, spine: pd.DataFrame
 ) -> tuple[pd.DataFrame, set[int]]:
     anchor = spine.set_index(KEY)
-    rows, conflict_indexes = [], set()
+    rows: list[dict[str, Any]] = []
+    conflict_record_ids: set[int] = set()
     for key, original in usable.groupby(ANALYTE_KEY, sort=False, dropna=False):
         group = _deduplicate(original)
         distances = pd.to_numeric(group["days_from_clinical_anchor"], errors="coerce")
         minimum = distances.abs().min() if distances.notna().any() else np.nan
-        nearest = (
-            group[distances.abs().eq(minimum)].copy()
-            if pd.notna(minimum)
-            else group.copy()
-        )
-        pre = pd.to_numeric(nearest["days_from_clinical_anchor"], errors="coerce") <= 0
+        nearest = group[distances.abs().eq(minimum)].copy() if pd.notna(minimum) else group.copy()
+        # At equal absolute distance, anchor-day/pre-anchor evidence precedes post-anchor.
+        pre = pd.to_numeric(nearest["days_from_clinical_anchor"], errors="coerce").le(0)
         if pre.any():
-            nearest = nearest[pre]
-        signatures = {_signature(row) for _, row in nearest.iterrows()}
-        units = (
-            {_normal_unit(x) for x in group["unit"].dropna()}
-            if "unit" in group
-            else set()
-        )
-        units.discard(pd.NA)
-        unit_conflict = len(units) > 1 and any(
-            _value_type(r) == "exact_numeric" for _, r in group.iterrows()
-        )
-        result_conflict = len(signatures) > 1
-        conflict = unit_conflict or result_conflict
+            nearest = nearest[pre].copy()
+
+        value_types = group.apply(_value_type, axis=1)
+        nearest_types = nearest.apply(_value_type, axis=1)
+        exact = pd.to_numeric(_column(group, "result_numeric_exact"), errors="coerce")
+        exact_rows = group[value_types.eq("exact_numeric")].copy()
+        comparable_units = {_comparable_unit(x) for x in exact_rows.get("unit", pd.Series(dtype="object")).dropna()}
+        comparable_units.discard(pd.NA)
+        unit_conflict = len(comparable_units) > 1
+        repeated_numeric = len(exact_rows) >= 2 and not unit_conflict
+
+        # Numeric variation is not semantic disagreement.  Censored observations
+        # remain distinct, and mixed/categorical states must agree exactly.
+        if nearest_types.eq("exact_numeric").all() and not unit_conflict:
+            result_conflict = False
+        else:
+            semantic_signatures = {
+                _semantic_signature(row) for _, row in nearest.iterrows()
+            }
+            result_conflict = len(semantic_signatures) > 1
+        conflict = bool(unit_conflict or result_conflict)
         if conflict:
-            conflict_indexes.update(original.index)
+            conflict_record_ids.update(
+                original["_lab_record_id"].dropna().astype(int).tolist()
+            )
+
         chosen = nearest.sort_values(["lab_date"], kind="stable").iloc[0]
         value_type = _value_type(chosen)
+        nearest_exact = pd.to_numeric(
+            _column(nearest[nearest_types.eq("exact_numeric")], "result_numeric_exact"),
+            errors="coerce",
+        ).dropna()
+        repeated_nearest = len(nearest_exact) >= 2 and not conflict
         selected_numeric = (
-            pd.to_numeric(
-                pd.Series([chosen.get("result_numeric_exact")]), errors="coerce"
-            ).iloc[0]
-            if value_type == "exact_numeric" and not conflict
+            nearest_exact.median()
+            if value_type == "exact_numeric" and not conflict and len(nearest_exact)
             else np.nan
         )
         text_value = _text(chosen, "result_text") or (
-            _text(chosen, "result_raw")
-            if value_type in {"qualitative", "uninterpretable"}
-            else ""
+            _text(chosen, "result_raw") if value_type in {"qualitative", "uninterpretable"} else ""
         )
-        exact = pd.to_numeric(_column(group, "result_numeric_exact"), errors="coerce")
-        compatible = (
-            exact[group["unit"].map(_normal_unit).eq(_normal_unit(chosen.get("unit")))]
-            if "unit" in group and not unit_conflict
-            else exact.iloc[0:0]
-        )
+        compatible = exact if repeated_numeric else exact.iloc[0:0]
         spine_row = anchor.loc[(key[0], key[1])]
-        row = {
-            "patient_id": key[0],
-            "clinical_episode_id": key[1],
+        if conflict:
+            selection_status = "conflict"
+        elif repeated_nearest:
+            selection_status = "selected_repeated_numeric_median"
+        elif value_type == "qualitative":
+            selection_status = "selected_qualitative"
+        elif value_type == "censored_numeric":
+            selection_status = "selected_censored"
+        elif value_type == "uninterpretable":
+            selection_status = "selected_uninterpretable"
+        else:
+            selection_status = "selected_single"
+        rows.append({
+            "patient_id": key[0], "clinical_episode_id": key[1],
             "clinical_anchor_date": spine_row.get("clinical_anchor_date"),
-            "clinical_visit_number": spine_row.get(
-                "clinical_visit_number", spine_row.get("visit_number", pd.NA)
-            ),
+            "clinical_visit_number": spine_row.get("clinical_visit_number", spine_row.get("visit_number", pd.NA)),
             "clinical_visit": spine_row.get("clinical_visit", pd.NA),
             "visit_type": spine_row.get("visit_type", pd.NA),
             "episode_start_date": spine_row.get("episode_start_date", pd.NaT),
             "episode_end_date": spine_row.get("episode_end_date", pd.NaT),
-            "canonical_analyte": key[2],
-            "lab_family": chosen.get("lab_family"),
-            "analytic_role": chosen.get("analytic_role"),
-            "selected_lab_date": chosen.get("lab_date"),
-            "selected_days_from_clinical_anchor": chosen.get(
-                "days_from_clinical_anchor"
-            ),
-            "selected_value_type": value_type,
-            "selected_value_numeric": selected_numeric,
-            "selected_operator": (
-                chosen.get("result_operator")
-                if value_type == "censored_numeric" and not conflict
-                else pd.NA
-            ),
-            "selected_numeric_bound": (
-                chosen.get("result_numeric_bound")
-                if value_type == "censored_numeric" and not conflict
-                else np.nan
-            ),
+            "canonical_analyte": key[2], "lab_family": chosen.get("lab_family"),
+            "analytic_role": chosen.get("analytic_role"), "selected_lab_date": chosen.get("lab_date"),
+            "selected_days_from_clinical_anchor": chosen.get("days_from_clinical_anchor"),
+            "selected_value_type": value_type, "selected_value_numeric": selected_numeric,
+            "selected_operator": chosen.get("result_operator") if value_type == "censored_numeric" and not conflict else pd.NA,
+            "selected_numeric_bound": chosen.get("result_numeric_bound") if value_type == "censored_numeric" and not conflict else np.nan,
             "selected_value_text": text_value if not conflict else pd.NA,
-            "selected_reported_interpretation": (
-                chosen.get("reported_interpretation") if not conflict else pd.NA
-            ),
+            "selected_reported_interpretation": chosen.get("reported_interpretation") if not conflict else pd.NA,
             "selected_unit": chosen.get("unit") if not unit_conflict else pd.NA,
             "selected_reference_range_raw": chosen.get("reference_range_raw"),
-            "selected_reference_low": chosen.get("reference_low"),
-            "selected_reference_high": chosen.get("reference_high"),
-            "selected_reference_operator": chosen.get("reference_operator"),
-            "selected_reference_bound": chosen.get("reference_bound"),
-            "selected_reference_status": (
-                _reference_status(chosen) if not conflict else pd.NA
-            ),
-            "n_measurements_in_episode": len(group),
-            "n_valid_measurements_in_episode": len(group),
-            "same_day_conflict": bool(result_conflict and minimum == 0),
-            "unit_conflict": bool(unit_conflict),
-            "result_conflict": bool(result_conflict),
-            "selection_status": (
-                "conflict"
-                if conflict
-                else (
-                    "selected"
-                    if value_type != "uninterpretable"
-                    else "selected_uninterpretable"
-                )
-            ),
+            "selected_reference_low": chosen.get("reference_low"), "selected_reference_high": chosen.get("reference_high"),
+            "selected_reference_operator": chosen.get("reference_operator"), "selected_reference_bound": chosen.get("reference_bound"),
+            "selected_reference_status": _reference_status(chosen) if not conflict else pd.NA,
+            "n_measurements_in_episode": len(group), "n_valid_measurements_in_episode": len(group),
+            "same_day_multiple_measurements": bool(len(nearest) > 1 and minimum == 0),
+            "same_day_conflict": bool(result_conflict and len(nearest) > 1 and minimum == 0),
+            "repeated_numeric_measurement": bool(repeated_numeric),
+            "unit_conflict": bool(unit_conflict), "true_result_conflict": bool(result_conflict),
+            "result_conflict": bool(result_conflict), "selection_status": selection_status,
             "source_protocol": chosen.get("source_protocol"),
-            "episode_numeric_min": (
-                compatible.min() if compatible.notna().any() else np.nan
-            ),
-            "episode_numeric_max": (
-                compatible.max() if compatible.notna().any() else np.nan
-            ),
-            "episode_numeric_median": (
-                compatible.median() if compatible.notna().any() else np.nan
-            ),
-        }
-        rows.append(row)
-    selected = _coerce_analyte_output_schema(pd.DataFrame(rows))
-    return selected, conflict_indexes
-
+            "episode_numeric_min": compatible.min() if compatible.notna().any() else np.nan,
+            "episode_numeric_max": compatible.max() if compatible.notna().any() else np.nan,
+            "episode_numeric_median": compatible.median() if compatible.notna().any() else np.nan,
+            "episode_numeric_range": compatible.max() - compatible.min() if compatible.notna().any() else np.nan,
+        })
+    return _coerce_analyte_output_schema(pd.DataFrame(rows)), conflict_record_ids
 
 def _status_is_positive(value: Any) -> Any:
     if pd.isna(value):
@@ -548,8 +674,13 @@ def build_wide(
     wide_base = spine[base_columns].copy().set_index(KEY)
     wide_index = wide_base.index
     feature_frames: list[pd.DataFrame] = []
+    numeric_wide_source = (
+        "selected_value_numeric_harmonized"
+        if "selected_value_numeric_harmonized" in selected
+        else "selected_value_numeric"
+    )
     fields = {
-        "selected_value_numeric": "value",
+        numeric_wide_source: "value",
         "selected_value_text": "text",
         "selected_unit": "unit",
         "selected_reference_status": "reference_status",
@@ -667,7 +798,7 @@ def _detail(frame: pd.DataFrame, reason: str, spine: pd.DataFrame) -> pd.DataFra
         for p, e in zip(out.patient_id, out.clinical_episode_id)
     ]
     out["reason_for_review"] = reason
-    return out.reindex(columns=QC_DETAIL)
+    return out.reindex(columns=LEGACY_QC_DETAIL)
 
 
 def write_table1(baseline: pd.DataFrame) -> None:
@@ -724,6 +855,10 @@ def main(argv: list[str] | None = None) -> None:
         pd.read_parquet(args.labs_long),
         pd.read_parquet(args.baseline_labs),
     )
+    labs = labs.copy()
+    labs["_lab_record_id"] = pd.RangeIndex(start=0, stop=len(labs), step=1)
+    if labs["_lab_record_id"].duplicated().any():
+        raise AssertionError("Duplicate _lab_record_id")
     required_spine = set(KEY + ["clinical_anchor_date"])
     required_labs = {
         "patient_id",
@@ -773,7 +908,6 @@ def main(argv: list[str] | None = None) -> None:
         and not _bool(clinical_spine["clinical_visit"]).all()
     ):
         raise AssertionError("Clinical spine contains clinical_visit != True")
-    labs = labs.copy()
     labs["lab_date"] = pd.to_datetime(labs.lab_date, errors="coerce")
     mapped = labs.canonical_analyte.notna() & _mapping_valid(labs)
     valid_result = _bool(labs.result_valid_for_analysis)
@@ -873,7 +1007,8 @@ def main(argv: list[str] | None = None) -> None:
                 f"Lab-source {column} disagrees with authoritative all-episode spine"
             )
         usable_all = usable_all.drop(columns=f"{column}__lab_source")
-    selected_all, conflict_indexes = select_episode_analytes(usable_all, all_spine)
+    selected_all, conflict_record_ids = select_episode_analytes(usable_all, all_spine)
+    selected_all = harmonize_selected_units(selected_all)
     if (
         "clinical_visit_number" in selected_all
         and str(selected_all["clinical_visit_number"].dtype) != "Int64"
@@ -976,11 +1111,18 @@ def main(argv: list[str] | None = None) -> None:
     wide[serology_cols].to_parquet(args.serology_output, index=False)
 
     unmatched_df, ambiguous_df = labs[~matched], labs[ambiguous]
-    conflict_df = _detail(
-        labs.loc[labs.index.intersection(conflict_indexes)],
-        "episode_result_or_unit_conflict",
-        all_spine,
-    )
+    conflict_df = usable_all.loc[
+        usable_all["_lab_record_id"].isin(conflict_record_ids)
+    ].copy()
+    conflict_df["reason_for_review"] = "episode_result_or_unit_conflict"
+    conflict_df = conflict_df.reindex(columns=QC_DETAIL)
+    if not conflict_df.empty:
+        if conflict_df["canonical_analyte"].isna().any():
+            raise AssertionError("Conflict QC contains rows without canonical_analyte")
+        if conflict_df["clinical_episode_id"].isna().any():
+            raise AssertionError("Conflict QC contains rows without clinical_episode_id")
+        if conflict_df["_lab_record_id"].duplicated().any():
+            raise AssertionError("Conflict QC contains duplicate _lab_record_id")
     _detail(unmatched_df, "unmatched_episode", all_spine).to_csv(
         common.BLOCKA_QC_DIR / "01_labs_unmatched_records.csv", index=False
     )
@@ -1037,6 +1179,48 @@ def main(argv: list[str] | None = None) -> None:
     unit_conflicts.to_csv(
         common.BLOCKA_QC_DIR / "01_labs_unit_conflicts.csv", index=False
     )
+    harmonization_qc = (
+        selected_all.groupby(
+            [
+                "canonical_analyte",
+                "selected_unit_original",
+                "selected_unit_harmonized",
+                "unit_harmonization_status",
+            ],
+            dropna=False,
+        )
+        .agg(
+            n_records=("canonical_analyte", "size"),
+            n_patients=("patient_id", "nunique"),
+            n_episodes=("clinical_episode_id", "nunique"),
+            n_values=("selected_value_numeric_original", "count"),
+        )
+        .reset_index()
+        .rename(
+            columns={
+                "selected_unit_original": "original_unit",
+                "selected_unit_harmonized": "canonical_unit",
+                "unit_harmonization_status": "harmonization_action",
+            }
+        )
+    )
+    harmonization_qc["conversion_applied"] = harmonization_qc[
+        "harmonization_action"
+    ].eq("converted")
+    harmonization_qc["n_values_converted"] = harmonization_qc["n_values"].where(
+        harmonization_qc["conversion_applied"], 0
+    )
+    harmonization_qc["n_values_not_convertible"] = harmonization_qc[
+        "n_values"
+    ].where(harmonization_qc["harmonization_action"].eq("not_convertible"), 0)
+    harmonization_qc = harmonization_qc.drop(columns="n_values")
+    if harmonization_qc.duplicated(
+        ["canonical_analyte", "original_unit", "canonical_unit"]
+    ).any():
+        raise AssertionError("Unit harmonization collisions")
+    harmonization_qc.to_csv(
+        common.BLOCKA_QC_DIR / "01_labs_unit_harmonization_qc.csv", index=False
+    )
 
     coverage_rows = []
     total_patients, total_episodes = (
@@ -1088,6 +1272,9 @@ def main(argv: list[str] | None = None) -> None:
                     int((sel.result_conflict | sel.unit_conflict).sum())
                     if len(sel)
                     else 0
+                ),
+                "n_repeated_numeric_episode_analytes": (
+                    int(sel.repeated_numeric_measurement.sum()) if len(sel) else 0
                 ),
                 "n_ambiguous_episode_matches": int(
                     ambiguous.reindex(raw.index, fill_value=False).sum()
@@ -1177,6 +1364,23 @@ def main(argv: list[str] | None = None) -> None:
         "n_unit_conflicts": (
             int(selected_all.unit_conflict.sum()) if len(selected_all) else 0
         ),
+        "n_analytes_with_multiple_units": int(
+            inventory.groupby("canonical_analyte")["unit"].nunique().gt(1).sum()
+        ),
+        "n_unit_alias_normalizations": int(
+            selected_all.unit_harmonization_status.eq("alias_normalized").sum()
+        ),
+        "n_unit_numeric_conversions": int(
+            selected_all.unit_harmonization_status.eq("converted").sum()
+        ),
+        "n_unit_not_convertible": int(
+            selected_all.unit_harmonization_status.eq("not_convertible").sum()
+        ),
+        "n_repeated_numeric_episode_analytes": int(
+            selected_all.repeated_numeric_measurement.sum()
+        ),
+        "n_true_result_conflicts": int(selected_all.true_result_conflict.sum()),
+        "n_true_unit_conflicts": int(selected_all.unit_conflict.sum()),
         "n_exact_numeric_selected": (
             int(selected_all.selected_value_type.eq("exact_numeric").sum())
             if len(selected_all)
