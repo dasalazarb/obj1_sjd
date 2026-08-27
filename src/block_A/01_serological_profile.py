@@ -26,6 +26,7 @@ import common  # noqa: E402
 
 LOG = logging.getLogger(__name__)
 KEY = ["patient_id", "clinical_episode_id"]
+MATCH_KEY = ["_patient_id_match", "clinical_episode_id"]
 ANALYTE_KEY = KEY + ["canonical_analyte"]
 DEFAULT_LABS = Path(
     "/data/salazarda/data/eda_sjd/data_analytic/BTRIS/20_btris_lab_records_long.parquet"
@@ -110,6 +111,17 @@ def _bool(series: pd.Series) -> pd.Series:
     return (
         series.astype("string").str.strip().str.lower().isin({"true", "1", "yes", "y"})
     )
+
+
+def _normalize_patient_id(series: pd.Series) -> pd.Series:
+    """Reproduce the EDA patient-ID normalization used at the integration boundary."""
+    normalized = (
+        series.astype("string")
+        .str.strip()
+        .str.replace(r"[-/\\\s]", "", regex=True)
+        .str.replace(r"^0+", "", regex=True)
+    )
+    return normalized.mask(normalized.isin(["", "nan", "None"]))
 
 
 def _column(frame: pd.DataFrame, name: str, default: Any = pd.NA) -> pd.Series:
@@ -198,8 +210,9 @@ def _logical_id(row: pd.Series) -> str:
     assay = _text(row, "assay")
     if specimen and assay:
         return f"specimen-assay:{specimen}|{assay}"
-    order_name, cluster = _text(row, "order_name_original"), _text(
-        row, "cluster_name_original"
+    order_name, cluster = (
+        _text(row, "order_name_original"),
+        _text(row, "cluster_name_original"),
     )
     if specimen and order_name and cluster:
         return f"specimen-order-cluster:{specimen}|{order_name}|{cluster}"
@@ -565,6 +578,18 @@ def main(argv: list[str] | None = None) -> None:
         raise ValueError(
             f"Labs missing required columns: {sorted(required_labs - set(labs))}"
         )
+    for frame in (all_spine, clinical_spine, labs, baseline):
+        frame["_patient_id_match"] = _normalize_patient_id(frame["patient_id"])
+
+    patient_crosswalk = all_spine[["patient_id", "_patient_id_match"]].drop_duplicates()
+    collision_counts = patient_crosswalk.groupby("_patient_id_match")[
+        "patient_id"
+    ].nunique()
+    normalization_collisions = int(collision_counts.gt(1).sum())
+    if normalization_collisions:
+        raise AssertionError(
+            "Patient-ID normalization creates collisions in authoritative spine"
+        )
     if all_spine.duplicated(KEY).any():
         raise AssertionError(
             "Duplicate patient_id + clinical_episode_id in all-episode spine"
@@ -587,12 +612,53 @@ def main(argv: list[str] | None = None) -> None:
     eligible = mapped & valid_result & matched & ~ambiguous
     usable_all = labs[eligible].copy()
     usable_all["clinical_episode_id"] = usable_all.matched_clinical_episode_id
-    all_spine_keys = pd.MultiIndex.from_frame(all_spine[KEY])
-    usable_all_keys = pd.MultiIndex.from_frame(usable_all[KEY])
-    if not usable_all_keys.isin(all_spine_keys).all():
+    all_spine_match_keys = pd.MultiIndex.from_frame(all_spine[MATCH_KEY])
+    usable_all_match_keys = pd.MultiIndex.from_frame(usable_all[MATCH_KEY])
+    resolved_lab_rows = usable_all_match_keys.isin(all_spine_match_keys)
+    unresolved_lab_rows = int((~resolved_lab_rows).sum())
+    if unresolved_lab_rows:
         raise AssertionError(
-            "Matched lab episode is absent from authoritative all-episode spine"
+            "Matched lab episode is absent from authoritative all-episode spine "
+            "after patient-ID normalization"
         )
+    raw_spine_keys = pd.MultiIndex.from_frame(all_spine[KEY])
+    raw_usable_keys = pd.MultiIndex.from_frame(usable_all[KEY])
+    rows_resolved_by_normalization = int(
+        (resolved_lab_rows & ~raw_usable_keys.isin(raw_spine_keys)).sum()
+    )
+
+    obj1_by_normalized = patient_crosswalk.set_index("_patient_id_match")["patient_id"]
+    lab_patient_groups = labs.groupby("_patient_id_match", dropna=False)
+    crosswalk_qc = lab_patient_groups.agg(
+        patient_id_eda=("patient_id", "first"),
+        n_lab_records=("patient_id", "size"),
+    ).reset_index()
+    matched_episode_counts = (
+        usable_all.groupby("_patient_id_match")["clinical_episode_id"]
+        .nunique()
+        .rename("n_matched_episodes")
+    )
+    crosswalk_qc["patient_id_obj1"] = crosswalk_qc["_patient_id_match"].map(
+        obj1_by_normalized
+    )
+    crosswalk_qc = crosswalk_qc.join(matched_episode_counts, on="_patient_id_match")
+    crosswalk_qc["n_matched_episodes"] = (
+        crosswalk_qc["n_matched_episodes"].fillna(0).astype(int)
+    )
+    crosswalk_qc = crosswalk_qc.rename(
+        columns={"_patient_id_match": "patient_id_normalized"}
+    ).reindex(
+        columns=[
+            "patient_id_obj1",
+            "patient_id_normalized",
+            "patient_id_eda",
+            "n_lab_records",
+            "n_matched_episodes",
+        ]
+    )
+    crosswalk_qc.to_csv(
+        common.BLOCKA_QC_DIR / "01_labs_patient_id_crosswalk_qc.csv", index=False
+    )
 
     # Episode metadata belongs to the authoritative spine.  Refuse collisions
     # rather than silently replacing similarly named lab-source columns.
@@ -612,12 +678,17 @@ def main(argv: list[str] | None = None) -> None:
     ]
     collisions = set(context_columns).intersection(usable_all.columns)
     usable_all = usable_all.rename(columns={c: f"{c}__lab_source" for c in collisions})
+    usable_all = usable_all.rename(columns={"patient_id": "patient_id__eda_source"})
     usable_all = usable_all.merge(
-        all_spine[KEY + context_columns],
-        on=KEY,
+        all_spine[MATCH_KEY + ["patient_id"] + context_columns],
+        on=MATCH_KEY,
         how="left",
         validate="many_to_one",
     )
+    if usable_all["patient_id"].isna().any():
+        raise AssertionError(
+            "Lab matched episode still cannot be resolved after patient-ID normalization"
+        )
     for column in collisions:
         source = usable_all[f"{column}__lab_source"]
         authoritative = usable_all[column]
@@ -636,8 +707,7 @@ def main(argv: list[str] | None = None) -> None:
     if not selected_all.empty and selected_all.duplicated(ANALYTE_KEY).any():
         raise AssertionError("Duplicate analyte-level keys")
     clinical_keys = pd.MultiIndex.from_frame(clinical_spine[KEY])
-    usable_all_index = pd.MultiIndex.from_frame(usable_all[KEY])
-    usable_clinical = usable_all.loc[usable_all_index.isin(clinical_keys)].copy()
+    usable_clinical = usable_all.loc[_bool(usable_all["clinical_visit"])].copy()
     if selected_all.empty:
         selected_clinical = selected_all.copy()
     else:
@@ -646,16 +716,23 @@ def main(argv: list[str] | None = None) -> None:
             selected_all_index.isin(clinical_keys)
         ].copy()
     wide, future_violations = build_wide(clinical_spine, selected_clinical, usable_all)
-    if baseline.patient_id.duplicated().any():
-        raise AssertionError("20b baseline has duplicate patient_id rows")
-    baseline_cols = ["patient_id"] + [c for c in BASELINE_FEATURES if c in baseline]
+    baseline_feature_cols = [c for c in BASELINE_FEATURES if c in baseline]
+    baseline_for_merge = baseline[["_patient_id_match"] + baseline_feature_cols].copy()
+    if baseline_for_merge["_patient_id_match"].duplicated().any():
+        raise AssertionError("20b baseline has duplicate normalized patient IDs")
+    wide["_patient_id_match"] = _normalize_patient_id(wide["patient_id"])
     wide = wide.merge(
-        baseline[baseline_cols], on="patient_id", how="left", validate="many_to_one"
+        baseline_for_merge,
+        on="_patient_id_match",
+        how="left",
+        validate="many_to_one",
     )
+    wide = wide.drop(columns="_patient_id_match")
     wide_keys = pd.MultiIndex.from_frame(wide[KEY])
-    missing_keys, extra_keys = clinical_keys.difference(
-        wide_keys
-    ), wide_keys.difference(clinical_keys)
+    missing_keys, extra_keys = (
+        clinical_keys.difference(wide_keys),
+        wide_keys.difference(clinical_keys),
+    )
     if (
         wide.duplicated(KEY).any()
         or len(wide) != len(clinical_spine)
@@ -714,7 +791,7 @@ def main(argv: list[str] | None = None) -> None:
     _detail(ambiguous_df, "ambiguous_episode_match", all_spine).to_csv(
         common.BLOCKA_QC_DIR / "01_labs_ambiguous_episode_matches.csv", index=False
     )
-    nonclinical = usable_all.loc[~usable_all_index.isin(clinical_keys)].copy()
+    nonclinical = usable_all.loc[~_bool(usable_all["clinical_visit"])].copy()
     nonclinical_columns = [
         "patient_id",
         "matched_clinical_episode_id",
@@ -766,8 +843,9 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     coverage_rows = []
-    total_patients, total_episodes = clinical_spine.patient_id.nunique(), len(
-        clinical_spine
+    total_patients, total_episodes = (
+        clinical_spine.patient_id.nunique(),
+        len(clinical_spine),
     )
     for analyte, raw in labs[mapped].groupby("canonical_analyte", dropna=False):
         sel = (
@@ -832,6 +910,37 @@ def main(argv: list[str] | None = None) -> None:
         r"research|procedure", na=False
     )
     qc = {
+        "n_patient_ids_obj1": int(all_spine.patient_id.nunique()),
+        "n_patient_ids_eda_labs": int(labs.patient_id.nunique()),
+        "n_patient_ids_matched_after_normalization": int(
+            labs.loc[
+                labs["_patient_id_match"].isin(patient_crosswalk["_patient_id_match"]),
+                "_patient_id_match",
+            ].nunique()
+        ),
+        "n_patient_ids_unmatched_after_normalization": int(
+            labs.loc[
+                ~labs["_patient_id_match"].isin(patient_crosswalk["_patient_id_match"]),
+                "_patient_id_match",
+            ].nunique()
+        ),
+        "n_patient_id_normalization_collisions": normalization_collisions,
+        "n_lab_rows_resolved_by_patient_id_normalization": rows_resolved_by_normalization,
+        "n_lab_rows_unresolved_after_patient_id_normalization": unresolved_lab_rows,
+        "n_20b_patients_matched_after_normalization": int(
+            baseline.loc[
+                baseline["_patient_id_match"].isin(clinical_spine["_patient_id_match"]),
+                "_patient_id_match",
+            ].nunique()
+        ),
+        "n_20b_patients_unmatched_after_normalization": int(
+            baseline.loc[
+                ~baseline["_patient_id_match"].isin(
+                    clinical_spine["_patient_id_match"]
+                ),
+                "_patient_id_match",
+            ].nunique()
+        ),
         "n_input_lab_records": len(labs),
         "n_valid_lab_records": int(eligible.sum()),
         "n_mapped_analytes": int(mapped.sum()),
@@ -897,7 +1006,11 @@ def main(argv: list[str] | None = None) -> None:
         common.BLOCKA_QC_DIR / "01_labs_episode_qc.json", "w", encoding="utf-8"
     ) as handle:
         json.dump(qc, handle, indent=2)
-    write_table1(baseline[baseline.patient_id.isin(clinical_spine.patient_id)])
+    write_table1(
+        baseline[
+            baseline["_patient_id_match"].isin(clinical_spine["_patient_id_match"])
+        ]
+    )
     LOG.info("Wrote %s analyte-episode and %s wide rows", len(selected_all), len(wide))
 
 
