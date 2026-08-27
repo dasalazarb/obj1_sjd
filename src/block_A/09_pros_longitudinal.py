@@ -51,6 +51,11 @@ LABELS = {
     "mdafs_global": "MDAFS global", **SF36_MEASURES,
 }
 NORM = {"sf36_pcs": 50.0, "sf36_mcs": 50.0}
+PROTOCOL_COLUMNS = ("parent_protocol", "protocol", "protocol_parent", "source_protocol")
+ESSPRI_COMPARISON_NOTE = (
+    "ESSPRI contributes directly to baseline Pop classification; inferential "
+    "comparison by Pop is not performed to avoid circular interpretation."
+)
 
 
 def read(path: Path) -> pd.DataFrame:
@@ -78,7 +83,7 @@ def load_spine(path: Path) -> pd.DataFrame:
     missing = set(SPINE_COLUMNS) - set(spine)
     if missing:
         raise KeyError(f"Clinical spine lacks {sorted(missing)}")
-    optional = [c for c in ("parent_protocol", "baseline_pop") if c in spine]
+    optional = [c for c in (*PROTOCOL_COLUMNS, "baseline_pop") if c in spine]
     spine = spine[SPINE_COLUMNS + optional].copy()
     for c in ("clinical_anchor_date", "clinical_baseline_date"):
         spine[c] = pd.to_datetime(spine[c], errors="coerce")
@@ -112,6 +117,32 @@ def attach_baseline_pop(spine: pd.DataFrame, pop_path: Path) -> pd.DataFrame:
     return spine.merge(values.rename(columns={candidate: "baseline_pop"}), on="patient_id", how="left", validate="many_to_one")
 
 
+def attach_parent_protocol(spine: pd.DataFrame, source: pd.DataFrame) -> pd.DataFrame:
+    """Attach canonical upstream protocol metadata by episode identity."""
+    spine_candidate = next((column for column in PROTOCOL_COLUMNS if column in spine), None)
+    if spine_candidate is not None and spine_candidate != "parent_protocol":
+        spine = spine.rename(columns={spine_candidate: "parent_protocol"})
+    if "parent_protocol" in spine and spine["parent_protocol"].notna().all():
+        return spine
+    candidate = next((column for column in PROTOCOL_COLUMNS if column in source), None)
+    if candidate is None:
+        if "parent_protocol" not in spine:
+            spine["parent_protocol"] = pd.NA
+        return spine
+    keys = ["patient_id", "clinical_episode_id"]
+    protocol = source[keys + [candidate]].dropna(subset=keys).copy()
+    conflicting = protocol.dropna(subset=[candidate]).groupby(keys)[candidate].nunique().gt(1)
+    if conflicting.any():
+        raise ValueError("Upstream parent protocol is not unique by patient + clinical episode")
+    protocol = protocol.drop_duplicates(keys).rename(columns={candidate: "_upstream_parent_protocol"})
+    result = spine.merge(protocol, on=keys, how="left", validate="one_to_one")
+    if "parent_protocol" in result:
+        result["parent_protocol"] = result["parent_protocol"].fillna(result.pop("_upstream_parent_protocol"))
+    else:
+        result = result.rename(columns={"_upstream_parent_protocol": "parent_protocol"})
+    return result
+
+
 def instrument_columns(instrument: str, scored: pd.DataFrame) -> list[str]:
     prefix = {"ESSPRI": "esspri_", "SF-36": "sf36_", "PROFAD": "profad_", "MDAFS": "mdafs_"}[instrument]
     return [c for c in scored if c.startswith(prefix)]
@@ -126,8 +157,12 @@ def canonical_episode_data(raw: pd.DataFrame, spine: pd.DataFrame) -> tuple[pd.D
     raw["_raw_row"] = np.arange(len(raw))
     known = spine[keys].drop_duplicates().assign(_mapped=True)
     mapped = raw.merge(known, on=keys, how="left", validate="many_to_one")
-    unmapped = mapped["_mapped"].isna()
-    analysis_raw = mapped.loc[~unmapped].drop(columns="_mapped").copy()
+    outside_spine = mapped["_mapped"].isna()
+    valid_identity = mapped[keys].notna().all(axis=1)
+    should_be_clinical = mapped.get("clinical_visit", pd.Series(False, index=mapped.index)).eq(True)
+    nonclinical = outside_spine & valid_identity & ~should_be_clinical
+    true_failure = outside_spine & should_be_clinical
+    analysis_raw = mapped.loc[~outside_spine].drop(columns="_mapped").copy()
     scored = score_all_pros(analysis_raw)
     violations = pd.DataFrame(scored.attrs.get("pro_range_violations", []))
     episode = spine.copy()
@@ -171,9 +206,13 @@ def canonical_episode_data(raw: pd.DataFrame, spine: pd.DataFrame) -> tuple[pd.D
     episode = episode.rename(columns={"sf36_available": "sf36_available", "sf36_complete": "sf36_complete"})
     episode = episode.sort_values(["patient_id", "clinical_anchor_date", "clinical_episode_id"]).reset_index(drop=True)
     mapping = pd.DataFrame([{
-        "n_raw_pro_rows": len(raw), "n_rows_with_patient_id": int(raw.patient_id.notna().sum()),
+        "n_source_episode_rows": len(raw),
+        "n_source_unique_episodes": int(mapped.loc[valid_identity, keys].drop_duplicates().shape[0]),
+        "n_clinical_episodes_included": int(mapped.loc[~outside_spine, keys].drop_duplicates().shape[0]),
+        "n_nonclinical_episodes_excluded": int(mapped.loc[nonclinical, keys].drop_duplicates().shape[0]),
+        "n_true_episode_mapping_failures": int(true_failure.sum()),
+        "n_rows_with_patient_id": int(raw.patient_id.notna().sum()),
         "n_rows_with_episode_id": int(raw.clinical_episode_id.notna().sum()),
-        "n_rows_without_episode_mapping": int(unmapped.sum()),
         "n_multiple_rows_same_patient_episode_instrument": duplicate_groups,
         "n_conflicts_same_patient_episode_instrument": len(conflicts),
     }])
@@ -213,11 +252,20 @@ def by_pop_table(df: pd.DataFrame) -> pd.DataFrame:
     rows=[]
     for inst, measure in measures():
         groups = [pd.to_numeric(base.loc[base.baseline_pop.eq(p), measure], errors="coerce").dropna() for p in ("Pop1", "Pop2", "Pop3")] if measure in base else []
-        pval = kruskal(*groups).pvalue if len(groups) == 3 and all(len(g) >= 2 for g in groups) else np.nan
+        definitional = inst == "ESSPRI"
+        pval = (kruskal(*groups).pvalue if not definitional and len(groups) == 3
+                and all(len(g) >= 2 for g in groups) else np.nan)
+        role = "definitional_descriptive" if definitional else "independent_descriptive_inferential"
         for pop, vals in zip(("Pop1", "Pop2", "Pop3"), groups):
-            d=describe(vals); rows.append({"baseline_pop":pop,"instrument":inst,"measure":measure,"N":int(base.baseline_pop.eq(pop).sum()),**d,"iqr":d["q3"]-d["q1"],"kruskal_wallis_p_value":pval})
+            d=describe(vals); rows.append({"baseline_pop":pop,"instrument":inst,"measure":measure,"N":int(base.baseline_pop.eq(pop).sum()),**d,"iqr":d["q3"]-d["q1"],"kruskal_wallis_p_value":pval,
+                                           "comparison_role": role,
+                                           "comparison_note": ESSPRI_COMPARISON_NOTE if definitional else pd.NA})
     out=pd.DataFrame(rows)
-    out["q_value"] = fdr(out["kruskal_wallis_p_value"]) if len(out) else np.nan
+    out["q_value"] = np.nan
+    if len(out):
+        tests = out.drop_duplicates(["instrument", "measure"]).set_index(["instrument", "measure"])["kruskal_wallis_p_value"]
+        adjusted = fdr(tests)
+        out["q_value"] = [adjusted.get((inst, measure), np.nan) for inst, measure in zip(out.instrument, out.measure)]
     return out
 
 
@@ -239,10 +287,20 @@ def availability_table(df: pd.DataFrame, grouping: str) -> pd.DataFrame:
             stem=inst.lower().replace("-", "")
             any_col, complete_col=f"{stem}_available",f"{stem}_complete"
             any_n=int(group[any_col].sum()); complete_n=int(group[complete_col].sum())
-            row={grouping:value,"instrument":inst,"n_patients":group.patient_id.nunique(),"n_with_any_item":any_n,"n_with_complete_score":complete_n,
+            n_patients=group.patient_id.nunique()
+            row={grouping:value,"instrument":inst,"n_patients":n_patients,"n_with_any_item":any_n,"n_with_complete_score":complete_n,
                  "pct_with_any_item":100*any_n/len(group) if len(group) else np.nan,"pct_with_complete_score":100*complete_n/len(group) if len(group) else np.nan}
             if grouping == "parent_protocol":
-                row.update(n_episodes=len(group), pct_available=row["pct_with_complete_score"])
+                patients_any=group.loc[group[any_col], "patient_id"].nunique()
+                patients_complete=group.loc[group[complete_col], "patient_id"].nunique()
+                row={grouping:value,"instrument":inst,"n_patients":n_patients,
+                     "n_patients_with_any_item":patients_any,"n_patients_with_complete_score":patients_complete,
+                     "pct_patients_with_any_item":100*patients_any/n_patients if n_patients else np.nan,
+                     "pct_patients_with_complete_score":100*patients_complete/n_patients if n_patients else np.nan,
+                     "n_episodes":len(group),"n_episodes_with_any_item":any_n,
+                     "n_episodes_with_complete_score":complete_n,
+                     "pct_episodes_with_any_item":100*any_n/len(group) if len(group) else np.nan,
+                     "pct_episodes_with_complete_score":100*complete_n/len(group) if len(group) else np.nan}
             rows.append(row)
     return pd.DataFrame(rows)
 
@@ -341,8 +399,8 @@ def write(df: pd.DataFrame, path: Path, overwrite: bool) -> None:
 def main() -> None:
     args=parse_args(); logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(message)s")
     for d in (OUT_STEM.parent,TABLES,QC,FIGURES): d.mkdir(parents=True,exist_ok=True)
-    spine=attach_baseline_pop(load_spine(args.spine),args.pop)
     raw=read(args.responses)
+    spine=attach_parent_protocol(attach_baseline_pop(load_spine(args.spine),args.pop), raw)
     episode,conflicts,violations,mapping=canonical_episode_data(raw,spine)
     duplicates=int(episode.duplicated(["patient_id","clinical_episode_id"]).sum())
     multiple=int(episode.loc[episode.is_clinical_baseline.eq(True)].patient_id.duplicated().sum())
@@ -352,7 +410,6 @@ def main() -> None:
         raise ValueError(f"Hard PRO QC failed: duplicates={duplicates}, multiple_baseline={multiple}, range={score_range}, negative_time={negative}")
     base=baseline_table(episode); pop=by_pop_table(episode); visit=by_visit_table(episode)
     avail_visit=availability_table(episode,"clinical_visit_number")
-    if "parent_protocol" not in episode: episode["parent_protocol"]="Unknown"  # documented fallback; never inferred from interval text
     avail_protocol=availability_table(episode,"parent_protocol")
     longitudinal,model_qc,eligible=longitudinal_tables(episode)
     score_qc=scoring_qc(raw,episode,violations)
@@ -360,7 +417,16 @@ def main() -> None:
              "n_baseline_patients":int(episode.is_clinical_baseline.sum()),
              **{f"n_{inst.lower().replace('-','')}_baseline_available":int(episode.loc[episode.is_clinical_baseline.eq(True),primary].notna().sum()) for inst,primary in PRO_PRIMARY_MEASURES.items()},
              **{f"n_{inst.lower().replace('-','')}_longitudinal_eligible":eligible.get(inst,0) for inst in PRO_PRIMARY_MEASURES},
-             "n_duplicate_patient_episode":duplicates,"n_multiple_baseline":multiple,"n_unmapped_pro_assessments":mapping["n_rows_without_episode_mapping"],"n_scoring_range_violations":score_range}
+             "n_duplicate_patient_episode":duplicates,"n_multiple_baseline":multiple,
+             "n_nonclinical_source_episodes_excluded":mapping["n_nonclinical_episodes_excluded"],
+             "n_true_episode_mapping_failures":mapping["n_true_episode_mapping_failures"],
+             "n_clinical_episodes_parent_protocol_known":int(episode.parent_protocol.notna().sum()),
+             "n_clinical_episodes_parent_protocol_unknown":int(episode.parent_protocol.isna().sum()),
+             "n_11d_episodes":int(episode.parent_protocol.astype("string").str.upper().eq("11D").sum()),
+             "n_15d_episodes":int(episode.parent_protocol.astype("string").str.upper().eq("15D").sum()),
+             "n_11d_patients":int(episode.loc[episode.parent_protocol.astype("string").str.upper().eq("11D"),"patient_id"].nunique()),
+             "n_15d_patients":int(episode.loc[episode.parent_protocol.astype("string").str.upper().eq("15D"),"patient_id"].nunique()),
+             "n_scoring_range_violations":score_range}
     artifacts=[(episode,OUT_STEM.with_suffix(".parquet")),(episode,OUT_STEM.with_suffix(".csv")),(base,TABLES/"09_pros_baseline.csv"),(pop,TABLES/"09_pros_by_baseline_pop.csv"),(visit,TABLES/"09_pros_by_clinical_visit_number.csv"),(avail_visit,TABLES/"09_pros_availability_by_clinical_visit_number.csv"),(avail_protocol,TABLES/"09_pros_availability_by_protocol.csv"),(longitudinal,TABLES/"09_pros_longitudinal_change.csv"),(pd.DataFrame([summary]),QC/"09_pros_qc_summary.csv"),(score_qc,QC/"09_pros_scoring_qc.csv"),(pd.DataFrame([mapping]),QC/"09_pros_episode_mapping_qc.csv"),(conflicts,QC/"09_pros_duplicate_conflicts.csv"),(model_qc,QC/"09_pros_model_qc.csv")]
     for frame,path in artifacts: write(frame,path,args.overwrite)
     make_figures(visit,pop)
