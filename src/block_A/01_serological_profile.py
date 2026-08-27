@@ -128,6 +128,144 @@ def _column(frame: pd.DataFrame, name: str, default: Any = pd.NA) -> pd.Series:
     return frame[name] if name in frame else pd.Series(default, index=frame.index)
 
 
+def _coerce_analyte_output_schema(frame: pd.DataFrame) -> pd.DataFrame:
+    """Apply the stable, semantic schema for the analyte-level artifact."""
+    out = frame.copy()
+    integer_columns = [
+        "clinical_visit_number",
+        "selected_days_from_clinical_anchor",
+        "n_measurements_in_episode",
+        "n_valid_measurements_in_episode",
+    ]
+    numeric_columns = [
+        "selected_value_numeric",
+        "selected_numeric_bound",
+        "selected_reference_low",
+        "selected_reference_high",
+        "selected_reference_bound",
+        "episode_numeric_min",
+        "episode_numeric_max",
+        "episode_numeric_median",
+    ]
+    boolean_columns = [
+        "clinical_visit",
+        "same_day_conflict",
+        "unit_conflict",
+        "result_conflict",
+    ]
+    datetime_columns = [
+        "clinical_anchor_date",
+        "episode_start_date",
+        "episode_end_date",
+        "selected_lab_date",
+    ]
+    string_columns = [
+        "patient_id",
+        "clinical_episode_id",
+        "canonical_analyte",
+        "lab_family",
+        "analytic_role",
+        "selected_value_type",
+        "selected_operator",
+        "selected_value_text",
+        "selected_reported_interpretation",
+        "selected_unit",
+        "selected_reference_range_raw",
+        "selected_reference_operator",
+        "selected_reference_status",
+        "selection_status",
+        "source_protocol",
+        "visit_type",
+    ]
+    for column in integer_columns:
+        if column in out:
+            out[column] = (
+                pd.to_numeric(out[column], errors="coerce").round().astype("Int64")
+            )
+    for column in numeric_columns:
+        if column in out:
+            out[column] = pd.to_numeric(out[column], errors="coerce").astype("Float64")
+    for column in boolean_columns:
+        if column in out:
+            out[column] = out[column].astype("boolean")
+    for column in datetime_columns:
+        if column in out:
+            out[column] = pd.to_datetime(out[column], errors="coerce")
+    for column in string_columns:
+        if column in out:
+            out[column] = out[column].astype("string")
+    return out
+
+
+def _coerce_wide_output_schema(frame: pd.DataFrame) -> pd.DataFrame:
+    """Apply explicit types to structural and dynamically named wide columns."""
+    out = frame.copy()
+    if "clinical_visit_number" in out:
+        out["clinical_visit_number"] = (
+            pd.to_numeric(out["clinical_visit_number"], errors="coerce")
+            .round()
+            .astype("Int64")
+        )
+    for column in ["clinical_visit", "is_clinical_baseline", *BASELINE_FEATURES]:
+        if column in out:
+            out[column] = out[column].astype("boolean")
+    for column in [
+        "clinical_anchor_date",
+        "episode_start_date",
+        "episode_end_date",
+        "clinical_baseline_date",
+        "visit_date",
+        "visit_date_clean",
+    ]:
+        if column in out:
+            out[column] = pd.to_datetime(out[column], errors="coerce")
+    for column in [
+        "patient_id",
+        "clinical_episode_id",
+        "visit_type",
+        "clinical_baseline_episode_id",
+        "visit_id",
+    ]:
+        if column in out:
+            out[column] = out[column].astype("string")
+
+    for column in out.columns:
+        if column.endswith("__measurement_date"):
+            out[column] = pd.to_datetime(out[column], errors="coerce")
+        elif column.endswith("__value"):
+            out[column] = pd.to_numeric(out[column], errors="coerce").astype("Float64")
+        elif column.endswith(("__days_from_anchor", "__n_measurements")):
+            out[column] = (
+                pd.to_numeric(out[column], errors="coerce").round().astype("Int64")
+            )
+        elif column.endswith("__conflict"):
+            out[column] = out[column].astype("boolean")
+        elif column.endswith(
+            (
+                "__text",
+                "__unit",
+                "__reference_status",
+                "__selection_status",
+                "__episode_status",
+                "__patient_consensus_value",
+            )
+        ):
+            out[column] = out[column].astype("string")
+        elif column.endswith(
+            (
+                "__ever_positive_through_episode",
+                "__known_through_episode",
+            )
+        ):
+            out[column] = out[column].astype("boolean")
+    return out
+
+
+def _object_dtype_columns(frame: pd.DataFrame) -> list[str]:
+    """Return columns whose Parquet representation would require inference."""
+    return [column for column in frame.columns if frame[column].dtype == "object"]
+
+
 def _mapping_valid(labs: pd.DataFrame) -> pd.Series:
     status = _column(labs, "semantic_mapping_status").astype("string").str.strip()
     # Missing mapping status is not evidence of a valid upstream mapping.
@@ -377,7 +515,8 @@ def select_episode_analytes(
             ),
         }
         rows.append(row)
-    return pd.DataFrame(rows), conflict_indexes
+    selected = _coerce_analyte_output_schema(pd.DataFrame(rows))
+    return selected, conflict_indexes
 
 
 def _status_is_positive(value: Any) -> Any:
@@ -430,18 +569,9 @@ def build_wide(
             if not selected.empty
             else selected
         )
-        if part.empty:
-            episode_value: Any = {}
-            episode_status: Any = {}
-        else:
-            episode_value = part.set_index(KEY)["selected_value_numeric"].combine_first(
-                part.set_index(KEY)["selected_value_text"]
-            )
-            episode_status = part.set_index(KEY)["selected_reference_status"]
-        wide[f"{analyte}__episode_value"] = [
-            episode_value.get(tuple(k), pd.NA)
-            for k in wide[KEY].itertuples(index=False, name=None)
-        ]
+        episode_status: Any = (
+            {} if part.empty else part.set_index(KEY)["selected_reference_status"]
+        )
         wide[f"{analyte}__episode_status"] = [
             episode_status.get(tuple(k), pd.NA)
             for k in wide[KEY].itertuples(index=False, name=None)
@@ -704,6 +834,13 @@ def main(argv: list[str] | None = None) -> None:
             )
         usable_all = usable_all.drop(columns=f"{column}__lab_source")
     selected_all, conflict_indexes = select_episode_analytes(usable_all, all_spine)
+    if (
+        "clinical_visit_number" in selected_all
+        and str(selected_all["clinical_visit_number"].dtype) != "Int64"
+    ):
+        raise AssertionError(
+            "clinical_visit_number did not retain nullable integer schema"
+        )
     if not selected_all.empty and selected_all.duplicated(ANALYTE_KEY).any():
         raise AssertionError("Duplicate analyte-level keys")
     clinical_keys = pd.MultiIndex.from_frame(clinical_spine[KEY])
@@ -742,6 +879,18 @@ def main(argv: list[str] | None = None) -> None:
         raise AssertionError("Wide output does not exactly preserve the clinical spine")
     if future_violations:
         raise AssertionError(f"Detected {future_violations} future-leakage violations")
+
+    # Reapply schemas after filtering and merging so every primary artifact has
+    # deterministic Parquet types at its write boundary.
+    selected_all = _coerce_analyte_output_schema(selected_all)
+    wide = _coerce_wide_output_schema(wide)
+    for name, frame in (("analyte-level", selected_all), ("wide", wide)):
+        object_columns = _object_dtype_columns(frame)
+        if object_columns:
+            raise AssertionError(
+                f"{name} contains ambiguous object columns: "
+                + ", ".join(object_columns[:50])
+            )
 
     for path, frame, csv_copy in (
         (args.analyte_output, selected_all, True),
