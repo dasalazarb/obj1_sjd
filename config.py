@@ -43,7 +43,7 @@ COHORT_C2_FILE = OUT_DIR / "cohort_c2.parquet"
 # Unión de los distintos MISSING_STRINGS que existían duplicados (e inconsistentes
 # entre sí) en 01_pop_distribution.py, 01_table1_baseline.py, 06_overlap_glandular.py,
 # 06_overlap_glandular_followup.py, 06_overlap_glandular_followup_base_1st_Visit.py,
-# 09_pros_baseline.py, src/derivations/pro_scoring.py y src/derivations/visit_dates.py.
+# src/derivations/pro_scoring.py and the canonical clinical episode spine.
 # Antes cada script reconocía un subconjunto distinto de centinelas (p.ej. "-99" se
 # trataba como faltante en unos scripts y como valor real en otros). Esta es ahora
 # la fuente única de verdad — todos los scripts deben importar desde aquí.
