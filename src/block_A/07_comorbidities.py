@@ -40,22 +40,19 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import common  # noqa: E402
 import config  # noqa: E402
-from src.derivations.visit_dates import add_parsed_visit_dates  # noqa: E402
 
 PATIENT_ID_COL = "ids__patient_record_number"
-VISIT_DATE_COL = "ids__visit_date"
 AGE_COL = "ids__age_at_visit"
 SEX_COL = "ids__sex"
 # The deployed analytic extract contains only this total-score field.  Keep one
 # explicit source of truth rather than requiring an unavailable alias.  The
 # ``*_raw_qc`` output is retained for schema compatibility and is
 # therefore an identical audit copy of the primary value in this extract.
-ESSDAI_PRIMARY_COL = config.ESSDAI_TOTAL_RAW
-ESSDAI_RAW_QC_COL = config.ESSDAI_TOTAL_RAW
+ESSDAI_PRIMARY_COL = "essdai_total"  # canonical upstream episode-level score
 # Section 5 progression uses the same moderate-to-severe threshold as Pop 1.
 SEVERE_THRESHOLD = config.ESSDAI_SEVERE
 RANDOM_SEED = 20260728
-SCRIPT_VERSION = "1.2.0"
+SCRIPT_VERSION = "2.0.0"
 
 FIGURES_DIR = common.OUTPUTS_DIR / "figures" / "blockA"
 TABLES_DIR = common.OUTPUTS_DIR / "tables" / "blockA"
@@ -92,7 +89,7 @@ class Condition:
 
 
 def _pmh(name: str, label: str, source: str, category: str, *details: str) -> Condition:
-    return Condition(name, label, (source,), "past_medical_history", category, tuple(details),
+    return Condition(name, label, (source,), "general_medical", category, tuple(details),
                      "Documented history at baseline; blank means no history documented in this source.")
 
 
@@ -164,8 +161,8 @@ _other_immune = [
 ]
 OTHER_IMMUNE_MEDIATED_SYSTEMIC_CONDITIONS = [_rheum(n, l, *("rheumatological_comorbidities__" + x for x in (g, h, c)), "other_immune_mediated_systemic", "Other immune-mediated/systemic") for n, l, g, h, c in _other_immune]
 RHEUMATOLOGIC_MANIFESTATIONS = [
-    _rheum("raynaud", "Raynaud's phenomenon", "rheumatological_comorbidities__integ_raynds", "rheumatological_comorbidities__integ_raynds_hx", "rheumatological_comorbidities__integ_raynds_confirm", "rheumatologic_manifestation", "Rheumatologic manifestations / associated features"),
-    _rheum("cryoglobulinemia", "Cryoglobulinemia", "rheumatological_comorbidities__cryoglobulinemia", "rheumatological_comorbidities__cryoglobulinemia_hx", "rheumatological_comorbidities__cryoglobulinemia_confirm", "rheumatologic_manifestation", "Rheumatologic manifestations / associated features"),
+    _rheum("raynaud", "Raynaud's phenomenon", "rheumatological_comorbidities__integ_raynds", "rheumatological_comorbidities__integ_raynds_hx", "rheumatological_comorbidities__integ_raynds_confirm", "sjd_associated_manifestation", "Rheumatologic manifestations / associated features"),
+    _rheum("cryoglobulinemia", "Cryoglobulinemia", "rheumatological_comorbidities__cryoglobulinemia", "rheumatological_comorbidities__cryoglobulinemia_hx", "rheumatological_comorbidities__cryoglobulinemia_confirm", "sjd_associated_manifestation", "Rheumatologic manifestations / associated features"),
 ]
 RHEUMATOLOGIC_ANALYSIS_CONDITIONS = [*RHEUMATOLOGIC_NON_SAID_CONDITIONS, *CONCOMITANT_SAID_CONDITIONS, *OTHER_IMMUNE_MEDIATED_SYSTEMIC_CONDITIONS]
 RHEUMATOLOGIC_DESCRIPTIVE_CONDITIONS = [*RHEUMATOLOGIC_ANALYSIS_CONDITIONS, *RHEUMATOLOGIC_MANIFESTATIONS]
@@ -175,6 +172,7 @@ def iter_analysis_conditions() -> Iterable[Condition]:
     yield from RHEUMATOLOGIC_NON_SAID_CONDITIONS
     yield from CONCOMITANT_SAID_CONDITIONS
     yield from OTHER_IMMUNE_MEDIATED_SYSTEMIC_CONDITIONS
+    yield from RHEUMATOLOGIC_MANIFESTATIONS
 
 
 CONDITION_NAMES = [c.name for c in iter_analysis_conditions()]
@@ -188,7 +186,7 @@ PROGRESSION_FAMILIES = (
     ("other_immune_mediated_systemic", OTHER_IMMUNE_MEDIATED_SYSTEMIC_CONDITIONS),
     ("rheumatologic_manifestations", RHEUMATOLOGIC_MANIFESTATIONS),
 )
-PROGRESSION_CONDITIONS = [*iter_analysis_conditions(), *RHEUMATOLOGIC_MANIFESTATIONS]
+PROGRESSION_CONDITIONS = list(iter_analysis_conditions())
 PROGRESSION_CONDITION_NAMES = {c.name for c in PROGRESSION_CONDITIONS}
 PROGRESSION_CONDITION_NAMES_ORDERED = [c.name for c in PROGRESSION_CONDITIONS]
 SUBTYPE_COLS = ("past_medical_history__thyroid_disease_spfy", "rheumatological_comorbidities__inflam_bowel_spfy")
@@ -199,15 +197,15 @@ DOMAIN_EVALUABLE_COLS = DOMAIN_EVALUABLE
 UNAVAILABLE: dict[str, str] = {}
 
 UPSTREAM = {
-    common.VISIT_SPINE_PARQUET: "src/00_build_visit_spine.py",
+    common.CLINICAL_VISIT_SPINE_PARQUET: "src/00_build_visit_spine.py",
     common.POP_LONGITUDINAL_PARQUET: "src/block_A/01_pop_distribution.py",
-    common.OVERLAP_LONGITUDINAL_PARQUET: "src/block_A/06_overlap_glandular_followup.py",
+    common.OVERLAP_LONGITUDINAL_PARQUET: "src/block_A/06_overlap_glandular.py",
 }
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--input", type=Path, default=common.DEFAULT_ANALYTIC_DATASET)
+    p.add_argument("--input", type=Path, default=common.SOURCE_EPISODE_SPINE)
     p.add_argument("--rebuild-upstream", action="store_true")
     p.add_argument("--random-seed", type=int, default=RANDOM_SEED)
     p.add_argument("--run-sparse-monte-carlo", action="store_true",
@@ -284,27 +282,44 @@ def parse_age_first_value(series: pd.Series) -> pd.Series:
 
 
 def load_visit_spine() -> pd.DataFrame:
-    # Patient and canonical visit identity are the integration keys.
-    cols = ["patient_id", "visit_id", "visit_date", "visit_number", "observed_baseline_date", "time_since_observed_baseline_days", "time_since_observed_baseline_years", "age_at_visit", "sex"]
-    df = _read_required(common.VISIT_SPINE_PARQUET, cols)
-    df["visit_date"] = pd.to_datetime(df["visit_date"])
-    df["observed_baseline_date"] = pd.to_datetime(df["observed_baseline_date"])
-    df["age_at_visit"] = parse_age_first_value(df["age_at_visit"])
-    if df["patient_id"].isna().any() or not df["visit_id"].is_unique or df.duplicated(["patient_id", "visit_date"]).any():
-        raise ValueError("Visit spine violates patient/visit identity constraints")
-    if (df["time_since_observed_baseline_days"] < 0).any():
-        raise ValueError("Visit spine contains negative time since baseline")
+    """Load the authoritative clinical-episode spine without rebuilding time."""
+    cols = ["patient_id", "clinical_episode_id", "clinical_anchor_date", "clinical_visit",
+            "clinical_visit_number", "clinical_baseline_episode_id", "clinical_baseline_date",
+            "is_clinical_baseline", "time_since_clinical_baseline_days",
+            "time_since_clinical_baseline_years"]
+    available = available_columns(common.CLINICAL_VISIT_SPINE_PARQUET)
+    optional = [c for c in ("age_at_visit", "sex") if c in available]
+    df = _read_required(common.CLINICAL_VISIT_SPINE_PARQUET, cols + optional)
+    df = df.loc[df["clinical_visit"].eq(True)].copy()
+    for col in ("clinical_anchor_date", "clinical_baseline_date"):
+        df[col] = pd.to_datetime(df[col], errors="coerce")
+    if "age_at_visit" in df:
+        df["age_at_visit"] = parse_age_first_value(df["age_at_visit"])
+    keys = ["patient_id", "clinical_episode_id"]
+    if df[keys].isna().any().any() or df.duplicated(keys).any():
+        raise ValueError("Clinical episode spine violates canonical identity")
+    baseline = df.loc[df["is_clinical_baseline"].eq(True)]
+    if baseline["patient_id"].duplicated().any():
+        raise ValueError("Multiple clinical baselines for a patient")
+    if not baseline["clinical_episode_id"].eq(baseline["clinical_baseline_episode_id"]).all():
+        raise ValueError("Clinical baseline episode mismatch")
+    if not baseline["clinical_anchor_date"].eq(baseline["clinical_baseline_date"]).all():
+        raise ValueError("Clinical baseline date mismatch")
     return df
 
 
 def load_pop_classification() -> pd.DataFrame:
-    cols = ["patient_id", "visit_id", "visit_date", "visit_number", "essdai_total", "esspri_total", "pop_status", "baseline_pop_status"]
-    return _read_required(common.POP_LONGITUDINAL_PARQUET, cols)
+    cols = ["patient_id", "clinical_episode_id", "essdai_total", "pop_status"]
+    available = available_columns(common.POP_LONGITUDINAL_PARQUET)
+    optional = [c for c in ("baseline_pop_status", "pop_baseline_status") if c in available]
+    return _read_required(common.POP_LONGITUDINAL_PARQUET, cols + optional)
 
 
 def load_domain_flags() -> pd.DataFrame:
-    cols = (["patient_id", "visit_id", "visit_date"] + ALL_DOMAINS
-            + list(DOMAIN_EVALUABLE.values()) + ["n_extraglandular_domains_active"])
+    cols = ["patient_id", "clinical_episode_id"] + ALL_DOMAINS + list(DOMAIN_EVALUABLE.values())
+    available = available_columns(common.OVERLAP_LONGITUDINAL_PARQUET)
+    if "n_extraglandular_domains_active" in available:
+        cols.append("n_extraglandular_domains_active")
     df = _read_required(common.OVERLAP_LONGITUDINAL_PARQUET, cols)
     for col in ALL_DOMAINS + list(DOMAIN_EVALUABLE.values()):
         df[col] = normalize_binary_flag(df[col])
@@ -313,15 +328,14 @@ def load_domain_flags() -> pd.DataFrame:
 
 def selected_raw_columns(input_path: Path) -> list[str]:
     schema = available_columns(input_path)
-    desired = [PATIENT_ID_COL, VISIT_DATE_COL, AGE_COL, SEX_COL, ESSDAI_PRIMARY_COL, ESSDAI_RAW_QC_COL, *SUBTYPE_COLS]
-    desired.extend(col for c in [*iter_analysis_conditions(), *RHEUMATOLOGIC_MANIFESTATIONS]
-                   for col in (*c.primary, *c.detail_columns))
+    desired = ["patient_id", "clinical_episode_id", "is_clinical_baseline", AGE_COL, SEX_COL, *SUBTYPE_COLS]
+    desired.extend(col for c in iter_analysis_conditions() for col in (*c.primary, *c.detail_columns))
     prohibited = [c for c in desired if c.startswith(PROHIBITED_SOURCE_PREFIXES)]
     if prohibited:
         raise AssertionError(f"Prohibited Section 5 source(s): {prohibited}")
-    required = {PATIENT_ID_COL, VISIT_DATE_COL, ESSDAI_PRIMARY_COL, ESSDAI_RAW_QC_COL}
+    required = {"patient_id", "clinical_episode_id", "is_clinical_baseline"}
     if required - schema:
-        raise KeyError(f"Raw input lacks required columns: {sorted(required - schema)}")
+        raise KeyError(f"Canonical source lacks required columns: {sorted(required - schema)}")
     return list(dict.fromkeys(c for c in desired if c in schema))
 
 
@@ -411,89 +425,47 @@ def apply_exposure_definition(frame: pd.DataFrame, condition: Condition,
     out["exposure"] = out[condition.name].fillna(False).astype(int)
     return out
 
-def collapse_same_patient_date(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    binary_cols = [c for c in df if str(df[c].dtype) == "boolean"]
-    subtype_cols = [c for c in SUBTYPE_COLS if c in df]
-    records, audit = [], []
-    for (pid, date), group in df.groupby(["patient_id", "visit_date"], dropna=False, sort=False):
-        row: dict[str, Any] = {"patient_id": pid, "visit_date": date}
-        for col in binary_cols:
-            row[col] = nullable_or(group[[col]]).iloc[0] if len(group) == 1 else nullable_or(group[[col]].T.reset_index(drop=True).T).iloc[0]
-            # Above one-column OR is row-wise; collapse group explicitly.
-            vals = group[col]
-            row[col] = True if vals.eq(True).any() else (False if vals.eq(False).any() else pd.NA)
-        conflict_cols = []
-        for col in subtype_cols:
-            vals = group[col].dropna().astype(str).str.strip().unique()
-            row[col] = vals[0] if len(vals) == 1 else pd.NA
-            row[f"{col}_conflict"] = len(vals) > 1
-            if len(vals) > 1:
-                conflict_cols.append(col)
-        records.append(row)
-        if len(group) > 1:
-            audit.append({"patient_id": pid, "visit_date": date, "n_source_rows": len(group), "conflicting_subtype_columns": "|".join(conflict_cols)})
-    collapsed = pd.DataFrame(records)
-    for col in binary_cols:
-        collapsed[col] = collapsed[col].astype("boolean")
-    return collapsed, pd.DataFrame(audit, columns=["patient_id", "visit_date", "n_source_rows", "conflicting_subtype_columns"])
-
-
 def build_baseline_comorbidity_dataset(raw: pd.DataFrame, spine: pd.DataFrame, pop: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, int]:
-    parsed = add_parsed_visit_dates(raw, PATIENT_ID_COL, VISIT_DATE_COL)
-    n_pipe = int(parsed["had_pipe_delimited_date"].sum())
-    derived = derive_comorbidity_indicators(parsed)
-    collapsed, duplicate_audit = collapse_same_patient_date(derived)
-    base_spine = spine.loc[spine["visit_number"].eq(0)].copy()
-    if base_spine["patient_id"].duplicated().any():
-        raise ValueError("More than one visit_number==0 row for a patient")
-    base = base_spine.merge(collapsed, on=["patient_id", "visit_date"], how="left", validate="one_to_one")
-    base_pop = pop.loc[pop["visit_number"].eq(0), ["patient_id", "baseline_pop_status", "essdai_total"]].drop_duplicates("patient_id")
-    base = base.merge(base_pop, on="patient_id", how="left", validate="one_to_one")
-    base = base.rename(columns={"visit_id": "baseline_visit_id", "visit_date": "baseline_date", "age_at_visit": "age_baseline", "baseline_pop_status": "baseline_pop", "essdai_total": "baseline_essdai_pop_pipeline"})
-    # Primary ESSDAI comes from the available total-score column at canonical baseline.
-    baseline_raw = parsed.merge(base_spine[["patient_id", "visit_date"]], on=["patient_id", "visit_date"], how="inner")
-    ess = baseline_raw.groupby("patient_id", as_index=False).agg(
-        baseline_essdai=(ESSDAI_PRIMARY_COL, lambda s: pd.to_numeric(s, errors="coerce").dropna().iloc[0] if pd.to_numeric(s, errors="coerce").notna().any() else np.nan),
-        baseline_essdai_raw_qc=(ESSDAI_RAW_QC_COL, lambda s: pd.to_numeric(s, errors="coerce").dropna().iloc[0] if pd.to_numeric(s, errors="coerce").notna().any() else np.nan),
-    )
-    essdai_source_columns = list(dict.fromkeys(c for c in (ESSDAI_PRIMARY_COL, ESSDAI_RAW_QC_COL) if c in base))
-    base = base.drop(columns=essdai_source_columns).merge(ess, on="patient_id", how="left", validate="one_to_one")
-    # These fields are absence-by-default checkboxes in the clinical extract:
-    # an empty value means that the patient does not have the condition, rather
-    # than that the condition was not evaluated.  Resolve that convention once
-    # in the baseline dataset so prevalence plots and downstream models use the
-    # full relevant cohort as their denominator/reference population.
-    pmh_names = [c.name for c in PAST_MEDICAL_HISTORY_CONDITIONS]
-    base[pmh_names] = base[pmh_names].fillna(False).astype("boolean")
-    for condition in RHEUMATOLOGIC_DESCRIPTIVE_CONDITIONS:
-        flags = [base.get(f"source__{col}", pd.Series(pd.NA, index=base.index,
-                                                     dtype="boolean"))
-                 for col in condition.primary]
-        status = derive_condition_status(*flags)
-        base[f"{condition.name}_status"] = status
-        exposed = (flags[0].fillna(False) | flags[1].fillna(False) |
-                   flags[2].fillna(False)).astype("boolean")
-        base[condition.name] = exposed
-        base[f"{condition.name}_primary_exposure"] = exposed.astype(float)
-    non_said = [c.name for c in RHEUMATOLOGIC_NON_SAID_CONDITIONS]
-    said = [c.name for c in CONCOMITANT_SAID_CONDITIONS]
-    other_immune = [c.name for c in OTHER_IMMUNE_MEDIATED_SYSTEMIC_CONDITIONS]
-    base["n_general_medical_history"] = base[pmh_names].astype(int).sum(axis=1)
-    base["any_general_medical_history"] = base["n_general_medical_history"].gt(0).astype("boolean")
-    base["n_rheumatologic_non_said"] = base[non_said].astype(int).sum(axis=1)
-    base["any_rheumatologic_non_said"] = base["n_rheumatologic_non_said"].gt(0).astype("boolean")
-    base["n_concomitant_said"] = base[said].astype(int).sum(axis=1)
-    base["concomitant_said_any"] = base["n_concomitant_said"].gt(0).astype("boolean")
-    base["n_other_immune_mediated_systemic"] = base[other_immune].astype(int).sum(axis=1)
-    base["any_other_immune_mediated_systemic"] = base["n_other_immune_mediated_systemic"].gt(0).astype("boolean")
-    malignancies = ["breast_cancer", "lung_cancer", "colon_cancer", "thyroid_cancer",
-                    "head_neck_cancer", "other_malignancy"]
-    base["any_non_lymphoma_malignancy_history"] = base[malignancies].any(axis=1).astype("boolean")
-    if len(base) != base["patient_id"].nunique():
-        raise ValueError("Baseline dataset is not one row per patient")
-    if not base["baseline_date"].equals(base["observed_baseline_date"]):
-        raise ValueError("Baseline date is not the canonical observed baseline date")
-    return base, duplicate_audit, n_pipe
+    """Derive exposures once, exclusively on authoritative baseline episodes."""
+    keys = ["patient_id", "clinical_episode_id"]
+    raw_base = raw.loc[raw["is_clinical_baseline"].eq(True)].copy()
+    if raw_base.duplicated(keys).any():
+        raise ValueError("Raw canonical input has duplicate baseline episodes")
+    derived = derive_comorbidity_indicators(raw_base)
+    base_spine = spine.loc[spine["is_clinical_baseline"].eq(True)].copy()
+    base = base_spine.merge(derived.drop(columns=["is_clinical_baseline"], errors="ignore"), on=keys,
+                            how="left", validate="one_to_one")
+    pop_cols = pop[[*keys, "pop_status", "essdai_total"]].drop_duplicates(keys)
+    base = base.merge(pop_cols, on=keys, how="left", validate="one_to_one")
+    base = base.rename(columns={"clinical_episode_id": "clinical_baseline_episode_id_source",
+        "clinical_anchor_date": "clinical_baseline_date_source", "pop_status": "baseline_pop",
+        "essdai_total": "baseline_essdai", "age_at_visit": "age_baseline"})
+    # Preserve required canonical names and assert their equality to the baseline row.
+    base["clinical_baseline_episode_id"] = base["clinical_baseline_episode_id_source"]
+    base["clinical_baseline_date"] = base["clinical_baseline_date_source"]
+    if AGE_COL in base and "age_baseline" not in base: base["age_baseline"] = parse_age_first_value(base[AGE_COL])
+    if SEX_COL in base and "sex" not in base: base["sex"] = base[SEX_COL]
+    pmh = [c.name for c in PAST_MEDICAL_HISTORY_CONDITIONS]
+    for name in [c.name for c in iter_analysis_conditions()]:
+        if name not in base: base[name] = pd.Series(False, index=base.index, dtype="boolean")
+        base[name] = base[name].fillna(False).astype("boolean")
+    families = {
+      "general_medical": pmh,
+      "rheumatologic_non_said": [c.name for c in RHEUMATOLOGIC_NON_SAID_CONDITIONS],
+      "concomitant_said": [c.name for c in CONCOMITANT_SAID_CONDITIONS],
+      "other_immune_mediated_systemic": [c.name for c in OTHER_IMMUNE_MEDIATED_SYSTEMIC_CONDITIONS],
+      "sjd_associated_manifestations": [c.name for c in RHEUMATOLOGIC_MANIFESTATIONS]}
+    for family, names in families.items():
+        base[f"n_{family}"] = base[names].astype(int).sum(axis=1)
+        base[f"any_{family}"] = base[f"n_{family}"].gt(0).astype("boolean")
+    base["concomitant_said_any"] = base["any_concomitant_said"]
+    base["any_other_immune_mediated_systemic"] = base["any_other_immune_mediated_systemic"]
+    base["any_sjd_associated_manifestation"] = base["any_sjd_associated_manifestations"]
+    all_names = [c.name for c in iter_analysis_conditions()]
+    base["n_total_conditions"] = base[all_names].astype(int).sum(axis=1)
+    base["any_condition"] = base["n_total_conditions"].gt(0).astype("boolean")
+    if base["patient_id"].duplicated().any(): raise ValueError("Baseline is not one row per patient")
+    return base, pd.DataFrame(columns=[*keys, "n_source_rows"]), 0
 
 
 def summarize_historical_family(base: pd.DataFrame, conditions: Sequence[Condition],
@@ -584,81 +556,81 @@ def apply_fdr(p_values: pd.Series) -> pd.Series:
     return out
 
 def build_longitudinal_essdai_dataset(raw: pd.DataFrame, spine: pd.DataFrame, pop: pd.DataFrame, domains: pd.DataFrame, base: pd.DataFrame) -> pd.DataFrame:
-    parsed = add_parsed_visit_dates(raw, PATIENT_ID_COL, VISIT_DATE_COL)
-    values = parsed.assign(essdai_total_recoded=pd.to_numeric(parsed[ESSDAI_PRIMARY_COL], errors="coerce"), essdai_total_raw_qc=pd.to_numeric(parsed[ESSDAI_RAW_QC_COL], errors="coerce"))
-    values = values.groupby(["patient_id", "visit_date"], as_index=False).agg(essdai_total_recoded=("essdai_total_recoded", "first"), essdai_total_raw_qc=("essdai_total_raw_qc", "first"))
-    long = spine.merge(values, on=["patient_id", "visit_date"], how="left", validate="one_to_one")
-    popcols = pop[["visit_id", "pop_status"]].drop_duplicates("visit_id")
-    long = long.merge(popcols, on="visit_id", how="left", validate="one_to_one").merge(domains.drop(columns=["patient_id", "visit_date"]), on="visit_id", how="left", validate="one_to_one")
-    rheum_status_cols = [f"{c.name}_status" for c in
-                         RHEUMATOLOGIC_ANALYSIS_CONDITIONS]
+    """Merge validated upstream outcomes by canonical episode identity."""
+    keys = ["patient_id", "clinical_episode_id"]
+    popcols = pop[[*keys, "essdai_total", "pop_status"]].drop_duplicates(keys)
+    long = spine.merge(popcols, on=keys, how="left", validate="one_to_one")
+    long = long.merge(domains, on=keys, how="left", validate="one_to_one")
+    status_cols = [f"{c.name}_status" for c in RHEUMATOLOGIC_DESCRIPTIVE_CONDITIONS if f"{c.name}_status" in base]
+    burden_cols = [c for c in base if c.startswith(("n_", "any_")) or c == "concomitant_said_any"]
     bcols = ["patient_id", "baseline_essdai", "baseline_pop", "age_baseline", "sex",
-             *CONDITION_NAMES, *[c.name for c in RHEUMATOLOGIC_MANIFESTATIONS],
-             *rheum_status_cols]
+             *[c.name for c in iter_analysis_conditions()], *status_cols, *burden_cols]
+    bcols = list(dict.fromkeys(c for c in bcols if c in base))
     long = long.drop(columns=["sex"], errors="ignore").merge(base[bcols], on="patient_id", how="left", validate="many_to_one")
-    if long["patient_id"].isna().any() or not long["visit_id"].is_unique:
-        raise ValueError("Longitudinal analytic dataset violates identity constraints")
-    valid = long["essdai_total_recoded"].dropna()
-    if not valid.between(0, 123).all(): raise ValueError("Recoded ESSDAI outside 0..123")
+    if long.duplicated(keys).any(): raise ValueError("Duplicate canonical patient episode")
+    valid = long["essdai_total"].dropna()
+    if not valid.between(0, 123).all(): raise ValueError("Canonical ESSDAI outside 0..123")
     return long
 
 
 def build_severe5_survival_dataset(long: pd.DataFrame, base: pd.DataFrame) -> pd.DataFrame:
-    rows = []
-    for pid, g in long.groupby("patient_id"):
-        b = base.loc[base["patient_id"].eq(pid)].iloc[0]
-        follow = g.loc[(g["visit_number"] > 0) & g["essdai_total_recoded"].notna()].sort_values("visit_date")
-        if pd.isna(b["baseline_essdai"]) or b["baseline_essdai"] >= SEVERE_THRESHOLD or follow.empty: continue
-        event_rows = follow.loc[follow["essdai_total_recoded"] >= SEVERE_THRESHOLD]
-        event_date = event_rows["visit_date"].iloc[0] if not event_rows.empty else pd.NaT
-        last = follow["visit_date"].max(); end = event_date if pd.notna(event_date) else last
-        row = b.to_dict(); row.update({"last_evaluable_date": last, "event_date": event_date, "followup_days": (end-b["baseline_date"]).days, "severe5_event": int(pd.notna(event_date))})
+    rows=[]
+    for pid,g in long.groupby("patient_id"):
+        b=base.loc[base.patient_id.eq(pid)].iloc[0]
+        follow=g.loc[(g.clinical_anchor_date > b.clinical_baseline_date) & g.essdai_total.notna()].sort_values("clinical_anchor_date")
+        if pd.isna(b.baseline_essdai) or b.baseline_essdai >= SEVERE_THRESHOLD or follow.empty: continue
+        events=follow.loc[follow.essdai_total >= SEVERE_THRESHOLD]
+        event_date=events.clinical_anchor_date.iloc[0] if len(events) else pd.NaT
+        last=follow.clinical_anchor_date.max(); end=event_date if pd.notna(event_date) else last
+        row=b.to_dict(); row.update(last_evaluable_date=last,event_date=event_date,
+          followup_days=(end-b.clinical_baseline_date).days,severe5_event=int(pd.notna(event_date)))
         rows.append(row)
-    out = pd.DataFrame(rows); out["followup_years"] = out.get("followup_days", pd.Series(dtype=float))/365.25
-    if len(out) and ((out["followup_days"] <= 0).any() or (out["event_date"].dropna() > out.loc[out["event_date"].notna(), "last_evaluable_date"]).any()): raise ValueError("Invalid severe-event timing")
+    out=pd.DataFrame(rows); out["followup_years"]=out.get("followup_days",pd.Series(dtype=float))/365.25
+    if len(out) and (out.followup_days < 0).any(): raise ValueError("Negative severe-event follow-up")
     return out
 
 
-def build_new_domain_survival_dataset(long: pd.DataFrame, base: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    rows, audit = [], []
-    for pid, g in long.sort_values("visit_date").groupby("patient_id"):
-        baseline_g = g.loc[g["visit_number"].eq(0)]
-        follow = g.loc[g["visit_number"] > 0]
-        if baseline_g.empty or follow.empty: continue
-        bdom = baseline_g.iloc[0]; event_candidates = []; censoring_dates = []
-        n_eval = 0; n_inactive = 0
-        for domain in ORGAN_DOMAINS:
-            evaluable_col = DOMAIN_EVALUABLE[domain]
-            baseline_evaluable = bool(bdom[evaluable_col]) if pd.notna(bdom[evaluable_col]) else False
-            state = bool(bdom[domain]) if baseline_evaluable else pd.NA
-            at_risk = baseline_evaluable and not bool(state)
-            n_eval += int(baseline_evaluable)
-            n_inactive += int(at_risk)
-            evaluable_follow = follow.loc[follow[evaluable_col].eq(True)] if at_risk else follow.iloc[0:0]
-            events = evaluable_follow.loc[evaluable_follow[domain].eq(True), "visit_date"]
-            date = events.min() if not events.empty else pd.NaT
-            last_domain_evaluable = evaluable_follow["visit_date"].max() if not evaluable_follow.empty else pd.NaT
-            audit.append({"patient_id": pid, "domain": domain, "baseline_evaluable": baseline_evaluable,
-                          "baseline_state": state, "at_risk": at_risk,
-                          "last_domain_evaluable_date": last_domain_evaluable,
-                          "domain_event_date": date})
-            if pd.notna(date): event_candidates.append((date, domain))
-            if pd.notna(last_domain_evaluable): censoring_dates.append(last_domain_evaluable)
-        # A patient contributes only with at least one baseline-inactive domain
-        # and a later evaluation of at least one such domain.
-        if n_inactive == 0 or not censoring_dates: continue
-        first_date, first_name = min(event_candidates) if event_candidates else (pd.NaT, pd.NA)
-        last = max(censoring_dates); end = first_date if pd.notna(first_date) else last
-        b = base.loc[base["patient_id"].eq(pid)].iloc[0].to_dict()
-        b.update({"first_new_domain_date": first_date, "first_new_domain_name": first_name, "new_domain_event": int(pd.notna(first_date)), "n_domains_inactive_at_baseline": n_inactive, "n_domains_evaluable_at_baseline": n_eval, "last_evaluable_date": last, "followup_days": (end-b["baseline_date"]).days})
-        rows.append(b)
-    out = pd.DataFrame(rows); out["followup_years"] = out.get("followup_days", pd.Series(dtype=float))/365.25
-    if len(out) and (out["followup_days"] <= 0).any(): raise ValueError("New-domain event/censoring time must be positive")
-    return out, pd.DataFrame(audit)
+def build_new_domain_survival_dataset(long: pd.DataFrame, base: pd.DataFrame) -> tuple[pd.DataFrame,pd.DataFrame]:
+    patient_rows=[]; domain_rows=[]
+    for pid,g in long.sort_values("clinical_anchor_date").groupby("patient_id"):
+        baseline=g.loc[g.is_clinical_baseline.eq(True)]
+        if len(baseline)!=1: continue
+        b=baseline.iloc[0]; follow=g.loc[g.clinical_anchor_date > b.clinical_baseline_date]
+        event_candidates=[]; censor_dates=[]; n_risk=0
+        for domain in ALL_DOMAINS:
+            evcol=DOMAIN_EVALUABLE[domain]
+            baseline_eval=bool(b[evcol]) if pd.notna(b[evcol]) else False
+            baseline_active=bool(b[domain]) if baseline_eval else pd.NA
+            eval_follow=follow.loc[follow[evcol].eq(True)] if baseline_eval and not bool(baseline_active) else follow.iloc[:0]
+            at_risk=bool(baseline_eval and not bool(baseline_active) and len(eval_follow))
+            events=eval_follow.loc[eval_follow[domain].eq(True),"clinical_anchor_date"]
+            event_date=events.min() if len(events) else pd.NaT
+            censor=eval_follow.clinical_anchor_date.max() if len(eval_follow) else pd.NaT
+            record={"patient_id":pid,"domain":domain,"baseline_evaluable":baseline_eval,
+              "baseline_active":baseline_active,"at_risk":at_risk,"domain_event":int(pd.notna(event_date)),
+              "domain_event_date":event_date,"last_domain_evaluable_date":censor}
+            if at_risk:
+                end=event_date if pd.notna(event_date) else censor
+                record["followup_days"]=(end-b.clinical_baseline_date).days
+                n_risk+=1; censor_dates.append(censor)
+                if pd.notna(event_date): event_candidates.append((event_date,domain))
+            domain_rows.append(record)
+        if not n_risk: continue
+        first_date,first_domain=min(event_candidates) if event_candidates else (pd.NaT,pd.NA)
+        last=max(censor_dates); end=first_date if pd.notna(first_date) else last
+        row=base.loc[base.patient_id.eq(pid)].iloc[0].to_dict()
+        row.update(first_new_domain_date=first_date,first_new_domain_name=first_domain,
+          new_domain_event=int(pd.notna(first_date)),n_domains_inactive_at_baseline=n_risk,
+          last_evaluable_date=last,followup_days=(end-b.clinical_baseline_date).days)
+        patient_rows.append(row)
+    out=pd.DataFrame(patient_rows); out["followup_years"]=out.get("followup_days",pd.Series(dtype=float))/365.25
+    audit=pd.DataFrame(domain_rows)
+    if len(out) and (out.followup_days < 0).any(): raise ValueError("Negative domain follow-up")
+    return out,audit
 
 
 def _empty_progression(c: Condition, outcome: str, estimand: str, warning: str, **counts: Any) -> dict[str, Any]:
-    return {"comorbidity": c.name, "display_label": c.label, "condition_family": c.condition_family, "outcome": outcome, "estimand": estimand, "model_type": "not fitted", "effect_measure": "Not estimable", "estimate": np.nan, "ci95_low": np.nan, "ci95_high": np.nan, "p_value": np.nan, "n_patients": counts.get("n_patients", 0), "n_followup_observations": counts.get("n_followup_observations", 0), "n_events": counts.get("n_events", np.nan), "n_exposed": counts.get("n_exposed", np.nan), "n_exposed_events": counts.get("n_exposed_events", np.nan), "n_complete_cases": counts.get("n_complete_cases", 0), "baseline_reference_group": "Comorbidity absent", "adjustment_covariates": "baseline ESSDAI; baseline Pop; age; sex", "time_scale": "years since observed baseline", "threshold": SEVERE_THRESHOLD if outcome == "Progression to ESSDAI >=5" else np.nan, "model_converged": False, "proportional_hazards_p": np.nan, "sparse_event_flag": True, "model_status": "not_estimable", "warning": warning, "interpretation": "Not estimable; no causal interpretation is warranted."}
+    return {"comorbidity": c.name, "display_label": c.label, "condition_family": c.condition_family, "outcome": outcome, "estimand": estimand, "model_type": "not fitted", "effect_measure": "Not estimable", "estimate": np.nan, "ci95_low": np.nan, "ci95_high": np.nan, "p_value": np.nan, "n_patients": counts.get("n_patients", 0), "n_followup_observations": counts.get("n_followup_observations", 0), "n_events": counts.get("n_events", np.nan), "n_exposed": counts.get("n_exposed", np.nan), "n_exposed_events": counts.get("n_exposed_events", np.nan), "n_complete_cases": counts.get("n_complete_cases", 0), "baseline_reference_group": "Comorbidity absent", "adjustment_covariates": "baseline ESSDAI; baseline Pop; age; sex", "time_scale": "years since clinical baseline", "threshold": SEVERE_THRESHOLD if outcome == "Progression to ESSDAI >=5" else np.nan, "model_converged": False, "proportional_hazards_p": np.nan, "sparse_event_flag": True, "model_status": "not_estimable", "warning": warning, "interpretation": "Not estimable; no causal interpretation is warranted."}
 
 
 def restrict_to_primary_exposure(data: pd.DataFrame, c: Condition) -> pd.DataFrame:
@@ -678,11 +650,11 @@ def progression_exposure_column(c: Condition) -> str:
 def fit_mixed_model(long: pd.DataFrame, c: Condition) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     import statsmodels.formula.api as smf
     exposure_col = progression_exposure_column(c)
-    cols = ["patient_id", "essdai_total_recoded", "time_since_observed_baseline_years",
-            exposure_col, "baseline_essdai", "baseline_pop", "age_baseline", "sex", "visit_number"]
-    data = restrict_to_primary_exposure(long.loc[long["visit_number"] > 0, cols], c)
-    data = data.dropna(subset=["patient_id", "essdai_total_recoded",
-                              "time_since_observed_baseline_years", "baseline_essdai",
+    cols = ["patient_id", "essdai_total", "time_since_clinical_baseline_years",
+            exposure_col, "baseline_essdai", "baseline_pop", "age_baseline", "sex"]
+    data = restrict_to_primary_exposure(long.loc[long["time_since_clinical_baseline_days"] > 0, cols], c)
+    data = data.dropna(subset=["patient_id", "essdai_total",
+                              "time_since_clinical_baseline_years", "baseline_essdai",
                               "baseline_pop", "age_baseline", "sex"])
     eligible = data.groupby("patient_id").size(); n = len(eligible)
     exposure_counts = data.drop_duplicates("patient_id")[c.name].value_counts()
@@ -691,7 +663,7 @@ def fit_mixed_model(long: pd.DataFrame, c: Condition) -> tuple[list[dict[str, An
     if n < 5 or data[c.name].nunique() < 2 or exposure_counts.get(1, 0) < 5:
         row = _empty_progression(c, "Longitudinal ESSDAI trajectory", "Time x comorbidity", "Too few complete patients or no exposure variation", **model_counts)
         return [row], {"comorbidity": c.name, "outcome": "ESSDAI trajectory", "convergence": False, "warning": row["warning"]}
-    formula = "essdai_total_recoded ~ time_since_observed_baseline_years * Q('%s') + baseline_essdai + C(baseline_pop) + age_baseline + C(sex)" % c.name
+    formula = "essdai_total ~ time_since_clinical_baseline_years * Q('%s') + baseline_essdai + C(baseline_pop) + age_baseline + C(sex)" % c.name
     model_type, fit, warning_text = "Linear mixed model (random intercept)", None, ""
     try:
         with warnings.catch_warnings(record=True) as caught:
@@ -706,7 +678,7 @@ def fit_mixed_model(long: pd.DataFrame, c: Condition) -> tuple[list[dict[str, An
         except (ValueError, np.linalg.LinAlgError) as gee_exc:
             row = _empty_progression(c, "Longitudinal ESSDAI trajectory", "Time x comorbidity", f"Mixed model and GEE failed: {gee_exc}", **model_counts)
             return [row], {"comorbidity": c.name, "outcome": "ESSDAI trajectory", "convergence": False, "warning": row["warning"]}
-    interaction = f"time_since_observed_baseline_years:Q('{c.name}')"
+    interaction = f"time_since_clinical_baseline_years:Q('{c.name}')"
     exposure = f"Q('{c.name}')"
     result_rows = []
     for term, estimand, measure in ((interaction, "Difference in annual ESSDAI slope", "Beta per year"), (exposure, "Adjusted mean difference during follow-up", "Adjusted mean difference")):
@@ -887,12 +859,14 @@ def create_progression_forestplot(
 
 def run_qc_checks(base: pd.DataFrame, long: pd.DataFrame, severe: pd.DataFrame, new_domain: pd.DataFrame, domain_audit: pd.DataFrame) -> dict[str, Any]:
     if base["patient_id"].isna().any() or base["patient_id"].duplicated().any(): raise ValueError("Invalid baseline patient identity")
-    if not base["baseline_date"].eq(base["observed_baseline_date"]).all(): raise ValueError("Noncanonical baseline detected")
+    if not base["clinical_baseline_episode_id_source"].eq(base["clinical_baseline_episode_id"]).all(): raise ValueError("Baseline episode mismatch")
+    if not base["clinical_baseline_date_source"].eq(base["clinical_baseline_date"]).all(): raise ValueError("Baseline date mismatch")
+    if long.duplicated(["patient_id", "clinical_episode_id"]).any(): raise ValueError("Duplicate patient episode")
     for col in CONDITION_NAMES + ALL_DOMAINS + list(DOMAIN_EVALUABLE.values()):
         source = base[col] if col in base else long[col]
         if str(source.dtype) != "boolean": raise TypeError(f"{col} is not nullable boolean")
     if len(domain_audit):
-        if ((domain_audit["baseline_state"] == True) & domain_audit["domain_event_date"].notna()).any(): raise ValueError("Baseline-active domain counted as new")  # noqa: E712
+        if ((domain_audit["baseline_active"] == True) & domain_audit["domain_event_date"].notna()).any(): raise ValueError("Baseline-active domain counted as new")  # noqa: E712
         if ((~domain_audit["baseline_evaluable"]) & domain_audit["at_risk"]).any():
             raise ValueError("Baseline-unevaluable domain entered the new-domain risk set")
         if (domain_audit["domain_event_date"].notna() & ~domain_audit["at_risk"]).any():
@@ -911,13 +885,13 @@ def missingness_table(base: pd.DataFrame) -> pd.DataFrame:
 
 def source_mapping(raw_columns: Iterable[str]) -> pd.DataFrame:
     raw_columns=set(raw_columns); rows=[]
-    for c in [*iter_analysis_conditions(), *RHEUMATOLOGIC_MANIFESTATIONS]:
+    for c in list(iter_analysis_conditions()):
         prohibited=[x for x in (*c.primary,*c.detail_columns) if x.startswith(PROHIBITED_SOURCE_PREFIXES)]
         if prohibited: raise AssertionError(f"Prohibited source selected: {prohibited}")
         rows.append({"condition":c.name,"condition_family":c.condition_family,
           "clinical_category":c.clinical_category,"source_columns":"|".join(c.primary),
           "status_definition":("documented_history=True only when PMH source is positive; blank means no documented history"
-             if c.condition_family=="past_medical_history" else
+             if c.condition_family=="general_medical" else
              "confirmed_present > history_only > status_uncertain > no_comorbidity; confirmed_present is primary positive"),
           "availability":"available" if any(x in raw_columns for x in c.primary) else "unavailable"})
     return pd.DataFrame(rows)
@@ -957,6 +931,60 @@ def create_sectioned_comorbidity_plot(base: pd.DataFrame,
     _plot_save(fig, path)
 
 
+def condition_dictionary() -> pd.DataFrame:
+    rows=[]
+    for c in iter_analysis_conditions():
+        role = {"general_medical":"general_medical_comorbidity",
+                "other_immune_mediated_systemic":"other_immune_mediated"}.get(c.condition_family,c.condition_family)
+        rows.append({"condition":c.name,"display_label":c.label,"condition_family":c.condition_family,
+          "clinical_category":c.clinical_category,"source_columns":"|".join(c.primary),
+          "derivation_rule":("positive checkbox = documented history; blank = no documented history" if c.condition_family=="general_medical" else "general OR history OR confirmed"),
+          "analysis_role":role})
+    return pd.DataFrame(rows)
+
+
+def burden_summary(base: pd.DataFrame) -> pd.DataFrame:
+    columns=["n_general_medical","n_rheumatologic_non_said","n_concomitant_said",
+      "n_other_immune_mediated_systemic","n_sjd_associated_manifestations","n_total_conditions"]
+    rows=[]
+    groups=[("Overall",base)]+[(p,base.loc[base.baseline_pop.eq(p)]) for p in ("Pop1","Pop2","Pop3")]
+    for group,data in groups:
+        for col in columns:
+            x=pd.to_numeric(data[col],errors="coerce").dropna()
+            rows.append({"group":group,"burden":col,"N":len(x),"mean":x.mean(),"SD":x.std(),
+              "median":x.median(),"IQR":x.quantile(.75)-x.quantile(.25),"min":x.min(),"max":x.max()})
+    return pd.DataFrame(rows)
+
+
+def source_qc(raw: pd.DataFrame) -> pd.DataFrame:
+    rows=[]
+    for c in iter_analysis_conditions():
+        for col in c.primary:
+            exists=col in raw
+            normalized=normalize_binary_flag(raw[col]) if exists else pd.Series(dtype="boolean")
+            unrec=[x for x in _UNRECOGNIZED if x["source_column"]==col]
+            rows.append({"condition":c.name,"condition_family":c.condition_family,"source_column":col,
+              "source_exists":exists,"n_nonmissing":int(raw[col].notna().sum()) if exists else 0,
+              "n_yes":int(normalized.eq(True).sum()),"n_no":int(normalized.eq(False).sum()),
+              "n_unrecognized":len(unrec),"unique_unrecognized_values":"|".join(sorted({x["original_value"] for x in unrec}))})
+    return pd.DataFrame(rows)
+
+def create_standard_figures(overall: pd.DataFrame, by_pop: pd.DataFrame, burden: pd.DataFrame) -> None:
+    """Create requested figures exclusively from their published tables."""
+    d=overall.sort_values("pct")
+    fig,ax=plt.subplots(figsize=(10,max(6,.25*len(d))))
+    ax.scatter(d.pct,np.arange(len(d))); ax.set_yticks(np.arange(len(d)),d.display_label)
+    ax.set_xlabel("Baseline prevalence (%)"); ax.grid(axis="x",alpha=.25)
+    _plot_save(fig,FIGURES_DIR/"07_comorbidities_dotplot.pdf")
+    x=np.arange(len(by_pop)); fig,ax=plt.subplots(figsize=(max(12,.22*len(x)),7))
+    for i,pop in enumerate((1,2,3)): ax.bar(x+(i-1)*.25,by_pop[f"pct_pop{pop}"],.25,label=f"Pop{pop}")
+    ax.set_xticks(x,by_pop.display_label,rotation=90); ax.set_ylabel("Baseline prevalence (%)"); ax.legend()
+    _plot_save(fig,FIGURES_DIR/"07_comorbidities_by_pop_grouped_bar.pdf")
+    b=burden.loc[burden.group.eq("Overall")]
+    fig,ax=plt.subplots(figsize=(10,5)); ax.bar(b.burden,b["mean"],yerr=b.SD.fillna(0))
+    ax.tick_params(axis="x",rotation=35); ax.set_ylabel("Mean baseline condition count")
+    _plot_save(fig,FIGURES_DIR/"07_comorbidity_burden_by_family.pdf")
+
 def main(argv: Sequence[str] | None = None) -> int:
     args=parse_args(argv); ensure_directories(); logger=setup_logging(); np.random.seed(args.random_seed)
     logger.info("[1/7] Loading canonical sources")
@@ -968,7 +996,7 @@ def main(argv: Sequence[str] | None = None) -> int:
       ("rheumatologic_comorbidities",RHEUMATOLOGIC_NON_SAID_CONDITIONS,False),
       ("concomitant_said",CONCOMITANT_SAID_CONDITIONS,False),
       ("other_immune_mediated_systemic",OTHER_IMMUNE_MEDIATED_SYSTEMIC_CONDITIONS,False),
-      ("rheumatologic_manifestations",RHEUMATOLOGIC_MANIFESTATIONS,False)]
+      ("sjd_associated_manifestations",RHEUMATOLOGIC_MANIFESTATIONS,False)]
     logger.info("[3/7] Writing separate descriptive outputs")
     produced=[]
     for stem,conditions,historical in families:
@@ -977,6 +1005,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                                        replicates=args.monte_carlo_replicates,seed=args.random_seed)
         op=TABLES_DIR/f"07_{stem}_overall.csv"; bp=TABLES_DIR/f"07_{stem}_by_pop.csv"
         overall.to_csv(op,index=False); by_pop.to_csv(bp,index=False); produced.extend([op,bp])
+    all_conditions=list(iter_analysis_conditions())
+    overall=pd.concat([summarize_historical_family(base,PAST_MEDICAL_HISTORY_CONDITIONS),
+      summarize_confirmed_family(base,[c for c in all_conditions if c.condition_family!="general_medical"])],ignore_index=True)
+    overall["n_positive"]=overall.get("n_documented_history").fillna(overall.get("n_confirmed_present"))
+    overall["N"]=overall.get("n_total_patients").fillna(overall.get("N_evaluable"))
+    overall["pct"]=100*overall["n_positive"]/overall["N"]
+    overall.to_csv(TABLES_DIR/"07_comorbidities_overall.csv",index=False)
+    by_pop=summarize_family_by_pop(base,all_conditions,run_sparse_monte_carlo=args.run_sparse_monte_carlo,replicates=args.monte_carlo_replicates,seed=args.random_seed)
+    by_pop["fdr_family"]="prevalence_by_pop"; by_pop.to_csv(TABLES_DIR/"07_comorbidities_by_pop.csv",index=False)
+    burden_summary(base).to_csv(TABLES_DIR/"07_comorbidity_burden_summary.csv",index=False)
+    condition_dictionary().to_csv(TABLES_DIR/"07_comorbidity_condition_dictionary.csv",index=False)
+    create_standard_figures(overall,by_pop,burden_summary(base))
+    produced.extend([TABLES_DIR/"07_comorbidities_overall.csv",TABLES_DIR/"07_comorbidities_by_pop.csv",TABLES_DIR/"07_comorbidity_burden_summary.csv",TABLES_DIR/"07_comorbidity_condition_dictionary.csv"])
     pmh_section_order = [
         ("Cardiovascular / metabolic", "Cardiovascular/metabolic"),
         ("Respiratory", "Respiratory"), ("Endocrine", "Endocrine"),
@@ -1013,7 +1054,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         row,diagnostic=fit_cox_model(severe,condition,"severe5_event","Progression to ESSDAI >=5",args.minimum_events); progression_rows.append(row); diagnostics.append(diagnostic)
         row,diagnostic=fit_cox_model(new_domain,condition,"new_domain_event","New ESSDAI-domain involvement",args.minimum_events); progression_rows.append(row); diagnostics.append(diagnostic)
     progression=pd.DataFrame(progression_rows)
-    progression["fdr_bh_q_value"]=progression.groupby(["outcome","estimand"])["p_value"].transform(apply_fdr)
+    progression["fdr_family"]=progression["outcome"]
+    progression["q_value"]=progression.groupby(["outcome","estimand"])["p_value"].transform(apply_fdr)
+    progression["fdr_bh_q_value"]=progression["q_value"]
+    model_outputs={"Longitudinal ESSDAI trajectory":"07_comorbidity_essdai_longitudinal_models.csv",
+      "Progression to ESSDAI >=5":"07_comorbidity_severe5_models.csv",
+      "New ESSDAI-domain involvement":"07_comorbidity_new_domain_models.csv"}
+    for outcome,name in model_outputs.items():
+        progression.loc[progression.outcome.eq(outcome)].to_csv(TABLES_DIR/name,index=False); produced.append(TABLES_DIR/name)
+
     for stem, conditions in PROGRESSION_FAMILIES:
         names = {c.name for c in conditions}
         family_results = progression.loc[progression["comorbidity"].isin(names)].copy()
@@ -1031,18 +1080,37 @@ def main(argv: Sequence[str] | None = None) -> int:
         rheum_sections, rheum_progression_plot)
     produced.extend([pmh_progression_plot, rheum_progression_plot])
     pd.DataFrame(diagnostics).to_csv(QC_DIR/"07_comorbidities_model_diagnostics.csv",index=False)
+    hard_qc=run_qc_checks(base,long,severe,new_domain,domain_audit)
     logger.info("[6/7] Writing auditable source map and QC")
     mapping=source_mapping(raw.columns); mapping.to_csv(QC_DIR/"07_comorbidities_source_mapping.csv",index=False)
     duplicates.to_csv(QC_DIR/"07_comorbidities_patient_duplicates.csv",index=False)
     missingness_table(base).to_csv(QC_DIR/"07_comorbidities_missingness.csv",index=False)
     pd.DataFrame(_UNRECOGNIZED,columns=["source_column","original_value","row_index"]).drop_duplicates().to_csv(QC_DIR/"07_comorbidities_unrecognized_values.csv",index=False)
+    source_qc(raw).to_csv(QC_DIR/"07_comorbidity_source_qc.csv",index=False)
+    unrecognized=pd.DataFrame(_UNRECOGNIZED,columns=["source_column","original_value","row_index"])
+    if len(unrecognized): unrecognized=unrecognized.groupby(["source_column","original_value"],as_index=False).size().rename(columns={"size":"n_occurrences"})
+    else: unrecognized=pd.DataFrame(columns=["source_column","original_value","n_occurrences"])
+    unrecognized.to_csv(QC_DIR/"07_comorbidity_unrecognized_values.csv",index=False)
+    audit_cols=["patient_id","clinical_baseline_episode_id","clinical_baseline_date","baseline_pop","baseline_essdai","age_baseline","sex",*CONDITION_NAMES]
+    base[[c for c in audit_cols if c in base]].to_csv(QC_DIR/"07_comorbidity_baseline_patient_audit.csv",index=False)
+    pd.DataFrame(diagnostics).to_csv(QC_DIR/"07_comorbidity_model_qc.csv",index=False)
+    pd.DataFrame({"metric":["n_longitudinal_rows","n_unmatched_pop","n_unmatched_domains"],"value":[len(long),int(long.pop_status.isna().sum()),int(long[ALL_DOMAINS].isna().all(axis=1).sum())]}).to_csv(QC_DIR/"07_comorbidity_merge_qc.csv",index=False)
     prohibited_used=sorted(x for c in iter_analysis_conditions() for x in (*c.primary,*c.detail_columns) if x.startswith(PROHIBITED_SOURCE_PREFIXES))
     qc={"input_path":str(args.input),"script_version":SCRIPT_VERSION,"run_timestamp":datetime.now(timezone.utc).isoformat(),
-      "n_baseline_patients":len(base),"n_pipe_delimited_visit_dates":n_pipe,"essdai_threshold":SEVERE_THRESHOLD,
-      "condition_family_counts":{f:sum(c.condition_family==f for c in iter_analysis_conditions()) for f in ("past_medical_history","rheumatologic_non_said","concomitant_said","other_immune_mediated_systemic")},
+      "n_baseline_patients":len(base),"essdai_threshold":SEVERE_THRESHOLD,
+      "condition_family_counts":{f:sum(c.condition_family==f for c in iter_analysis_conditions()) for f in ("general_medical","rheumatologic_non_said","concomitant_said","other_immune_mediated_systemic")},
       "prohibited_sources_used":prohibited_used,"prohibited_source_check_passed":not prohibited_used,
       "monte_carlo_enabled":args.run_sparse_monte_carlo,"upstream_file_timestamps":timestamps,
       "separate_burden_columns":["n_general_medical_history","n_rheumatologic_non_said","n_concomitant_said","n_other_immune_mediated_systemic"]}
+    qc_summary={"n_patients_clinical_spine":spine.patient_id.nunique(),"n_clinical_episodes":len(spine),
+      "n_baseline_patients":len(base),"n_duplicate_patient_episode":int(spine.duplicated(["patient_id","clinical_episode_id"]).sum()),
+      "n_patients_multiple_baseline":int(spine.loc[spine.is_clinical_baseline.eq(True)].patient_id.duplicated().sum()),
+      "n_patients_without_baseline":int(spine.patient_id.nunique()-len(base)),"n_pop_baseline_available":int(base.baseline_pop.notna().sum()),
+      "n_essdai_baseline_available":int(base.baseline_essdai.notna().sum()),"n_conditions_total":len(CONDITION_NAMES),
+      "n_general_medical_conditions":len(PAST_MEDICAL_HISTORY_CONDITIONS),"n_rheumatologic_non_said_conditions":len(RHEUMATOLOGIC_NON_SAID_CONDITIONS),
+      "n_concomitant_said_conditions":len(CONCOMITANT_SAID_CONDITIONS),"n_other_immune_conditions":len(OTHER_IMMUNE_MEDIATED_SYSTEMIC_CONDITIONS),
+      "n_sjd_associated_manifestations":len(RHEUMATOLOGIC_MANIFESTATIONS)}
+    pd.DataFrame([qc_summary]).to_csv(QC_DIR/"07_comorbidities_qc_summary.csv",index=False)
     (QC_DIR/"07_comorbidities_qc.json").write_text(json.dumps(qc,indent=2,default=str)+"\n")
     logger.info("[7/7] Complete: progression results written separately by comorbidity family")
     print("Generated files:"); [print(x.resolve()) for x in produced+[QC_DIR/"07_comorbidities_qc.json",QC_DIR/"07_comorbidities_source_mapping.csv"]]
