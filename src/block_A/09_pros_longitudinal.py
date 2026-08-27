@@ -56,6 +56,12 @@ ESSPRI_COMPARISON_NOTE = (
     "ESSPRI contributes directly to baseline Pop classification; inferential "
     "comparison by Pop is not performed to avoid circular interpretation."
 )
+CLINICAL_VISIT_DESCRIPTIVE_NOTE = (
+    "Clinical visit number is used for descriptive summaries only. "
+    "Longitudinal inference uses actual elapsed clinical time. Late visit "
+    "numbers have small sample sizes and should not be interpreted as "
+    "population-level trajectories."
+)
 
 
 def read(path: Path) -> pd.DataFrame:
@@ -276,7 +282,8 @@ def by_visit_table(df: pd.DataFrame) -> pd.DataFrame:
             d=describe(group[measure] if measure in group else pd.Series(dtype=float))
             rows.append({"clinical_visit_number":visit,"instrument":inst,"measure":measure,
                          "n_patients_observed":group.patient_id.nunique(),**d,
-                         "pct_available":100*d["n_available"]/group.patient_id.nunique() if group.patient_id.nunique() else np.nan})
+                         "pct_available":100*d["n_available"]/group.patient_id.nunique() if group.patient_id.nunique() else np.nan,
+                         "methodological_note":CLINICAL_VISIT_DESCRIPTIVE_NOTE})
     return pd.DataFrame(rows)
 
 
@@ -349,10 +356,11 @@ def longitudinal_tables(df: pd.DataFrame) -> tuple[pd.DataFrame,pd.DataFrame,dic
         spans=eligible.groupby("patient_id").time_since_clinical_baseline_years.agg(lambda x:x.max()-x.min()) if len(eligible) else pd.Series(dtype=float)
         counts=eligible.groupby("patient_id").size() if len(eligible) else pd.Series(dtype=float)
         row={"instrument":inst,"measure":measure,"n_patients_longitudinal":len(eligible_ids),"n_observations":len(eligible),
-             "n_missing":int(df[measure].isna().sum()),"median_followup_years":spans.median(),"median_measurements_per_patient":counts.median(),
-             "baseline_mean_or_median":first[measure].mean() if len(first) else np.nan,"last_mean_or_median":last[measure].mean() if len(last) else np.nan,
-             "mean_or_median_change":changes.mean(),**model}
-        rows.append(row); models.append({"instrument":inst,"measure":measure,"n_patients":len(eligible_ids),"n_observations":len(eligible),**model})
+             "n_missing":int(df[measure].isna().sum()),"median_observed_pro_span_years":spans.median(),"median_measurements_per_patient":counts.median(),
+             "first_available_mean":first[measure].mean() if len(first) else np.nan,"last_available_mean":last[measure].mean() if len(last) else np.nan,
+             "mean_first_to_last_change":changes.mean(),**model}
+        rows.append(row); models.append({"instrument":inst,"measure":measure,"n_patients":len(eligible_ids),"n_observations":len(eligible),
+                                         "longitudinal_summary_basis":"first_and_last_available_measurements",**model})
     out=pd.DataFrame(rows); model_qc=pd.DataFrame(models)
     if len(out): out["q_value"]=fdr(out.p_value)
     if len(model_qc): model_qc["q_value"]=fdr(model_qc.p_value)
