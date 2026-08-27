@@ -13,6 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_DIR = PROJECT_ROOT / "data"
 RAW_DATA_DIR = DATA_DIR / "raw"
 INTERMEDIATE_DATA_DIR = DATA_DIR / "intermediate"
+BLOCKA_INTERMEDIATE_DATA_DIR = INTERMEDIATE_DATA_DIR / "block_A"
 ANALYTIC_DATA_DIR = DATA_DIR / "analytic"
 METADATA_DIR = PROJECT_ROOT / "metadata"
 OUTPUTS_DIR = PROJECT_ROOT / "outputs"
@@ -46,7 +47,7 @@ CLINICAL_VISIT_SPINE_PARQUET = INTERMEDIATE_DATA_DIR / "00_clinical_visit_spine.
 CLINICAL_VISIT_SPINE_CSV = INTERMEDIATE_DATA_DIR / "00_clinical_visit_spine.csv"
 POP_LONGITUDINAL_PARQUET = INTERMEDIATE_DATA_DIR / "01_visit_level_classification.parquet"
 OVERLAP_LONGITUDINAL_PARQUET = (
-    INTERMEDIATE_DATA_DIR / "06_overlap_longitudinal_dx_temporal_anchor_patient_visit.parquet"
+    BLOCKA_INTERMEDIATE_DATA_DIR / "06_overlap_episode_level.parquet"
 )
 PROS_LONGITUDINAL_PARQUET = INTERMEDIATE_DATA_DIR / "09_pros_longitudinal_patient_visit.parquet"
 INTEGRATED_LONGITUDINAL_PARQUET = ANALYTIC_DATA_DIR / "10_integrated_longitudinal_patient_visit.parquet"
@@ -57,7 +58,8 @@ TRANSITION_EPISODE_CSV = INTERMEDIATE_DATA_DIR / "23_transition_episode_dataset.
 def ensure_output_dirs() -> None:
     """Create standard output directories used by analysis scripts."""
     for path in (
-        INTERMEDIATE_DATA_DIR, ANALYTIC_DATA_DIR, BLOCKA_TABLES_DIR, BLOCKA_QC_DIR,
+        INTERMEDIATE_DATA_DIR, BLOCKA_INTERMEDIATE_DATA_DIR, ANALYTIC_DATA_DIR,
+        BLOCKA_TABLES_DIR, BLOCKA_QC_DIR,
         BLOCKB_TABLES_DIR, BLOCKB_FIGURES_DIR, BLOCKB_QC_DIR, BLOCKB_LOGS_DIR,
     ):
         path.mkdir(parents=True, exist_ok=True)
