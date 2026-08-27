@@ -52,7 +52,8 @@ ESSDAI_PRIMARY_COL = "essdai_total"  # canonical upstream episode-level score
 # Section 5 progression uses the same moderate-to-severe threshold as Pop 1.
 SEVERE_THRESHOLD = config.ESSDAI_SEVERE
 RANDOM_SEED = 20260728
-SCRIPT_VERSION = "2.0.0"
+SCRIPT_VERSION = "2.1.0"
+SPARSE_EXPOSURE_THRESHOLD = 10
 
 FIGURES_DIR = common.OUTPUTS_DIR / "figures" / "blockA"
 TABLES_DIR = common.OUTPUTS_DIR / "tables" / "blockA"
@@ -635,7 +636,34 @@ def build_new_domain_survival_dataset(long: pd.DataFrame, base: pd.DataFrame) ->
 
 
 def _empty_progression(c: Condition, outcome: str, estimand: str, warning: str, **counts: Any) -> dict[str, Any]:
-    return {"comorbidity": c.name, "display_label": c.label, "condition_family": c.condition_family, "outcome": outcome, "estimand": estimand, "model_type": "not fitted", "effect_measure": "Not estimable", "estimate": np.nan, "ci95_low": np.nan, "ci95_high": np.nan, "p_value": np.nan, "n_patients": counts.get("n_patients", 0), "n_followup_observations": counts.get("n_followup_observations", 0), "n_events": counts.get("n_events", np.nan), "n_exposed": counts.get("n_exposed", np.nan), "n_exposed_events": counts.get("n_exposed_events", np.nan), "n_complete_cases": counts.get("n_complete_cases", 0), "baseline_reference_group": "Comorbidity absent", "adjustment_covariates": "baseline ESSDAI; baseline Pop; age; sex", "time_scale": "years since clinical baseline", "threshold": SEVERE_THRESHOLD if outcome == "Progression to ESSDAI >=5" else np.nan, "model_converged": False, "proportional_hazards_p": np.nan, "sparse_event_flag": True, "model_status": "not_estimable", "warning": warning, "interpretation": "Not estimable; no causal interpretation is warranted."}
+    n_patients = counts.get("n_patients", 0)
+    n_exposed = counts.get("n_exposed", np.nan)
+    n_unexposed = n_patients - n_exposed if pd.notna(n_exposed) else np.nan
+    sparse = bool(n_exposed < SPARSE_EXPOSURE_THRESHOLD) if pd.notna(n_exposed) else False
+    return {
+        "condition": c.name, "comorbidity": c.name, "display_label": c.label,
+        "condition_family": c.condition_family, "outcome": outcome, "estimand": estimand,
+        "model_type": "not fitted", "model_attempted": "LME" if outcome == "Longitudinal ESSDAI trajectory" else "Cox PH",
+        "model_used": "not_fitted", "effect_measure": "Not estimable", "estimate": np.nan,
+        "ci95_low": np.nan, "ci95_high": np.nan, "p_value": np.nan,
+        "n_patients": n_patients, "n_observations": counts.get("n_followup_observations", 0),
+        "n_followup_observations": counts.get("n_followup_observations", 0),
+        "n_at_risk": n_patients, "n_events": counts.get("n_events", np.nan),
+        "n_exposed": n_exposed, "n_unexposed": n_unexposed,
+        "n_exposed_events": counts.get("n_exposed_events", np.nan),
+        "n_complete_cases": counts.get("n_complete_cases", 0),
+        "baseline_reference_group": "Comorbidity absent",
+        "adjustment_covariates": "baseline ESSDAI; baseline Pop; age; sex",
+        "time_scale": "years since clinical baseline",
+        "threshold": SEVERE_THRESHOLD if outcome == "Progression to ESSDAI >=5" else np.nan,
+        "model_converged": False, "converged": False, "singular_fit": False,
+        "fallback_used": False, "proportional_hazards_p": np.nan,
+        "ph_assumption_p_value": np.nan, "ph_assumption_status": "not_estimable",
+        "sparse_event_flag": True, "sparse_exposure": sparse, "model_status": "model_failed",
+        "model_warning": warning, "warning": warning, "result_interpretability": "not_estimable",
+        "primary_interpretation_flag": "not_estimable",
+        "interpretation": "Not estimable; no causal interpretation is warranted."
+    }
 
 
 def restrict_to_primary_exposure(data: pd.DataFrame, c: Condition) -> pd.DataFrame:
@@ -654,42 +682,117 @@ def progression_exposure_column(c: Condition) -> str:
 
 def fit_mixed_model(long: pd.DataFrame, c: Condition) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     import statsmodels.formula.api as smf
-    exposure_col = progression_exposure_column(c)
     cols = ["patient_id", "essdai_total", "time_since_clinical_baseline_years",
-            exposure_col, "baseline_essdai", "baseline_pop", "age_baseline", "sex"]
-    data = restrict_to_primary_exposure(long.loc[long["time_since_clinical_baseline_days"] > 0, cols], c)
-    data = data.dropna(subset=["patient_id", "essdai_total",
-                              "time_since_clinical_baseline_years", "baseline_essdai",
-                              "baseline_pop", "age_baseline", "sex"])
-    eligible = data.groupby("patient_id").size(); n = len(eligible)
-    exposure_counts = data.drop_duplicates("patient_id")[c.name].value_counts()
-    model_counts = {"n_patients": n, "n_followup_observations": len(data),
-                    "n_complete_cases": n, "n_exposed": int(exposure_counts.get(1, 0))}
-    if n < 5 or data[c.name].nunique() < 2 or exposure_counts.get(1, 0) < 5:
-        row = _empty_progression(c, "Longitudinal ESSDAI trajectory", "Time x comorbidity", "Too few complete patients or no exposure variation", **model_counts)
-        return [row], {"comorbidity": c.name, "outcome": "ESSDAI trajectory", "convergence": False, "warning": row["warning"]}
+            c.name, "baseline_essdai", "baseline_pop", "age_baseline", "sex"]
+    data = restrict_to_primary_exposure(
+        long.loc[long["time_since_clinical_baseline_days"] > 0, cols], c
+    ).dropna(subset=["patient_id", "essdai_total", "time_since_clinical_baseline_years",
+                     "baseline_essdai", "baseline_pop", "age_baseline", "sex"])
+    patients = data.drop_duplicates("patient_id")
+    n = len(patients); n_exposed = int(patients[c.name].sum())
+    counts = {"n_patients": n, "n_followup_observations": len(data),
+              "n_complete_cases": n, "n_exposed": n_exposed}
+    sparse = n_exposed < SPARSE_EXPOSURE_THRESHOLD
+    if n < 5 or data[c.name].nunique() < 2 or n_exposed < 5:
+        status = "no_variation" if data[c.name].nunique() < 2 else "insufficient_exposure"
+        warning = "Too few complete patients or insufficient exposure variation"
+        row = _empty_progression(c, "Longitudinal ESSDAI trajectory",
+                                 "annual_slope_difference", warning, **counts)
+        row["model_status"] = status
+        return [row], _model_qc_row(row)
+
     formula = "essdai_total ~ time_since_clinical_baseline_years * Q('%s') + baseline_essdai + C(baseline_pop) + age_baseline + C(sex)" % c.name
-    model_type, fit, warning_text = "Linear mixed model (random intercept)", None, ""
+    fit = None; model_used = "LME"; singular = False; fallback = False; warning_text = ""
     try:
         with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always"); fit = smf.mixedlm(formula, data, groups=data["patient_id"]).fit(reml=False, method="lbfgs")
-            warning_text = "; ".join(str(w.message) for w in caught)
-        variance = float(fit.cov_re.iloc[0, 0]); singular = variance < 1e-8
-        if not fit.converged or singular: raise RuntimeError(f"Mixed model unstable: converged={fit.converged}, random-intercept variance={variance:.3g}")
+            warnings.simplefilter("always")
+            fit = smf.mixedlm(formula, data, groups=data["patient_id"]).fit(reml=False, method="lbfgs")
+        caught_text = "; ".join(str(w.message) for w in caught)
+        variance = float(fit.cov_re.iloc[0, 0])
+        singular = variance < 1e-8 or "singular" in caught_text.lower()
+        if not fit.converged or singular:
+            detail = "Random effects covariance is singular" if singular else "LME did not converge"
+            raise RuntimeError(detail)
+        warning_text = caught_text
     except (ValueError, np.linalg.LinAlgError, RuntimeError) as exc:
-        warning_text = f"Mixed model failed ({exc}); used GEE fallback"
+        fallback = True; model_used = "GEE_fallback"
+        warning_text = f"Mixed model failed ({exc}); GEE fallback used"
         try:
-            fit = GEE.from_formula(formula, groups="patient_id", data=data, family=Gaussian(), cov_struct=Exchangeable()).fit(); model_type = "Gaussian GEE (exchangeable)"
+            fit = GEE.from_formula(formula, groups="patient_id", data=data,
+                                   family=Gaussian(), cov_struct=Exchangeable()).fit()
         except (ValueError, np.linalg.LinAlgError) as gee_exc:
-            row = _empty_progression(c, "Longitudinal ESSDAI trajectory", "Time x comorbidity", f"Mixed model and GEE failed: {gee_exc}", **model_counts)
-            return [row], {"comorbidity": c.name, "outcome": "ESSDAI trajectory", "convergence": False, "warning": row["warning"]}
-    interaction = f"time_since_clinical_baseline_years:Q('{c.name}')"
-    exposure = f"Q('{c.name}')"
-    result_rows = []
-    for term, estimand, measure in ((interaction, "Difference in annual ESSDAI slope", "Beta per year"), (exposure, "Adjusted mean difference during follow-up", "Adjusted mean difference")):
-        est, se, p = float(fit.params[term]), float(fit.bse[term]), float(fit.pvalues[term])
-        result_rows.append({**_empty_progression(c, "Longitudinal ESSDAI trajectory", estimand, warning_text, **model_counts), "model_type": model_type, "effect_measure": measure, "estimate": est, "ci95_low": est-1.96*se, "ci95_high": est+1.96*se, "p_value": p, "model_converged": True, "sparse_event_flag": False, "model_status": "fitted", "interpretation": f"Adjusted association estimate ({measure}); this is not a causal effect."})
-    return result_rows, {"comorbidity": c.name, "outcome": "ESSDAI trajectory", "convergence": True, "model_type": model_type, "warning": warning_text}
+            row = _empty_progression(c, "Longitudinal ESSDAI trajectory",
+                                     "annual_slope_difference",
+                                     f"Mixed model and GEE failed: {gee_exc}", **counts)
+            row.update({"singular_fit": singular, "fallback_used": True})
+            return [row], _model_qc_row(row)
+
+    interpretability = ("caution_sparse_and_fallback" if sparse and fallback else
+                        "caution_sparse_exposure" if sparse else
+                        "caution_gee_fallback" if fallback else "standard")
+    flag = "exploratory_only" if sparse or fallback else "eligible"
+    status = "lme_failed_gee_used" if fallback else "ok"
+    model_type = "Gaussian GEE (exchangeable)" if fallback else "Linear mixed model (random intercept)"
+    terms = ((f"Q('{c.name}')", "mean_difference_followup", "Adjusted mean difference"),
+             (f"time_since_clinical_baseline_years:Q('{c.name}')", "annual_slope_difference", "Beta per year"))
+    rows = []
+    for term, estimand, measure in terms:
+        est, se, p_value = float(fit.params[term]), float(fit.bse[term]), float(fit.pvalues[term])
+        row = _empty_progression(c, "Longitudinal ESSDAI trajectory", estimand, warning_text, **counts)
+        row.update({"model_type": model_type, "model_used": model_used, "effect_measure": measure,
+                    "estimate": est, "ci95_low": est - 1.96 * se, "ci95_high": est + 1.96 * se,
+                    "p_value": p_value, "model_converged": True, "converged": True,
+                    "singular_fit": singular, "fallback_used": fallback, "sparse_event_flag": False,
+                    "model_status": status, "result_interpretability": interpretability,
+                    "primary_interpretation_flag": flag,
+                    "interpretation": "Exploratory / unstable estimate." if flag == "exploratory_only" else "Adjusted association estimate; not a causal effect."})
+        rows.append(row)
+    return rows, _model_qc_row(rows[0])
+
+
+def _model_qc_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Return one normalized model-attempt audit row."""
+    return {key: row.get(key) for key in (
+        "condition", "outcome", "model_attempted", "model_used", "converged",
+        "singular_fit", "fallback_used", "n_exposed", "n_events",
+        "sparse_exposure", "model_status", "model_warning"
+    )}
+
+
+def finalize_model_metadata(results: pd.DataFrame) -> pd.DataFrame:
+    """Standardize machine-readable QC and interpretation fields."""
+    out = results.copy()
+    fitted = out["model_converged"].fillna(False).astype(bool)
+    cox = out["outcome"].ne("Longitudinal ESSDAI trajectory")
+    out.loc[cox & fitted, "model_used"] = "Cox_PH"
+    out.loc[cox, "model_attempted"] = "Cox PH"
+    out["converged"] = fitted
+    out["fallback_used"] = out["model_used"].eq("GEE_fallback")
+    out["sparse_exposure"] = out["n_exposed"].lt(SPARSE_EXPOSURE_THRESHOLD)
+    out["n_unexposed"] = out["n_patients"] - out["n_exposed"]
+    out["n_at_risk"] = out["n_patients"]
+    out["n_observations"] = out["n_followup_observations"]
+    out["model_warning"] = out["warning"].fillna("")
+    ph_p = out["proportional_hazards_p"]
+    out["ph_assumption_p_value"] = ph_p
+    out["ph_assumption_status"] = np.where(~cox | ~fitted, "not_estimable",
+                                            np.where(ph_p.isna(), "not_tested",
+                                                     np.where(ph_p < .05, "warning", "pass")))
+    # Sparse exposure and PH warnings never suppress estimates, but prevent
+    # their promotion as primary, robust findings.
+    caution = out["sparse_exposure"] | out["fallback_used"] | out["ph_assumption_status"].eq("warning")
+    out["primary_interpretation_flag"] = np.where(~fitted, "not_estimable",
+                                                   np.where(caution, "exploratory_only", "eligible"))
+    out.loc[~fitted, "result_interpretability"] = "not_estimable"
+    out.loc[fitted & out["sparse_exposure"] & out["fallback_used"], "result_interpretability"] = "caution_sparse_and_fallback"
+    out.loc[fitted & out["sparse_exposure"] & ~out["fallback_used"], "result_interpretability"] = "caution_sparse_exposure"
+    out.loc[fitted & ~out["sparse_exposure"] & out["fallback_used"], "result_interpretability"] = "caution_gee_fallback"
+    out.loc[fitted & ~out["sparse_exposure"] & ~out["fallback_used"], "result_interpretability"] = "standard"
+    out["HR"] = np.where(cox & fitted, out["estimate"], np.nan)
+    out["CI95_low"] = out["ci95_low"]
+    out["CI95_high"] = out["ci95_high"]
+    out["model_adjustment"] = out["model_type"]
+    return out
 
 
 def fit_cox_model(data: pd.DataFrame, c: Condition, event_col: str, outcome: str, minimum_events: int) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1081,7 +1184,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         rows,diagnostic=fit_mixed_model(long,condition); progression_rows.extend(rows); diagnostics.append(diagnostic)
         row,diagnostic=fit_cox_model(severe,condition,"severe5_event","Progression to ESSDAI >=5",args.minimum_events); progression_rows.append(row); diagnostics.append(diagnostic)
         row,diagnostic=fit_cox_model(new_domain,condition,"new_domain_event","New ESSDAI-domain involvement",args.minimum_events); progression_rows.append(row); diagnostics.append(diagnostic)
-    progression=pd.DataFrame(progression_rows)
+    progression=finalize_model_metadata(pd.DataFrame(progression_rows))
     progression["fdr_family"]=progression["outcome"]
     progression["q_value"]=progression.groupby(["outcome","estimand"])["p_value"].transform(apply_fdr)
     progression["fdr_bh_q_value"]=progression["q_value"]
@@ -1090,6 +1193,14 @@ def main(argv: Sequence[str] | None = None) -> int:
       "New ESSDAI-domain involvement":"07_comorbidity_new_domain_models.csv"}
     for outcome,name in model_outputs.items():
         progression.loc[progression.outcome.eq(outcome)].to_csv(TABLES_DIR/name,index=False); produced.append(TABLES_DIR/name)
+    interpretation = progression.assign(
+        fallback_used=progression["model_used"].eq("GEE_fallback"),
+        ph_warning=progression["ph_assumption_status"].eq("warning")
+    )[["condition", "condition_family", "outcome", "estimand", "n_exposed", "n_events",
+       "model_used", "model_status", "estimate", "CI95_low", "CI95_high", "p_value", "q_value",
+       "sparse_exposure", "fallback_used", "ph_warning", "primary_interpretation_flag"]]
+    interpretation_path = TABLES_DIR / "07_comorbidity_model_interpretation_summary.csv"
+    interpretation.to_csv(interpretation_path, index=False); produced.append(interpretation_path)
 
     for stem, conditions in PROGRESSION_FAMILIES:
         names = {c.name for c in conditions}
@@ -1125,7 +1236,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     audit_cols=["patient_id","clinical_baseline_episode_id","clinical_baseline_date","baseline_pop","baseline_essdai","age_baseline","sex",*CONDITION_NAMES]
     base[[c for c in audit_cols if c in base]].to_csv(QC_DIR/"07_comorbidity_baseline_patient_audit.csv",index=False)
     prevalence_qc=condition_prevalence_qc(base)
-    prevalence_qc.to_csv(QC_DIR/"07_comorbidity_model_qc.csv",index=False)
+    model_qc = progression.drop_duplicates(["condition", "outcome"])[[
+        "condition", "outcome", "model_attempted", "model_used", "converged",
+        "singular_fit", "fallback_used", "n_exposed", "n_events", "sparse_exposure", "model_status"
+    ]]
+    model_qc.to_csv(QC_DIR/"07_comorbidity_model_qc.csv",index=False)
     pd.DataFrame({"metric":["n_longitudinal_rows","n_unmatched_pop","n_unmatched_domains"],"value":[len(long),int(long.pop_status.isna().sum()),int(long[ALL_DOMAINS].isna().all(axis=1).sum())]}).to_csv(QC_DIR/"07_comorbidity_merge_qc.csv",index=False)
     prohibited_used=sorted(x for c in iter_analysis_conditions() for x in (*c.primary,*c.detail_columns) if x.startswith(PROHIBITED_SOURCE_PREFIXES))
     qc={"input_path":str(args.input),"script_version":SCRIPT_VERSION,"run_timestamp":datetime.now(timezone.utc).isoformat(),
@@ -1154,6 +1269,29 @@ def main(argv: Sequence[str] | None = None) -> int:
       "n_conditions_with_overall_vs_pop_definition_mismatch":int((~prevalence_qc.overall_pop_consistency_flag).sum()),
       "n_unrecognized_tokens":int(unrecognized.n_occurrences.sum()) if len(unrecognized) else 0,
       "n_unrecognized_on_tokens":int(unrecognized_on)}
+    longitudinal_qc = model_qc[model_qc.outcome.eq("Longitudinal ESSDAI trajectory")]
+    qc_summary.update({
+      "n_longitudinal_models_total": len(longitudinal_qc),
+      "n_longitudinal_lme_success": int(longitudinal_qc.model_used.eq("LME").sum()),
+      "n_longitudinal_gee_fallback": int(longitudinal_qc.model_used.eq("GEE_fallback").sum()),
+      "n_longitudinal_not_estimable": int(longitudinal_qc.model_used.eq("not_fitted").sum()),
+      "n_sparse_exposure_models": int(model_qc.sparse_exposure.sum()),
+      "n_sparse_and_gee_models": int((model_qc.sparse_exposure & model_qc.model_used.eq("GEE_fallback")).sum())})
+    longitudinal_rows = progression[progression.outcome.eq("Longitudinal ESSDAI trajectory")]
+    if not (longitudinal_rows.n_exposed + longitudinal_rows.n_unexposed).eq(longitudinal_rows.n_patients).all():
+        raise AssertionError("Longitudinal exposure counts do not sum to modeled patients")
+    fallback_inconsistent = (
+        (longitudinal_rows.model_used.eq("GEE_fallback") & ~longitudinal_rows.fallback_used)
+        | (longitudinal_rows.model_used.eq("LME") & longitudinal_rows.fallback_used)
+    )
+    if fallback_inconsistent.any():
+        raise AssertionError("Longitudinal fallback metadata is inconsistent")
+    for outcome in ("Progression to ESSDAI >=5", "New ESSDAI-domain involvement"):
+        check = progression[progression.outcome.eq(outcome)]
+        if (check.n_events > check.n_at_risk).any():
+            raise AssertionError(f"Events exceed risk set for {outcome}")
+    if len(severe) and not severe.baseline_essdai.lt(SEVERE_THRESHOLD).all():
+        raise AssertionError("Severe5 risk set contains baseline ESSDAI >= threshold")
     if family_mismatches or not prevalence_qc.overall_pop_consistency_flag.all() or unrecognized_on:
         raise AssertionError("Comorbidity family/exposure/token QC hard check failed")
     pd.DataFrame([qc_summary]).to_csv(QC_DIR/"07_comorbidities_qc_summary.csv",index=False)
