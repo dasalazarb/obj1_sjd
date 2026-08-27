@@ -26,6 +26,21 @@ import common  # noqa: E402
 
 LOG = logging.getLogger(__name__)
 KEY = ["patient_id", "clinical_episode_id"]
+WIDE_SPINE_COLUMNS = [
+    "patient_id",
+    "clinical_episode_id",
+    "clinical_anchor_date",
+    "clinical_visit_number",
+    "clinical_visit",
+    "visit_type",
+    "episode_start_date",
+    "episode_end_date",
+    "clinical_baseline_episode_id",
+    "clinical_baseline_date",
+    "is_clinical_baseline",
+    "time_since_clinical_baseline_days",
+    "time_since_clinical_baseline_years",
+]
 MATCH_KEY = ["_patient_id_match", "clinical_episode_id"]
 ANALYTE_KEY = KEY + ["canonical_analyte"]
 DEFAULT_LABS = Path(
@@ -199,48 +214,45 @@ def _coerce_analyte_output_schema(frame: pd.DataFrame) -> pd.DataFrame:
 
 def _coerce_wide_output_schema(frame: pd.DataFrame) -> pd.DataFrame:
     """Apply explicit types to structural and dynamically named wide columns."""
-    out = frame.copy()
-    if "clinical_visit_number" in out:
-        out["clinical_visit_number"] = (
-            pd.to_numeric(out["clinical_visit_number"], errors="coerce")
-            .round()
-            .astype("Int64")
-        )
-    for column in ["clinical_visit", "is_clinical_baseline", *BASELINE_FEATURES]:
-        if column in out:
-            out[column] = out[column].astype("boolean")
-    for column in [
+    integer_columns = {
+        "clinical_visit_number",
+        "time_since_clinical_baseline_days",
+    }
+    boolean_columns = {"clinical_visit", "is_clinical_baseline", *BASELINE_FEATURES}
+    datetime_columns = {
         "clinical_anchor_date",
         "episode_start_date",
         "episode_end_date",
         "clinical_baseline_date",
-        "visit_date",
-        "visit_date_clean",
-    ]:
-        if column in out:
-            out[column] = pd.to_datetime(out[column], errors="coerce")
-    for column in [
+    }
+    string_columns = {
         "patient_id",
         "clinical_episode_id",
         "visit_type",
         "clinical_baseline_episode_id",
-        "visit_id",
-    ]:
-        if column in out:
-            out[column] = out[column].astype("string")
+    }
 
-    for column in out.columns:
-        if column.endswith("__measurement_date"):
-            out[column] = pd.to_datetime(out[column], errors="coerce")
-        elif column.endswith("__value"):
-            out[column] = pd.to_numeric(out[column], errors="coerce").astype("Float64")
-        elif column.endswith(("__days_from_anchor", "__n_measurements")):
-            out[column] = (
-                pd.to_numeric(out[column], errors="coerce").round().astype("Int64")
+    def coerce(column: str) -> pd.Series:
+        values = frame[column]
+        if column in integer_columns or column.endswith(
+            ("__days_from_anchor", "__n_measurements")
+        ):
+            return pd.to_numeric(values, errors="coerce").round().astype("Int64")
+        if column == "time_since_clinical_baseline_years" or column.endswith(
+            "__value"
+        ):
+            return pd.to_numeric(values, errors="coerce").astype("Float64")
+        if column in boolean_columns or column.endswith(
+            (
+                "__conflict",
+                "__ever_positive_through_episode",
+                "__known_through_episode",
             )
-        elif column.endswith("__conflict"):
-            out[column] = out[column].astype("boolean")
-        elif column.endswith(
+        ):
+            return values.astype("boolean")
+        if column in datetime_columns or column.endswith("__measurement_date"):
+            return pd.to_datetime(values, errors="coerce")
+        if column in string_columns or column.endswith(
             (
                 "__text",
                 "__unit",
@@ -250,15 +262,12 @@ def _coerce_wide_output_schema(frame: pd.DataFrame) -> pd.DataFrame:
                 "__patient_consensus_value",
             )
         ):
-            out[column] = out[column].astype("string")
-        elif column.endswith(
-            (
-                "__ever_positive_through_episode",
-                "__known_through_episode",
-            )
-        ):
-            out[column] = out[column].astype("boolean")
-    return out
+            return values.astype("string")
+        return values
+
+    # Construct once from typed Series rather than repeatedly inserting dynamic
+    # lab columns, which would recreate the fragmentation this boundary prevents.
+    return pd.DataFrame({column: coerce(column) for column in frame.columns})
 
 
 def _object_dtype_columns(frame: pd.DataFrame) -> list[str]:
@@ -532,7 +541,13 @@ def _status_is_positive(value: Any) -> Any:
 def build_wide(
     spine: pd.DataFrame, selected: pd.DataFrame, usable: pd.DataFrame
 ) -> tuple[pd.DataFrame, int]:
-    wide = spine.copy()
+    missing_keys = set(KEY) - set(spine.columns)
+    if missing_keys:
+        raise ValueError(f"Clinical spine missing wide keys: {sorted(missing_keys)}")
+    base_columns = [c for c in WIDE_SPINE_COLUMNS if c in spine.columns]
+    wide_base = spine[base_columns].copy().set_index(KEY)
+    wide_index = wide_base.index
+    feature_frames: list[pd.DataFrame] = []
     fields = {
         "selected_value_numeric": "value",
         "selected_value_text": "text",
@@ -549,9 +564,7 @@ def build_wide(
             continue
         pivot = selected.pivot(index=KEY, columns="canonical_analyte", values=source)
         pivot.columns = [f"{c}__{suffix}" for c in pivot.columns]
-        wide = wide.merge(
-            pivot.reset_index(), on=KEY, how="left", validate="one_to_one"
-        )
+        feature_frames.append(pivot.reindex(wide_index))
     # Include analytes observed only in nonclinical episodes: their dynamic
     # episode value stays missing, but dated stable/genetic history may still
     # legitimately become known at a later clinical visit.
@@ -561,21 +574,24 @@ def build_wide(
         else pd.Series(dtype="object")
     )
     future_violations = 0
-    anchors = pd.to_datetime(wide["clinical_anchor_date"], errors="coerce")
+    anchors = pd.to_datetime(wide_base["clinical_anchor_date"], errors="coerce")
     lab_dates = pd.to_datetime(usable["lab_date"], errors="coerce")
+    derived_columns: dict[str, pd.Series] = {}
     for analyte, family in families.items():
         part = (
             selected[selected.canonical_analyte.eq(analyte)]
             if not selected.empty
             else selected
         )
-        episode_status: Any = (
-            {} if part.empty else part.set_index(KEY)["selected_reference_status"]
-        )
-        wide[f"{analyte}__episode_status"] = [
-            episode_status.get(tuple(k), pd.NA)
-            for k in wide[KEY].itertuples(index=False, name=None)
-        ]
+        if part.empty:
+            status_series = pd.Series(pd.NA, index=wide_index, dtype="string")
+        else:
+            status_series = (
+                part.set_index(KEY)["selected_reference_status"]
+                .reindex(wide_index)
+                .astype("string")
+            )
+        derived_columns[f"{analyte}__episode_status"] = status_series
         evidence = usable[usable.canonical_analyte.eq(analyte)].copy()
         evidence["_date"] = lab_dates.reindex(evidence.index)
         evidence["_status"] = evidence.apply(
@@ -583,15 +599,15 @@ def build_wide(
         )
         if family == "stable_autoimmune" and evidence["_status"].notna().any():
             values = []
-            for pid, date in zip(wide.patient_id, anchors):
+            for (pid, _), date in zip(wide_index, anchors):
                 prior = evidence[
                     evidence.patient_id.eq(pid)
                     & evidence._date.notna()
                     & evidence._date.le(date)
                 ]["_status"].dropna()
                 values.append(pd.NA if prior.empty else bool(prior.astype(bool).any()))
-            wide[f"{analyte}__ever_positive_through_episode"] = pd.array(
-                values, dtype="boolean"
+            derived_columns[f"{analyte}__ever_positive_through_episode"] = pd.Series(
+                pd.array(values, dtype="boolean"), index=wide_index
             )
         if family == "fixed_genetic":
             consensus, consensus_conflict = {}, {}
@@ -602,19 +618,43 @@ def build_wide(
                 } - {""}
                 consensus[pid] = next(iter(vals)) if len(vals) == 1 else pd.NA
                 consensus_conflict[pid] = len(vals) > 1
-            wide[f"{analyte}__patient_consensus_value"] = wide.patient_id.map(consensus)
-            wide[f"{analyte}__patient_consensus_conflict"] = wide.patient_id.map(
-                consensus_conflict
-            ).astype("boolean")
+            derived_columns[f"{analyte}__patient_consensus_value"] = pd.Series(
+                [consensus.get(pid, pd.NA) for pid, _ in wide_index],
+                index=wide_index,
+                dtype="string",
+            )
+            derived_columns[f"{analyte}__patient_consensus_conflict"] = pd.Series(
+                pd.array(
+                    [consensus_conflict.get(pid, False) for pid, _ in wide_index],
+                    dtype="boolean",
+                ),
+                index=wide_index,
+            )
             known = []
-            for pid, date in zip(wide.patient_id, anchors):
+            for (pid, _), date in zip(wide_index, anchors):
                 prior = evidence[
                     evidence.patient_id.eq(pid)
                     & evidence._date.notna()
                     & evidence._date.le(date)
                 ]
                 known.append(bool(len(prior)))
-            wide[f"{analyte}__known_through_episode"] = pd.array(known, dtype="boolean")
+            derived_columns[f"{analyte}__known_through_episode"] = pd.Series(
+                pd.array(known, dtype="boolean"), index=wide_index
+            )
+    derived_frame = (
+        pd.DataFrame(derived_columns, index=wide_index)
+        if derived_columns
+        else pd.DataFrame(index=wide_index)
+    )
+    wide = pd.concat(
+        [
+            wide_base,
+            *(frame.reindex(wide_index) for frame in feature_frames),
+            derived_frame.reindex(wide_index),
+        ],
+        axis=1,
+    )
+    wide = wide.reset_index().copy()
     return wide, future_violations
 
 
@@ -853,6 +893,13 @@ def main(argv: list[str] | None = None) -> None:
             selected_all_index.isin(clinical_keys)
         ].copy()
     wide, future_violations = build_wide(clinical_spine, selected_clinical, usable_all)
+    unexpected_spine_columns = set(clinical_spine.columns) - set(WIDE_SPINE_COLUMNS)
+    leaked_columns = [c for c in wide.columns if c in unexpected_spine_columns]
+    if leaked_columns:
+        raise AssertionError(
+            "Lab wide accidentally inherited non-structural clinical-spine columns: "
+            + ", ".join(leaked_columns[:50])
+        )
     baseline_feature_cols = [c for c in BASELINE_FEATURES if c in baseline]
     baseline_for_merge = baseline[["_patient_id_match"] + baseline_feature_cols].copy()
     if baseline_for_merge["_patient_id_match"].duplicated().any():
