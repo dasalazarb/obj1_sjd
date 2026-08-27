@@ -83,6 +83,17 @@ MDAFS_ACTIVITY_FLAGS = [
     "multidimensional_assessment_of_fatigue_scale__fat_q5_dont_do_activity",
 ] + [f"multidimensional_assessment_of_fatigue_scale__fat_q{i}_no_actvty" for i in range(6, 15)]
 
+# Public metadata used by downstream QC. Analysis scripts must not maintain a
+# second set of score ranges.
+PRO_SCORE_RANGES = {
+    "esspri_dryness": (0.0, 10.0), "esspri_fatigue": (0.0, 10.0),
+    "esspri_pain": (0.0, 10.0), "esspri_total": (0.0, 10.0),
+    "esspri_partial_mean": (0.0, 10.0),
+    **{measure: (0.0, 100.0) for measure in SF36_DOMAIN_ITEMS},
+    "sf36_pcs": (0.0, 100.0), "sf36_mcs": (0.0, 100.0),
+    "profad_total": (0.0, 7.0), "mdafs_global": (1.0, 50.0),
+}
+
 MISSING_STRINGS = config.MISSING_STRINGS
 
 
@@ -99,6 +110,7 @@ def _numeric_in_range(df: pd.DataFrame, columns: list[str], minimum: float, maxi
         bad = raw.notna() & (~raw.map(_is_missing)) & (values.isna() | values.lt(minimum) | values.gt(maximum))
         for idx in df.index[bad]:
             violations.append({"patient_id": df.at[idx, "patient_id"] if "patient_id" in df else np.nan,
+                               "clinical_episode_id": df.at[idx, "clinical_episode_id"] if "clinical_episode_id" in df else np.nan,
                                "visit_date": df.at[idx, "visit_date"] if "visit_date" in df else pd.NaT,
                                "instrument": instrument, "variable": col, "raw_value": raw.loc[idx],
                                "expected_min": minimum, "expected_max": maximum, "action_taken": "set_missing"})
