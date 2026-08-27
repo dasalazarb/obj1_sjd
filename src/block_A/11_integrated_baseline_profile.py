@@ -51,10 +51,10 @@ VARIABLE_SCHEMA = {
     "essdai_total": ("Pop", "Previously derived ESSDAI total", "float64", "0-123", False, True, "01_pop_distribution.py"),
     "esspri_total": ("Pop", "Previously derived ESSPRI total", "float64", "0-10", False, True, "01_pop_distribution.py"),
     "n_extraglandular_domains_active": ("Overlap", "Official active extraglandular-domain count", "Int64", "0-11 integer", False, True, "06_overlap_glandular_followup.py"),
-    "sf36_pcs": ("PROs", "Previously scored SF-36 physical component", "float64", "operational plausibility 0-100", False, True, "09_pros_longitudinal_scoring.py"),
-    "sf36_mcs": ("PROs", "Previously scored SF-36 mental component", "float64", "operational plausibility 0-100", False, True, "09_pros_longitudinal_scoring.py"),
-    "profad_total": ("PROs", "Previously scored PROFAD total", "float64", "upstream-defined", False, True, "09_pros_longitudinal_scoring.py"),
-    "mdafs_global": ("PROs", "Previously scored MDAFS global", "float64", "upstream-defined", False, True, "09_pros_longitudinal_scoring.py"),
+    "sf36_pcs": ("PROs", "Previously scored SF-36 physical component", "float64", "operational plausibility 0-100", False, True, "09_pros_longitudinal.py"),
+    "sf36_mcs": ("PROs", "Previously scored SF-36 mental component", "float64", "operational plausibility 0-100", False, True, "09_pros_longitudinal.py"),
+    "profad_total": ("PROs", "Previously scored PROFAD total", "float64", "upstream-defined", False, True, "09_pros_longitudinal.py"),
+    "mdafs_global": ("PROs", "Previously scored MDAFS global", "float64", "upstream-defined", False, True, "09_pros_longitudinal.py"),
 }
 
 

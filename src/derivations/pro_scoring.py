@@ -1,8 +1,8 @@
 """Reusable visit-level scoring for patient-reported outcomes (PROs).
 
 The formulas, item recoding, completeness rules, normative values, and PCS/MCS
-coefficients are migrated unchanged from ``09_pros_baseline.py``.  Scores are
-computed independently for every input row; callers control visit selection.
+coefficients are the single source of truth for every PRO analysis. Scores are
+computed independently for every input row; callers control episode selection.
 """
 from __future__ import annotations
 
@@ -82,6 +82,23 @@ MDAFS_ACTIVITY_FLAGS = [
     "multidimensional_assessment_of_fatigue_scale__fat_q4_dont_do_activity",
     "multidimensional_assessment_of_fatigue_scale__fat_q5_dont_do_activity",
 ] + [f"multidimensional_assessment_of_fatigue_scale__fat_q{i}_no_actvty" for i in range(6, 15)]
+
+# Public analysis metadata: downstream QC consumes the same definitions as the
+# scorers instead of maintaining a second set of instrument rules.
+PRO_MEASURES = {
+    "ESSPRI": ["esspri_dryness", "esspri_fatigue", "esspri_pain", "esspri_total", "esspri_partial_mean"],
+    "SF-36": list(SF36_MEASURES),
+    "PROFAD": ["profad_total"],
+    "MDAFS": ["mdafs_global"],
+}
+PRO_PRIMARY_MEASURES = {"ESSPRI": "esspri_total", "SF-36": "sf36_pcs", "PROFAD": "profad_total", "MDAFS": "mdafs_global"}
+PRO_ITEM_COLUMNS = {"ESSPRI": list(ESSPRI_COMPONENTS.values()), "SF-36": SF36_ITEMS, "PROFAD": PROFAD_ITEMS, "MDAFS": MDAFS_ITEMS + MDAFS_ACTIVITY_FLAGS}
+PRO_SCORE_RANGES = {
+    **{name: (0.0, 10.0) for name in PRO_MEASURES["ESSPRI"]},
+    **{name: (0.0, 100.0) for name in SF36_DOMAIN_ITEMS},
+    "sf36_pcs": (0.0, 100.0), "sf36_mcs": (0.0, 100.0),
+    "profad_total": (0.0, 7.0), "mdafs_global": (1.0, 50.0),
+}
 
 MISSING_STRINGS = config.MISSING_STRINGS
 
@@ -194,6 +211,13 @@ def score_mdafs_visit(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def score_all_pros(df: pd.DataFrame) -> pd.DataFrame:
-    """Add all supported visit-level PRO scores in the established order."""
+    """Add all supported row-level PRO scores and normalized presence flags."""
     for scorer in (score_esspri_visit, score_sf36_visit, score_profad_visit, score_mdafs_visit): df=scorer(df)
+    for instrument, columns in PRO_ITEM_COLUMNS.items():
+        stem = instrument.lower().replace("-", "")
+        present = pd.DataFrame(
+            {column: ~(df[column] if column in df else pd.Series(np.nan, index=df.index)).map(_is_missing)
+             for column in columns}, index=df.index
+        )
+        df[f"{stem}_any_item_present"] = present.any(axis=1)
     return df
