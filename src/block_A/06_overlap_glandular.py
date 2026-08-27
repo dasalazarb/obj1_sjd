@@ -533,7 +533,7 @@ def main() -> None:
         "--input", type=Path, default=common.CLINICAL_VISIT_SPINE_PARQUET
     )
     parser.add_argument(
-        "--intermediate-dir", type=Path, default=common.INTERMEDIATE_DATA_DIR
+        "--intermediate-dir", type=Path, default=common.BLOCKA_INTERMEDIATE_DATA_DIR
     )
     parser.add_argument("--table-dir", type=Path, default=common.BLOCKA_TABLES_DIR)
     parser.add_argument(
