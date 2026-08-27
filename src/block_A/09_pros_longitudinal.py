@@ -65,8 +65,8 @@ def read(path: Path) -> pd.DataFrame:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--responses", type=Path, default=common.DEFAULT_ANALYTIC_DATASET,
-                   help="PRO responses with upstream patient_id + clinical_episode_id")
+    p.add_argument("--responses", type=Path, default=common.SOURCE_EPISODE_SPINE,
+                   help="Canonical episode-assigned dataset containing raw PRO responses")
     p.add_argument("--spine", type=Path, default=common.CLINICAL_VISIT_SPINE_PARQUET)
     p.add_argument("--pop", type=Path, default=common.POP_LONGITUDINAL_PARQUET)
     p.add_argument("--overwrite", action=argparse.BooleanOptionalAction, default=True)
