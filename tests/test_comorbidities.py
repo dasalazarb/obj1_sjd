@@ -59,6 +59,38 @@ def test_rheumatologic_exposure_is_any_source_positive_with_blank_false():
     assert exposure.tolist() == [1, 1, 1, 0]
 
 
+def test_checkbox_on_is_a_recognized_positive_token():
+    comorbidities._UNRECOGNIZED.clear()
+    result = comorbidities.normalize_binary_flag(pd.Series(["on"], name="checkbox"))
+    assert result.tolist() == [True]
+    assert comorbidities._UNRECOGNIZED == []
+
+
+def test_overall_rheumatologic_prevalence_uses_any_yes_not_only_confirmed():
+    spec = comorbidities.RHEUMATOLOGIC_MANIFESTATIONS[0]
+    base = pd.DataFrame({
+        spec.name: pd.Series([True, True, True, False], dtype="boolean"),
+        f"{spec.name}_status": ["status_uncertain", "history_only",
+                                "confirmed_present", "no_comorbidity"],
+    })
+    row = comorbidities.summarize_confirmed_family(base, [spec]).iloc[0]
+    assert row.n_positive_any_yes == 3
+    assert row.pct_positive_any_yes == 75
+    assert row.n_confirmed_present == 1
+
+
+def test_condition_qc_reconciles_pop_classified_subset():
+    data = {c.name: pd.Series([True, True, True, True], dtype="boolean")
+            for c in comorbidities.iter_analysis_conditions()}
+    data["baseline_pop"] = ["Pop1", "Pop2", "Pop3", pd.NA]
+    qc = comorbidities.condition_prevalence_qc(pd.DataFrame(data))
+    assert qc.n_positive_full_cohort.eq(4).all()
+    assert qc.n_positive_pop_classified.eq(3).all()
+    assert qc.sum_positive_pop.eq(3).all()
+    assert qc.overall_pop_consistency_flag.all()
+    assert qc.loc[qc.condition.eq("hypertension"), "condition_family"].item() == "general_medical"
+
+
 def test_family_burdens_are_separate_and_no_combined_total_exists():
     pmh = comorbidities.PAST_MEDICAL_HISTORY_CONDITIONS[0]
     rheum = comorbidities.RHEUMATOLOGIC_NON_SAID_CONDITIONS[0]

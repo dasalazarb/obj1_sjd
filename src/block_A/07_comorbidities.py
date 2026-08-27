@@ -348,7 +348,7 @@ _UNRECOGNIZED: list[dict[str, Any]] = []
 
 def normalize_binary_flag(series: pd.Series) -> pd.Series:
     """Map common binary encodings to pandas nullable Boolean values."""
-    positive = {"1", "1.0", "true", "yes", "y", "positive", "present", "confirmed", "history"}
+    positive = {"1", "1.0", "true", "yes", "y", "positive", "present", "confirmed", "history", "on"}
     negative = {"0", "0.0", "false", "no", "n", "negative", "absent"}
     missing = {str(x).strip().lower() for x in config.MISSING_STRINGS}
     result = pd.Series(pd.NA, index=series.index, dtype="boolean", name=series.name)
@@ -469,7 +469,7 @@ def build_baseline_comorbidity_dataset(raw: pd.DataFrame, spine: pd.DataFrame, p
 
 
 def summarize_historical_family(base: pd.DataFrame, conditions: Sequence[Condition],
-                                family_label: str = "past_medical_history") -> pd.DataFrame:
+                                family_label: str = "general_medical") -> pd.DataFrame:
     n_total = len(base); rows = []
     for c in conditions:
         positive = base.get(c.name, pd.Series(False, index=base.index)).fillna(False).eq(True)
@@ -488,19 +488,24 @@ def summarize_confirmed_family(base: pd.DataFrame, conditions: Sequence[Conditio
     for c in conditions:
         status=base.get(f"{c.name}_status", pd.Series("no_comorbidity", index=base.index)).fillna("no_comorbidity")
         counts=status.value_counts(); N=len(status)
+        positive=base.get(c.name, pd.Series(False, index=base.index)).fillna(False).eq(True)
+        n_positive=int(positive.sum())
         rows.append({"condition":c.name,"display_label":c.label,"condition_family":c.condition_family,
           "clinical_category":c.clinical_category,"n_confirmed_present":int(counts.get("confirmed_present",0)),
           "n_history_only":int(counts.get("history_only",0)),"n_status_uncertain":int(counts.get("status_uncertain",0)),
           "n_no_comorbidity":int(counts.get("no_comorbidity",0)),"N_evaluable":N,
+          "n_positive_any_yes":n_positive,
+          "pct_positive_any_yes":100*n_positive/N if N else np.nan,
           "pct_confirmed":100*int(counts.get("confirmed_present",0))/N if N else np.nan})
     return pd.DataFrame(rows)
 
 
 def summarize_overall_prevalence(base: pd.DataFrame) -> pd.DataFrame:
-    """Compatibility wrapper: confirmed rheumatologic conditions only."""
+    """Summarize primary any-source-positive rheumatologic prevalence."""
     out=summarize_confirmed_family(base,RHEUMATOLOGIC_ANALYSIS_CONDITIONS)
     return out.rename(columns={"N_evaluable":"n_evaluable_primary","pct_confirmed":"pct_confirmed_among_evaluable"}).assign(
-      n_total_cohort=len(base),n_missing=0,pct_confirmed_total_cohort=lambda x:100*x.n_confirmed_present/len(base) if len(base) else np.nan)
+      n_total_cohort=len(base),n_missing=0,
+      pct_positive_total_cohort=lambda x:100*x.n_positive_any_yes/len(base) if len(base) else np.nan)
 
 
 def _monte_carlo_p(table: np.ndarray, replicates: int, rng: np.random.Generator) -> float:
@@ -892,7 +897,7 @@ def source_mapping(raw_columns: Iterable[str]) -> pd.DataFrame:
           "clinical_category":c.clinical_category,"source_columns":"|".join(c.primary),
           "status_definition":("documented_history=True only when PMH source is positive; blank means no documented history"
              if c.condition_family=="general_medical" else
-             "confirmed_present > history_only > status_uncertain > no_comorbidity; confirmed_present is primary positive"),
+             "primary exposure = general OR history OR confirmed; detailed status retained for audit"),
           "availability":"available" if any(x in raw_columns for x in c.primary) else "unavailable"})
     return pd.DataFrame(rows)
 
@@ -969,6 +974,28 @@ def source_qc(raw: pd.DataFrame) -> pd.DataFrame:
               "n_unrecognized":len(unrec),"unique_unrecognized_values":"|".join(sorted({x["original_value"] for x in unrec}))})
     return pd.DataFrame(rows)
 
+
+def condition_prevalence_qc(base: pd.DataFrame) -> pd.DataFrame:
+    """Reconcile the one canonical exposure over the full and Pop subsets."""
+    classified = base["baseline_pop"].isin(("Pop1", "Pop2", "Pop3"))
+    rows = []
+    for condition in iter_analysis_conditions():
+        positive = base[condition.name].fillna(False).astype(bool)
+        pop_counts = [int((positive & base["baseline_pop"].eq(pop)).sum())
+                      for pop in ("Pop1", "Pop2", "Pop3")]
+        n_classified = int((positive & classified).sum())
+        pop_sum = sum(pop_counts)
+        rows.append({
+            "condition": condition.name,
+            "condition_family": condition.condition_family,
+            "n_positive_full_cohort": int(positive.sum()),
+            "n_positive_pop_classified": n_classified,
+            "n_pop1": pop_counts[0], "n_pop2": pop_counts[1], "n_pop3": pop_counts[2],
+            "sum_positive_pop": pop_sum,
+            "overall_pop_consistency_flag": n_classified == pop_sum,
+        })
+    return pd.DataFrame(rows)
+
 def create_standard_figures(overall: pd.DataFrame, by_pop: pd.DataFrame, burden: pd.DataFrame) -> None:
     """Create requested figures exclusively from their published tables."""
     d=overall.sort_values("pct")
@@ -987,6 +1014,7 @@ def create_standard_figures(overall: pd.DataFrame, by_pop: pd.DataFrame, burden:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args=parse_args(argv); ensure_directories(); logger=setup_logging(); np.random.seed(args.random_seed)
+    _UNRECOGNIZED.clear()
     logger.info("[1/7] Loading canonical sources")
     timestamps=check_upstream_artifacts(args.input,args.rebuild_upstream,logger)
     spine=load_visit_spine(); pop=load_pop_classification(); domains=load_domain_flags(); raw=load_selected_raw_columns(args.input)
@@ -1008,7 +1036,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     all_conditions=list(iter_analysis_conditions())
     overall=pd.concat([summarize_historical_family(base,PAST_MEDICAL_HISTORY_CONDITIONS),
       summarize_confirmed_family(base,[c for c in all_conditions if c.condition_family!="general_medical"])],ignore_index=True)
-    overall["n_positive"]=overall.get("n_documented_history").fillna(overall.get("n_confirmed_present"))
+    overall["n_positive"]=overall.get("n_documented_history").fillna(overall.get("n_positive_any_yes"))
     overall["N"]=overall.get("n_total_patients").fillna(overall.get("N_evaluable"))
     overall["pct"]=100*overall["n_positive"]/overall["N"]
     overall.to_csv(TABLES_DIR/"07_comorbidities_overall.csv",index=False)
@@ -1085,15 +1113,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     mapping=source_mapping(raw.columns); mapping.to_csv(QC_DIR/"07_comorbidities_source_mapping.csv",index=False)
     duplicates.to_csv(QC_DIR/"07_comorbidities_patient_duplicates.csv",index=False)
     missingness_table(base).to_csv(QC_DIR/"07_comorbidities_missingness.csv",index=False)
-    pd.DataFrame(_UNRECOGNIZED,columns=["source_column","original_value","row_index"]).drop_duplicates().to_csv(QC_DIR/"07_comorbidities_unrecognized_values.csv",index=False)
+    # Re-scan the complete source exactly once.  Baseline derivation may have
+    # populated the collector for only a subset of rows.
+    _UNRECOGNIZED.clear()
     source_qc(raw).to_csv(QC_DIR/"07_comorbidity_source_qc.csv",index=False)
+    pd.DataFrame(_UNRECOGNIZED,columns=["source_column","original_value","row_index"]).drop_duplicates().to_csv(QC_DIR/"07_comorbidities_unrecognized_values.csv",index=False)
     unrecognized=pd.DataFrame(_UNRECOGNIZED,columns=["source_column","original_value","row_index"])
     if len(unrecognized): unrecognized=unrecognized.groupby(["source_column","original_value"],as_index=False).size().rename(columns={"size":"n_occurrences"})
     else: unrecognized=pd.DataFrame(columns=["source_column","original_value","n_occurrences"])
     unrecognized.to_csv(QC_DIR/"07_comorbidity_unrecognized_values.csv",index=False)
     audit_cols=["patient_id","clinical_baseline_episode_id","clinical_baseline_date","baseline_pop","baseline_essdai","age_baseline","sex",*CONDITION_NAMES]
     base[[c for c in audit_cols if c in base]].to_csv(QC_DIR/"07_comorbidity_baseline_patient_audit.csv",index=False)
-    pd.DataFrame(diagnostics).to_csv(QC_DIR/"07_comorbidity_model_qc.csv",index=False)
+    prevalence_qc=condition_prevalence_qc(base)
+    prevalence_qc.to_csv(QC_DIR/"07_comorbidity_model_qc.csv",index=False)
     pd.DataFrame({"metric":["n_longitudinal_rows","n_unmatched_pop","n_unmatched_domains"],"value":[len(long),int(long.pop_status.isna().sum()),int(long[ALL_DOMAINS].isna().all(axis=1).sum())]}).to_csv(QC_DIR/"07_comorbidity_merge_qc.csv",index=False)
     prohibited_used=sorted(x for c in iter_analysis_conditions() for x in (*c.primary,*c.detail_columns) if x.startswith(PROHIBITED_SOURCE_PREFIXES))
     qc={"input_path":str(args.input),"script_version":SCRIPT_VERSION,"run_timestamp":datetime.now(timezone.utc).isoformat(),
@@ -1102,6 +1134,14 @@ def main(argv: Sequence[str] | None = None) -> int:
       "prohibited_sources_used":prohibited_used,"prohibited_source_check_passed":not prohibited_used,
       "monte_carlo_enabled":args.run_sparse_monte_carlo,"upstream_file_timestamps":timestamps,
       "separate_burden_columns":["n_general_medical_history","n_rheumatologic_non_said","n_concomitant_said","n_other_immune_mediated_systemic"]}
+    dictionary=condition_dictionary().set_index("condition")["condition_family"]
+    family_mismatches=int(sum(
+        table.set_index("condition")["condition_family"].ne(dictionary).sum()
+        for table in (overall,by_pop,prevalence_qc)
+    ))
+    unrecognized_on=sum(
+        str(value).strip().lower()=="on" for value in unrecognized.get("original_value", pd.Series(dtype=str))
+    )
     qc_summary={"n_patients_clinical_spine":spine.patient_id.nunique(),"n_clinical_episodes":len(spine),
       "n_baseline_patients":len(base),"n_duplicate_patient_episode":int(spine.duplicated(["patient_id","clinical_episode_id"]).sum()),
       "n_patients_multiple_baseline":int(spine.loc[spine.is_clinical_baseline.eq(True)].patient_id.duplicated().sum()),
@@ -1109,7 +1149,13 @@ def main(argv: Sequence[str] | None = None) -> int:
       "n_essdai_baseline_available":int(base.baseline_essdai.notna().sum()),"n_conditions_total":len(CONDITION_NAMES),
       "n_general_medical_conditions":len(PAST_MEDICAL_HISTORY_CONDITIONS),"n_rheumatologic_non_said_conditions":len(RHEUMATOLOGIC_NON_SAID_CONDITIONS),
       "n_concomitant_said_conditions":len(CONCOMITANT_SAID_CONDITIONS),"n_other_immune_conditions":len(OTHER_IMMUNE_MEDIATED_SYSTEMIC_CONDITIONS),
-      "n_sjd_associated_manifestations":len(RHEUMATOLOGIC_MANIFESTATIONS)}
+      "n_sjd_associated_manifestations":len(RHEUMATOLOGIC_MANIFESTATIONS),
+      "n_conditions_with_family_mismatch":family_mismatches,
+      "n_conditions_with_overall_vs_pop_definition_mismatch":int((~prevalence_qc.overall_pop_consistency_flag).sum()),
+      "n_unrecognized_tokens":int(unrecognized.n_occurrences.sum()) if len(unrecognized) else 0,
+      "n_unrecognized_on_tokens":int(unrecognized_on)}
+    if family_mismatches or not prevalence_qc.overall_pop_consistency_flag.all() or unrecognized_on:
+        raise AssertionError("Comorbidity family/exposure/token QC hard check failed")
     pd.DataFrame([qc_summary]).to_csv(QC_DIR/"07_comorbidities_qc_summary.csv",index=False)
     (QC_DIR/"07_comorbidities_qc.json").write_text(json.dumps(qc,indent=2,default=str)+"\n")
     logger.info("[7/7] Complete: progression results written separately by comorbidity family")
