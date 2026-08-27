@@ -49,7 +49,7 @@ POP_LONGITUDINAL_PARQUET = INTERMEDIATE_DATA_DIR / "01_visit_level_classificatio
 OVERLAP_LONGITUDINAL_PARQUET = (
     BLOCKA_INTERMEDIATE_DATA_DIR / "06_overlap_episode_level.parquet"
 )
-PROS_LONGITUDINAL_PARQUET = INTERMEDIATE_DATA_DIR / "09_pros_longitudinal_patient_visit.parquet"
+PROS_LONGITUDINAL_PARQUET = INTERMEDIATE_DATA_DIR / "09_pros_episode_level.parquet"
 INTEGRATED_LONGITUDINAL_PARQUET = ANALYTIC_DATA_DIR / "10_integrated_longitudinal_patient_visit.parquet"
 TRANSITION_EPISODE_PARQUET = INTERMEDIATE_DATA_DIR / "23_transition_episode_dataset.parquet"
 TRANSITION_EPISODE_CSV = INTERMEDIATE_DATA_DIR / "23_transition_episode_dataset.csv"

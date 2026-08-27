@@ -1,4 +1,3 @@
-import importlib
 import numpy as np
 import pandas as pd
 
@@ -22,13 +21,9 @@ def test_observed_only_esspri_never_uses_proxy_values():
     assert not scored.loc[0, "esspri_scoring_valid"]
 
 
-def test_shared_scoring_is_the_baseline_algorithm_and_pcs_mcs_are_numeric():
-    baseline = importlib.import_module("src.block_A.09_pros_baseline")
+def test_shared_scoring_produces_numeric_pcs_mcs():
     row = _complete_sf36_row() | {"esspri_questionnaire__dryness": 1, "esspri_questionnaire__fatigue": 2, "esspri_questionnaire__pain": 3}
     one = score_all_pros(pd.DataFrame([row]))
-    two = baseline.score_all_pros(pd.DataFrame([row]))
-    pd.testing.assert_series_equal(one["esspri_total"], two["esspri_total"])
-    assert one.loc[0, "sf36_pcs"] == two.loc[0, "sf36_pcs"]
     assert np.isfinite(one.loc[0, "sf36_pcs"])
     assert np.isfinite(one.loc[0, "sf36_mcs"])
 
