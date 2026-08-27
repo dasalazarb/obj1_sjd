@@ -221,11 +221,12 @@ def baseline_summary(baseline: pd.DataFrame) -> pd.DataFrame:
 def domain_incidence(episodes: pd.DataFrame, baseline: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for key, meta in EXTRAGLANDULAR_DOMAINS.items():
-        at_risk = baseline[
+        baseline_negative = baseline[
             baseline[f"eg_{key}_evaluable"] & ~baseline[meta["active_col"]]
         ]
-        durations, event_dates = [], []
-        for patient, base_date in at_risk.set_index("patient_id")[
+        durations, event_dates, event_times = [], [], []
+        eligible_patients = []
+        for patient, base_date in baseline_negative.set_index("patient_id")[
             "clinical_anchor_date"
         ].items():
             follow = episodes[
@@ -233,39 +234,39 @@ def domain_incidence(episodes: pd.DataFrame, baseline: pd.DataFrame) -> pd.DataF
                 & (episodes["clinical_anchor_date"] > base_date)
                 & episodes[f"eg_{key}_evaluable"]
             ].sort_values("clinical_anchor_date")
+            if follow.empty:
+                continue
+
+            eligible_patients.append(patient)
             event = follow[follow[meta["active_col"]]]
             end = (
                 event.iloc[0]["clinical_anchor_date"]
-                if len(event)
-                else (
-                    follow.iloc[-1]["clinical_anchor_date"]
-                    if len(follow)
-                    else base_date
-                )
+                if not event.empty
+                else follow.iloc[-1]["clinical_anchor_date"]
             )
-            durations.append(max(0.0, (end - base_date).days / DAY_PER_YEAR))
-            if len(event):
+            duration = max(0.0, (end - base_date).days / DAY_PER_YEAR)
+            durations.append(duration)
+            if not event.empty:
                 event_dates.append(end)
+                event_times.append(duration)
+
+        n_at_risk = len(eligible_patients)
+        assert len(event_dates) <= n_at_risk, (
+            f"Incident {key} events exceed the population at risk"
+        )
+        assert n_at_risk <= len(baseline_negative), (
+            f"The {key} population at risk exceeds baseline-evaluable inactive patients"
+        )
+        assert len(set(eligible_patients)) == n_at_risk, (
+            f"Duplicate patients in the {key} population at risk"
+        )
         py = float(sum(durations))
-        event_times = []
-        for _, base in at_risk.iterrows():
-            ev = episodes[
-                (episodes.patient_id == base.patient_id)
-                & (episodes.clinical_anchor_date > base.clinical_anchor_date)
-                & episodes[f"eg_{key}_evaluable"]
-                & episodes[meta["active_col"]]
-            ].sort_values("clinical_anchor_date")
-            if len(ev):
-                event_times.append(
-                    (ev.iloc[0].clinical_anchor_date - base.clinical_anchor_date).days
-                    / DAY_PER_YEAR
-                )
         rows.append(
             {
                 "domain": meta["label"],
-                "n_at_risk": len(at_risk),
+                "n_at_risk": n_at_risk,
                 "n_incident": len(event_dates),
-                "pct_incident": pct(len(event_dates), len(at_risk)),
+                "pct_incident": pct(len(event_dates), n_at_risk),
                 "person_years_observed": py,
                 "incidence_rate_per_100_py": 100 * len(event_dates) / py
                 if py
