@@ -80,6 +80,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--labs-long", type=Path, default=DEFAULT_LABS)
     parser.add_argument("--baseline-labs", type=Path, default=DEFAULT_BASELINE)
+    parser.add_argument("--all-spine", type=Path, default=common.EPISODE_SPINE_PARQUET)
     parser.add_argument(
         "--spine", type=Path, default=common.CLINICAL_VISIT_SPINE_PARQUET
     )
@@ -301,6 +302,10 @@ def select_episode_analytes(
             "clinical_visit_number": spine_row.get(
                 "clinical_visit_number", spine_row.get("visit_number", pd.NA)
             ),
+            "clinical_visit": spine_row.get("clinical_visit", pd.NA),
+            "visit_type": spine_row.get("visit_type", pd.NA),
+            "episode_start_date": spine_row.get("episode_start_date", pd.NaT),
+            "episode_end_date": spine_row.get("episode_end_date", pd.NaT),
             "canonical_analyte": key[2],
             "lab_family": chosen.get("lab_family"),
             "analytic_role": chosen.get("analytic_role"),
@@ -395,20 +400,31 @@ def build_wide(
         wide = wide.merge(
             pivot.reset_index(), on=KEY, how="left", validate="one_to_one"
         )
+    # Include analytes observed only in nonclinical episodes: their dynamic
+    # episode value stays missing, but dated stable/genetic history may still
+    # legitimately become known at a later clinical visit.
     families = (
-        selected.groupby("canonical_analyte")["lab_family"].first()
-        if not selected.empty
+        usable.groupby("canonical_analyte")["lab_family"].first()
+        if not usable.empty
         else pd.Series(dtype="object")
     )
     future_violations = 0
     anchors = pd.to_datetime(wide["clinical_anchor_date"], errors="coerce")
     lab_dates = pd.to_datetime(usable["lab_date"], errors="coerce")
     for analyte, family in families.items():
-        part = selected[selected.canonical_analyte.eq(analyte)]
-        episode_value = part.set_index(KEY)["selected_value_numeric"].combine_first(
-            part.set_index(KEY)["selected_value_text"]
+        part = (
+            selected[selected.canonical_analyte.eq(analyte)]
+            if not selected.empty
+            else selected
         )
-        episode_status = part.set_index(KEY)["selected_reference_status"]
+        if part.empty:
+            episode_value: Any = {}
+            episode_status: Any = {}
+        else:
+            episode_value = part.set_index(KEY)["selected_value_numeric"].combine_first(
+                part.set_index(KEY)["selected_value_text"]
+            )
+            episode_status = part.set_index(KEY)["selected_reference_status"]
         wide[f"{analyte}__episode_value"] = [
             episode_value.get(tuple(k), pd.NA)
             for k in wide[KEY].itertuples(index=False, name=None)
@@ -519,7 +535,8 @@ def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
     args = parse_args(argv)
     common.ensure_output_dirs()
-    spine, labs, baseline = (
+    all_spine, clinical_spine, labs, baseline = (
+        pd.read_parquet(args.all_spine),
         pd.read_parquet(args.spine),
         pd.read_parquet(args.labs_long),
         pd.read_parquet(args.baseline_labs),
@@ -535,16 +552,32 @@ def main(argv: list[str] | None = None) -> None:
         "lab_date",
         "days_from_clinical_anchor",
     }
-    if required_spine - set(spine):
-        raise ValueError(
-            f"Spine missing required columns: {sorted(required_spine - set(spine))}"
-        )
+    for name, frame in (
+        ("All-episode spine", all_spine),
+        ("Clinical spine", clinical_spine),
+    ):
+        if required_spine - set(frame):
+            raise ValueError(
+                f"{name} missing required columns: "
+                f"{sorted(required_spine - set(frame))}"
+            )
     if required_labs - set(labs):
         raise ValueError(
             f"Labs missing required columns: {sorted(required_labs - set(labs))}"
         )
-    if spine.duplicated(KEY).any():
-        raise AssertionError("Duplicate patient_id + clinical_episode_id in spine")
+    if all_spine.duplicated(KEY).any():
+        raise AssertionError(
+            "Duplicate patient_id + clinical_episode_id in all-episode spine"
+        )
+    if clinical_spine.duplicated(KEY).any():
+        raise AssertionError(
+            "Duplicate patient_id + clinical_episode_id in clinical spine"
+        )
+    if (
+        "clinical_visit" in clinical_spine
+        and not _bool(clinical_spine["clinical_visit"]).all()
+    ):
+        raise AssertionError("Clinical spine contains clinical_visit != True")
     labs = labs.copy()
     labs["lab_date"] = pd.to_datetime(labs.lab_date, errors="coerce")
     mapped = labs.canonical_analyte.notna() & _mapping_valid(labs)
@@ -552,16 +585,67 @@ def main(argv: list[str] | None = None) -> None:
     matched = labs.matched_clinical_episode_id.notna()
     ambiguous = _bool(labs.episode_match_ambiguous)
     eligible = mapped & valid_result & matched & ~ambiguous
-    usable = labs[eligible].copy()
-    usable["clinical_episode_id"] = usable.matched_clinical_episode_id
-    spine_keys = pd.MultiIndex.from_frame(spine[KEY])
-    usable_keys = pd.MultiIndex.from_frame(usable[KEY])
-    if not usable_keys.isin(spine_keys).all():
-        raise AssertionError("Matched lab episode is absent from clinical spine")
-    selected, conflict_indexes = select_episode_analytes(usable, spine)
-    if not selected.empty and selected.duplicated(ANALYTE_KEY).any():
+    usable_all = labs[eligible].copy()
+    usable_all["clinical_episode_id"] = usable_all.matched_clinical_episode_id
+    all_spine_keys = pd.MultiIndex.from_frame(all_spine[KEY])
+    usable_all_keys = pd.MultiIndex.from_frame(usable_all[KEY])
+    if not usable_all_keys.isin(all_spine_keys).all():
+        raise AssertionError(
+            "Matched lab episode is absent from authoritative all-episode spine"
+        )
+
+    # Episode metadata belongs to the authoritative spine.  Refuse collisions
+    # rather than silently replacing similarly named lab-source columns.
+    context_columns = [
+        c
+        for c in (
+            "clinical_anchor_date",
+            "clinical_visit",
+            "visit_type",
+            "episode_start_date",
+            "episode_end_date",
+            "clinical_baseline_episode_id",
+            "clinical_baseline_date",
+            "is_clinical_baseline",
+        )
+        if c in all_spine
+    ]
+    collisions = set(context_columns).intersection(usable_all.columns)
+    usable_all = usable_all.rename(columns={c: f"{c}__lab_source" for c in collisions})
+    usable_all = usable_all.merge(
+        all_spine[KEY + context_columns],
+        on=KEY,
+        how="left",
+        validate="many_to_one",
+    )
+    for column in collisions:
+        source = usable_all[f"{column}__lab_source"]
+        authoritative = usable_all[column]
+        if "date" in column:
+            source = pd.to_datetime(source, errors="coerce")
+            authoritative = pd.to_datetime(authoritative, errors="coerce")
+        disagreement = (
+            source.notna() & authoritative.notna() & ~source.eq(authoritative)
+        )
+        if disagreement.any():
+            raise AssertionError(
+                f"Lab-source {column} disagrees with authoritative all-episode spine"
+            )
+        usable_all = usable_all.drop(columns=f"{column}__lab_source")
+    selected_all, conflict_indexes = select_episode_analytes(usable_all, all_spine)
+    if not selected_all.empty and selected_all.duplicated(ANALYTE_KEY).any():
         raise AssertionError("Duplicate analyte-level keys")
-    wide, future_violations = build_wide(spine, selected, usable)
+    clinical_keys = pd.MultiIndex.from_frame(clinical_spine[KEY])
+    usable_all_index = pd.MultiIndex.from_frame(usable_all[KEY])
+    usable_clinical = usable_all.loc[usable_all_index.isin(clinical_keys)].copy()
+    if selected_all.empty:
+        selected_clinical = selected_all.copy()
+    else:
+        selected_all_index = pd.MultiIndex.from_frame(selected_all[KEY])
+        selected_clinical = selected_all.loc[
+            selected_all_index.isin(clinical_keys)
+        ].copy()
+    wide, future_violations = build_wide(clinical_spine, selected_clinical, usable_all)
     if baseline.patient_id.duplicated().any():
         raise AssertionError("20b baseline has duplicate patient_id rows")
     baseline_cols = ["patient_id"] + [c for c in BASELINE_FEATURES if c in baseline]
@@ -569,12 +653,12 @@ def main(argv: list[str] | None = None) -> None:
         baseline[baseline_cols], on="patient_id", how="left", validate="many_to_one"
     )
     wide_keys = pd.MultiIndex.from_frame(wide[KEY])
-    missing_keys, extra_keys = spine_keys.difference(wide_keys), wide_keys.difference(
-        spine_keys
-    )
+    missing_keys, extra_keys = clinical_keys.difference(
+        wide_keys
+    ), wide_keys.difference(clinical_keys)
     if (
         wide.duplicated(KEY).any()
-        or len(wide) != len(spine)
+        or len(wide) != len(clinical_spine)
         or len(missing_keys)
         or len(extra_keys)
     ):
@@ -583,7 +667,7 @@ def main(argv: list[str] | None = None) -> None:
         raise AssertionError(f"Detected {future_violations} future-leakage violations")
 
     for path, frame, csv_copy in (
-        (args.analyte_output, selected, True),
+        (args.analyte_output, selected_all, True),
         (args.wide_output, wide, True),
     ):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -595,7 +679,7 @@ def main(argv: list[str] | None = None) -> None:
             KEY
             + [
                 c
-                for c in spine.columns
+                for c in clinical_spine.columns
                 if c in {"clinical_anchor_date", "clinical_visit_number"}
             ]
             + [
@@ -622,13 +706,39 @@ def main(argv: list[str] | None = None) -> None:
     conflict_df = _detail(
         labs.loc[labs.index.intersection(conflict_indexes)],
         "episode_result_or_unit_conflict",
-        spine,
+        all_spine,
     )
-    _detail(unmatched_df, "unmatched_episode", spine).to_csv(
+    _detail(unmatched_df, "unmatched_episode", all_spine).to_csv(
         common.BLOCKA_QC_DIR / "01_labs_unmatched_records.csv", index=False
     )
-    _detail(ambiguous_df, "ambiguous_episode_match", spine).to_csv(
+    _detail(ambiguous_df, "ambiguous_episode_match", all_spine).to_csv(
         common.BLOCKA_QC_DIR / "01_labs_ambiguous_episode_matches.csv", index=False
+    )
+    nonclinical = usable_all.loc[~usable_all_index.isin(clinical_keys)].copy()
+    nonclinical_columns = [
+        "patient_id",
+        "matched_clinical_episode_id",
+        "clinical_anchor_date",
+        "clinical_visit",
+        "visit_type",
+        "lab_date",
+        "days_from_clinical_anchor",
+        "canonical_analyte",
+        "lab_family",
+        "analytic_role",
+        "result_raw",
+        "result_numeric_exact",
+        "result_operator",
+        "result_numeric_bound",
+        "result_text",
+        "unit",
+        "reported_interpretation",
+        "episode_match_method",
+        "source_protocol",
+    ]
+    nonclinical.reindex(columns=nonclinical_columns).to_csv(
+        common.BLOCKA_QC_DIR / "01_labs_matched_nonclinical_episode_records.csv",
+        index=False,
     )
     conflict_df.to_csv(
         common.BLOCKA_QC_DIR / "01_labs_episode_conflicts.csv", index=False
@@ -647,19 +757,23 @@ def main(argv: list[str] | None = None) -> None:
     )
     inventory.to_csv(common.BLOCKA_QC_DIR / "01_labs_unit_inventory.csv", index=False)
     unit_conflicts = (
-        selected[selected.unit_conflict] if not selected.empty else selected
+        selected_all[selected_all.unit_conflict]
+        if not selected_all.empty
+        else selected_all
     )
     unit_conflicts.to_csv(
         common.BLOCKA_QC_DIR / "01_labs_unit_conflicts.csv", index=False
     )
 
     coverage_rows = []
-    total_patients, total_episodes = spine.patient_id.nunique(), len(spine)
+    total_patients, total_episodes = clinical_spine.patient_id.nunique(), len(
+        clinical_spine
+    )
     for analyte, raw in labs[mapped].groupby("canonical_analyte", dropna=False):
         sel = (
-            selected[selected.canonical_analyte.eq(analyte)]
-            if not selected.empty
-            else selected
+            selected_clinical[selected_clinical.canonical_analyte.eq(analyte)]
+            if not selected_clinical.empty
+            else selected_clinical
         )
         valid_raw = raw[eligible.reindex(raw.index, fill_value=False)]
         types = valid_raw.apply(_value_type, axis=1).value_counts()
@@ -712,6 +826,11 @@ def main(argv: list[str] | None = None) -> None:
     pd.DataFrame(coverage_rows).to_csv(
         common.BLOCKA_TABLES_DIR / "01_labs_episode_coverage.csv", index=False
     )
+    nonclinical_visit_type = _column(nonclinical, "visit_type").astype("string")
+    ambiguous_visit_type = nonclinical_visit_type.str.casefold().eq("ambiguous")
+    research_or_procedure = nonclinical_visit_type.str.casefold().str.contains(
+        r"research|procedure", na=False
+    )
     qc = {
         "n_input_lab_records": len(labs),
         "n_valid_lab_records": int(eligible.sum()),
@@ -722,36 +841,53 @@ def main(argv: list[str] | None = None) -> None:
         "n_unique_lab_families": (
             int(labs.loc[mapped, "lab_family"].nunique()) if "lab_family" in labs else 0
         ),
-        "n_rows_analyte_episode": len(selected),
+        "n_rows_analyte_episode": len(selected_all),
         "n_rows_wide": len(wide),
         "n_unique_patients": wide.patient_id.nunique(),
         "n_unique_clinical_episodes": wide[KEY].drop_duplicates().shape[0],
         "n_duplicate_patient_episode_analyte_keys": (
-            int(selected.duplicated(ANALYTE_KEY).sum()) if len(selected) else 0
+            int(selected_all.duplicated(ANALYTE_KEY).sum()) if len(selected_all) else 0
         ),
         "n_duplicate_patient_episode_keys_wide": int(wide.duplicated(KEY).sum()),
         "n_unmatched_records": int((~matched).sum()),
         "n_ambiguous_matches": int(ambiguous.sum()),
-        "n_result_conflicts": (
-            int(selected.result_conflict.sum()) if len(selected) else 0
+        "n_lab_records_matched_to_any_episode": len(usable_all),
+        "n_lab_records_matched_to_clinical_episode": len(usable_clinical),
+        "n_lab_records_matched_to_nonclinical_episode": len(nonclinical),
+        "n_unique_matched_episodes_all": usable_all[KEY].drop_duplicates().shape[0],
+        "n_unique_matched_clinical_episodes": usable_clinical[KEY]
+        .drop_duplicates()
+        .shape[0],
+        "n_unique_matched_nonclinical_episodes": nonclinical[KEY]
+        .drop_duplicates()
+        .shape[0],
+        "n_matched_ambiguous_visit_type": int(ambiguous_visit_type.sum()),
+        "n_matched_research_or_procedure_only": int(research_or_procedure.sum()),
+        "n_matched_other_nonclinical_visit_type": int(
+            (~ambiguous_visit_type & ~research_or_procedure).sum()
         ),
-        "n_unit_conflicts": int(selected.unit_conflict.sum()) if len(selected) else 0,
+        "n_result_conflicts": (
+            int(selected_all.result_conflict.sum()) if len(selected_all) else 0
+        ),
+        "n_unit_conflicts": (
+            int(selected_all.unit_conflict.sum()) if len(selected_all) else 0
+        ),
         "n_exact_numeric_selected": (
-            int(selected.selected_value_type.eq("exact_numeric").sum())
-            if len(selected)
+            int(selected_all.selected_value_type.eq("exact_numeric").sum())
+            if len(selected_all)
             else 0
         ),
         "n_censored_numeric_selected": (
-            int(selected.selected_value_type.eq("censored_numeric").sum())
-            if len(selected)
+            int(selected_all.selected_value_type.eq("censored_numeric").sum())
+            if len(selected_all)
             else 0
         ),
         "n_qualitative_selected": (
-            int(selected.selected_value_type.eq("qualitative").sum())
-            if len(selected)
+            int(selected_all.selected_value_type.eq("qualitative").sum())
+            if len(selected_all)
             else 0
         ),
-        "n_clinical_spine_rows": len(spine),
+        "n_clinical_spine_rows": len(clinical_spine),
         "n_wide_rows": len(wide),
         "n_missing_clinical_episodes_in_wide": len(missing_keys),
         "n_extra_clinical_episodes_in_wide": len(extra_keys),
@@ -761,8 +897,8 @@ def main(argv: list[str] | None = None) -> None:
         common.BLOCKA_QC_DIR / "01_labs_episode_qc.json", "w", encoding="utf-8"
     ) as handle:
         json.dump(qc, handle, indent=2)
-    write_table1(baseline[baseline.patient_id.isin(spine.patient_id)])
-    LOG.info("Wrote %s analyte-episode and %s wide rows", len(selected), len(wide))
+    write_table1(baseline[baseline.patient_id.isin(clinical_spine.patient_id)])
+    LOG.info("Wrote %s analyte-episode and %s wide rows", len(selected_all), len(wide))
 
 
 if __name__ == "__main__":
