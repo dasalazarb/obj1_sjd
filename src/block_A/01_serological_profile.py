@@ -69,6 +69,25 @@ NORMAL = re.compile(r"\b(normal|within (?:the )?(?:reference )?range)\b", re.I)
 INVALID_MAPPING = re.compile(
     r"unmapped|invalid|excluded|reject|no[_ ]?mapping|ambiguous", re.I
 )
+INVALID_RESULT_TOKENS = {
+    "",
+    ":",
+    "-",
+    "--",
+    "not tested",
+    "not performed",
+    "not done",
+    "cancelled",
+    "canceled",
+    "unable to perform",
+    "unable to report",
+    "insufficient sample",
+    "insufficient specimen",
+    "see comment",
+    "see note",
+    "pending",
+    "test not performed",
+}
 QC_DETAIL = [
     "_lab_record_id",
     "patient_id",
@@ -227,6 +246,8 @@ def _coerce_analyte_output_schema(frame: pd.DataFrame) -> pd.DataFrame:
         "true_result_conflict",
         "unit_conflict",
         "result_conflict",
+        "invalid_tokens_filtered_from_competition",
+        "conflict_resolved_by_invalid_token_filter",
     ]
     datetime_columns = [
         "clinical_anchor_date",
@@ -430,6 +451,80 @@ def _text(row: pd.Series, name: str) -> str:
     return "" if pd.isna(value) else str(value).strip()
 
 
+def _normalize_result_token(value: Any) -> str:
+    if pd.isna(value):
+        return ""
+    return str(value).strip().casefold()
+
+
+def _is_invalid_result_token(value: Any) -> bool:
+    return _normalize_result_token(value) in INVALID_RESULT_TOKENS
+
+
+def _is_invalid_nonresult(row: pd.Series) -> bool:
+    """Identify administrative placeholders without overriding numeric evidence."""
+    exact = pd.to_numeric(
+        pd.Series([row.get("result_numeric_exact")]), errors="coerce"
+    ).iloc[0]
+    bound = pd.to_numeric(
+        pd.Series([row.get("result_numeric_bound")]), errors="coerce"
+    ).iloc[0]
+    return bool(
+        pd.isna(exact)
+        and pd.isna(bound)
+        and all(
+            _is_invalid_result_token(row.get(column))
+            for column in ("result_raw", "result_text", "reported_interpretation")
+        )
+    )
+
+
+def build_invalid_result_tokens_qc(labs: pd.DataFrame) -> pd.DataFrame:
+    """Summarize retained source records classified as administrative non-results."""
+    columns = [
+        "canonical_analyte",
+        "normalized_token",
+        "raw_example",
+        "n_records",
+        "n_patients",
+        "n_episodes",
+    ]
+    if labs.empty:
+        return pd.DataFrame(columns=columns)
+    invalid = labs.loc[labs.apply(_is_invalid_nonresult, axis=1)].copy()
+    if invalid.empty:
+        return pd.DataFrame(columns=columns)
+
+    result_columns = ("result_raw", "result_text", "reported_interpretation")
+
+    def representative(row: pd.Series) -> tuple[str, str]:
+        for column in result_columns:
+            value = row.get(column)
+            if pd.notna(value) and str(value).strip():
+                return _normalize_result_token(value), str(value).strip()
+        return "", ""
+
+    examples = invalid.apply(representative, axis=1)
+    invalid["normalized_token"] = examples.map(lambda value: value[0])
+    invalid["raw_example"] = examples.map(lambda value: value[1])
+    invalid["_episode"] = _column(
+        invalid, "matched_clinical_episode_id"
+    ).astype("string")
+    return (
+        invalid.groupby(
+            ["canonical_analyte", "normalized_token"], dropna=False
+        )
+        .agg(
+            raw_example=("raw_example", "first"),
+            n_records=("patient_id", "size"),
+            n_patients=("patient_id", "nunique"),
+            n_episodes=("_episode", "nunique"),
+        )
+        .reset_index()
+        .reindex(columns=columns)
+    )
+
+
 def _value_type(row: pd.Series) -> str:
     if pd.notna(
         pd.to_numeric(
@@ -443,6 +538,8 @@ def _value_type(row: pd.Series) -> str:
     ).iloc[0]
     if operator in {"<", "<=", ">", ">="} and pd.notna(bound):
         return "censored_numeric"
+    if _is_invalid_nonresult(row):
+        return "invalid_nonresult"
     if any(
         _text(row, c) for c in ("result_text", "result_raw", "reported_interpretation")
     ):
@@ -558,18 +655,32 @@ def select_episode_analytes(
     conflict_record_ids: set[int] = set()
     for key, original in usable.groupby(ANALYTE_KEY, sort=False, dropna=False):
         group = _deduplicate(original)
+        invalid_mask = group.apply(_is_invalid_nonresult, axis=1)
+        interpretable = group.loc[~invalid_mask].copy()
+        candidates = interpretable if not interpretable.empty else group
         distances = pd.to_numeric(group["days_from_clinical_anchor"], errors="coerce")
-        minimum = distances.abs().min() if distances.notna().any() else np.nan
-        nearest = group[distances.abs().eq(minimum)].copy() if pd.notna(minimum) else group.copy()
+        candidate_distances = distances.reindex(candidates.index)
+        minimum = (
+            candidate_distances.abs().min()
+            if candidate_distances.notna().any()
+            else np.nan
+        )
+        nearest = (
+            candidates[candidate_distances.abs().eq(minimum)].copy()
+            if pd.notna(minimum)
+            else candidates.copy()
+        )
         # At equal absolute distance, anchor-day/pre-anchor evidence precedes post-anchor.
         pre = pd.to_numeric(nearest["days_from_clinical_anchor"], errors="coerce").le(0)
         if pre.any():
             nearest = nearest[pre].copy()
 
-        value_types = group.apply(_value_type, axis=1)
+        value_types = candidates.apply(_value_type, axis=1)
         nearest_types = nearest.apply(_value_type, axis=1)
-        exact = pd.to_numeric(_column(group, "result_numeric_exact"), errors="coerce")
-        exact_rows = group[value_types.eq("exact_numeric")].copy()
+        exact = pd.to_numeric(
+            _column(candidates, "result_numeric_exact"), errors="coerce"
+        )
+        exact_rows = candidates[value_types.eq("exact_numeric")].copy()
         comparable_units = {_comparable_unit(x) for x in exact_rows.get("unit", pd.Series(dtype="object")).dropna()}
         comparable_units.discard(pd.NA)
         unit_conflict = len(comparable_units) > 1
@@ -577,7 +688,10 @@ def select_episode_analytes(
 
         # Numeric variation is not semantic disagreement.  Censored observations
         # remain distinct, and mixed/categorical states must agree exactly.
-        if nearest_types.eq("exact_numeric").all() and not unit_conflict:
+        if (
+            nearest_types.eq("exact_numeric").all()
+            or nearest_types.eq("invalid_nonresult").all()
+        ) and not unit_conflict:
             result_conflict = False
         else:
             semantic_signatures = {
@@ -585,6 +699,11 @@ def select_episode_analytes(
             }
             result_conflict = len(semantic_signatures) > 1
         conflict = bool(unit_conflict or result_conflict)
+        # Administrative placeholders would have produced a semantic conflict
+        # only when at least one genuine result remains to supersede them.
+        conflict_resolved_by_filter = bool(
+            invalid_mask.any() and not interpretable.empty and not conflict
+        )
         if conflict:
             conflict_record_ids.update(
                 original["_lab_record_id"].dropna().astype(int).tolist()
@@ -603,7 +722,9 @@ def select_episode_analytes(
             else np.nan
         )
         text_value = _text(chosen, "result_text") or (
-            _text(chosen, "result_raw") if value_type in {"qualitative", "uninterpretable"} else ""
+            _text(chosen, "result_raw")
+            if value_type in {"qualitative", "uninterpretable", "invalid_nonresult"}
+            else ""
         )
         compatible = exact if repeated_numeric else exact.iloc[0:0]
         spine_row = anchor.loc[(key[0], key[1])]
@@ -617,6 +738,8 @@ def select_episode_analytes(
             selection_status = "selected_censored"
         elif value_type == "uninterpretable":
             selection_status = "selected_uninterpretable"
+        elif value_type == "invalid_nonresult":
+            selection_status = "selected_invalid_nonresult"
         else:
             selection_status = "selected_single"
         rows.append({
@@ -640,12 +763,15 @@ def select_episode_analytes(
             "selected_reference_low": chosen.get("reference_low"), "selected_reference_high": chosen.get("reference_high"),
             "selected_reference_operator": chosen.get("reference_operator"), "selected_reference_bound": chosen.get("reference_bound"),
             "selected_reference_status": _reference_status(chosen) if not conflict else pd.NA,
-            "n_measurements_in_episode": len(group), "n_valid_measurements_in_episode": len(group),
+            "n_measurements_in_episode": len(group),
+            "n_valid_measurements_in_episode": int((~invalid_mask).sum()),
             "same_day_multiple_measurements": bool(len(nearest) > 1 and minimum == 0),
             "same_day_conflict": bool(result_conflict and len(nearest) > 1 and minimum == 0),
             "repeated_numeric_measurement": bool(repeated_numeric),
             "unit_conflict": bool(unit_conflict), "true_result_conflict": bool(result_conflict),
             "result_conflict": bool(result_conflict), "selection_status": selection_status,
+            "invalid_tokens_filtered_from_competition": bool(invalid_mask.any()),
+            "conflict_resolved_by_invalid_token_filter": conflict_resolved_by_filter,
             "source_protocol": chosen.get("source_protocol"),
             "episode_numeric_min": compatible.min() if compatible.notna().any() else np.nan,
             "episode_numeric_max": compatible.max() if compatible.notna().any() else np.nan,
@@ -682,7 +808,11 @@ def build_wide(
     fields = {
         numeric_wide_source: "value",
         "selected_value_text": "text",
-        "selected_unit": "unit",
+        (
+            "selected_unit_harmonized"
+            if "selected_unit_harmonized" in selected
+            else "selected_unit"
+        ): "unit",
         "selected_reference_status": "reference_status",
         "selected_lab_date": "measurement_date",
         "selected_days_from_clinical_anchor": "days_from_anchor",
@@ -1158,6 +1288,10 @@ def main(argv: list[str] | None = None) -> None:
     conflict_df.to_csv(
         common.BLOCKA_QC_DIR / "01_labs_episode_conflicts.csv", index=False
     )
+    invalid_tokens_qc = build_invalid_result_tokens_qc(labs.loc[mapped])
+    invalid_tokens_qc.to_csv(
+        common.BLOCKA_QC_DIR / "01_labs_invalid_result_tokens_qc.csv", index=False
+    )
     unit_frame = labs[mapped].copy()
     unit_frame["unit"] = _column(unit_frame, "unit").map(_normal_unit)
     unit_frame["clinical_episode_id"] = unit_frame.matched_clinical_episode_id
@@ -1207,6 +1341,9 @@ def main(argv: list[str] | None = None) -> None:
     harmonization_qc["conversion_applied"] = harmonization_qc[
         "harmonization_action"
     ].eq("converted")
+    harmonization_qc["conversion_factor"] = pd.Series(
+        pd.NA, index=harmonization_qc.index, dtype="Float64"
+    )
     harmonization_qc["n_values_converted"] = harmonization_qc["n_values"].where(
         harmonization_qc["conversion_applied"], 0
     )
@@ -1263,6 +1400,7 @@ def main(argv: list[str] | None = None) -> None:
                 "n_exact_numeric": int(types.get("exact_numeric", 0)),
                 "n_censored_numeric": int(types.get("censored_numeric", 0)),
                 "n_qualitative": int(types.get("qualitative", 0)),
+                "n_invalid_nonresult": int(types.get("invalid_nonresult", 0)),
                 "n_uninterpretable": int(types.get("uninterpretable", 0)),
                 "n_units": raw.get("unit", pd.Series(dtype="object"))
                 .map(_normal_unit)
@@ -1375,6 +1513,15 @@ def main(argv: list[str] | None = None) -> None:
         ),
         "n_unit_not_convertible": int(
             selected_all.unit_harmonization_status.eq("not_convertible").sum()
+        ),
+        "n_analytes_with_validated_numeric_conversion": len(
+            {key[0] for key in UNIT_CONVERSIONS}
+        ),
+        "n_invalid_nonresult_records": int(
+            labs.loc[mapped].apply(_is_invalid_nonresult, axis=1).sum()
+        ),
+        "n_episode_conflicts_resolved_by_invalid_token_filter": int(
+            selected_all.conflict_resolved_by_invalid_token_filter.sum()
         ),
         "n_repeated_numeric_episode_analytes": int(
             selected_all.repeated_numeric_measurement.sum()

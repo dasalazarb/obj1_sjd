@@ -108,3 +108,82 @@ def test_build_wide_does_not_create_mixed_episode_value():
     assert "anti_ro_ssa__episode_value" not in result
     assert result.loc[0, "anti_ro_ssa__text"] == "positive"
     assert result.loc[0, "anti_ro_ssa__episode_status"] == "positive"
+
+
+def test_invalid_administrative_tokens_are_not_qualitative_results():
+    row = pd.Series(
+        {
+            "result_raw": " Not tested ",
+            "result_text": pd.NA,
+            "reported_interpretation": pd.NA,
+            "result_numeric_exact": pd.NA,
+            "result_numeric_bound": pd.NA,
+        }
+    )
+
+    assert serology._normalize_result_token(row["result_raw"]) == "not tested"
+    assert serology._is_invalid_result_token(row["result_raw"])
+    assert serology._value_type(row) == "invalid_nonresult"
+
+
+def test_valid_result_wins_without_conflict_over_invalid_placeholder():
+    usable = pd.DataFrame(
+        {
+            "patient_id": ["1", "1"],
+            "clinical_episode_id": ["episode-1", "episode-1"],
+            "canonical_analyte": ["ana", "ana"],
+            "days_from_clinical_anchor": [0, 0],
+            "lab_date": pd.to_datetime(["2024-01-01", "2024-01-01"]),
+            "result_raw": ["NEGATIVE", "Not tested"],
+            "result_text": [pd.NA, pd.NA],
+            "reported_interpretation": [pd.NA, pd.NA],
+            "result_numeric_exact": [pd.NA, pd.NA],
+            "result_numeric_bound": [pd.NA, pd.NA],
+            "result_operator": [pd.NA, pd.NA],
+            "unit": [pd.NA, pd.NA],
+            "_lab_record_id": [1, 2],
+        }
+    )
+    spine = pd.DataFrame(
+        {
+            "patient_id": ["1"],
+            "clinical_episode_id": ["episode-1"],
+            "clinical_anchor_date": pd.to_datetime(["2024-01-01"]),
+        }
+    )
+
+    selected, conflict_ids = serology.select_episode_analytes(usable, spine)
+
+    assert selected.loc[0, "selected_value_type"] == "qualitative"
+    assert selected.loc[0, "selected_value_text"] == "NEGATIVE"
+    assert not selected.loc[0, "result_conflict"]
+    assert selected.loc[0, "n_measurements_in_episode"] == 2
+    assert selected.loc[0, "n_valid_measurements_in_episode"] == 1
+    assert selected.loc[0, "conflict_resolved_by_invalid_token_filter"]
+    assert conflict_ids == set()
+
+
+def test_invalid_token_qc_preserves_source_record_counts():
+    labs = pd.DataFrame(
+        {
+            "patient_id": ["1", "1", "2"],
+            "matched_clinical_episode_id": ["e1", "e1", "e2"],
+            "canonical_analyte": ["ana", "ana", "ana"],
+            "result_raw": [":", "POSITIVE", ":"],
+            "result_numeric_exact": [pd.NA, pd.NA, pd.NA],
+            "result_numeric_bound": [pd.NA, pd.NA, pd.NA],
+        }
+    )
+
+    result = serology.build_invalid_result_tokens_qc(labs)
+
+    assert result.to_dict("records") == [
+        {
+            "canonical_analyte": "ana",
+            "normalized_token": ":",
+            "raw_example": ":",
+            "n_records": 2,
+            "n_patients": 2,
+            "n_episodes": 2,
+        }
+    ]
