@@ -1,12 +1,10 @@
-"""Minimal behavioural tests for the integrated longitudinal dataset builder."""
+"""Behavioural tests for the clinical-episode integration boundary."""
 import importlib.util
 from pathlib import Path
 
 import pytest
 
 pd = pytest.importorskip("pandas")
-
-
 MODULE_PATH = Path(__file__).resolve().parents[1] / "src/block_A/10_build_integrated_longitudinal_dataset.py"
 spec = importlib.util.spec_from_file_location("integrated_builder", MODULE_PATH)
 builder = importlib.util.module_from_spec(spec)
@@ -14,62 +12,68 @@ assert spec.loader is not None
 spec.loader.exec_module(builder)
 
 
-def test_pro_columns_match_longitudinal_pro_scoring_output():
-    from src.derivations.pro_scoring import score_all_pros
-
-    scored = score_all_pros(pd.DataFrame({"patient_id": ["a"], "visit_date": [pd.Timestamp("2020-01-01")]}))
-
-    assert set(builder.PRO_COLUMNS).issubset(scored.columns)
-
-
 def frames():
-    spine = pd.DataFrame({"patient_id": ["a", "a", "b"], "visit_id": ["a0", "a1", "b0"],
-                          "visit_date": pd.to_datetime(["2020-01-01", "2021-01-01", "2020-06-01"]),
-                          "visit_number": [0, 1, 0], "time_since_observed_baseline_days": [0, 366, 0]})
-    pop = pd.DataFrame({"patient_id": ["a", "a", "b"], "visit_id": ["a0", "a1", "b0"],
-                        "visit_date": spine.visit_date, "pop_status": ["Pop2", "Pop1", "Pop3"],
-                        "essdai_total": [4.0, 2.0, 1.0], "esspri_total": [7.0, 5.0, 3.0],
-                        "baseline_pop_status": ["Pop2", "Pop2", "Pop3"]})
-    overlap = pd.DataFrame({"patient_id": ["a", "a", "b"], "visit_id": ["a0", "a1", "b0"],
-                            "visit_date": spine.visit_date, "overlap_status": ["neither", "overlap", "neither"],
-                            "extraglandular_active": [False, True, True], "extraglandular_evaluable": [True, True, True],
-                            "n_extraglandular_domains_active": [0, 2, 1]})
-    pros = pd.DataFrame({"patient_id": ["a", "a", "b"], "visit_id": ["a0", "a1", "b0"],
-                         "visit_date": spine.visit_date, "sf36_pcs": [40.0, 35.0, 50.0], "sf36_mcs": [45.0, 46.0, 48.0],
-                         "profad_total": [1.0, 2.0, 3.0], "mdafs_global": [2.0, 3.0, 4.0]})
-    return spine, pop, overlap, pros
+    spine = pd.DataFrame({
+        "patient_id": ["a", "a", "b"], "clinical_episode_id": ["a1", "a2", "b1"],
+        "clinical_anchor_date": pd.to_datetime(["2020-01-01", "2021-01-01", "2020-06-01"]),
+        "clinical_visit_number": [1, 2, 1], "clinical_visit": [True] * 3,
+        "visit_type": ["clinical"] * 3, "episode_start_date": pd.to_datetime(["2020-01-01", "2021-01-01", "2020-06-01"]),
+        "episode_end_date": pd.to_datetime(["2020-01-01", "2021-01-01", "2020-06-01"]),
+        "clinical_baseline_episode_id": ["a1", "a1", "b1"],
+        "clinical_baseline_date": pd.to_datetime(["2020-01-01", "2020-01-01", "2020-06-01"]),
+        "is_clinical_baseline": [True, False, True],
+        "time_since_clinical_baseline_days": [0, 366, 0],
+        "time_since_clinical_baseline_years": [0.0, 366 / 365.25, 0.0],
+    })
+    metadata = spine[[*builder.KEYS, "clinical_anchor_date", "clinical_visit_number"]]
+    pop = metadata.assign(pop_status=["Pop2", "Pop1", "Pop3"], essdai_total=[4., 2., 1.], esspri_total_observed=[7., 5., 3.], esspri_total=[7., 5., 3.])
+    labs = metadata.assign(**{"crp__value": [1., 2., pd.NA], "crp__text": [pd.NA] * 3,
+                              "crp__measurement_date": [pd.Timestamp("2020-01-01"), pd.Timestamp("2021-01-01"), pd.NaT],
+                              "crp__n_measurements": [1, 1, 0]})
+    overlap = metadata.assign(overlap_status=["neither", "overlap", "neither"], overlap_evaluable=[True] * 3,
+                              extraglandular_active=[False, True, False])
+    pros = metadata.assign(sf36_pcs=[40., 35., 50.], sf36_mcs=[45., 46., 48.], profad_total=[1., 2., 3.], mdafs_global=[2., 3., 4.])
+    return spine, pop, labs, overlap, pros
 
 
-def test_merge_preserves_spine_rows_and_unique_patient_visits():
-    spine, pop, overlap, pros = frames()
-    result, _ = builder.build_integrated(spine, pop, overlap, pros)
-    assert len(result) == len(spine)
-    assert not result.duplicated(["patient_id", "visit_id"]).any()
+def test_sources_integrate_on_episode_and_spine_is_preserved():
+    inputs = frames()
+    result, _ = builder.build_integrated(*inputs)
+    assert len(result) == len(inputs[0])
+    assert not result.duplicated(builder.KEYS).any()
+    a2 = result.set_index("clinical_episode_id").loc["a2"]
+    assert (a2.pop_status, a2["crp__value"], a2.overlap_status, a2.sf36_pcs) == ("Pop1", 2., "overlap", 35.)
 
 
-def test_merge_accepts_legacy_overlap_patient_id_column():
-    spine, pop, overlap, pros = frames()
-    overlap = overlap.drop(columns="patient_id")
-    overlap.insert(0, "ids__patient_record_number", ["a", "a", "b"])
-
-    result, _ = builder.build_integrated(spine, pop, overlap, pros)
-
-    assert result.overlap_status.notna().all()
-    assert result.loc[result.visit_id.eq("a1"), "overlap_status"].iloc[0] == "overlap"
+@pytest.mark.parametrize("source_index", [1, 2, 3, 4])
+def test_missing_source_episode_is_hard_failure(source_index):
+    inputs = list(frames())
+    inputs[source_index] = inputs[source_index].iloc[:-1]
+    with pytest.raises(AssertionError, match="contract"):
+        builder.build_integrated(*inputs)
 
 
-def test_lags_deltas_incidence_and_original_scores_are_preserved():
-    spine, pop, overlap, pros = frames()
-    result, _ = builder.build_integrated(spine, pop, overlap, pros)
-    follow_up = result.loc[result.visit_id.eq("a1")].iloc[0]
-    assert follow_up.previous_pop == "Pop2"
-    assert follow_up.next_pop is pd.NA or pd.isna(follow_up.next_pop)
-    assert follow_up.delta_pcs == -5.0
-    assert follow_up.incident_extraglandular_from_previous
-    assert result.loc[result.visit_id.eq("a0"), "sf36_pcs"].iloc[0] == 40.0
-    assert result.loc[result.visit_id.eq("a1"), "essdai_total"].iloc[0] == 2.0
-    assert result.loc[result.visit_id.eq("a0"), "mdafs_global"].iloc[0] == 2.0
-    assert follow_up.delta_mdafs_global == 1.0
-    assert follow_up.change_from_baseline_mdafs_global == 1.0
-    assert follow_up.next_mdafs_global is pd.NA or pd.isna(follow_up.next_mdafs_global)
-    assert result.loc[result.visit_id.eq("a0"), "next_mdafs_global"].iloc[0] == 3.0
+def test_extra_source_episode_is_hard_failure():
+    inputs = list(frames())
+    extra = inputs[1].iloc[[0]].assign(patient_id="z", clinical_episode_id="z1")
+    inputs[1] = pd.concat([inputs[1], extra], ignore_index=True)
+    with pytest.raises(AssertionError, match="contract"):
+        builder.build_integrated(*inputs)
+
+
+@pytest.mark.parametrize("column,value", [("clinical_anchor_date", pd.Timestamp("1999-01-01")), ("clinical_visit_number", 99)])
+def test_structural_discrepancy_is_hard_failure(column, value):
+    inputs = list(frames())
+    inputs[2].loc[0, column] = value
+    with pytest.raises(AssertionError, match="contract"):
+        builder.build_integrated(*inputs)
+
+
+def test_only_retrospective_features_and_labs_have_semantic_dtypes():
+    result, _ = builder.build_integrated(*frames())
+    assert not any(column.startswith("next_") for column in result)
+    assert result.set_index("clinical_episode_id").loc["a2", "previous_pop_status"] == "Pop2"
+    assert result["crp__value"].dtype == "Float64"
+    assert result["crp__text"].dtype.name == "string"
+    assert result["crp__n_measurements"].dtype == "Int64"
+    assert not result.set_index("clinical_episode_id").loc["b1", "has_lab_measurement"]
