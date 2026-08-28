@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""SECTION 2 — consecutive-visit Pop transition analyses."""
+"""Pop transitions between consecutive canonical clinical episodes."""
 from __future__ import annotations
-import argparse, importlib.util, json, sys
+import argparse, json, sys
 from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
@@ -17,41 +17,79 @@ POP_ORDER=["Pop1","Pop2","Pop3","Unclassifiable"]
 DISPLAY={"Unclassifiable":"Unclassified","Pop1":"Pop1","Pop2":"Pop2","Pop3":"Pop3"}
 COLORS={"Pop1":"#d95f02","Pop2":"#7570b3","Pop3":"#1b9e77","Unclassifiable":"#9e9e9e"}
 INTERMEDIATE_DIR=Path(getattr(common,'INTERMEDIATE_DATA_DIR',PROJECT_ROOT/'data'/'intermediate'))
-MASTER=INTERMEDIATE_DIR/'01_visit_level_classification.parquet'
-INTERVALS=INTERMEDIATE_DIR/'10_pop_transition_intervals.parquet'
+MASTER=common.POP_LONGITUDINAL_PARQUET
+INTERVALS=common.POP_TRANSITION_INTERVALS_PARQUET
 OUTPUTS_DIR=Path(getattr(common,'OUTPUTS_DIR',PROJECT_ROOT/'outputs'))
 TABLES_DIR=Path(getattr(common,'BLOCKA_TABLES_DIR',OUTPUTS_DIR/'tables'/'blockA'))
 FIGURES_DIR=Path(getattr(common,'BLOCKA_FIGURES_DIR',OUTPUTS_DIR/'figures'/'blockA'))
 QC_DIR=OUTPUTS_DIR/'qc'/'blockA'
 MODEL_STATES=["Pop1","Pop2","Pop3"]
 SPARSE_THRESHOLD=5
+REQUIRED_COLUMNS={
+    'patient_id', 'clinical_episode_id', 'clinical_anchor_date',
+    'clinical_visit_number', 'pop_status',
+}
+ORDER_COLUMNS=[
+    'patient_id', 'clinical_anchor_date', 'clinical_visit_number',
+    'clinical_episode_id',
+]
 
 def write_json(obj,path): path.write_text(json.dumps(obj, indent=2, default=str))
 def pct(n,d): return n/d*100 if d else np.nan
 
-def load_classification(input_path: Path|None) -> tuple[pd.DataFrame,bool]:
-    if MASTER.exists(): return pd.read_parquet(MASTER), False
-    # fallback: import and run exact builder from 01 script
-    spec=importlib.util.spec_from_file_location('popdist', Path(__file__).with_name('01_pop_distribution.py'))
-    mod=importlib.util.module_from_spec(spec); assert spec.loader; spec.loader.exec_module(mod)
-    path=input_path or mod.DEFAULT_INPUT
-    df=pd.read_parquet(path) if Path(path).suffix=='.parquet' else pd.read_csv(path, low_memory=False)
-    vis,_,_=mod.build_longitudinal_pop_dataset(df)
-    INTERMEDIATE_DIR.mkdir(parents=True, exist_ok=True); vis.to_parquet(MASTER,index=False)
-    return vis, True
+def load_classification(input_path: Path|None) -> pd.DataFrame:
+    path=input_path or common.POP_LONGITUDINAL_PARQUET
+    if not path.exists():
+        raise FileNotFoundError(f'Required upstream Pop dataset not found: {path}')
+    return pd.read_parquet(path)
 
-def build_intervals(vis: pd.DataFrame) -> tuple[pd.DataFrame,int]:
+def validate_input(vis: pd.DataFrame) -> pd.DataFrame:
+    """Validate and normalize the canonical episode-level Pop contract."""
+    missing=REQUIRED_COLUMNS-set(vis.columns)
+    if missing: raise ValueError(f'Missing required Pop episode columns: {sorted(missing)}')
+    out=vis.copy()
+    duplicates=out.duplicated(['patient_id','clinical_episode_id'], keep=False)
+    if duplicates.any():
+        raise ValueError(f'Duplicate patient_id + clinical_episode_id keys: {int(duplicates.sum())} rows')
+    out['clinical_anchor_date']=pd.to_datetime(out.clinical_anchor_date, errors='coerce')
+    if out.clinical_anchor_date.isna().any(): raise ValueError('clinical_anchor_date contains missing or invalid values')
+    visit_number=pd.to_numeric(out.clinical_visit_number, errors='coerce')
+    if visit_number.isna().any() or (visit_number<1).any(): raise ValueError('clinical_visit_number must be >= 1')
+    out['clinical_visit_number']=visit_number
+    if out.pop_status.isna().any(): raise ValueError('pop_status must be present for every clinical episode')
+    unknown=set(out.pop_status.unique())-set(POP_ORDER)
+    if unknown: raise ValueError(f'Unexpected pop_status values: {sorted(unknown)}')
+    return out.sort_values(ORDER_COLUMNS).reset_index(drop=True)
+
+def build_intervals(vis: pd.DataFrame) -> tuple[pd.DataFrame,dict]:
+    vis=validate_input(vis)
     rows=[]
-    for pid,g in vis.sort_values(['patient_id','visit_date_clean','visit_number']).groupby('patient_id'):
+    for pid,g in vis.groupby('patient_id', sort=False):
         if len(g)<2: continue
         rec=g.to_dict('records')
         for a,b in zip(rec[:-1], rec[1:]):
-            days=(pd.Timestamp(b['visit_date_clean'])-pd.Timestamp(a['visit_date_clean'])).days
-            rows.append({'patient_id':pid,'from_visit_number':a['visit_number'],'to_visit_number':b['visit_number'],'from_date':a['visit_date_clean'],'to_date':b['visit_date_clean'],'from_time_since_baseline_years':a['time_since_baseline_years'],'to_time_since_baseline_years':b['time_since_baseline_years'],'from_pop':a['pop_status'],'to_pop':b['pop_status'],'from_pop_display':a.get('pop_status_display',DISPLAY.get(a['pop_status'],a['pop_status'])),'to_pop_display':b.get('pop_status_display',DISPLAY.get(b['pop_status'],b['pop_status'])),'interval_days':days,'interval_years':days/365.25,'changed_state':a['pop_status']!=b['pop_status'],'transition_pair':f"{a['pop_status']} -> {b['pop_status']}"})
-    out=pd.DataFrame(rows)
+            days=(b['clinical_anchor_date']-a['clinical_anchor_date']).days
+            rows.append({'patient_id':pid,
+                'from_clinical_episode_id':a['clinical_episode_id'],'to_clinical_episode_id':b['clinical_episode_id'],
+                'from_clinical_visit_number':a['clinical_visit_number'],'to_clinical_visit_number':b['clinical_visit_number'],
+                'from_clinical_anchor_date':a['clinical_anchor_date'],'to_clinical_anchor_date':b['clinical_anchor_date'],
+                'from_pop':a['pop_status'],'to_pop':b['pop_status'],
+                'from_pop_display':a.get('pop_status_display',DISPLAY.get(a['pop_status'],a['pop_status'])),
+                'to_pop_display':b.get('pop_status_display',DISPLAY.get(b['pop_status'],b['pop_status'])),
+                'interval_days':days,'interval_years':days/365.25,
+                'changed_state':a['pop_status']!=b['pop_status'],'transition_pair':f"{a['pop_status']} -> {b['pop_status']}"})
+    columns=['patient_id','from_clinical_episode_id','to_clinical_episode_id','from_clinical_visit_number','to_clinical_visit_number','from_clinical_anchor_date','to_clinical_anchor_date','from_pop','to_pop','from_pop_display','to_pop_display','interval_days','interval_years','changed_state','transition_pair']
+    out=pd.DataFrame(rows, columns=columns)
+    expected=int(vis.groupby('patient_id').size().sub(1).clip(lower=0).sum())
+    if len(out)!=expected: raise AssertionError(f'Created {len(out)} adjacent intervals; expected {expected}')
     nonpos=int((out.interval_days<=0).sum()) if not out.empty else 0
     if not out.empty: out=out[out.interval_days>0].copy()
-    return out, nonpos
+    qc={'n_input_episodes':int(len(vis)),'n_input_patients':int(vis.patient_id.nunique()),
+        'n_patients_with_ge2_clinical_episodes':int(vis.groupby('patient_id').size().ge(2).sum()),
+        'n_adjacent_intervals_expected':expected,
+        'n_adjacent_intervals_created_before_time_filter':expected,
+        'n_intervals_nonpositive_time':nonpos,'n_intervals_retained':int(len(out))}
+    return out.reset_index(drop=True),qc
 
 def transition_matrix(intervals: pd.DataFrame) -> pd.DataFrame:
     idx=pd.MultiIndex.from_product([POP_ORDER,POP_ORDER], names=['from_pop','to_pop'])
@@ -86,7 +124,7 @@ def plot_heatmap(m,path):
     piv=m.pivot(index='from_pop',columns='to_pop',values='row_pct').reindex(index=POP_ORDER,columns=POP_ORDER)
     counts=m.pivot(index='from_pop',columns='to_pop',values='n_intervals').reindex(index=POP_ORDER,columns=POP_ORDER)
     fig,ax=plt.subplots(figsize=(7,6)); im=ax.imshow(piv.fillna(0), cmap='Blues', vmin=0, vmax=np.nanmax(piv.values) if np.isfinite(piv.values).any() else 1)
-    ax.set_xticks(range(4), [DISPLAY[x] for x in POP_ORDER]); ax.set_yticks(range(4), [DISPLAY[x] for x in POP_ORDER]); ax.set_xlabel('To population'); ax.set_ylabel('From population'); ax.set_title('Consecutive-visit transition matrix')
+    ax.set_xticks(range(4), [DISPLAY[x] for x in POP_ORDER]); ax.set_yticks(range(4), [DISPLAY[x] for x in POP_ORDER]); ax.set_xlabel('To population'); ax.set_ylabel('From population'); ax.set_title('Consecutive clinical-episode transition matrix')
     for i in range(4):
         for j in range(4): ax.text(j,i,f"{int(counts.iloc[i,j])}\n{piv.iloc[i,j]:.1f}%" if pd.notna(piv.iloc[i,j]) else f"{int(counts.iloc[i,j])}\nNA",ha='center',va='center',fontsize=9)
     fig.colorbar(im,ax=ax,label='Row %'); fig.text(.01,.01,'Rows sum to 100% within each starting population. Transitions involving Unclassifiable may reflect missing ESSDAI/ESSPRI data rather than true clinical change.',fontsize=8); fig.tight_layout(rect=(0,.05,1,1)); fig.savefig(path); plt.close(fig)
@@ -98,7 +136,7 @@ def plot_sankey(intervals,path):
         nodes=[f'From {DISPLAY[x]}' for x in POP_ORDER]+[f'To {DISPLAY[x]}' for x in POP_ORDER]
         labels=[f'{a} → {b}: n={n}' for a,b,n in counts[['from_pop','to_pop','n']].itertuples(index=False,name=None)]
         fig=go.Figure(go.Sankey(node={'label':nodes,'color':[COLORS[x] for x in POP_ORDER]*2}, link={'source':[POP_ORDER.index(x) for x in counts.from_pop], 'target':[4+POP_ORDER.index(x) for x in counts.to_pop], 'value':counts.n,'customdata':labels,'hovertemplate':'%{customdata}<extra></extra>'}))
-        fig.update_layout(title_text='Observed consecutive-visit transitions<br><sup>Link width represents interval count n; hover shows the exact count. Unclassifiable may reflect missing data.</sup>')
+        fig.update_layout(title_text='Observed consecutive clinical-episode transitions<br><sup>Link width represents interval count n; hover shows the exact count. Unclassifiable may reflect missing data.</sup>')
         fig.write_image(str(path))
     except Exception:
         fig,ax=plt.subplots(figsize=(10,6)); y_from=np.linspace(.85,.15,4); y_to=np.linspace(.85,.15,4)
@@ -110,7 +148,7 @@ def plot_sankey(intervals,path):
             ax.text(.5,(y0+y1)/2,f'n={int(r.n)}',ha='center',va='center',fontsize=8,
                     bbox={'boxstyle':'round,pad=.2','fc':'white','ec':COLORS[r.from_pop],'alpha':.9})
         for i,p in enumerate(POP_ORDER): ax.text(-.03,y_from[i],DISPLAY[p],ha='right',va='center'); ax.text(1.03,y_to[i],DISPLAY[p],ha='left',va='center')
-        ax.text(0,.95,'From previous visit',ha='center',weight='bold'); ax.text(1,.95,'To next visit',ha='center',weight='bold'); ax.set_axis_off(); ax.set_title('Observed consecutive-visit transitions\nLine width scales with $\\sqrt{n}$; labels show interval counts',weight='bold'); fig.text(.01,.01,'Transitions involving Unclassifiable may reflect missing data rather than true clinical change.',fontsize=8); fig.tight_layout(rect=(0,.04,1,1)); fig.savefig(path,bbox_inches='tight'); plt.close(fig)
+        ax.text(0,.95,'From previous clinical episode',ha='center',weight='bold'); ax.text(1,.95,'To next clinical episode',ha='center',weight='bold'); ax.set_axis_off(); ax.set_title('Observed consecutive clinical-episode transitions\nLine width scales with $\\sqrt{n}$; labels show interval counts',weight='bold'); fig.text(.01,.01,'Transitions involving Unclassifiable may reflect missing data rather than true clinical change.',fontsize=8); fig.tight_layout(rect=(0,.04,1,1)); fig.savefig(path,bbox_inches='tight'); plt.close(fig)
 
 def plot_diagram(rates_df,path):
     pos={'Pop1':(0,.72),'Pop2':(.85,.72),'Pop3':(.85,.08),'Unclassifiable':(0,.08)}; fig,ax=plt.subplots(figsize=(9,7))
@@ -123,42 +161,30 @@ def plot_diagram(rates_df,path):
         ax.text(x,y,f'{r.from_pop}→{r.to_pop}\nn={int(r.n_transitions)}; rate={r.rate_per_person_year:.3f}/y',ha='center',va='center',fontsize=7.5,
                 bbox={'boxstyle':'round,pad=.25','fc':'white','ec':COLORS[r.from_pop],'alpha':.94})
     for p,(x,y) in pos.items(): ax.scatter([x],[y],s=2200,c=COLORS[p],edgecolors='white',linewidths=2,zorder=5); ax.text(x,y,DISPLAY[p],ha='center',va='center',color='white',weight='bold',zorder=6)
-    ax.set(xlim=(-.18,1.03),ylim=(-.1,.9)); ax.set_axis_off(); ax.set_title('Observed consecutive-visit transitions\nArrow width scales with $\\sqrt{n}$',weight='bold'); fig.text(.01,.01,'Descriptive rates per person-year, not model-estimated probabilities. Unclassifiable may reflect missing data. Arrows with n<3 are omitted for readability.',fontsize=8); fig.tight_layout(rect=(0,.04,1,1)); fig.savefig(path,bbox_inches='tight'); plt.close(fig)
+    ax.set(xlim=(-.18,1.03),ylim=(-.1,.9)); ax.set_axis_off(); ax.set_title('Observed consecutive clinical-episode transitions\nArrow width scales with $\\sqrt{n}$',weight='bold'); fig.text(.01,.01,'Descriptive rates per person-year, not model-estimated probabilities. Unclassifiable may reflect missing data. Arrows with n<3 are omitted for readability.',fontsize=8); fig.tight_layout(rect=(0,.04,1,1)); fig.savefig(path,bbox_inches='tight'); plt.close(fig)
 
 def prepare_multistate_data(vis: pd.DataFrame) -> tuple[pd.DataFrame,dict]:
-    """Create panel-observation intervals without bridging excluded observations.
+    """Create model intervals after canonical adjacent episodes are paired.
 
-    Pairing is performed *before* removing Unclassifiable visits.  Consequently,
+    Pairing is performed *before* removing Unclassifiable episodes. Consequently,
     Pop1 -> Unclassifiable -> Pop2 contributes no Pop1 -> Pop2 interval.
     """
-    required={'patient_id','visit_number','visit_date_clean','time_since_baseline_years','pop_status'}
-    missing=required-set(vis.columns)
-    if missing: raise ValueError(f"Missing multi-state columns: {sorted(missing)}")
-    ordered=vis.copy(); ordered['visit_date_clean']=pd.to_datetime(ordered.visit_date_clean, errors='coerce')
-    ordered=ordered.sort_values(['patient_id','visit_date_clean','visit_number'])
-    rows=[]; nonpositive=0; excluded_unclassifiable=0
-    for pid,g in ordered.groupby('patient_id', sort=False):
-        rec=g.to_dict('records')
-        for a,b in zip(rec[:-1],rec[1:]):
-            dt=(b['visit_date_clean']-a['visit_date_clean']).total_seconds()/(365.25*86400) if pd.notna(a['visit_date_clean']) and pd.notna(b['visit_date_clean']) else np.nan
-            if a['pop_status'] not in MODEL_STATES or b['pop_status'] not in MODEL_STATES:
-                excluded_unclassifiable+=1; continue
-            if not np.isfinite(dt) or dt<=0:
-                nonpositive+=1; continue
-            rows.append({'patient_id':pid,'from_pop':a['pop_status'],'to_pop':b['pop_status'],
-                         'interval_years':float(dt),'from_visit_number':a['visit_number'],
-                         'to_visit_number':b['visit_number']})
-    out=pd.DataFrame(rows, columns=['patient_id','from_pop','to_pop','interval_years','from_visit_number','to_visit_number'])
+    ordered=validate_input(vis)
+    adjacent,adjacent_qc=build_intervals(ordered)
+    excluded=(~adjacent.from_pop.isin(MODEL_STATES)|~adjacent.to_pop.isin(MODEL_STATES))
+    out=adjacent.loc[~excluded, ['patient_id','from_clinical_episode_id','to_clinical_episode_id',
+        'from_pop','to_pop','interval_years','from_clinical_visit_number','to_clinical_visit_number']].copy()
     counts={(f'{a} -> {b}'):int(((out.from_pop==a)&(out.to_pop==b)).sum()) for a in MODEL_STATES for b in MODEL_STATES if a!=b}
     state_counts=ordered.loc[ordered.pop_status.isin(MODEL_STATES),'pop_status'].value_counts().reindex(MODEL_STATES,fill_value=0)
-    used_visits=(set(zip(out.patient_id,out.from_visit_number))|set(zip(out.patient_id,out.to_visit_number))) if len(out) else set()
+    used_episodes=(set(zip(out.patient_id,out.from_clinical_episode_id))|set(zip(out.patient_id,out.to_clinical_episode_id))) if len(out) else set()
     info={'n_patients_total':int(ordered.patient_id.nunique()),
-          'n_patients_with_ge2_visits':int(ordered.groupby('patient_id').size().ge(2).sum()),
-          'n_patients_used':int(out.patient_id.nunique()),'n_observations_used':len(used_visits),
-          'n_intervals':int(len(out)),'n_intervals_excluded_nonpositive_time':nonpositive,
-          'n_adjacent_intervals_excluded_unclassifiable':excluded_unclassifiable,
+          'n_patients_with_ge2_clinical_episodes':int(ordered.groupby('patient_id').size().ge(2).sum()),
+          'n_patients_used':int(out.patient_id.nunique()),'n_observations_used':len(used_episodes),
+          'n_model_intervals':int(len(out)),
+          'n_intervals_excluded_nonpositive_time':adjacent_qc['n_intervals_nonpositive_time'],
+          'n_adjacent_intervals_excluded_unclassifiable':int(excluded.sum()),
           'observations_by_state':{k:int(v) for k,v in state_counts.items()},'transitions_by_pair':counts,
-          'median_time_between_visits_years':float(out.interval_years.median()) if len(out) else None}
+          'median_time_between_clinical_episodes_years':float(out.interval_years.median()) if len(out) else None}
     return out,info
 
 def build_q_matrix(theta: np.ndarray, n_states: int=3) -> np.ndarray:
@@ -282,7 +308,7 @@ def multistate_qc(prep: dict,fit: dict,intervals: pd.DataFrame) -> dict:
     sparse=[pair for pair,n in prep['transitions_by_pair'].items() if n<SPARSE_THRESHOLD]
     if sparse: warnings.append(f'Sparse observed transitions (<{SPARSE_THRESHOLD}): {", ".join(sparse)}.')
     return {**prep,'model_type':'Continuous-time homogeneous Markov multi-state panel model (state ~ time; no covariates)',
-            'unclassifiable_treatment':'Excluded as potentially missing; intervals adjacent to it are excluded and visits on either side are not joined.',
+            'unclassifiable_treatment':'Excluded as potentially missing; intervals adjacent to it are excluded and clinical episodes on either side are not joined.',
             'Q':q.tolist(),'convergence':bool(res.success),'optimizer_message':str(res.message),'log_likelihood':float(-res.fun),
             'AIC':float(2*len(res.x)+2*res.fun),'n_parameters':len(res.x),'ci_method':fit['ci_method'],
             'sparse_transitions':sparse,'checks':checks,'warnings':warnings}
@@ -290,8 +316,9 @@ def multistate_qc(prep: dict,fit: dict,intervals: pd.DataFrame) -> dict:
 def main():
     ap=argparse.ArgumentParser(); ap.add_argument('--input', type=Path, default=None); args=ap.parse_args()
     for d in [INTERMEDIATE_DIR,TABLES_DIR,FIGURES_DIR,QC_DIR]: d.mkdir(parents=True, exist_ok=True)
-    vis,fallback=load_classification(args.input); intervals,nonpos=build_intervals(vis); intervals.to_parquet(INTERVALS,index=False)
-    m=transition_matrix(intervals); m.to_csv(TABLES_DIR/'10_transition_matrix_consecutive_visits.csv',index=False)
+    input_path=args.input or common.POP_LONGITUDINAL_PARQUET
+    vis=validate_input(load_classification(args.input)); intervals,interval_qc=build_intervals(vis); intervals.to_parquet(INTERVALS,index=False)
+    m=transition_matrix(intervals); m.to_csv(TABLES_DIR/'10_transition_matrix_consecutive_episodes.csv',index=False)
     r=rates(intervals); r.to_csv(TABLES_DIR/'10_multistate_transition_rates.csv',index=False)
     plot_heatmap(m, FIGURES_DIR/'10_transition_heatmap.pdf'); plot_sankey(intervals, FIGURES_DIR/'10_transition_sankey.pdf'); plot_diagram(r, FIGURES_DIR/'10_multistate_transition_diagram.pdf')
     total_int=len(intervals); stable=int((~intervals.changed_state).sum()) if total_int else 0; changed=int(intervals.changed_state.sum()) if total_int else 0
@@ -301,14 +328,20 @@ def main():
     common_pair=intervals.transition_pair.value_counts().head(1)
     mc=common_pair.index[0] if len(common_pair) else None; mcn=int(common_pair.iloc[0]) if len(common_pair) else 0; mcr=np.nan
     if mc: mcr=float(m.loc[(m.from_pop==mc.split(' -> ')[0])&(m.to_pop==mc.split(' -> ')[1]),'row_pct'].iloc[0])
-    tqc={'classification_file_used':str(MASTER),'classification_recomputed_fallback':fallback,'n_patients_total_in_classification_file':int(vis.patient_id.nunique()),'n_patients_with_ge2_visits':pats_ge2,'n_transition_intervals':total_int,'state_order':POP_ORDER,'row_totals':{k:int(v) for k,v in row_tot.items()},'row_percent_sums':{k:(None if pd.isna(v) else float(v)) for k,v in row_sums.items()},'row_percent_sums_close_to_100':bool(all((row_tot[p]==0) or np.isclose(row_sums[p],100) for p in POP_ORDER)),'n_intervals_with_nonpositive_time':nonpos,'n_intervals_excluded_nonpositive_time':nonpos,'n_transitions_involving_unclassifiable':involved,'pct_transitions_involving_unclassifiable':pct(involved,total_int),'n_stable_intervals':stable,'pct_stable_intervals':pct(stable,total_int),'n_changed_intervals':changed,'pct_changed_intervals':pct(changed,total_int),'n_patients_with_any_transition':int(anychg.sum()) if len(anychg) else 0,'pct_patients_with_any_transition':pct(int(anychg.sum()) if len(anychg) else 0,pats_ge2),'median_time_between_all_consecutive_visits_yrs':float(intervals.interval_years.median()) if total_int else np.nan,'median_time_between_changed_transitions_yrs':float(intervals.loc[intervals.changed_state,'interval_years'].median()) if changed else np.nan,'most_common_transition':mc,'most_common_transition_n':mcn,'most_common_transition_row_pct':mcr,'warnings':[]}
+    tqc={'classification_file_used':str(input_path),'upstream_recomputed':False,
+        'n_input_episodes':interval_qc['n_input_episodes'],'n_patients_total':interval_qc['n_input_patients'],
+        'n_patients_with_ge2_clinical_episodes':pats_ge2,
+        'n_adjacent_intervals_expected':interval_qc['n_adjacent_intervals_expected'],
+        'n_adjacent_intervals_created':interval_qc['n_adjacent_intervals_created_before_time_filter'],
+        'n_transition_intervals_retained':total_int,'n_intervals_nonpositive_time':interval_qc['n_intervals_nonpositive_time'],
+        'state_order':POP_ORDER,'row_totals':{k:int(v) for k,v in row_tot.items()},'row_percent_sums':{k:(None if pd.isna(v) else float(v)) for k,v in row_sums.items()},'row_percent_sums_close_to_100':bool(all((row_tot[p]==0) or np.isclose(row_sums[p],100) for p in POP_ORDER)),'n_transitions_involving_unclassifiable':involved,'pct_transitions_involving_unclassifiable':pct(involved,total_int),'n_stable_intervals':stable,'pct_stable_intervals':pct(stable,total_int),'n_changed_intervals':changed,'pct_changed_intervals':pct(changed,total_int),'n_patients_with_any_transition':int(anychg.sum()) if len(anychg) else 0,'pct_patients_with_any_transition':pct(int(anychg.sum()) if len(anychg) else 0,pats_ge2),'median_time_between_consecutive_episodes_yrs':float(intervals.interval_years.median()) if total_int else np.nan,'median_time_between_changed_transitions_yrs':float(intervals.loc[intervals.changed_state,'interval_years'].median()) if changed else np.nan,'most_common_transition':mc,'most_common_transition_n':mcn,'most_common_transition_row_pct':mcr,'warnings':[]}
     if len(m)!=16: raise ValueError('Transition matrix does not contain 16 combinations')
     write_json(tqc, QC_DIR/'10_transition_matrix_qc.json')
     pt=intervals.groupby('from_pop').interval_years.sum().reindex(POP_ORDER, fill_value=0.0)
     mqc={'model_type':'descriptive transition intensity per person-year from consecutive observed intervals','exploratory_flag':True,'person_time_by_state':{k:float(v) for k,v in pt.items()},'n_transitions_by_pair':{f"{x.from_pop} -> {x.to_pop}":int(x.n_transitions) for x in r.itertuples()},'sparse_transition_pairs':[f"{x.from_pop} -> {x.to_pop}" for x in r.itertuples() if x.sparse_flag],'states_with_zero_person_time':[k for k,v in pt.items() if v==0],'transitions_involving_unclassifiable_note':'May reflect missing ESSDAI/ESSPRI data rather than true clinical change.','warnings':[]}
     write_json(mqc, QC_DIR/'10_multistate_transition_qc.json')
     # Complementary analysis: panel-observed continuous-time Markov model.  This
-    # is intentionally separate from the observed consecutive-visit summaries.
+    # is intentionally separate from observed consecutive-episode summaries.
     model_intervals,prep=prepare_multistate_data(vis); fit=fit_multistate_model(model_intervals); q=fit['Q']
     intensity_rows=[]; k=0
     for i,a in enumerate(MODEL_STATES):
