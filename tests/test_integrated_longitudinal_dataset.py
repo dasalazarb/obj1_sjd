@@ -98,3 +98,37 @@ def test_only_retrospective_features_and_labs_have_semantic_dtypes():
     assert result["crp__text"].dtype.name == "string"
     assert result["crp__n_measurements"].dtype == "Int64"
     assert not result.set_index("clinical_episode_id").loc["b1", "has_lab_measurement"]
+
+
+def zero_block_inputs():
+    spine, pop, labs, overlap, pros = frames()
+    # Patient b's sole (baseline) episode has no data in any integrated block.
+    pop.loc[2, ["pop_status", "essdai_total", "esspri_total_observed", "esspri_total"]] = pd.NA
+    labs.loc[2, ["crp__value", "crp__measurement_date"]] = pd.NA
+    labs.loc[2, "crp__n_measurements"] = 0
+    overlap.loc[2, "overlap_evaluable"] = False
+    pros.loc[2, ["sf36_pcs", "sf36_mcs", "profad_total", "mdafs_global"]] = pd.NA
+    return spine, pop, labs, overlap, pros
+
+
+def test_zero_block_episode_is_not_removed():
+    inputs = zero_block_inputs()
+    result, _ = builder.build_integrated(*inputs)
+
+    assert len(result) == len(inputs[0])
+    assert result.set_index("clinical_episode_id").loc["b1", "n_integrated_blocks_available"] == 0
+
+
+def test_zero_block_baseline_is_identified():
+    result, _ = builder.build_integrated(*zero_block_inputs())
+    _, summary = builder.build_zero_block_qc(result)
+
+    assert summary["n_zero_block_clinical_baselines"] == 1
+    assert summary["zero_block_baseline_present"] is True
+
+
+def test_patient_with_all_episodes_zero_block_is_identified():
+    result, _ = builder.build_integrated(*zero_block_inputs())
+    _, summary = builder.build_zero_block_qc(result)
+
+    assert summary["n_patients_with_all_episodes_zero_block"] == 1
