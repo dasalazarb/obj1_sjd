@@ -89,20 +89,25 @@ def validate_source(spine: pd.DataFrame, source: pd.DataFrame, name: str) -> tup
     mismatches = ([{"source": name, **dict(zip(KEYS, key)), "mismatch": "missing_from_source"} for key in sorted(missing)]
                   + [{"source": name, **dict(zip(KEYS, key)), "mismatch": "extra_in_source"} for key in sorted(extra)])
     discrepancies: list[dict] = []
-    shared = [column for column in STRUCTURAL_COLUMNS if column not in KEYS and column in source]
-    compared = spine[KEYS + shared].merge(source[KEYS + shared], on=KEYS, suffixes=("_spine", "_source"))
-    for column in shared:
+    shared_structural = [column for column in STRUCTURAL_COLUMNS if column not in KEYS and column in source]
+    compared = spine[KEYS + shared_structural].merge(
+        source[KEYS + shared_structural], on=KEYS, suffixes=("_spine", "_source")
+    )
+    for column in shared_structural:
         mask = _different(compared[f"{column}_spine"], compared[f"{column}_source"])
         for row in compared.loc[mask, KEYS + [f"{column}_spine", f"{column}_source"]].itertuples(index=False, name=None):
             discrepancies.append({"source": name, **dict(zip(KEYS, row[:2])), "variable": column,
                                   "spine_value": row[2], "source_value": row[3]})
+    inherited_spine_columns = sorted((set(source.columns) & set(spine.columns)) - set(KEYS))
     summary = {"source": name, "n_rows": len(source), "n_patients": source.patient_id.nunique(),
                "n_unique_patient_episode": len(source_keys), "n_duplicates": duplicates,
                "n_missing_spine_keys": len(missing), "n_extra_keys": len(extra),
-               "structural_discrepancies": len(discrepancies)}
+               "structural_discrepancies": len(discrepancies),
+               "n_inherited_spine_columns_dropped": len(inherited_spine_columns)}
     if duplicates or missing or extra or discrepancies:
         raise AssertionError(f"{name} violates clinical-spine contract: {summary}")
-    return source.drop(columns=shared), summary, mismatches, discrepancies
+    clean = source.drop(columns=inherited_spine_columns, errors="ignore")
+    return clean, summary, mismatches, discrepancies
 
 
 def _coerce_lab_dtypes(frame: pd.DataFrame, lab_columns: set[str]) -> pd.DataFrame:

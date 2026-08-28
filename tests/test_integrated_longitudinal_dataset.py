@@ -69,6 +69,27 @@ def test_structural_discrepancy_is_hard_failure(column, value):
         builder.build_integrated(*inputs)
 
 
+def test_inherited_raw_spine_columns_are_not_reintegrated_from_pop():
+    spine, pop, labs, overlap, pros = frames()
+    spine["esspri_questionnaire__dryness"] = [2.0, 4.0, 6.0]
+    pop["esspri_questionnaire__dryness"] = [2.0, 4.00001, 6.0]
+
+    result, summaries = builder.build_integrated(spine, pop, labs, overlap, pros)
+
+    assert result["esspri_questionnaire__dryness"].tolist() == [2.0, 4.0, 6.0]
+    assert "pop_status" in result.columns
+    assert "esspri_total_observed" in result.columns
+    assert summaries[0]["n_inherited_spine_columns_dropped"] == 3
+
+
+def test_true_derived_feature_conflict_is_hard_failure():
+    spine, pop, labs, overlap, pros = frames()
+    pros["esspri_total_observed"] = [1.0, 2.0, 3.0]
+
+    with pytest.raises(AssertionError, match="conflicting duplicate features"):
+        builder.build_integrated(spine, pop, labs, overlap, pros)
+
+
 def test_only_retrospective_features_and_labs_have_semantic_dtypes():
     result, _ = builder.build_integrated(*frames())
     assert not any(column.startswith("next_") for column in result)
