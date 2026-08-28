@@ -196,6 +196,44 @@ def build_integrated(clinical_spine: pd.DataFrame, pop: pd.DataFrame, labs: pd.D
     return integrated, summaries
 
 
+def build_zero_block_qc(integrated: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """Return zero-block episodes and their aggregate, non-identifying QC."""
+    zero_block = integrated.loc[
+        integrated["n_integrated_blocks_available"].eq(0)
+    ].copy()
+    baseline = zero_block["is_clinical_baseline"].fillna(False).astype(bool)
+    patient_block_counts = (
+        integrated.groupby("patient_id")["n_integrated_blocks_available"]
+        .sum(min_count=1)
+    )
+    summary = {
+        "n_zero_block_episodes": int(len(zero_block)),
+        "n_zero_block_patients": int(zero_block["patient_id"].nunique()),
+        "n_zero_block_clinical_baselines": int(baseline.sum()),
+        "n_zero_block_nonbaseline_episodes": int((~baseline).sum()),
+        "n_patients_with_all_episodes_zero_block": int(
+            patient_block_counts.fillna(0).eq(0).sum()
+        ),
+        "zero_block_baseline_present": bool(baseline.any()),
+    }
+    return zero_block, summary
+
+
+def zero_block_distribution(zero_block: pd.DataFrame, column: str) -> pd.DataFrame:
+    """Aggregate zero-block episodes by a category without exposing episode IDs."""
+    output_columns = [column, "n_zero_block_episodes", "pct_zero_block_episodes"]
+    if column not in zero_block:
+        return pd.DataFrame(columns=output_columns)
+    counts = zero_block.groupby(column, dropna=False).size().rename("n_zero_block_episodes")
+    distribution = counts.reset_index()
+    denominator = len(zero_block)
+    distribution["pct_zero_block_episodes"] = (
+        distribution["n_zero_block_episodes"].div(denominator).mul(100)
+        if denominator else pd.Series(dtype="float64")
+    )
+    return distribution[output_columns]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--spine", type=Path, default=common.CLINICAL_VISIT_SPINE_PARQUET)
@@ -224,11 +262,25 @@ def main() -> None:
     pd.DataFrame([x for detail in details for x in detail[3]], columns=discrepancy_columns).to_csv(qc_dir / "10_integrated_structural_discrepancy_qc.csv", index=False)
     coverage_columns = KEYS + ["has_pop_state", "has_essdai", "has_esspri_observed", "has_lab_measurement", "has_overlap_data", "has_pro_data", "n_integrated_blocks_available"]
     integrated[coverage_columns].to_csv(qc_dir / "10_integrated_longitudinal_coverage.csv", index=False)
+    zero_block, zero_summary = build_zero_block_qc(integrated)
+    zero_block_distribution(zero_block, "clinical_visit_number").to_csv(
+        qc_dir / "10_zero_block_by_clinical_visit_number.csv", index=False
+    )
+    if "visit_type" in integrated:
+        zero_block_distribution(zero_block, "visit_type").to_csv(
+            qc_dir / "10_zero_block_by_visit_type.csv", index=False
+        )
+    zero_block_distribution(zero_block, "is_clinical_baseline").to_csv(
+        qc_dir / "10_zero_block_by_baseline_status.csv", index=False
+    )
     qc = {"n_rows": len(integrated), "n_patients": int(integrated.patient_id.nunique()),
           "n_unique_patient_episode": int(integrated[KEYS].drop_duplicates().shape[0]),
           "n_duplicate_keys": int(integrated.duplicated(KEYS).sum()), "spine_preserved": True,
-          "sources": summaries}
+          "sources": summaries, "zero_block_qc": zero_summary}
     (qc_dir / "10_integrated_longitudinal_qc.json").write_text(json.dumps(qc, indent=2), encoding="utf-8")
+    if zero_summary["zero_block_baseline_present"]:
+        print("WARNING: clinical baseline episodes exist with zero integrated data blocks.\n"
+              "Review before Step 11 baseline profiling.")
     print(f"Wrote {len(integrated):,} clinical episodes to {args.output}")
 
 
