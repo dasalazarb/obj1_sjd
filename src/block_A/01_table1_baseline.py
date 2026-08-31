@@ -16,6 +16,10 @@ from typing import Iterable
 
 import numpy as np
 import pandas as pd
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
 
 # Allow execution as `python src/block_A/01_table1_baseline.py`.
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -79,6 +83,20 @@ REQUIRED_SPINE_VARS = {
 
 MISSING_STRINGS = config.MISSING_STRINGS
 
+RETENTION_THRESHOLDS = {
+    "6 months": 182, "1 year": 365, "2 years": 730,
+    "3 years": 1095, "5 years": 1826, "10 years": 3652,
+}
+RETENTION_COLUMNS = {
+    "6 months": "has_followup_6mo", "1 year": "has_followup_1yr",
+    "2 years": "has_followup_2yr", "3 years": "has_followup_3yr",
+    "5 years": "has_followup_5yr", "10 years": "has_followup_10yr",
+}
+PROTOCOL_CANDIDATES = [
+    "source_protocol", "ids__protocol", "ids__protocol_number",
+    "ids__study_protocol", "protocol", "protocol_number", "parent_protocol",
+]
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate Block A Table 1 overall cohort demographics.")
@@ -89,6 +107,7 @@ def parse_args() -> argparse.Namespace:
         help="Authoritative SjD clinical episode spine (CSV/Parquet/XLSX).",
     )
     parser.add_argument("--outdir", type=Path, default=common.BLOCKA_TABLES_DIR, help="Output directory for Block A tables.")
+    parser.add_argument("--figures-dir", type=Path, default=common.OUTPUTS_DIR / "figures" / "blockA")
     parser.add_argument(
         "--intermediate-dir",
         type=Path,
@@ -480,12 +499,298 @@ def build_outputs(baseline: pd.DataFrame, dataset_missing: list[str], eligibilit
     return table, qc
 
 
+def resolve_protocol_column(df: pd.DataFrame) -> str | None:
+    """Return the first available protocol field in the documented priority order."""
+    return next((column for column in PROTOCOL_CANDIDATES if column in df.columns), None)
+
+
+def normalize_protocol_membership(value: object) -> str:
+    """Normalize 11D/15D labels while retaining dual membership."""
+    if is_missing_value(value):
+        return ""
+    compact = str(value).upper().replace("-", "").replace(" ", "")
+    memberships = []
+    if "11D" in compact:
+        memberships.append("11D")
+    if "15D" in compact:
+        memberships.append("15D")
+    return " | ".join(memberships)
+
+
+def prepare_longitudinal_clinical_episodes(
+    df: pd.DataFrame, baseline_patient_ids: Iterable[object] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Validate and audit the authoritative clinical-episode unit."""
+    work = df.copy()
+    source = select_patient_id_col(work)
+    work[CANONICAL_PATIENT_ID_COL] = work[source].astype("string")
+    clinical = work.loc[work[CLINICAL_VISIT_COL].eq(True).fillna(False)].copy()  # noqa: E712
+    if baseline_patient_ids is not None:
+        wanted = pd.Index(pd.Series(list(baseline_patient_ids), dtype="string"))
+        clinical = clinical.loc[clinical[CANONICAL_PATIENT_ID_COL].isin(wanted)].copy()
+    duplicate = clinical.duplicated([CANONICAL_PATIENT_ID_COL, CLINICAL_EPISODE_COL], keep=False)
+    if duplicate.any():
+        examples = clinical.loc[duplicate, [CANONICAL_PATIENT_ID_COL, CLINICAL_EPISODE_COL]].head().to_dict("records")
+        raise ValueError(f"Duplicate patient_id + clinical_episode_id values: {examples}")
+    clinical[CLINICAL_ANCHOR_DATE_COL] = pd.to_datetime(clinical[CLINICAL_ANCHOR_DATE_COL], errors="coerce")
+    clinical[CLINICAL_BASELINE_DATE_COL] = pd.to_datetime(clinical[CLINICAL_BASELINE_DATE_COL], errors="coerce")
+    protocol_col = resolve_protocol_column(clinical)
+    clinical["protocol_membership"] = clinical[protocol_col].map(normalize_protocol_membership) if protocol_col else ""
+    clinical["has_valid_anchor_date"] = clinical[CLINICAL_ANCHOR_DATE_COL].notna()
+    clinical["is_prebaseline"] = (
+        clinical["has_valid_anchor_date"] & clinical[CLINICAL_BASELINE_DATE_COL].notna()
+        & (clinical[CLINICAL_ANCHOR_DATE_COL] < clinical[CLINICAL_BASELINE_DATE_COL])
+    )
+    clinical["included_in_primary_followup"] = (
+        clinical["has_valid_anchor_date"] & clinical[CLINICAL_BASELINE_DATE_COL].notna()
+        & ~clinical["is_prebaseline"]
+    )
+    audit_columns = [CANONICAL_PATIENT_ID_COL, CLINICAL_EPISODE_COL, CLINICAL_ANCHOR_DATE_COL,
+                     CLINICAL_BASELINE_DATE_COL, CLINICAL_VISIT_COL, "protocol_membership",
+                     "is_prebaseline", "has_valid_anchor_date", "included_in_primary_followup"]
+    return clinical, clinical[audit_columns].copy()
+
+
+def build_intervisit_gaps(episodes: pd.DataFrame) -> pd.DataFrame:
+    columns = [CANONICAL_PATIENT_ID_COL, "previous_clinical_episode_id", CLINICAL_EPISODE_COL,
+               "previous_visit_date", "visit_date", "gap_days", "gap_order",
+               "gap_zero_days", "gap_negative", "protocol_membership"]
+    dated = episodes.loc[episodes["included_in_primary_followup"]].copy()
+    dated["_episode_sort"] = dated[CLINICAL_EPISODE_COL].astype("string")
+    dated = dated.sort_values([CANONICAL_PATIENT_ID_COL, CLINICAL_ANCHOR_DATE_COL, "_episode_sort"], kind="stable")
+    rows = []
+    for patient_id, group in dated.groupby(CANONICAL_PATIENT_ID_COL, sort=False):
+        previous = None
+        for _, row in group.iterrows():
+            if previous is not None:
+                gap = int((row[CLINICAL_ANCHOR_DATE_COL] - previous[CLINICAL_ANCHOR_DATE_COL]).days)
+                rows.append([patient_id, previous[CLINICAL_EPISODE_COL], row[CLINICAL_EPISODE_COL],
+                             previous[CLINICAL_ANCHOR_DATE_COL], row[CLINICAL_ANCHOR_DATE_COL], gap,
+                             len(rows) + 1, gap == 0, gap < 0, row["protocol_membership"]])
+            previous = row
+        # Gap order is patient-specific, not a global row number.
+        start = len(rows) - max(len(group) - 1, 0)
+        for order, target in enumerate(range(start, len(rows)), 1):
+            rows[target][6] = order
+    return pd.DataFrame(rows, columns=columns)
+
+
+def build_patient_followup_metrics(
+    episodes: pd.DataFrame, patient_ids: Iterable[object] | None = None,
+) -> pd.DataFrame:
+    """Build exactly one longitudinal metrics row for every requested patient."""
+    if patient_ids is None:
+        patient_ids = episodes[CANONICAL_PATIENT_ID_COL].dropna().unique()
+    ids = pd.Series(list(patient_ids), dtype="string").drop_duplicates()
+    gaps = build_intervisit_gaps(episodes)
+    rows = []
+    for patient_id in ids:
+        all_patient = episodes.loc[episodes[CANONICAL_PATIENT_ID_COL].eq(patient_id)]
+        eligible = all_patient.loc[all_patient["included_in_primary_followup"]]
+        dates = eligible[CLINICAL_ANCHOR_DATE_COL].dropna()
+        baseline_dates = all_patient[CLINICAL_BASELINE_DATE_COL].dropna()
+        baseline_date = baseline_dates.iloc[0] if not baseline_dates.empty else pd.NaT
+        first_date, last_date = (dates.min(), dates.max()) if not dates.empty else (pd.NaT, pd.NaT)
+        followup_days = float((last_date - baseline_date).days) if pd.notna(last_date) and pd.notna(baseline_date) else np.nan
+        patient_gaps = gaps.loc[gaps[CANONICAL_PATIENT_ID_COL].eq(patient_id)]
+        valid_gaps = patient_gaps.loc[~patient_gaps["gap_negative"], "gap_days"]
+        n_episodes = int(len(eligible))
+        row = {
+            CANONICAL_PATIENT_ID_COL: patient_id, CLINICAL_BASELINE_DATE_COL: baseline_date,
+            "first_clinical_date": first_date, "last_clinical_date": last_date,
+            "n_clinical_episodes": n_episodes, "n_dated_clinical_episodes": int(len(dates)),
+            "followup_days": followup_days, "followup_years": followup_days / 365.25,
+            "median_gap_days": valid_gaps.median() if not valid_gaps.empty else np.nan,
+            "max_gap_days": valid_gaps.max() if not valid_gaps.empty else np.nan,
+            "visits_per_followup_year": n_episodes / (followup_days / 365.25) if followup_days > 0 else np.nan,
+            "has_gap_over_180d": bool((valid_gaps > 180).any()),
+            "has_gap_over_365d": bool((valid_gaps > 365).any()),
+            "has_gap_over_730d": bool((valid_gaps > 730).any()),
+            "in_protocol_11d": bool(all_patient["protocol_membership"].str.contains("11D", na=False).any()),
+            "in_protocol_15d": bool(all_patient["protocol_membership"].str.contains("15D", na=False).any()),
+        }
+        for label, days in RETENTION_THRESHOLDS.items():
+            row[RETENTION_COLUMNS[label]] = bool(pd.notna(followup_days) and followup_days >= days)
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _summary_values(metrics: pd.DataFrame, gaps: pd.DataFrame) -> dict[str, object]:
+    n = len(metrics)
+    valid_gaps = pd.to_numeric(gaps.loc[~gaps["gap_negative"], "gap_days"], errors="coerce").dropna()
+    def count_text(mask: pd.Series) -> str:
+        return n_pct(int(mask.sum()), n)
+    follow_text, _ = median_iqr(metrics["followup_years"])
+    episodes_text, _ = median_iqr(metrics["n_clinical_episodes"])
+    rate_text, _ = median_iqr(metrics["visits_per_followup_year"])
+    gap_text, _ = median_iqr(valid_gaps)
+    values = {
+        "Clinical episodes": int(metrics["n_clinical_episodes"].sum()), "Unique patients": n,
+        "Patients with exactly 1 clinical episode": count_text(metrics["n_clinical_episodes"].eq(1)),
+        "Patients with >=2 clinical episodes": count_text(metrics["n_clinical_episodes"].ge(2)),
+        "Patients with >=3 clinical episodes": count_text(metrics["n_clinical_episodes"].ge(3)),
+        "Patients with >=5 clinical episodes": count_text(metrics["n_clinical_episodes"].ge(5)),
+        "Patients with >=10 clinical episodes": count_text(metrics["n_clinical_episodes"].ge(10)),
+        "Follow-up, median (IQR), years": follow_text,
+        "Clinical episodes per patient, median (IQR)": episodes_text,
+        "Clinical episodes per patient, mean": round(metrics["n_clinical_episodes"].mean(), 1) if n else np.nan,
+        "Maximum clinical episodes per patient": int(metrics["n_clinical_episodes"].max()) if n else np.nan,
+        "Median inter-visit gap, days": round(valid_gaps.median(), 1) if not valid_gaps.empty else np.nan,
+        "IQR inter-visit gap, days": gap_text,
+        "P90 inter-visit gap, days": round(valid_gaps.quantile(.9), 1) if not valid_gaps.empty else np.nan,
+        "Clinical episodes per follow-up year, median (IQR)": rate_text,
+    }
+    for percentile in (10, 25, 50, 75, 90):
+        values[f"Follow-up P{percentile}, years"] = round(metrics["followup_years"].quantile(percentile / 100), 1) if n else np.nan
+    values["Maximum follow-up, years"] = round(metrics["followup_years"].max(), 1) if n else np.nan
+    for label, column in RETENTION_COLUMNS.items():
+        values[f"Follow-up >={label}"] = count_text(metrics[column])
+    for days in (180, 365, 730):
+        values[f"Patients with at least one gap >{days} days"] = count_text(metrics[f"has_gap_over_{days}d"])
+    return values
+
+
+def build_followup_summary(
+    overall_metrics: pd.DataFrame, overall_gaps: pd.DataFrame,
+    protocol_metrics: dict[str, tuple[pd.DataFrame, pd.DataFrame]] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    cohorts = dict(protocol_metrics or {})
+    cohorts["Overall"] = (overall_metrics, overall_gaps)
+    values = {name: _summary_values(*parts) for name, parts in cohorts.items()}
+    indicators = list(values["Overall"])
+    wide = pd.DataFrame({"Indicator": indicators, **{name: [value[i] for i in indicators] for name, value in values.items()}})
+    long = wide.melt(id_vars="Indicator", var_name="Cohort", value_name="Value")
+    return wide, long
+
+
+def build_retention_table(cohort_metrics: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    rows = []
+    for cohort, metrics in cohort_metrics.items():
+        denominator = len(metrics)
+        for label, days in RETENTION_THRESHOLDS.items():
+            retained = int(metrics[RETENTION_COLUMNS[label]].sum())
+            rows.append({"cohort": cohort, "time": label, "days": days, "n_retained": retained,
+                         "denominator": denominator, "pct_retained": round(100 * retained / denominator, 1) if denominator else np.nan})
+    return pd.DataFrame(rows)
+
+
+def build_followup_qc(episodes: pd.DataFrame, metrics: pd.DataFrame, gaps: pd.DataFrame, protocol_column: str | None) -> pd.DataFrame:
+    missing = episodes[CLINICAL_ANCHOR_DATE_COL].isna()
+    pre = episodes["is_prebaseline"]
+    negative = gaps["gap_negative"] if not gaps.empty else pd.Series(dtype=bool)
+    checks = {
+        "followup_n_unique_patients": metrics[CANONICAL_PATIENT_ID_COL].nunique(),
+        "followup_duplicate_patient_episode_ids": episodes.duplicated([CANONICAL_PATIENT_ID_COL, CLINICAL_EPISODE_COL]).sum(),
+        "followup_n_patients_missing_baseline_date": metrics[CLINICAL_BASELINE_DATE_COL].isna().sum(),
+        "followup_n_clinical_episodes_missing_anchor_date": missing.sum(),
+        "followup_n_patients_with_missing_anchor_date": episodes.loc[missing, CANONICAL_PATIENT_ID_COL].nunique(),
+        "followup_n_prebaseline_clinical_episodes": pre.sum(),
+        "followup_n_patients_with_prebaseline_clinical_episodes": episodes.loc[pre, CANONICAL_PATIENT_ID_COL].nunique(),
+        "followup_n_zero_day_gaps": gaps["gap_zero_days"].sum() if not gaps.empty else 0,
+        "followup_n_negative_gaps": negative.sum(),
+        "followup_n_patients_with_negative_gaps": gaps.loc[negative, CANONICAL_PATIENT_ID_COL].nunique() if not gaps.empty else 0,
+        "followup_protocol_column_found": bool(protocol_column),
+        "followup_n_protocol_11d_patients": metrics["in_protocol_11d"].sum() if protocol_column else np.nan,
+        "followup_n_protocol_15d_patients": metrics["in_protocol_15d"].sum() if protocol_column else np.nan,
+        "followup_n_dual_protocol_patients": (metrics["in_protocol_11d"] & metrics["in_protocol_15d"]).sum() if protocol_column else np.nan,
+    }
+    rows = [{"qc_check": key, "value": value, "status": "pass", "details": "Longitudinal descriptive QC."} for key, value in checks.items()]
+    warning_keys = {"followup_n_clinical_episodes_missing_anchor_date", "followup_n_prebaseline_clinical_episodes",
+                    "followup_n_zero_day_gaps", "followup_n_negative_gaps"}
+    for row in rows:
+        if row["qc_check"] in warning_keys and row["value"]:
+            row["status"] = "warning"
+        if row["qc_check"] == "followup_protocol_column_found" and not row["value"]:
+            row.update(status="warning", details="protocol_column_missing")
+    return pd.DataFrame(rows)
+
+
+def validate_followup_hard_qc(metrics: pd.DataFrame, baseline: pd.DataFrame, retention: pd.DataFrame) -> None:
+    if metrics[CANONICAL_PATIENT_ID_COL].duplicated().any():
+        raise ValueError("Patient follow-up metrics must contain one row per patient")
+    if set(metrics[CANONICAL_PATIENT_ID_COL]) != set(baseline[CANONICAL_PATIENT_ID_COL]):
+        raise ValueError("Longitudinal and Table 1 patient universes differ")
+    if (metrics["followup_days"].dropna() < 0).any() or (metrics["last_clinical_date"].dropna() < metrics.loc[metrics["last_clinical_date"].notna(), CLINICAL_BASELINE_DATE_COL]).any():
+        raise ValueError("Invalid negative follow-up")
+    ordered = [RETENTION_COLUMNS[x] for x in RETENTION_THRESHOLDS]
+    for earlier, later in zip(ordered, ordered[1:]):
+        if (metrics[later] & ~metrics[earlier]).any():
+            raise ValueError("Retention thresholds are not monotonic")
+    if not retention["pct_retained"].dropna().between(0, 100).all():
+        raise ValueError("Retention percentages outside 0–100")
+
+
+def append_followup_rows_to_table1(table: pd.DataFrame, metrics: pd.DataFrame, gaps: pd.DataFrame) -> pd.DataFrame:
+    n = len(metrics)
+    valid_gaps = gaps.loc[~gaps["gap_negative"], "gap_days"]
+    specifications = []
+    for variable, series in [
+        ("Clinical episodes per patient, median (IQR)", metrics["n_clinical_episodes"]),
+        ("Follow-up, median (IQR), years", metrics["followup_years"]),
+        ("Median inter-visit gap, days", valid_gaps),
+    ]:
+        text, raw = median_iqr(series)
+        specifications.append([variable, int(series.notna().sum()), int(series.isna().sum()), text, raw])
+    for variable, mask in [
+        ("Patients with >=2 clinical episodes", metrics["n_clinical_episodes"].ge(2)),
+        ("Patients with >=3 clinical episodes", metrics["n_clinical_episodes"].ge(3)),
+        ("Follow-up >=1 year", metrics["has_followup_1yr"]),
+        ("Follow-up >=2 years", metrics["has_followup_2yr"]),
+        ("Follow-up >=5 years", metrics["has_followup_5yr"]),
+    ]:
+        count = int(mask.sum()); pct = round(100 * count / n, 1) if n else None
+        specifications.append([variable, count, 0, n_pct(count, n), {"n": count, "denominator": n, "pct": pct}])
+    added = pd.DataFrame([["Follow-up / longitudinal observation", v, count, missing, text, json.dumps(raw)]
+                          for v, count, missing, text, raw in specifications], columns=table.columns)
+    return pd.concat([table, added], ignore_index=True)
+
+
+def plot_followup_distribution(cohorts: dict[str, pd.DataFrame], path: Path) -> None:
+    plt.figure(figsize=(8, 5))
+    for name, metrics in cohorts.items():
+        plt.hist(metrics["followup_years"].dropna(), bins=20, alpha=.45, label=name)
+    plt.xlabel("Follow-up (years)"); plt.ylabel("Patients"); plt.title("Follow-up distribution"); plt.legend(); plt.tight_layout(); plt.savefig(path, dpi=150); plt.close()
+
+
+def plot_retention(retention: pd.DataFrame, path: Path) -> None:
+    plt.figure(figsize=(8, 5))
+    for cohort, data in retention.groupby("cohort", sort=False):
+        plt.step(data["days"] / 365.25, data["pct_retained"], where="post", label=cohort)
+    plt.xlabel("Follow-up (years)"); plt.ylabel("Patients retained (%)")
+    plt.title("Descriptive follow-up retention curve (not Kaplan-Meier)"); plt.ylim(0, 105); plt.legend(); plt.tight_layout(); plt.savefig(path, dpi=150); plt.close()
+
+
+def plot_visits_per_patient(metrics: pd.DataFrame, path: Path) -> None:
+    visits = metrics["n_clinical_episodes"]
+    categories = ["1 visit", "2 visits", "3–4 visits", "5–9 visits", ">=10 visits"]
+    counts = [(visits == 1).sum(), (visits == 2).sum(), visits.between(3, 4).sum(), visits.between(5, 9).sum(), (visits >= 10).sum()]
+    plt.figure(figsize=(8, 5)); plt.bar(categories, counts); plt.ylabel("Patients"); plt.title("Clinical episodes per patient"); plt.tight_layout(); plt.savefig(path, dpi=150); plt.close()
+
+
+def plot_followup_vs_visits(metrics: pd.DataFrame, path: Path) -> None:
+    plt.figure(figsize=(7, 5)); plt.scatter(metrics["followup_years"], metrics["n_clinical_episodes"], alpha=.6)
+    plt.xlabel("Follow-up (years)"); plt.ylabel("Clinical episodes"); plt.title("Follow-up vs clinical episodes"); plt.tight_layout(); plt.savefig(path, dpi=150); plt.close()
+
+
+def plot_swimmer_followup(episodes: pd.DataFrame, metrics: pd.DataFrame, path: Path) -> None:
+    ordered = metrics.sort_values(["n_clinical_episodes", "followup_days"], ascending=False)[CANONICAL_PATIENT_ID_COL].tolist()
+    positions = {patient_id: index for index, patient_id in enumerate(ordered)}
+    dated = episodes.loc[episodes["included_in_primary_followup"]].copy()
+    dated["days_from_clinical_baseline"] = (dated[CLINICAL_ANCHOR_DATE_COL] - dated[CLINICAL_BASELINE_DATE_COL]).dt.days
+    plt.figure(figsize=(9, max(5, min(14, len(ordered) * .12))))
+    for _, row in metrics.iterrows():
+        if pd.notna(row["followup_days"]): plt.hlines(positions[row[CANONICAL_PATIENT_ID_COL]], 0, row["followup_days"], color="grey", lw=.7)
+    plt.scatter(dated["days_from_clinical_baseline"], dated[CANONICAL_PATIENT_ID_COL].map(positions), s=8)
+    plt.xlabel("Days from clinical baseline"); plt.ylabel("Patients"); plt.title("Clinical episode follow-up by patient"); plt.yticks([]); plt.tight_layout(); plt.savefig(path, dpi=150); plt.close()
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
     args = parse_args()
     common.ensure_output_dirs()
     args.outdir.mkdir(parents=True, exist_ok=True)
     args.intermediate_dir.mkdir(parents=True, exist_ok=True)
+    args.figures_dir.mkdir(parents=True, exist_ok=True)
 
     df = read_table(args.input)
     dataset_missing = validate_hardcoded_vars(df)
@@ -528,16 +833,69 @@ def main() -> None:
     if dataset_missing:
         qc = pd.concat([qc, pd.DataFrame([{"qc_check": "dataset_columns_missing_but_allowed", "value": len(dataset_missing), "status": "warning", "details": ", ".join(dataset_missing)}])], ignore_index=True)
 
+    # Longitudinal extension: use precisely the Table 1 patient universe and the
+    # same authoritative clinical episode spine.
+    episodes, followup_audit = prepare_longitudinal_clinical_episodes(df, baseline[CANONICAL_PATIENT_ID_COL])
+    gaps = build_intervisit_gaps(episodes)
+    metrics = build_patient_followup_metrics(episodes, baseline[CANONICAL_PATIENT_ID_COL])
+    protocol_column = resolve_protocol_column(df)
+    protocol_parts: dict[str, tuple[pd.DataFrame, pd.DataFrame]] = {}
+    cohort_metrics = {"Overall": metrics}
+    if protocol_column:
+        for code, name in (("11D", "Protocol 11D"), ("15D", "Protocol 15D")):
+            subset = episodes.loc[episodes["protocol_membership"].str.contains(code, na=False)].copy()
+            ids = subset[CANONICAL_PATIENT_ID_COL].drop_duplicates()
+            if not ids.empty:
+                subset_gaps = build_intervisit_gaps(subset)
+                subset_metrics = build_patient_followup_metrics(subset, ids)
+                protocol_parts[name] = (subset_metrics, subset_gaps)
+                cohort_metrics[name] = subset_metrics
+    summary, summary_long = build_followup_summary(metrics, gaps, protocol_parts)
+    retention = build_retention_table(cohort_metrics)
+    followup_qc = build_followup_qc(episodes, metrics, gaps, protocol_column)
+    validate_followup_hard_qc(metrics, baseline, retention)
+    table = append_followup_rows_to_table1(table, metrics, gaps)
+
     csv_path = args.outdir / "01_table1_overall.csv"
     xlsx_path = args.outdir / "01_table1_overall.xlsx"
     qc_path = args.outdir / "01_table1_overall_qc.csv"
     audit_path = args.outdir / "01_table1_baseline_patient_audit.csv"
+    followup_paths = {
+        "summary": args.outdir / "01_followup_summary_by_protocol.csv",
+        "long": args.outdir / "01_followup_summary_long.csv",
+        "metrics": args.outdir / "01_patient_followup_metrics.csv",
+        "retention": args.outdir / "01_retention_by_time.csv",
+        "gaps": args.outdir / "01_intervisit_gaps.csv",
+        "qc": args.outdir / "01_followup_qc.csv",
+        "excel": args.outdir / "01_followup_summary.xlsx",
+    }
+    followup_audit_path = args.intermediate_dir / "01_followup_episode_audit.csv"
     table.to_csv(csv_path, index=False)
     qc.to_csv(qc_path, index=False)
     build_patient_audit(df, baseline).to_csv(audit_path, index=False)
+    summary.to_csv(followup_paths["summary"], index=False)
+    summary_long.to_csv(followup_paths["long"], index=False)
+    metrics.to_csv(followup_paths["metrics"], index=False)
+    retention.to_csv(followup_paths["retention"], index=False)
+    gaps.to_csv(followup_paths["gaps"], index=False)
+    followup_qc.to_csv(followup_paths["qc"], index=False)
+    followup_audit.to_csv(followup_audit_path, index=False)
     with pd.ExcelWriter(xlsx_path) as writer:
         table.to_excel(writer, sheet_name="Table1_Overall", index=False)
         qc.to_excel(writer, sheet_name="QC", index=False)
+    with pd.ExcelWriter(followup_paths["excel"]) as writer:
+        summary.to_excel(writer, sheet_name="followup_summary", index=False)
+        summary_long.to_excel(writer, sheet_name="followup_summary_long", index=False)
+        metrics.to_excel(writer, sheet_name="patient_metrics", index=False)
+        retention.to_excel(writer, sheet_name="retention", index=False)
+        gaps.to_excel(writer, sheet_name="intervisit_gaps", index=False)
+        followup_qc.to_excel(writer, sheet_name="qc", index=False)
+
+    plot_followup_distribution(cohort_metrics, args.figures_dir / "01_followup_distribution.png")
+    plot_retention(retention, args.figures_dir / "01_retention_curve.png")
+    plot_visits_per_patient(metrics, args.figures_dir / "01_visits_per_patient.png")
+    plot_followup_vs_visits(metrics, args.figures_dir / "01_followup_vs_visits.png")
+    plot_swimmer_followup(episodes, metrics, args.figures_dir / "01_swimmer_followup.png")
 
     LOG.info("Wrote %s", csv_path.relative_to(common.PROJECT_ROOT) if csv_path.is_relative_to(common.PROJECT_ROOT) else csv_path)
     LOG.info("Wrote %s", xlsx_path.relative_to(common.PROJECT_ROOT) if xlsx_path.is_relative_to(common.PROJECT_ROOT) else xlsx_path)
