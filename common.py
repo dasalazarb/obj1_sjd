@@ -17,6 +17,11 @@ BLOCKA_INTERMEDIATE_DATA_DIR = INTERMEDIATE_DATA_DIR / "block_A"
 ANALYTIC_DATA_DIR = DATA_DIR / "analytic"
 METADATA_DIR = PROJECT_ROOT / "metadata"
 OUTPUTS_DIR = PROJECT_ROOT / "outputs"
+STUDIES_ANALYTIC_DIR = ANALYTIC_DATA_DIR / "studies"
+STUDIES_TABLES_DIR = OUTPUTS_DIR / "tables" / "studies"
+STUDIES_FIGURES_DIR = OUTPUTS_DIR / "figures" / "studies"
+STUDIES_QC_DIR = OUTPUTS_DIR / "qc" / "studies"
+STUDIES_LOGS_DIR = OUTPUTS_DIR / "logs" / "studies"
 
 # Canonical input defaults. CLI arguments in scripts may override these.
 DEFAULT_ANALYTIC_DATASET = Path("/data/salazarda/data/obj1_sjd/data/raw") / "visits_long_collapsed_by_interval_codebook_corrected.parquet"
@@ -67,5 +72,7 @@ def ensure_output_dirs() -> None:
         INTERMEDIATE_DATA_DIR, BLOCKA_INTERMEDIATE_DATA_DIR, ANALYTIC_DATA_DIR,
         BLOCKA_TABLES_DIR, BLOCKA_QC_DIR,
         BLOCKB_TABLES_DIR, BLOCKB_FIGURES_DIR, BLOCKB_QC_DIR, BLOCKB_LOGS_DIR,
+        STUDIES_ANALYTIC_DIR, STUDIES_TABLES_DIR, STUDIES_FIGURES_DIR,
+        STUDIES_QC_DIR, STUDIES_LOGS_DIR,
     ):
         path.mkdir(parents=True, exist_ok=True)

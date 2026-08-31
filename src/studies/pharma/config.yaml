@@ -1,0 +1,31 @@
+study_name: pharma
+contract_version: clinical_episode_v1
+random_seed: 20260831
+pop_levels:
+  classifiable: [Pop1, Pop2, Pop3]
+  unclassifiable: Unclassifiable
+transition_scope:
+  origins: [Pop1, Pop2, Pop3]
+  destinations: [Pop1, Pop2, Pop3]
+  include_stability: true
+pairwise_transition_contrasts:
+  - [Pop1, Pop2, Pop1]
+  - [Pop1, Pop3, Pop1]
+  - [Pop2, Pop1, Pop2]
+  - [Pop2, Pop3, Pop2]
+  - [Pop3, Pop1, Pop3]
+  - [Pop3, Pop2, Pop3]
+sustained_transition:
+  required_consecutive_destination_episodes: 2
+strict_systemic_worsening:
+  minimum_delta_essdai: 3
+interval_sensitivity_years: {minimum: 0.5, maximum: 3.5}
+minimum_counts:
+  cell_for_modeling: 5
+  events_for_multivariable_model: 10
+  events_for_prediction: 25
+  nonevents_for_prediction: 25
+  patients_for_prediction: 80
+coverage: {minimum_feature_coverage: 0.70}
+bootstrap: {association_replicates: 1000, prediction_replicates: 1000}
+prediction: {policy: auto, outer_folds: 5, inner_folds: 3}
