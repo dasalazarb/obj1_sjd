@@ -46,6 +46,7 @@ def test_baseline_only():
 def test_followup_over_one_year():
     _, _, metrics = prepare_metrics(episode_frame(["2020-01-01", "2021-01-02"]))
     assert metrics.iloc[0].n_clinical_episodes == 2
+    assert metrics.iloc[0].visits_per_followup_year == pytest.approx(1, abs=0.01)
     assert metrics.iloc[0].has_followup_1yr
 
 
@@ -76,6 +77,8 @@ def test_missing_anchor_is_audited_without_imputation_or_gap():
     episodes, audit, metrics = prepare_metrics(episode_frame(["2020-01-01", None]))
     assert not audit.iloc[1].has_valid_anchor_date
     assert pd.isna(episodes.iloc[1].clinical_anchor_date)
+    assert metrics.iloc[0].n_clinical_episodes == 2
+    assert metrics.iloc[0].n_dated_clinical_episodes == 1
     assert table1.build_intervisit_gaps(episodes).empty
     qc = table1.build_followup_qc(episodes, metrics, table1.build_intervisit_gaps(episodes), None)
     assert qc.set_index("qc_check").loc["followup_n_clinical_episodes_missing_anchor_date", "value"] == 1
@@ -97,6 +100,25 @@ def test_dual_protocol_membership_has_one_overall_row():
 ])
 def test_protocol_normalization(value, expected):
     assert table1.normalize_protocol_membership(value) == expected
+
+
+def test_protocol_resolution_skips_empty_higher_priority_column():
+    frame = episode_frame(["2020-01-01", "2021-01-01"])
+    frame["source_protocol"] = [None, ""]
+    frame["ids__protocol"] = ["11D", "15D"]
+    assert table1.resolve_protocol_column(frame) == "ids__protocol"
+    episodes, _ = table1.prepare_longitudinal_clinical_episodes(frame, ["p1"])
+    assert set(episodes.protocol_membership) == {"11D", "15D"}
+
+
+def test_gap_iqr_contains_only_q1_to_q3():
+    episodes, _, metrics = prepare_metrics(
+        episode_frame(["2020-01-01", "2020-06-29", "2021-06-29"])
+    )
+    summary, _ = table1.build_followup_summary(metrics, table1.build_intervisit_gaps(episodes))
+    value = summary.set_index("Indicator").loc["IQR inter-visit gap, days", "Overall"]
+    assert value == "226.2–318.8"
+    assert "(" not in value
 
 
 def test_retention_is_monotonic():
