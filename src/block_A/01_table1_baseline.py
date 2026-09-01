@@ -500,8 +500,14 @@ def build_outputs(baseline: pd.DataFrame, dataset_missing: list[str], eligibilit
 
 
 def resolve_protocol_column(df: pd.DataFrame) -> str | None:
-    """Return the first available protocol field in the documented priority order."""
-    return next((column for column in PROTOCOL_CANDIDATES if column in df.columns), None)
+    """Return the first populated protocol field containing a recognized code."""
+    for column in PROTOCOL_CANDIDATES:
+        if column not in df.columns:
+            continue
+        populated = df[column].map(lambda value: not is_missing_value(value))
+        if populated.any() and df.loc[populated, column].map(normalize_protocol_membership).ne("").any():
+            return column
+    return None
 
 
 def normalize_protocol_membership(value: object) -> str:
@@ -586,23 +592,27 @@ def build_patient_followup_metrics(
     rows = []
     for patient_id in ids:
         all_patient = episodes.loc[episodes[CANONICAL_PATIENT_ID_COL].eq(patient_id)]
-        eligible = all_patient.loc[all_patient["included_in_primary_followup"]]
-        dates = eligible[CLINICAL_ANCHOR_DATE_COL].dropna()
+        # Known pre-baseline episodes remain audit-only.  Undated authoritative
+        # episodes cannot be placed on the timeline, but still count as clinical
+        # episodes; only dated, non-pre-baseline episodes drive temporal metrics.
+        countable = all_patient.loc[~all_patient["is_prebaseline"]]
+        dated = all_patient.loc[all_patient["included_in_primary_followup"]]
+        dates = dated[CLINICAL_ANCHOR_DATE_COL].dropna()
         baseline_dates = all_patient[CLINICAL_BASELINE_DATE_COL].dropna()
         baseline_date = baseline_dates.iloc[0] if not baseline_dates.empty else pd.NaT
         first_date, last_date = (dates.min(), dates.max()) if not dates.empty else (pd.NaT, pd.NaT)
         followup_days = float((last_date - baseline_date).days) if pd.notna(last_date) and pd.notna(baseline_date) else np.nan
         patient_gaps = gaps.loc[gaps[CANONICAL_PATIENT_ID_COL].eq(patient_id)]
         valid_gaps = patient_gaps.loc[~patient_gaps["gap_negative"], "gap_days"]
-        n_episodes = int(len(eligible))
+        n_episodes = int(len(countable))
+        n_dated_episodes = int(len(dates))
         row = {
             CANONICAL_PATIENT_ID_COL: patient_id, CLINICAL_BASELINE_DATE_COL: baseline_date,
             "first_clinical_date": first_date, "last_clinical_date": last_date,
-            "n_clinical_episodes": n_episodes, "n_dated_clinical_episodes": int(len(dates)),
+            "n_clinical_episodes": n_episodes, "n_dated_clinical_episodes": n_dated_episodes,
             "followup_days": followup_days, "followup_years": followup_days / 365.25,
             "median_gap_days": valid_gaps.median() if not valid_gaps.empty else np.nan,
             "max_gap_days": valid_gaps.max() if not valid_gaps.empty else np.nan,
-            "visits_per_followup_year": n_episodes / (followup_days / 365.25) if followup_days > 0 else np.nan,
             "has_gap_over_180d": bool((valid_gaps > 180).any()),
             "has_gap_over_365d": bool((valid_gaps > 365).any()),
             "has_gap_over_730d": bool((valid_gaps > 730).any()),
@@ -612,7 +622,16 @@ def build_patient_followup_metrics(
         for label, days in RETENTION_THRESHOLDS.items():
             row[RETENTION_COLUMNS[label]] = bool(pd.notna(followup_days) and followup_days >= days)
         rows.append(row)
-    return pd.DataFrame(rows)
+    metrics = pd.DataFrame(rows)
+    followup_years = metrics["followup_years"].to_numpy(dtype=float)
+    n_clinical_episodes = metrics["n_clinical_episodes"].to_numpy(dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        metrics["visits_per_followup_year"] = np.where(
+            followup_years > 0,
+            (n_clinical_episodes - 1) / followup_years,
+            np.nan,
+        )
+    return metrics
 
 
 def _summary_values(metrics: pd.DataFrame, gaps: pd.DataFrame) -> dict[str, object]:
@@ -623,7 +642,10 @@ def _summary_values(metrics: pd.DataFrame, gaps: pd.DataFrame) -> dict[str, obje
     follow_text, _ = median_iqr(metrics["followup_years"])
     episodes_text, _ = median_iqr(metrics["n_clinical_episodes"])
     rate_text, _ = median_iqr(metrics["visits_per_followup_year"])
-    gap_text, _ = median_iqr(valid_gaps)
+    gap_q1_q3 = (
+        f"{valid_gaps.quantile(.25):.1f}–{valid_gaps.quantile(.75):.1f}"
+        if not valid_gaps.empty else "NA"
+    )
     values = {
         "Clinical episodes": int(metrics["n_clinical_episodes"].sum()), "Unique patients": n,
         "Patients with exactly 1 clinical episode": count_text(metrics["n_clinical_episodes"].eq(1)),
@@ -636,7 +658,7 @@ def _summary_values(metrics: pd.DataFrame, gaps: pd.DataFrame) -> dict[str, obje
         "Clinical episodes per patient, mean": round(metrics["n_clinical_episodes"].mean(), 1) if n else np.nan,
         "Maximum clinical episodes per patient": int(metrics["n_clinical_episodes"].max()) if n else np.nan,
         "Median inter-visit gap, days": round(valid_gaps.median(), 1) if not valid_gaps.empty else np.nan,
-        "IQR inter-visit gap, days": gap_text,
+        "IQR inter-visit gap, days": gap_q1_q3,
         "P90 inter-visit gap, days": round(valid_gaps.quantile(.9), 1) if not valid_gaps.empty else np.nan,
         "Clinical episodes per follow-up year, median (IQR)": rate_text,
     }
@@ -690,6 +712,7 @@ def build_followup_qc(episodes: pd.DataFrame, metrics: pd.DataFrame, gaps: pd.Da
         "followup_n_negative_gaps": negative.sum(),
         "followup_n_patients_with_negative_gaps": gaps.loc[negative, CANONICAL_PATIENT_ID_COL].nunique() if not gaps.empty else 0,
         "followup_protocol_column_found": bool(protocol_column),
+        "followup_protocol_column_name": protocol_column if protocol_column else np.nan,
         "followup_n_protocol_11d_patients": metrics["in_protocol_11d"].sum() if protocol_column else np.nan,
         "followup_n_protocol_15d_patients": metrics["in_protocol_15d"].sum() if protocol_column else np.nan,
         "followup_n_dual_protocol_patients": (metrics["in_protocol_11d"] & metrics["in_protocol_15d"]).sum() if protocol_column else np.nan,
@@ -702,6 +725,8 @@ def build_followup_qc(episodes: pd.DataFrame, metrics: pd.DataFrame, gaps: pd.Da
             row["status"] = "warning"
         if row["qc_check"] == "followup_protocol_column_found" and not row["value"]:
             row.update(status="warning", details="protocol_column_missing")
+        if row["qc_check"] == "followup_protocol_column_name" and not protocol_column:
+            row.update(status="warning", details="no_candidate_contains_recognized_11D_or_15D_values")
     return pd.DataFrame(rows)
 
 
@@ -710,6 +735,8 @@ def validate_followup_hard_qc(metrics: pd.DataFrame, baseline: pd.DataFrame, ret
         raise ValueError("Patient follow-up metrics must contain one row per patient")
     if set(metrics[CANONICAL_PATIENT_ID_COL]) != set(baseline[CANONICAL_PATIENT_ID_COL]):
         raise ValueError("Longitudinal and Table 1 patient universes differ")
+    if (metrics["n_dated_clinical_episodes"] > metrics["n_clinical_episodes"]).any():
+        raise ValueError("Dated clinical episode counts cannot exceed all clinical episode counts")
     if (metrics["followup_days"].dropna() < 0).any() or (metrics["last_clinical_date"].dropna() < metrics.loc[metrics["last_clinical_date"].notna(), CLINICAL_BASELINE_DATE_COL]).any():
         raise ValueError("Invalid negative follow-up")
     ordered = [RETENTION_COLUMNS[x] for x in RETENTION_THRESHOLDS]
