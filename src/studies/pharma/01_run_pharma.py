@@ -323,7 +323,14 @@ def time_to_first_transition(frame: pd.DataFrame) -> pd.DataFrame:
             g=g[g.from_pop.eq(origin)]
             if g.empty: continue
             first=g.iloc[0]; changed=g[g.changed_state.eq(1)]; end=changed.iloc[0] if len(changed) else g.iloc[-1]
-            rows.append({"origin_pop":origin,"patient":patient,"time_years":float(end.interval_years),"event":int(len(changed)>0),"timing_note":"change interval-censored between evaluations"})
+            start_date=pd.to_datetime(first.from_clinical_anchor_date)
+            end_date=pd.to_datetime(end.to_clinical_anchor_date)
+            if pd.isna(start_date) or pd.isna(end_date):
+                raise ValueError("Missing transition anchor date in time_to_first_transition()")
+            if end_date <= start_date:
+                raise ValueError("Non-positive follow-up time detected in time_to_first_transition()")
+            time_years=(end_date-start_date).days/365.25
+            rows.append({"origin_pop":origin,"patient":patient,"time_years":float(time_years),"event":int(len(changed)>0),"timing_note":"change interval-censored between evaluations"})
     # Public table must not include identifiers: aggregate empirical survival.
     out=[]
     for origin in CLASSIFIABLE:
@@ -413,9 +420,20 @@ def run(args: argparse.Namespace) -> dict:
     _save(manifest,dirs["qc"]/"01_pharma_feature_manifest.csv",generated)
     write_json(dirs["qc"]/"01_pharma_input_contract_qc.json",qc); generated.append(str((dirs["qc"]/"01_pharma_input_contract_qc.json").relative_to(ROOT)))
     baseline=select_clinical_baseline(master); baseline_path=dirs["analytic"]/"01_pharma_baseline.parquet"; baseline.to_parquet(baseline_path,index=False); generated.append(str(baseline_path.relative_to(ROOT)))
-    from_cols=list(dict.fromkeys(["clinical_anchor_date","essdai_total","esspri_total_observed",*resolved.values()])); to_cols=["clinical_anchor_date","essdai_total","esspri_total_observed"]
+    from_cols=list(dict.fromkeys(["essdai_total","esspri_total_observed",*resolved.values()])); to_cols=["essdai_total","esspri_total_observed"]
     from_cols=[x for x in from_cols if x in master and x not in ("pop_status",)]; validate_predictors(from_cols)
     enriched=enrich_transition_intervals(intervals,master,from_cols,to_cols)
+    required_transition_dates={"from_clinical_anchor_date","to_clinical_anchor_date"}
+    missing_transition_dates=required_transition_dates-set(enriched.columns)
+    if missing_transition_dates:
+        raise ValueError("Enriched transition intervals missing canonical dates: "
+                         f"{sorted(missing_transition_dates)}")
+    forbidden_date_suffixes={"from_clinical_anchor_date_x","from_clinical_anchor_date_y",
+                             "to_clinical_anchor_date_x","to_clinical_anchor_date_y"}
+    unexpected=forbidden_date_suffixes.intersection(enriched.columns)
+    if unexpected:
+        raise ValueError("Unexpected duplicated canonical transition dates after enrichment: "
+                         f"{sorted(unexpected)}")
     enriched=derive_transition_outcomes(enriched,config["strict_systemic_worsening"]["minimum_delta_essdai"]); enriched=classify_sustained_transitions(enriched)
     transition_path=dirs["analytic"]/"01_pharma_transition_intervals.parquet"; enriched.to_parquet(transition_path,index=False); generated.append(str(transition_path.relative_to(ROOT)))
     flow=[("master_patients",master.patient_id.nunique()),("patients_with_clinical_baseline",baseline.patient_id.nunique()),("patients_without_clinical_baseline",master.patient_id.nunique()-baseline.patient_id.nunique()),("intervals_total",len(enriched)),("intervals_classifiable",int(enriched.from_pop.isin(CLASSIFIABLE).mul(enriched.to_pop.isin(CLASSIFIABLE)).sum())),("intervals_with_unclassifiable",int((~enriched.from_pop.isin(CLASSIFIABLE)|~enriched.to_pop.isin(CLASSIFIABLE)).sum()))]
