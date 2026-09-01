@@ -383,6 +383,8 @@ def fit_model(data: pd.DataFrame, measure: str, model: str = "crude") -> tuple[d
         before["age_baseline"] = pd.to_numeric(before.age_baseline, errors="coerce")
         before["overlap_baseline"] = pd.to_numeric(before.overlap_baseline, errors="coerce")
     d = before.dropna()
+    if model == "adjusted":
+        d = d.loc[d.baseline_pop.isin(POP_LEVELS)].copy()
     sex_levels = sorted(d.sex.astype(str).unique()) if model == "adjusted" and len(d) else []
     sex_reference = next((x for x in sex_levels if x.lower() in {"female", "f"}), sex_levels[0] if sex_levels else "not available")
     audit = {
