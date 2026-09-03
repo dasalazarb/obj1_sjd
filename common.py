@@ -26,10 +26,12 @@ STUDIES_LOGS_DIR = OUTPUTS_DIR / "logs" / "studies"
 # Canonical input defaults. CLI arguments in scripts may override these.
 DEFAULT_ANALYTIC_DATASET = Path("/data/salazarda/data/obj1_sjd/data/raw") / "visits_long_collapsed_by_interval_codebook_corrected.parquet"
 DEFAULT_POP_DISTRIBUTION_INPUT = DEFAULT_ANALYTIC_DATASET
-SOURCE_EPISODE_SPINE = (
-    Path("/data/salazarda/data/obj1_sjd/data/raw")
-    / "clinical_episode_spine_sjd.parquet"
-)
+# Step 00 filters the versioned source to the longitudinal cohort and publishes
+# this stable filename for downstream analyses.
+SOURCE_EPISODE_SPINE = RAW_DATA_DIR / "clinical_episode_spine.parquet"
+UNFILTERED_EPISODE_SPINE = RAW_DATA_DIR / "clinical_episode_spine_sjd_11D_15D.parquet"
+LONGITUDINAL_ID_LIST = RAW_DATA_DIR / "list_ids_longitudinal.csv"
+SOURCE_EPISODE_SPINE_CSV = RAW_DATA_DIR / "clinical_episode_spine.csv"
 DEFAULT_CODEBOOK = METADATA_DIR / "Consolidated_Codebook_all_columns.xlsx"
 
 # Block A outputs.
