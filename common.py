@@ -28,10 +28,10 @@ DEFAULT_ANALYTIC_DATASET = Path("/data/salazarda/data/obj1_sjd/data/raw") / "vis
 DEFAULT_POP_DISTRIBUTION_INPUT = DEFAULT_ANALYTIC_DATASET
 # Step 00 filters the versioned source to the longitudinal cohort and publishes
 # this stable filename for downstream analyses.
-SOURCE_EPISODE_SPINE = RAW_DATA_DIR / "clinical_episode_spine.parquet"
+SOURCE_EPISODE_SPINE = RAW_DATA_DIR / "clinical_episode_spine_sjd.parquet"
 UNFILTERED_EPISODE_SPINE = RAW_DATA_DIR / "clinical_episode_spine_sjd_11D_15D.parquet"
 LONGITUDINAL_ID_LIST = RAW_DATA_DIR / "list_ids_longitudinal.csv"
-SOURCE_EPISODE_SPINE_CSV = RAW_DATA_DIR / "clinical_episode_spine.csv"
+SOURCE_EPISODE_SPINE_CSV = RAW_DATA_DIR / "clinical_episode_spine_sjd.csv"
 DEFAULT_CODEBOOK = METADATA_DIR / "Consolidated_Codebook_all_columns.xlsx"
 
 # Block A outputs.

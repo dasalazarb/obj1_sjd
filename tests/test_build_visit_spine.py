@@ -16,6 +16,11 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
+def test_filtered_raw_output_names_are_stable() -> None:
+    assert MODULE.common.SOURCE_EPISODE_SPINE.name == "clinical_episode_spine_sjd.parquet"
+    assert MODULE.common.SOURCE_EPISODE_SPINE_CSV.name == "clinical_episode_spine_sjd.csv"
+
+
 def test_filter_longitudinal_patients_keeps_only_listed_ids() -> None:
     source = pd.DataFrame(
         {"patient_id": [10, 20, 20, 30], "clinical_episode_id": [1, 2, 3, 4]}
