@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate and publish the authoritative clinical-episode spine.
+"""Filter, validate, and publish the authoritative clinical-episode spine.
 
 This step does not reconstruct, collapse, merge, or split clinical episodes.
 """
@@ -55,6 +55,26 @@ def read_source(path: Path) -> pd.DataFrame:
     if suffix == ".csv":
         return pd.read_csv(path)
     raise ValueError(f"Unsupported input format {suffix!r}; use .parquet or .csv")
+
+
+def filter_longitudinal_patients(
+    source: pd.DataFrame, id_list: pd.DataFrame
+) -> tuple[pd.DataFrame, dict[str, int]]:
+    """Keep source rows whose patient ID occurs in the longitudinal ID list."""
+    for label, frame in (("episode spine", source), ("longitudinal ID list", id_list)):
+        if "patient_id" not in frame.columns:
+            raise ValueError(f"Missing required column patient_id in {label}")
+
+    requested_ids = id_list["patient_id"].dropna().drop_duplicates()
+    filtered = source.loc[source["patient_id"].isin(requested_ids)].copy()
+    matched_ids = filtered["patient_id"].dropna().nunique()
+    metrics = {
+        "n_rows_before_longitudinal_filter": len(source),
+        "n_rows_after_longitudinal_filter": len(filtered),
+        "n_longitudinal_patient_ids": requested_ids.nunique(),
+        "n_longitudinal_patient_ids_matched": int(matched_ids),
+    }
+    return filtered, metrics
 
 
 def id_set(series: pd.Series) -> set[object]:
@@ -184,6 +204,10 @@ def write_outputs(
     metrics: dict[str, object],
 ) -> None:
     """Write both spines and the migration-specific QC artifacts."""
+    # Publish the filtered source under stable raw-data names. Scripts that use
+    # SOURCE_EPISODE_SPINE therefore consume the selected cohort unchanged.
+    episode_spine.to_parquet(common.SOURCE_EPISODE_SPINE, index=False)
+    episode_spine.to_csv(common.SOURCE_EPISODE_SPINE_CSV, index=False)
     episode_spine.to_parquet(common.EPISODE_SPINE_PARQUET, index=False)
     episode_spine.to_csv(common.EPISODE_SPINE_CSV, index=False)
     clinical_spine.to_parquet(common.CLINICAL_VISIT_SPINE_PARQUET, index=False)
@@ -205,12 +229,15 @@ def write_outputs(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", type=Path, default=common.SOURCE_EPISODE_SPINE)
+    parser.add_argument("--input", type=Path, default=common.UNFILTERED_EPISODE_SPINE)
+    parser.add_argument("--id-list", type=Path, default=common.LONGITUDINAL_ID_LIST)
     parser.add_argument("--overwrite", dest="overwrite", action="store_true", default=True)
     parser.add_argument("--no-overwrite", dest="overwrite", action="store_false")
     args = parser.parse_args()
     common.ensure_output_dirs()
     output_paths = (
+        common.SOURCE_EPISODE_SPINE,
+        common.SOURCE_EPISODE_SPINE_CSV,
         common.EPISODE_SPINE_PARQUET,
         common.EPISODE_SPINE_CSV,
         common.CLINICAL_VISIT_SPINE_PARQUET,
@@ -223,7 +250,10 @@ def main() -> None:
         raise FileExistsError("Output file(s) already exist: " + ", ".join(existing))
 
     source = read_source(args.input)
+    id_list = pd.read_csv(args.id_list)
+    source, filter_metrics = filter_longitudinal_patients(source, id_list)
     episode_spine, clinical_spine, assertions, metrics = build_episode_spines(source)
+    metrics = {**filter_metrics, **metrics}
     write_outputs(episode_spine, clinical_spine, assertions, metrics)
     print(json.dumps({"metrics": metrics, "hard_assertions": assertions}, indent=2))
 
