@@ -33,27 +33,17 @@ plt = None
 
 def load_pyplot():
     """Load the optional plotting backend without blocking table generation."""
-    probe = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if probe.returncode:
-        detail = probe.stderr.strip().splitlines()
+    try:
+        matplotlib = importlib.import_module("matplotlib")
+        matplotlib.use("Agg")
+        return importlib.import_module("matplotlib.pyplot")
+    except (ImportError, OSError) as exc:
         LOG.warning(
             "Matplotlib is unavailable; table, QC, and data outputs will be "
             "generated, but follow-up figures will be skipped: %s",
-            detail[-1] if detail else f"exit status {probe.returncode}",
+            exc,
         )
         return None
-    matplotlib = importlib.import_module("matplotlib")
-    matplotlib.use("Agg")
-    return importlib.import_module("matplotlib.pyplot")
 
 PATIENT_ID_COL = "ids__patient_record_number"
 FALLBACK_PATIENT_ID_COL = "ids__subject_number"
