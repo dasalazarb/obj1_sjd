@@ -33,10 +33,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--table1-audit",
         type=Path,
-        default=common.BLOCKA_TABLES_DIR / "01_table1_baseline_patient_audit.csv",
+        default=common.BLOCKA_QC_DIR / "01_table1_baseline" / "01_table1_baseline_patient_audit.csv",
     )
     parser.add_argument("--pop-longitudinal", type=Path, default=common.POP_LONGITUDINAL_PARQUET)
-    parser.add_argument("--outdir", type=Path, default=common.BLOCKA_QC_DIR)
+    parser.add_argument("--outdir", type=Path, default=common.BLOCKA_QC_DIR / "01b_baseline_qc")
     return parser.parse_args()
 
 

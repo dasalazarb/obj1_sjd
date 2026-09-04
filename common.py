@@ -52,20 +52,27 @@ EPISODE_SPINE_PARQUET = INTERMEDIATE_DATA_DIR / "00_episode_spine_all.parquet"
 EPISODE_SPINE_CSV = INTERMEDIATE_DATA_DIR / "00_episode_spine_all.csv"
 CLINICAL_VISIT_SPINE_PARQUET = INTERMEDIATE_DATA_DIR / "00_clinical_visit_spine.parquet"
 CLINICAL_VISIT_SPINE_CSV = INTERMEDIATE_DATA_DIR / "00_clinical_visit_spine.csv"
-POP_LONGITUDINAL_PARQUET = INTERMEDIATE_DATA_DIR / "01_visit_level_classification.parquet"
+POP_LONGITUDINAL_PARQUET = INTERMEDIATE_DATA_DIR / "01_pop_distribution" / "01_visit_level_classification.parquet"
 POP_TRANSITION_INTERVALS_PARQUET = (
-    INTERMEDIATE_DATA_DIR
+    INTERMEDIATE_DATA_DIR / "10_pop_transitions"
     / "10_pop_transition_clinical_episode_intervals.parquet"
 )
 OVERLAP_LONGITUDINAL_PARQUET = (
-    BLOCKA_INTERMEDIATE_DATA_DIR / "06_overlap_episode_level.parquet"
+    BLOCKA_INTERMEDIATE_DATA_DIR / "06_overlap_glandular" / "06_overlap_episode_level.parquet"
 )
-PROS_LONGITUDINAL_PARQUET = INTERMEDIATE_DATA_DIR / "09_pros_episode_level.parquet"
-LABS_EPISODE_WIDE_PARQUET = BLOCKA_INTERMEDIATE_DATA_DIR / "01_labs_episode_wide.parquet"
-SEROLOGY_EPISODE_PARQUET = BLOCKA_INTERMEDIATE_DATA_DIR / "01_serology_episode_level.parquet"
-INTEGRATED_LONGITUDINAL_PARQUET = ANALYTIC_DATA_DIR / "10_integrated_longitudinal_clinical_episode.parquet"
-TRANSITION_EPISODE_PARQUET = INTERMEDIATE_DATA_DIR / "23_transition_episode_dataset.parquet"
-TRANSITION_EPISODE_CSV = INTERMEDIATE_DATA_DIR / "23_transition_episode_dataset.csv"
+PROS_LONGITUDINAL_PARQUET = INTERMEDIATE_DATA_DIR / "09_pros_longitudinal" / "09_pros_episode_level.parquet"
+LABS_EPISODE_WIDE_PARQUET = BLOCKA_INTERMEDIATE_DATA_DIR / "01_serological_profile" / "01_labs_episode_wide.parquet"
+SEROLOGY_EPISODE_PARQUET = BLOCKA_INTERMEDIATE_DATA_DIR / "01_serological_profile" / "01_serology_episode_level.parquet"
+INTEGRATED_LONGITUDINAL_PARQUET = ANALYTIC_DATA_DIR / "10_build_integrated_longitudinal_dataset" / "10_integrated_longitudinal_clinical_episode.parquet"
+TRANSITION_EPISODE_PARQUET = INTERMEDIATE_DATA_DIR / "23_build_transition_episode_dataset" / "23_transition_episode_dataset.parquet"
+TRANSITION_EPISODE_CSV = INTERMEDIATE_DATA_DIR / "23_build_transition_episode_dataset" / "23_transition_episode_dataset.csv"
+
+
+def script_output_dir(root: Path, script_name: str) -> Path:
+    """Return the dedicated output directory for an analysis script."""
+    if script_name.startswith("00_"):
+        return root
+    return root / script_name
 
 
 def ensure_output_dirs() -> None:

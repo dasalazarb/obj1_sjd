@@ -244,6 +244,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=common.INTEGRATED_LONGITUDINAL_PARQUET)
     args = parser.parse_args()
     common.ensure_output_dirs()
+    args.output.parent.mkdir(parents=True, exist_ok=True)
     names = ["pop", "labs", "overlap", "pros"]
     spine = pd.read_parquet(args.spine)
     sources = [pd.read_parquet(path) for path in [args.pop, args.labs, args.overlap, args.pros]]
@@ -254,7 +255,8 @@ def main() -> None:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     integrated.to_parquet(args.output, index=False)
     integrated.to_csv(args.output.with_suffix(".csv"), index=False)
-    qc_dir = common.BLOCKA_QC_DIR
+    qc_dir = common.BLOCKA_QC_DIR / "10_build_integrated_longitudinal_dataset"
+    qc_dir.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(summaries).to_csv(qc_dir / "10_integrated_source_summary.csv", index=False)
     mismatch_columns = ["source", *KEYS, "mismatch"]
     discrepancy_columns = ["source", *KEYS, "variable", "spine_value", "source_value"]

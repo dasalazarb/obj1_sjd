@@ -177,17 +177,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--analyte-output",
         type=Path,
         default=common.BLOCKA_INTERMEDIATE_DATA_DIR
+        / "01_serological_profile"
         / "01_labs_episode_analyte_level.parquet",
     )
     parser.add_argument(
         "--wide-output",
         type=Path,
-        default=common.BLOCKA_INTERMEDIATE_DATA_DIR / "01_labs_episode_wide.parquet",
+        default=common.BLOCKA_INTERMEDIATE_DATA_DIR / "01_serological_profile" / "01_labs_episode_wide.parquet",
     )
     parser.add_argument(
         "--serology-output",
         type=Path,
         default=common.BLOCKA_INTERMEDIATE_DATA_DIR
+        / "01_serological_profile"
         / "01_serology_episode_level.parquet",
     )
     return parser.parse_args(argv)
@@ -966,7 +968,7 @@ def write_table1(baseline: pd.DataFrame) -> None:
                 "denominator_type": "20b baseline interpretable",
             }
         )
-    path = common.BLOCKA_TABLES_DIR / "01_table1_overall.csv"
+    path = common.BLOCKA_TABLES_DIR / "01_serological_profile" / "01_table1_overall.csv"
     old = pd.read_csv(path) if path.exists() else pd.DataFrame()
     if "section" in old:
         old = old[old.section.ne("Serologic characteristics")]
@@ -979,6 +981,11 @@ def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
     args = parse_args(argv)
     common.ensure_output_dirs()
+    for directory in (
+        common.BLOCKA_TABLES_DIR / "01_serological_profile",
+        common.BLOCKA_QC_DIR / "01_serological_profile",
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
     all_spine, clinical_spine, labs, baseline = (
         pd.read_parquet(args.all_spine),
         pd.read_parquet(args.spine),
@@ -1091,7 +1098,7 @@ def main(argv: list[str] | None = None) -> None:
         ]
     )
     crosswalk_qc.to_csv(
-        common.BLOCKA_QC_DIR / "01_labs_patient_id_crosswalk_qc.csv", index=False
+        common.BLOCKA_QC_DIR / "01_serological_profile" / "01_labs_patient_id_crosswalk_qc.csv", index=False
     )
 
     # Episode metadata belongs to the authoritative spine.  Refuse collisions
@@ -1254,10 +1261,10 @@ def main(argv: list[str] | None = None) -> None:
         if conflict_df["_lab_record_id"].duplicated().any():
             raise AssertionError("Conflict QC contains duplicate _lab_record_id")
     _detail(unmatched_df, "unmatched_episode", all_spine).to_csv(
-        common.BLOCKA_QC_DIR / "01_labs_unmatched_records.csv", index=False
+        common.BLOCKA_QC_DIR / "01_serological_profile" / "01_labs_unmatched_records.csv", index=False
     )
     _detail(ambiguous_df, "ambiguous_episode_match", all_spine).to_csv(
-        common.BLOCKA_QC_DIR / "01_labs_ambiguous_episode_matches.csv", index=False
+        common.BLOCKA_QC_DIR / "01_serological_profile" / "01_labs_ambiguous_episode_matches.csv", index=False
     )
     nonclinical = usable_all.loc[~_bool(usable_all["clinical_visit"])].copy()
     nonclinical_columns = [
@@ -1282,15 +1289,15 @@ def main(argv: list[str] | None = None) -> None:
         "source_protocol",
     ]
     nonclinical.reindex(columns=nonclinical_columns).to_csv(
-        common.BLOCKA_QC_DIR / "01_labs_matched_nonclinical_episode_records.csv",
+        common.BLOCKA_QC_DIR / "01_serological_profile" / "01_labs_matched_nonclinical_episode_records.csv",
         index=False,
     )
     conflict_df.to_csv(
-        common.BLOCKA_QC_DIR / "01_labs_episode_conflicts.csv", index=False
+        common.BLOCKA_QC_DIR / "01_serological_profile" / "01_labs_episode_conflicts.csv", index=False
     )
     invalid_tokens_qc = build_invalid_result_tokens_qc(labs.loc[mapped])
     invalid_tokens_qc.to_csv(
-        common.BLOCKA_QC_DIR / "01_labs_invalid_result_tokens_qc.csv", index=False
+        common.BLOCKA_QC_DIR / "01_serological_profile" / "01_labs_invalid_result_tokens_qc.csv", index=False
     )
     unit_frame = labs[mapped].copy()
     unit_frame["unit"] = _column(unit_frame, "unit").map(_normal_unit)
@@ -1304,14 +1311,14 @@ def main(argv: list[str] | None = None) -> None:
         )
         .reset_index()
     )
-    inventory.to_csv(common.BLOCKA_QC_DIR / "01_labs_unit_inventory.csv", index=False)
+    inventory.to_csv(common.BLOCKA_QC_DIR / "01_serological_profile" / "01_labs_unit_inventory.csv", index=False)
     unit_conflicts = (
         selected_all[selected_all.unit_conflict]
         if not selected_all.empty
         else selected_all
     )
     unit_conflicts.to_csv(
-        common.BLOCKA_QC_DIR / "01_labs_unit_conflicts.csv", index=False
+        common.BLOCKA_QC_DIR / "01_serological_profile" / "01_labs_unit_conflicts.csv", index=False
     )
     harmonization_qc = (
         selected_all.groupby(
@@ -1356,7 +1363,7 @@ def main(argv: list[str] | None = None) -> None:
     ).any():
         raise AssertionError("Unit harmonization collisions")
     harmonization_qc.to_csv(
-        common.BLOCKA_QC_DIR / "01_labs_unit_harmonization_qc.csv", index=False
+        common.BLOCKA_QC_DIR / "01_serological_profile" / "01_labs_unit_harmonization_qc.csv", index=False
     )
 
     coverage_rows = []
@@ -1423,7 +1430,7 @@ def main(argv: list[str] | None = None) -> None:
             }
         )
     pd.DataFrame(coverage_rows).to_csv(
-        common.BLOCKA_TABLES_DIR / "01_labs_episode_coverage.csv", index=False
+        common.BLOCKA_TABLES_DIR / "01_serological_profile" / "01_labs_episode_coverage.csv", index=False
     )
     nonclinical_visit_type = _column(nonclinical, "visit_type").astype("string")
     ambiguous_visit_type = nonclinical_visit_type.str.casefold().eq("ambiguous")
@@ -1550,7 +1557,7 @@ def main(argv: list[str] | None = None) -> None:
         "future_leakage_violations": future_violations,
     }
     with open(
-        common.BLOCKA_QC_DIR / "01_labs_episode_qc.json", "w", encoding="utf-8"
+        common.BLOCKA_QC_DIR / "01_serological_profile" / "01_labs_episode_qc.json", "w", encoding="utf-8"
     ) as handle:
         json.dump(qc, handle, indent=2)
     write_table1(
