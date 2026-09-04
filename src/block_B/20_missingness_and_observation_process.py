@@ -25,11 +25,11 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import common
 
-TABLES_DIR = common.BLOCKB_TABLES_DIR
-FIGURES_DIR = common.BLOCKB_FIGURES_DIR
-QC_DIR = common.BLOCKB_QC_DIR
-LOGS_DIR = common.BLOCKB_LOGS_DIR
-INTERMEDIATE_DIR = common.INTERMEDIATE_DATA_DIR
+TABLES_DIR = common.BLOCKB_TABLES_DIR / "20_missingness_and_observation_process"
+FIGURES_DIR = common.BLOCKB_FIGURES_DIR / "20_missingness_and_observation_process"
+QC_DIR = common.BLOCKB_QC_DIR / "20_missingness_and_observation_process"
+LOGS_DIR = common.BLOCKB_LOGS_DIR / "20_missingness_and_observation_process"
+INTERMEDIATE_DIR = common.INTERMEDIATE_DATA_DIR / "20_missingness_and_observation_process"
 KEY_COLUMNS = ["patient_id", "visit_id"]
 REQUIRED_COLUMNS = ["patient_id", "visit_id", "visit_date", "visit_number", "is_observed_baseline", "time_since_observed_baseline_days", "time_since_observed_baseline_years"]
 RECOMMENDED_DESIGN_COLUMNS = ["protocol", "protocol_number", "study_protocol", "interval_name"]
@@ -55,7 +55,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 
 def setup_logging() -> logging.Logger:
-    common.ensure_output_dirs(); logger=logging.getLogger("blockB20"); logger.setLevel(logging.INFO); logger.handlers.clear()
+    common.ensure_output_dirs(); [p.mkdir(parents=True, exist_ok=True) for p in (TABLES_DIR, FIGURES_DIR, QC_DIR, LOGS_DIR, INTERMEDIATE_DIR)]; logger=logging.getLogger("blockB20"); logger.setLevel(logging.INFO); logger.handlers.clear()
     fmt=logging.Formatter("%(asctime)s %(levelname)s %(message)s")
     for h in (logging.StreamHandler(), logging.FileHandler(LOGS_DIR/"20_missingness_and_observation_process.log",mode="w")):
         h.setFormatter(fmt); logger.addHandler(h)

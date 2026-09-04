@@ -53,8 +53,8 @@ DIAGNOSTIC_COLUMNS = ["outcome_key","source_variable","availability_flag","n_inp
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--input", type=Path, default=common.INTERMEDIATE_DATA_DIR / "20_observation_process_patient_visit.parquet")
-    p.add_argument("--baseline-input", type=Path, default=common.INTERMEDIATE_DATA_DIR / "21_multidimensional_baseline_patient.parquet")
+    p.add_argument("--input", type=Path, default=common.INTERMEDIATE_DATA_DIR / "20_missingness_and_observation_process" / "20_observation_process_patient_visit.parquet")
+    p.add_argument("--baseline-input", type=Path, default=common.INTERMEDIATE_DATA_DIR / "21_multidimensional_baseline_phenotypes" / "21_multidimensional_baseline_patient.parquet")
     p.add_argument("--min-followup-days", type=int, default=180)
     p.add_argument("--min-patients", type=int, default=20)
     p.add_argument("--fatigue-outcome", choices=["auto", *FATIGUE_SPECS], default="auto")
@@ -280,7 +280,7 @@ def make_integrated_figure(standardized: pd.DataFrame, specs: Mapping[str, Mappi
 
 
 def _planned_paths() -> Dict[str, Path]:
-    return {"parquet":common.INTERMEDIATE_DATA_DIR/"25_longitudinal_modeling_patient_visit.parquet", "csv":common.INTERMEDIATE_DATA_DIR/"25_longitudinal_modeling_patient_visit.csv", "results":common.BLOCKB_TABLES_DIR/"25_longitudinal_model_results.csv", "standard":common.BLOCKB_TABLES_DIR/"25_standardized_trajectory_estimates.csv", "diagnostics":common.BLOCKB_TABLES_DIR/"25_model_support_and_diagnostics.csv", "figure":common.BLOCKB_FIGURES_DIR/"25_standardized_annual_change_forestplot.pdf", "qc":common.BLOCKB_QC_DIR/"25_longitudinal_multidomain_models_qc.json", "log":common.BLOCKB_LOGS_DIR/"25_longitudinal_multidomain_models.log"}
+    return {"parquet":common.INTERMEDIATE_DATA_DIR/"25_longitudinal_multidomain_models"/"25_longitudinal_modeling_patient_visit.parquet", "csv":common.INTERMEDIATE_DATA_DIR/"25_longitudinal_multidomain_models"/"25_longitudinal_modeling_patient_visit.csv", "results":common.BLOCKB_TABLES_DIR/"25_longitudinal_multidomain_models"/"25_longitudinal_model_results.csv", "standard":common.BLOCKB_TABLES_DIR/"25_longitudinal_multidomain_models"/"25_standardized_trajectory_estimates.csv", "diagnostics":common.BLOCKB_TABLES_DIR/"25_longitudinal_multidomain_models"/"25_model_support_and_diagnostics.csv", "figure":common.BLOCKB_FIGURES_DIR/"25_longitudinal_multidomain_models"/"25_standardized_annual_change_forestplot.pdf", "qc":common.BLOCKB_QC_DIR/"25_longitudinal_multidomain_models"/"25_longitudinal_multidomain_models_qc.json", "log":common.BLOCKB_LOGS_DIR/"25_longitudinal_multidomain_models"/"25_longitudinal_multidomain_models.log"}
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:

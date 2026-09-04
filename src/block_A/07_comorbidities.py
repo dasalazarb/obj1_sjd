@@ -55,16 +55,16 @@ RANDOM_SEED = 20260728
 SCRIPT_VERSION = "2.1.0"
 SPARSE_EXPOSURE_THRESHOLD = 10
 
-FIGURES_DIR = common.OUTPUTS_DIR / "figures" / "blockA"
-TABLES_DIR = common.OUTPUTS_DIR / "tables" / "blockA"
-QC_DIR = common.OUTPUTS_DIR / "qc" / "blockA"
-LOG_PATH = common.OUTPUTS_DIR / "logs" / "07_comorbidities.log"
+FIGURES_DIR = common.OUTPUTS_DIR / "figures" / "blockA" / "07_comorbidities"
+TABLES_DIR = common.OUTPUTS_DIR / "tables" / "blockA" / "07_comorbidities"
+QC_DIR = common.OUTPUTS_DIR / "qc" / "blockA" / "07_comorbidities"
+LOG_PATH = common.OUTPUTS_DIR / "logs" / "07_comorbidities" / "07_comorbidities.log"
 
-BASELINE_PATH = common.INTERMEDIATE_DATA_DIR / "07_comorbidities_baseline_patient.parquet"
-LONGITUDINAL_PATH = common.INTERMEDIATE_DATA_DIR / "07_comorbidities_analysis_longitudinal.parquet"
-SEVERE_PATH = common.INTERMEDIATE_DATA_DIR / "07_comorbidity_severe5_survival.parquet"
-NEW_DOMAIN_PATH = common.INTERMEDIATE_DATA_DIR / "07_comorbidity_new_domain_survival.parquet"
-DOMAIN_AUDIT_PATH = common.INTERMEDIATE_DATA_DIR / "07_comorbidity_new_domain_patient_domain.parquet"
+BASELINE_PATH = common.INTERMEDIATE_DATA_DIR / "07_comorbidities" / "07_comorbidities_baseline_patient.parquet"
+LONGITUDINAL_PATH = common.INTERMEDIATE_DATA_DIR / "07_comorbidities" / "07_comorbidities_analysis_longitudinal.parquet"
+SEVERE_PATH = common.INTERMEDIATE_DATA_DIR / "07_comorbidities" / "07_comorbidity_severe5_survival.parquet"
+NEW_DOMAIN_PATH = common.INTERMEDIATE_DATA_DIR / "07_comorbidities" / "07_comorbidity_new_domain_survival.parquet"
+DOMAIN_AUDIT_PATH = common.INTERMEDIATE_DATA_DIR / "07_comorbidities" / "07_comorbidity_new_domain_patient_domain.parquet"
 
 INTERMEDIATE_PATHS = [BASELINE_PATH, LONGITUDINAL_PATH, SEVERE_PATH, NEW_DOMAIN_PATH, DOMAIN_AUDIT_PATH]
 
