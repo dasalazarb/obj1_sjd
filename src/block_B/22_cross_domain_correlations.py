@@ -21,7 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 import common  # noqa: E402
 
-DEFAULT_INPUT = common.INTERMEDIATE_DATA_DIR / "21_multidimensional_baseline_patient.parquet"
+DEFAULT_INPUT = common.INTERMEDIATE_DATA_DIR / "21_multidimensional_baseline_phenotypes" / "21_multidimensional_baseline_patient.parquet"
 CORRELATION_VARIABLES = ["essdai_total", "esspri_total", "esspri_dryness", "esspri_fatigue",
     "esspri_pain", "sf36_pcs", "sf36_mcs", "profad_total", "mdafs_global",
     "n_extraglandular_domains_active", "n_prespecified_comorbidities", "fibromyalgia",
@@ -192,11 +192,11 @@ def make_forestplot(models, path):
 
 def main(argv=None):
     args=parse_args(argv); data=define_ssa_group(load_baseline(args.input))
-    paths=[common.BLOCKB_TABLES_DIR/n for n in ["22_cross_domain_correlations.csv","22_pcs_multivariable_model.csv","22_esspri_multivariable_model.csv","22_esspri_domain_associations.csv","22_ssa_stratified_associations.csv","22_analysis_denominators.csv"]]
-    paths += [common.BLOCKB_FIGURES_DIR/n for n in ["22_cross_domain_correlation_heatmap.pdf","22_adjusted_associations_forestplot.pdf"]]
+    paths=[common.BLOCKB_TABLES_DIR/"22_cross_domain_correlations"/n for n in ["22_cross_domain_correlations.csv","22_pcs_multivariable_model.csv","22_esspri_multivariable_model.csv","22_esspri_domain_associations.csv","22_ssa_stratified_associations.csv","22_analysis_denominators.csv"]]
+    paths += [common.BLOCKB_FIGURES_DIR/"22_cross_domain_correlations"/n for n in ["22_cross_domain_correlation_heatmap.pdf","22_adjusted_associations_forestplot.pdf"]]
     if not args.overwrite and any(p.exists() for p in paths): raise FileExistsError("Output exists; use --overwrite")
-    for p in (common.BLOCKB_TABLES_DIR,common.BLOCKB_FIGURES_DIR,common.BLOCKB_QC_DIR,common.BLOCKB_LOGS_DIR): p.mkdir(parents=True,exist_ok=True)
-    logging.basicConfig(filename=common.BLOCKB_LOGS_DIR/"22_cross_domain_correlations.log",level=logging.INFO,filemode="w",format="%(asctime)s | %(message)s")
+    for p in [x.parent for x in paths]+[common.BLOCKB_QC_DIR/"22_cross_domain_correlations",common.BLOCKB_LOGS_DIR/"22_cross_domain_correlations"]: p.mkdir(parents=True,exist_ok=True)
+    logging.basicConfig(filename=common.BLOCKB_LOGS_DIR/"22_cross_domain_correlations"/"22_cross_domain_correlations.log",level=logging.INFO,filemode="w",format="%(asctime)s | %(message)s")
     counts=data.ssa_group.value_counts(); logging.info("Input loaded: %d patients; SSA groups %s",len(data),counts.to_dict())
     correlations=pd.concat([build_correlations(data,args.min_pair_n,"Overall")]+[build_correlations(data.loc[data.ssa_group.eq(g)],args.min_pair_n,g) for g in ["SSA_positive","SSA_negative"]],ignore_index=True)
     pcs_predictors=["essdai_total","esspri_total","profad_total","fibromyalgia","depression","age_baseline","protocol_group","time_since_diagnosis_years"]
@@ -235,7 +235,7 @@ def main(argv=None):
     correlations.to_csv(paths[0],index=False); pcs.to_csv(paths[1],index=False); ess.to_csv(paths[2],index=False); domains.to_csv(paths[3],index=False); strat.to_csv(paths[4],index=False); pd.DataFrame(den).to_csv(paths[5],index=False)
     make_correlation_heatmap(correlations,paths[6]); make_forestplot(all_models,paths[7])
     qc={"input_path":str(args.input),"n_input_patients":len(data),"n_unique_patients":data.patient_id.nunique(),"n_ssa_positive":int(counts.get("SSA_positive",0)),"n_ssa_negative":int(counts.get("SSA_negative",0)),"n_ssa_unknown":int(counts.get("SSA_unknown",0)),"n_correlations_requested":len(correlations),"n_correlations_estimated":int(correlations.status.eq("estimated").sum()),"n_primary_models_requested":2,"n_primary_models_fitted":int(pcs.model_status.eq("fitted").any())+int(ess.model_status.eq("fitted").any()),"n_domain_models_fitted":int(domains.loc[domains.model_status.eq("fitted"),"formula"].nunique()),"n_stratified_models_fitted":int(strat.loc[strat.model_status.eq("fitted"),["model_name","analysis_group"]].drop_duplicates().shape[0]),"pcs_model_n":int(pd.to_numeric(pcs.n_complete,errors="coerce").max() or 0),"esspri_model_n":int(pd.to_numeric(ess.n_complete,errors="coerce").max() or 0),"pcs_maximum_vif":None,"esspri_maximum_vif":None,"warnings":[]}
-    with open(common.BLOCKB_QC_DIR/"22_cross_domain_qc.json","w") as f: json.dump(qc,f,indent=2)
+    with open(common.BLOCKB_QC_DIR/"22_cross_domain_correlations"/"22_cross_domain_qc.json","w") as f: json.dump(qc,f,indent=2)
     logging.info("Correlations estimated: %d; models fitted: %d; outputs written",qc["n_correlations_estimated"],int(all_models.model_status.eq("fitted").sum()))
 
 if __name__ == "__main__": main()

@@ -8,18 +8,16 @@ plus patient-level provenance and QC files.
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import logging
+import subprocess
 import sys
 from pathlib import Path
 from typing import Iterable
 
 import numpy as np
 import pandas as pd
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
 
 # Allow execution as `python src/block_A/01_table1_baseline.py`.
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -30,6 +28,32 @@ import common  # noqa: E402
 import config  # noqa: E402
 
 LOG = logging.getLogger(__name__)
+plt = None
+
+
+def load_pyplot():
+    """Load the optional plotting backend without blocking table generation."""
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if probe.returncode:
+        detail = probe.stderr.strip().splitlines()
+        LOG.warning(
+            "Matplotlib is unavailable; table, QC, and data outputs will be "
+            "generated, but follow-up figures will be skipped: %s",
+            detail[-1] if detail else f"exit status {probe.returncode}",
+        )
+        return None
+    matplotlib = importlib.import_module("matplotlib")
+    matplotlib.use("Agg")
+    return importlib.import_module("matplotlib.pyplot")
 
 PATIENT_ID_COL = "ids__patient_record_number"
 FALLBACK_PATIENT_ID_COL = "ids__subject_number"
@@ -106,12 +130,13 @@ def parse_args() -> argparse.Namespace:
         default=common.SOURCE_EPISODE_SPINE,
         help="Authoritative SjD clinical episode spine (CSV/Parquet/XLSX).",
     )
-    parser.add_argument("--outdir", type=Path, default=common.BLOCKA_TABLES_DIR, help="Output directory for Block A tables.")
-    parser.add_argument("--figures-dir", type=Path, default=common.OUTPUTS_DIR / "figures" / "blockA")
+    parser.add_argument("--outdir", type=Path, default=common.BLOCKA_TABLES_DIR / "01_table1_baseline", help="Output directory for Block A tables.")
+    parser.add_argument("--qc-dir", type=Path, default=common.BLOCKA_QC_DIR / "01_table1_baseline", help="Output directory for Block A quality-control artifacts.")
+    parser.add_argument("--figures-dir", type=Path, default=common.OUTPUTS_DIR / "figures" / "blockA" / "01_table1_baseline")
     parser.add_argument(
         "--intermediate-dir",
         type=Path,
-        default=common.INTERMEDIATE_DATA_DIR / "block_A",
+        default=common.INTERMEDIATE_DATA_DIR / "block_A" / "01_table1_baseline",
         help="Directory for patient-level intermediate files used to manually audit Table 1 metrics.",
     )
     parser.add_argument("--eligibility", type=Path, default=common.BLOCKA_TABLES_DIR / "00_analytic_cohort_ids.csv", help="Optional prior eligibility patient ID file.")
@@ -812,10 +837,12 @@ def plot_swimmer_followup(episodes: pd.DataFrame, metrics: pd.DataFrame, path: P
 
 
 def main() -> None:
+    global plt
     logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
     args = parse_args()
     common.ensure_output_dirs()
     args.outdir.mkdir(parents=True, exist_ok=True)
+    args.qc_dir.mkdir(parents=True, exist_ok=True)
     args.intermediate_dir.mkdir(parents=True, exist_ok=True)
     args.figures_dir.mkdir(parents=True, exist_ok=True)
 
@@ -885,15 +912,15 @@ def main() -> None:
 
     csv_path = args.outdir / "01_table1_overall.csv"
     xlsx_path = args.outdir / "01_table1_overall.xlsx"
-    qc_path = args.outdir / "01_table1_overall_qc.csv"
-    audit_path = args.outdir / "01_table1_baseline_patient_audit.csv"
+    qc_path = args.qc_dir / "01_table1_overall_qc.csv"
+    audit_path = args.qc_dir / "01_table1_baseline_patient_audit.csv"
     followup_paths = {
         "summary": args.outdir / "01_followup_summary_by_protocol.csv",
         "long": args.outdir / "01_followup_summary_long.csv",
         "metrics": args.outdir / "01_patient_followup_metrics.csv",
         "retention": args.outdir / "01_retention_by_time.csv",
         "gaps": args.outdir / "01_intervisit_gaps.csv",
-        "qc": args.outdir / "01_followup_qc.csv",
+        "qc": args.qc_dir / "01_followup_qc.csv",
         "excel": args.outdir / "01_followup_summary.xlsx",
     }
     followup_audit_path = args.intermediate_dir / "01_followup_episode_audit.csv"
@@ -918,11 +945,13 @@ def main() -> None:
         gaps.to_excel(writer, sheet_name="intervisit_gaps", index=False)
         followup_qc.to_excel(writer, sheet_name="qc", index=False)
 
-    plot_followup_distribution(cohort_metrics, args.figures_dir / "01_followup_distribution.png")
-    plot_retention(retention, args.figures_dir / "01_retention_curve.png")
-    plot_visits_per_patient(metrics, args.figures_dir / "01_visits_per_patient.png")
-    plot_followup_vs_visits(metrics, args.figures_dir / "01_followup_vs_visits.png")
-    plot_swimmer_followup(episodes, metrics, args.figures_dir / "01_swimmer_followup.png")
+    plt = load_pyplot()
+    if plt is not None:
+        plot_followup_distribution(cohort_metrics, args.figures_dir / "01_followup_distribution.png")
+        plot_retention(retention, args.figures_dir / "01_retention_curve.png")
+        plot_visits_per_patient(metrics, args.figures_dir / "01_visits_per_patient.png")
+        plot_followup_vs_visits(metrics, args.figures_dir / "01_followup_vs_visits.png")
+        plot_swimmer_followup(episodes, metrics, args.figures_dir / "01_swimmer_followup.png")
 
     LOG.info("Wrote %s", csv_path.relative_to(common.PROJECT_ROOT) if csv_path.is_relative_to(common.PROJECT_ROOT) else csv_path)
     LOG.info("Wrote %s", xlsx_path.relative_to(common.PROJECT_ROOT) if xlsx_path.is_relative_to(common.PROJECT_ROOT) else xlsx_path)

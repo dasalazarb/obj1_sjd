@@ -33,10 +33,10 @@ ESSPRI_COMPONENTS = {
     "esspri_questionnaire__fatigue": "esspri_fatigue",
     "esspri_questionnaire__pain": "esspri_pain",
 }
-TABLE_DIR = common.OUTPUTS_DIR / "tables" / "blockA"
-FIGURE_DIR = common.OUTPUTS_DIR / "figures" / "blockA"
-QC_DIR = common.BLOCKA_QC_DIR
-INTERMEDIATE_DIR = common.INTERMEDIATE_DATA_DIR
+TABLE_DIR = common.BLOCKA_TABLES_DIR / "01_essdai_esspri"
+FIGURE_DIR = common.OUTPUTS_DIR / "figures" / "blockA" / "01_essdai_esspri"
+QC_DIR = common.BLOCKA_QC_DIR / "01_essdai_esspri"
+INTERMEDIATE_DIR = common.INTERMEDIATE_DATA_DIR / "01_essdai_esspri"
 
 
 def ensure_dirs():

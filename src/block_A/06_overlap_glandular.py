@@ -534,11 +534,11 @@ def main() -> None:
         "--input", type=Path, default=common.CLINICAL_VISIT_SPINE_PARQUET
     )
     parser.add_argument(
-        "--intermediate-dir", type=Path, default=common.BLOCKA_INTERMEDIATE_DATA_DIR
+        "--intermediate-dir", type=Path, default=common.BLOCKA_INTERMEDIATE_DATA_DIR / "06_overlap_glandular"
     )
-    parser.add_argument("--table-dir", type=Path, default=common.BLOCKA_TABLES_DIR)
+    parser.add_argument("--table-dir", type=Path, default=common.BLOCKA_TABLES_DIR / "06_overlap_glandular")
     parser.add_argument(
-        "--figure-dir", type=Path, default=common.OUTPUTS_DIR / "figures" / "blockA"
+        "--figure-dir", type=Path, default=common.OUTPUTS_DIR / "figures" / "blockA" / "06_overlap_glandular"
     )
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()

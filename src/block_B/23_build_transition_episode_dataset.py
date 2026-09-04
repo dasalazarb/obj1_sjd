@@ -37,9 +37,9 @@ OBSERVATION_FLAGS = ["avail_essdai", "avail_esspri_complete", "avail_sf36_comple
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, default=common.INTEGRATED_LONGITUDINAL_PARQUET)
-    parser.add_argument("--observation-input", type=Path, default=common.INTERMEDIATE_DATA_DIR / "20_observation_process_patient_visit.parquet")
-    parser.add_argument("--baseline-input", type=Path, default=common.INTERMEDIATE_DATA_DIR / "21_multidimensional_baseline_patient.parquet")
-    parser.add_argument("--legacy-interval-input", type=Path, default=common.INTERMEDIATE_DATA_DIR / "10_pop_transition_intervals.parquet")
+    parser.add_argument("--observation-input", type=Path, default=common.INTERMEDIATE_DATA_DIR / "20_missingness_and_observation_process" / "20_observation_process_patient_visit.parquet")
+    parser.add_argument("--baseline-input", type=Path, default=common.INTERMEDIATE_DATA_DIR / "21_multidimensional_baseline_phenotypes" / "21_multidimensional_baseline_patient.parquet")
+    parser.add_argument("--legacy-interval-input", type=Path, default=common.POP_TRANSITION_INTERVALS_PARQUET)
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--overwrite", action="store_true", default=True)
     group.add_argument("--no-overwrite", dest="overwrite", action="store_false")
@@ -295,10 +295,11 @@ def reconcile_legacy_intervals(episodes: pd.DataFrame, path: Path) -> Tuple[Opti
 
 def main(argv=None):
     args = parse_args(argv)
-    tables = common.BLOCKB_TABLES_DIR; qc_dir = common.BLOCKB_QC_DIR
-    outputs = [common.TRANSITION_EPISODE_PARQUET, common.TRANSITION_EPISODE_CSV, tables / "23_transition_episode_summary.csv", tables / "23_transition_pair_summary.csv", tables / "23_domain_change_summary.csv", tables / "23_episode_analysis_eligibility.csv", tables / "23_transition_episode_dictionary.csv", qc_dir / "23_transition_episode_qc.json", common.BLOCKB_LOGS_DIR / "23_build_transition_episode_dataset.log"]
+    tables = common.BLOCKB_TABLES_DIR / "23_build_transition_episode_dataset"; qc_dir = common.BLOCKB_QC_DIR / "23_build_transition_episode_dataset"
+    outputs = [common.TRANSITION_EPISODE_PARQUET, common.TRANSITION_EPISODE_CSV, tables / "23_transition_episode_summary.csv", tables / "23_transition_pair_summary.csv", tables / "23_domain_change_summary.csv", tables / "23_episode_analysis_eligibility.csv", tables / "23_transition_episode_dictionary.csv", qc_dir / "23_transition_episode_qc.json", common.BLOCKB_LOGS_DIR / "23_build_transition_episode_dataset" / "23_build_transition_episode_dataset.log"]
     if not args.overwrite and any(p.exists() for p in outputs): raise FileExistsError("A planned output exists; use --overwrite")
     common.ensure_output_dirs()
+    for path in outputs: path.parent.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", handlers=[logging.FileHandler(outputs[-1], mode="w"), logging.StreamHandler()])
     raw, observation, baseline = load_inputs(args.input, args.observation_input, args.baseline_input)
     visits = validate_visit_data(raw); warnings = []
