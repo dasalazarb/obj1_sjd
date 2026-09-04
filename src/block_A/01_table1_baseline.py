@@ -106,12 +106,13 @@ def parse_args() -> argparse.Namespace:
         default=common.SOURCE_EPISODE_SPINE,
         help="Authoritative SjD clinical episode spine (CSV/Parquet/XLSX).",
     )
-    parser.add_argument("--outdir", type=Path, default=common.BLOCKA_TABLES_DIR, help="Output directory for Block A tables.")
-    parser.add_argument("--figures-dir", type=Path, default=common.OUTPUTS_DIR / "figures" / "blockA")
+    parser.add_argument("--outdir", type=Path, default=common.BLOCKA_TABLES_DIR / "01_table1_baseline", help="Output directory for Block A tables.")
+    parser.add_argument("--qc-dir", type=Path, default=common.BLOCKA_QC_DIR / "01_table1_baseline", help="Output directory for Block A quality-control artifacts.")
+    parser.add_argument("--figures-dir", type=Path, default=common.OUTPUTS_DIR / "figures" / "blockA" / "01_table1_baseline")
     parser.add_argument(
         "--intermediate-dir",
         type=Path,
-        default=common.INTERMEDIATE_DATA_DIR / "block_A",
+        default=common.INTERMEDIATE_DATA_DIR / "block_A" / "01_table1_baseline",
         help="Directory for patient-level intermediate files used to manually audit Table 1 metrics.",
     )
     parser.add_argument("--eligibility", type=Path, default=common.BLOCKA_TABLES_DIR / "00_analytic_cohort_ids.csv", help="Optional prior eligibility patient ID file.")
@@ -816,6 +817,7 @@ def main() -> None:
     args = parse_args()
     common.ensure_output_dirs()
     args.outdir.mkdir(parents=True, exist_ok=True)
+    args.qc_dir.mkdir(parents=True, exist_ok=True)
     args.intermediate_dir.mkdir(parents=True, exist_ok=True)
     args.figures_dir.mkdir(parents=True, exist_ok=True)
 
@@ -885,15 +887,15 @@ def main() -> None:
 
     csv_path = args.outdir / "01_table1_overall.csv"
     xlsx_path = args.outdir / "01_table1_overall.xlsx"
-    qc_path = args.outdir / "01_table1_overall_qc.csv"
-    audit_path = args.outdir / "01_table1_baseline_patient_audit.csv"
+    qc_path = args.qc_dir / "01_table1_overall_qc.csv"
+    audit_path = args.qc_dir / "01_table1_baseline_patient_audit.csv"
     followup_paths = {
         "summary": args.outdir / "01_followup_summary_by_protocol.csv",
         "long": args.outdir / "01_followup_summary_long.csv",
         "metrics": args.outdir / "01_patient_followup_metrics.csv",
         "retention": args.outdir / "01_retention_by_time.csv",
         "gaps": args.outdir / "01_intervisit_gaps.csv",
-        "qc": args.outdir / "01_followup_qc.csv",
+        "qc": args.qc_dir / "01_followup_qc.csv",
         "excel": args.outdir / "01_followup_summary.xlsx",
     }
     followup_audit_path = args.intermediate_dir / "01_followup_episode_audit.csv"

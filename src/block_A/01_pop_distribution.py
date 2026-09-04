@@ -131,10 +131,10 @@ def _common_path(name: str, fallback: Path) -> Path:
 OUTPUTS_DIR = _common_path("OUTPUTS_DIR", PROJECT_ROOT / "outputs")
 TABLES_DIR = _common_path("TABLES_DIR", OUTPUTS_DIR / "tables")
 FIGURES_DIR = _common_path("FIGURES_DIR", OUTPUTS_DIR / "figures")
-BLOCKA_TABLES_DIR = _common_path("BLOCKA_TABLES_DIR", TABLES_DIR / "blockA")
-BLOCKA_FIGURES_DIR = _common_path("BLOCKA_FIGURES_DIR", FIGURES_DIR / "blockA")
-BLOCKA_QC_DIR = OUTPUTS_DIR / "qc" / "blockA"
-INTERMEDIATE_DIR = _common_path("INTERMEDIATE_DATA_DIR", PROJECT_ROOT / "data" / "intermediate")
+BLOCKA_TABLES_DIR = _common_path("BLOCKA_TABLES_DIR", TABLES_DIR / "blockA") / "01_pop_distribution"
+BLOCKA_FIGURES_DIR = _common_path("BLOCKA_FIGURES_DIR", FIGURES_DIR / "blockA") / "01_pop_distribution"
+BLOCKA_QC_DIR = OUTPUTS_DIR / "qc" / "blockA" / "01_pop_distribution"
+INTERMEDIATE_DIR = _common_path("INTERMEDIATE_DATA_DIR", PROJECT_ROOT / "data" / "intermediate") / "01_pop_distribution"
 DISPLAY = {"Unclassifiable": "Unclassified", "Pop1": "Pop1", "Pop2": "Pop2", "Pop3": "Pop3", "Overall": "Overall"}
 DEFAULT_CODEBOOK = Path(getattr(common, "DEFAULT_CODEBOOK", PROJECT_ROOT / "metadata" / "Consolidated_Codebook_all_columns.xlsx"))
 

@@ -34,11 +34,11 @@ from src.derivations.pro_scoring import (  # noqa: E402
 )
 
 LOG = logging.getLogger("pros_longitudinal")
-OUT_STEM = common.INTERMEDIATE_DATA_DIR / "09_pros_episode_level"
-TABLES = common.BLOCKA_TABLES_DIR
-QC = common.BLOCKA_QC_DIR
-FIGURES = common.OUTPUTS_DIR / "figures" / "blockA"
-OVERLAP_DEFAULT = common.INTERMEDIATE_DATA_DIR / "06_overlap_episode_level.parquet"
+OUT_STEM = common.INTERMEDIATE_DATA_DIR / "09_pros_longitudinal" / "09_pros_episode_level"
+TABLES = common.BLOCKA_TABLES_DIR / "09_pros_longitudinal"
+QC = common.BLOCKA_QC_DIR / "09_pros_longitudinal"
+FIGURES = common.OUTPUTS_DIR / "figures" / "blockA" / "09_pros_longitudinal"
+OVERLAP_DEFAULT = common.OVERLAP_LONGITUDINAL_PARQUET
 AGE_CANDIDATES = ("age_baseline", "ids__age_at_visit", "age_at_visit", "demographics__age_at_visit")
 SEX_CANDIDATES = ("sex", "ids__sex", "demographics__sex", "gender", "ids__gender")
 POP_LEVELS = ("Pop1", "Pop2", "Pop3")

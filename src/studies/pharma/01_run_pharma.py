@@ -407,7 +407,7 @@ def _save(frame: pd.DataFrame, path: Path, generated: list[str]) -> None:
 
 def run(args: argparse.Namespace) -> dict:
     config=load_config(args.config); seed=args.seed if args.seed is not None else config["random_seed"]
-    np.random.seed(seed); dirs=create_study_dirs("pharma")
+    np.random.seed(seed); dirs=create_study_dirs("pharma/01_run_pharma")
     logpath=dirs["logs"]/"01_run_pharma.log"; logging.basicConfig(filename=logpath,level=logging.INFO,format="%(asctime)s %(levelname)s %(message)s",force=True)
     logging.info("Pharma run started (mode=%s; no patient-level values are logged)",args.mode)
     master=load_parquet(args.integrated); intervals=load_parquet(args.transitions)

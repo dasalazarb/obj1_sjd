@@ -41,7 +41,7 @@ INTERPRETATION = "Baseline profile associated with an observed transition; not a
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--input", type=Path, default=getattr(common, "TRANSITION_EPISODE_PARQUET", common.INTERMEDIATE_DATA_DIR / "23_transition_episode_dataset.parquet"))
+    p.add_argument("--input", type=Path, default=getattr(common, "TRANSITION_EPISODE_PARQUET", common.INTERMEDIATE_DATA_DIR / "23_build_transition_episode_dataset" / "23_transition_episode_dataset.parquet"))
     p.add_argument("--min-transition-n", type=int, default=10)
     p.add_argument("--min-model-events", type=int, default=20)
     g = p.add_mutually_exclusive_group(); g.add_argument("--overwrite", action="store_true", default=True)
@@ -319,7 +319,7 @@ def make_figures(domain: pd.DataFrame, pro: pd.DataFrame, comparison: pd.DataFra
 
 def _planned_outputs() -> List[Path]:
     names=["24_transition_mechanism_summary.csv","24_domain_drivers_by_transition.csv","24_pro_changes_by_transition.csv","24_dominant_symptom_component.csv","24_serology_profiles_by_transition.csv","24_patient_profiles_by_transition.csv","24_transition_profile_models.csv","24_first_to_last_transition_summary.csv","24_consecutive_vs_first_last.csv"]
-    return [common.INTERMEDIATE_DATA_DIR/f"24_transition_mechanism_episode.{x}" for x in ("parquet","csv")]+[common.INTERMEDIATE_DATA_DIR/f"24_first_to_last_transition_patient.{x}" for x in ("parquet","csv")]+[common.BLOCKB_TABLES_DIR/x for x in names]+[common.BLOCKB_FIGURES_DIR/x for x in ("24_domain_drivers_heatmap.pdf","24_pro_changes_by_transition.pdf","24_consecutive_vs_first_last_transition_matrices.pdf")]+[common.BLOCKB_QC_DIR/"24_transition_mechanisms_qc.json",common.BLOCKB_LOGS_DIR/"24_transition_mechanisms.log"]
+    return [common.INTERMEDIATE_DATA_DIR/"24_transition_mechanisms"/f"24_transition_mechanism_episode.{x}" for x in ("parquet","csv")]+[common.INTERMEDIATE_DATA_DIR/"24_transition_mechanisms"/f"24_first_to_last_transition_patient.{x}" for x in ("parquet","csv")]+[common.BLOCKB_TABLES_DIR/"24_transition_mechanisms"/x for x in names]+[common.BLOCKB_FIGURES_DIR/"24_transition_mechanisms"/x for x in ("24_domain_drivers_heatmap.pdf","24_pro_changes_by_transition.pdf","24_consecutive_vs_first_last_transition_matrices.pdf")]+[common.BLOCKB_QC_DIR/"24_transition_mechanisms"/"24_transition_mechanisms_qc.json",common.BLOCKB_LOGS_DIR/"24_transition_mechanisms"/"24_transition_mechanisms.log"]
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
@@ -336,17 +336,17 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     if len(mechanism)!=len(episodes): raise ValueError("Intermediate mechanism output changed input episode count")
     summary=episodes.groupby(["transition_family","from_pop","to_pop"],dropna=False).agg(n_episodes=("episode_id","size"),n_unique_patients=("patient_id","nunique"),median_interval_days=("interval_days","median")).reset_index()
     for p in {x.parent for x in planned}: p.mkdir(parents=True,exist_ok=True)
-    mechanism.to_parquet(common.INTERMEDIATE_DATA_DIR/"24_transition_mechanism_episode.parquet",index=False); mechanism.to_csv(common.INTERMEDIATE_DATA_DIR/"24_transition_mechanism_episode.csv",index=False)
-    first_last.to_parquet(common.INTERMEDIATE_DATA_DIR/"24_first_to_last_transition_patient.parquet",index=False); first_last.to_csv(common.INTERMEDIATE_DATA_DIR/"24_first_to_last_transition_patient.csv",index=False)
+    mechanism.to_parquet(common.INTERMEDIATE_DATA_DIR/"24_transition_mechanisms"/"24_transition_mechanism_episode.parquet",index=False); mechanism.to_csv(common.INTERMEDIATE_DATA_DIR/"24_transition_mechanisms"/"24_transition_mechanism_episode.csv",index=False)
+    first_last.to_parquet(common.INTERMEDIATE_DATA_DIR/"24_transition_mechanisms"/"24_first_to_last_transition_patient.parquet",index=False); first_last.to_csv(common.INTERMEDIATE_DATA_DIR/"24_transition_mechanisms"/"24_first_to_last_transition_patient.csv",index=False)
     tables={"transition_mechanism_summary":summary,"domain_drivers_by_transition":domain,"pro_changes_by_transition":pro,"dominant_symptom_component":dominant,"serology_profiles_by_transition":serology,"patient_profiles_by_transition":profiles,"transition_profile_models":models,"first_to_last_transition_summary":flsummary,"consecutive_vs_first_last":comparison}
-    for name,frame in tables.items(): frame.to_csv(common.BLOCKB_TABLES_DIR/f"24_{name}.csv",index=False)
-    make_figures(domain,pro,comparison,common.BLOCKB_FIGURES_DIR)
+    for name,frame in tables.items(): frame.to_csv(common.BLOCKB_TABLES_DIR/"24_transition_mechanisms"/f"24_{name}.csv",index=False)
+    make_figures(domain,pro,comparison,common.BLOCKB_FIGURES_DIR/"24_transition_mechanisms")
     longitudinal={"from_anti_ro_pos","to_anti_ro_pos","from_low_c4","to_low_c4"}.issubset(episodes)
     qc={"input_path":str(args.input),"n_input_episodes":len(episodes),"n_unique_patients":episodes.patient_id.nunique(),"n_evaluable_pop_episodes":int(episodes.transition_family.ne("unevaluable").sum()),"n_unevaluable_pop_episodes":int(episodes.transition_family.eq("unevaluable").sum()),"n_changed_pop_episodes":int(episodes.event_any_pop_change.sum()),
         **{f"n_{f}":int(episodes.transition_family.eq(f).sum()) for f in ("to_pop1","from_pop1","pop2_to_pop3","pop3_to_pop2")},"n_domain_evaluable_episodes":int(episodes.candidate_driver_class.ne("not_evaluable").sum()),"n_pro_evaluable_episodes":int(episodes[[c for c in DELTAS if c in episodes]].notna().any(axis=1).sum()) if any(c in episodes for c in DELTAS) else 0,
         "n_first_to_last_patients":len(first_last),"n_first_to_last_evaluable":int(first_last.first_to_last_evaluable.sum()),"longitudinal_serology_change_status":"available_visit_aligned" if longitudinal else "unavailable_not_visit_aligned","models_requested":not args.skip_models,"n_models_fitted":int(models.model_status.astype(str).str.startswith("fitted").groupby(models.model_name).any().sum()),"n_models_skipped":int((~models.model_status.astype(str).str.startswith("fitted")).groupby(models.model_name).all().sum()),"missing_optional_columns":missing,"warnings":warnings}
-    (common.BLOCKB_QC_DIR/"24_transition_mechanisms_qc.json").write_text(json.dumps(qc,indent=2,default=str)+"\n")
+    (common.BLOCKB_QC_DIR/"24_transition_mechanisms"/"24_transition_mechanisms_qc.json").write_text(json.dumps(qc,indent=2,default=str)+"\n")
     log=[f"Input loaded: {args.input}",f"Episodes: {len(episodes)}; patients: {episodes.patient_id.nunique()}",f"Transition families: {episodes.transition_family.value_counts().to_dict()}","Domain and PRO analyses completed",f"First-to-last patients: {len(first_last)}",f"Model status: {models.model_status.value_counts().to_dict()}",f"Longitudinal serology: {qc['longitudinal_serology_change_status']}",*warnings,"Outputs written"]
-    (common.BLOCKB_LOGS_DIR/"24_transition_mechanisms.log").write_text("\n".join(log)+"\n")
+    (common.BLOCKB_LOGS_DIR/"24_transition_mechanisms"/"24_transition_mechanisms.log").write_text("\n".join(log)+"\n")
 
 if __name__ == "__main__": main()

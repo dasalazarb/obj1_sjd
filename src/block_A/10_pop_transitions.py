@@ -16,13 +16,13 @@ import common  # noqa:E402
 POP_ORDER=["Pop1","Pop2","Pop3","Unclassifiable"]
 DISPLAY={"Unclassifiable":"Unclassified","Pop1":"Pop1","Pop2":"Pop2","Pop3":"Pop3"}
 COLORS={"Pop1":"#d95f02","Pop2":"#7570b3","Pop3":"#1b9e77","Unclassifiable":"#9e9e9e"}
-INTERMEDIATE_DIR=Path(getattr(common,'INTERMEDIATE_DATA_DIR',PROJECT_ROOT/'data'/'intermediate'))
+INTERMEDIATE_DIR=Path(getattr(common,'INTERMEDIATE_DATA_DIR',PROJECT_ROOT/'data'/'intermediate'))/'10_pop_transitions'
 MASTER=common.POP_LONGITUDINAL_PARQUET
 INTERVALS=common.POP_TRANSITION_INTERVALS_PARQUET
 OUTPUTS_DIR=Path(getattr(common,'OUTPUTS_DIR',PROJECT_ROOT/'outputs'))
-TABLES_DIR=Path(getattr(common,'BLOCKA_TABLES_DIR',OUTPUTS_DIR/'tables'/'blockA'))
-FIGURES_DIR=Path(getattr(common,'BLOCKA_FIGURES_DIR',OUTPUTS_DIR/'figures'/'blockA'))
-QC_DIR=OUTPUTS_DIR/'qc'/'blockA'
+TABLES_DIR=Path(getattr(common,'BLOCKA_TABLES_DIR',OUTPUTS_DIR/'tables'/'blockA'))/'10_pop_transitions'
+FIGURES_DIR=Path(getattr(common,'BLOCKA_FIGURES_DIR',OUTPUTS_DIR/'figures'/'blockA'))/'10_pop_transitions'
+QC_DIR=OUTPUTS_DIR/'qc'/'blockA'/'10_pop_transitions'
 MODEL_STATES=["Pop1","Pop2","Pop3"]
 SPARSE_THRESHOLD=5
 REQUIRED_COLUMNS={
