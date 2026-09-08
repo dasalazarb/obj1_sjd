@@ -1053,6 +1053,22 @@ def main(argv: list[str] | None = None) -> None:
     eligible = mapped & valid_result & matched & ~ambiguous
     usable_all = labs[eligible].copy()
     usable_all["clinical_episode_id"] = usable_all.matched_clinical_episode_id
+
+    # BTRIS was matched against the broader eda_sjd spine.  Patients removed
+    # from the final obj1_sjd cohort are therefore expected here and must not
+    # be treated as broken episode references.  For patients retained in the
+    # authoritative spine, however, every matched episode must still resolve.
+    authoritative_patient_ids = set(
+        all_spine["_patient_id_match"].dropna().unique()
+    )
+    lab_rows_outside_authoritative_cohort = ~usable_all[
+        "_patient_id_match"
+    ].isin(authoritative_patient_ids)
+    n_lab_rows_excluded_outside_authoritative_cohort = int(
+        lab_rows_outside_authoritative_cohort.sum()
+    )
+    usable_all = usable_all.loc[~lab_rows_outside_authoritative_cohort].copy()
+
     all_spine_match_keys = pd.MultiIndex.from_frame(all_spine[MATCH_KEY])
     usable_all_match_keys = pd.MultiIndex.from_frame(usable_all[MATCH_KEY])
     resolved_lab_rows = usable_all_match_keys.isin(all_spine_match_keys)
@@ -1453,6 +1469,9 @@ def main(argv: list[str] | None = None) -> None:
             ].nunique()
         ),
         "n_patient_id_normalization_collisions": normalization_collisions,
+        "n_lab_rows_excluded_outside_authoritative_cohort": (
+            n_lab_rows_excluded_outside_authoritative_cohort
+        ),
         "n_lab_rows_resolved_by_patient_id_normalization": rows_resolved_by_normalization,
         "n_lab_rows_unresolved_after_patient_id_normalization": unresolved_lab_rows,
         "n_20b_patients_matched_after_normalization": int(
