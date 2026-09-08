@@ -20,6 +20,18 @@ def all_conditions():
             *comorbidities.OTHER_IMMUNE_MEDIATED_SYSTEMIC_CONDITIONS]
 
 
+def test_write_intermediate_dataset_creates_output_directory(tmp_path):
+    output_path = tmp_path / "missing" / "nested" / "dataset.parquet"
+    data = pd.DataFrame({"patient_id": [1, 2]})
+
+    parquet_path, csv_path = comorbidities.write_intermediate_dataset(data, output_path)
+
+    assert parquet_path.is_file()
+    assert csv_path.is_file()
+    pd.testing.assert_frame_equal(pd.read_parquet(parquet_path), data)
+    pd.testing.assert_frame_equal(pd.read_csv(csv_path), data)
+
+
 def test_families_exclude_anxiety_sjd_manifestations_and_prohibited_sources():
     names = {c.name for c in all_conditions()}
     assert "anxiety" not in names
