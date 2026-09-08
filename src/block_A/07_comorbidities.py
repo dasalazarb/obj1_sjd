@@ -860,6 +860,7 @@ def _plot_save(fig: plt.Figure, path: Path) -> None:
 def write_intermediate_dataset(data: pd.DataFrame, parquet_path: Path) -> tuple[Path, Path]:
     """Write an intermediate dataset in both Parquet and review-friendly CSV."""
     csv_path = parquet_path.with_suffix(".csv")
+    parquet_path.parent.mkdir(parents=True, exist_ok=True)
     data.to_parquet(parquet_path, index=False)
     data.to_csv(csv_path, index=False)
     return parquet_path, csv_path
