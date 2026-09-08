@@ -680,6 +680,21 @@ def progression_exposure_column(c: Condition) -> str:
     return c.name
 
 
+def _prepare_formula_data(data: pd.DataFrame, categorical_columns: Sequence[str]) -> pd.DataFrame:
+    """Return data with Patsy-compatible categorical dtypes.
+
+    Older Patsy releases pass pandas extension dtypes to ``numpy.issubdtype``.
+    In particular, that raises ``TypeError`` for ``string[python]`` columns.
+    Formula models only need ordinary object arrays for these categorical
+    values, so normalize them at the statsmodels boundary rather than changing
+    the dtypes of the canonical longitudinal dataset.
+    """
+    out = data.copy()
+    for column in categorical_columns:
+        out[column] = out[column].astype(object)
+    return out
+
+
 def fit_mixed_model(long: pd.DataFrame, c: Condition) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     import statsmodels.formula.api as smf
     cols = ["patient_id", "essdai_total", "time_since_clinical_baseline_years",
@@ -688,6 +703,7 @@ def fit_mixed_model(long: pd.DataFrame, c: Condition) -> tuple[list[dict[str, An
         long.loc[long["time_since_clinical_baseline_days"] > 0, cols], c
     ).dropna(subset=["patient_id", "essdai_total", "time_since_clinical_baseline_years",
                      "baseline_essdai", "baseline_pop", "age_baseline", "sex"])
+    data = _prepare_formula_data(data, ["patient_id", "baseline_pop", "sex"])
     patients = data.drop_duplicates("patient_id")
     n = len(patients); n_exposed = int(patients[c.name].sum())
     counts = {"n_patients": n, "n_followup_observations": len(data),
