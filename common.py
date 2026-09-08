@@ -50,8 +50,8 @@ VISIT_SPINE_CSV = INTERMEDIATE_DATA_DIR / "00_patient_visit_spine.csv"
 # consuming the episode spine implicitly.
 EPISODE_SPINE_PARQUET = INTERMEDIATE_DATA_DIR / "00_episode_spine_all.parquet"
 EPISODE_SPINE_CSV = INTERMEDIATE_DATA_DIR / "00_episode_spine_all.csv"
-CLINICAL_VISIT_SPINE_PARQUET = INTERMEDIATE_DATA_DIR / "00_clinical_visit_spine_sjd.parquet"
-CLINICAL_VISIT_SPINE_CSV = INTERMEDIATE_DATA_DIR / "00_clinical_visit_spine_sjd.csv"
+CLINICAL_VISIT_SPINE_PARQUET = INTERMEDIATE_DATA_DIR / "00_clinical_visit_spine.parquet"
+CLINICAL_VISIT_SPINE_CSV = INTERMEDIATE_DATA_DIR / "00_clinical_visit_spine.csv"
 POP_LONGITUDINAL_PARQUET = INTERMEDIATE_DATA_DIR / "01_pop_distribution" / "01_visit_level_classification.parquet"
 POP_TRANSITION_INTERVALS_PARQUET = (
     INTERMEDIATE_DATA_DIR / "10_pop_transitions"
