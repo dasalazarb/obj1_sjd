@@ -65,14 +65,21 @@ def filter_longitudinal_patients(
         if "patient_id" not in frame.columns:
             raise ValueError(f"Missing required column patient_id in {label}")
 
-    requested_ids = id_list["patient_id"].dropna().drop_duplicates()
-    filtered = source.loc[source["patient_id"].isin(requested_ids)].copy()
-    matched_ids = filtered["patient_id"].dropna().nunique()
+    # Deliberately do not coerce either side: cohort membership is an exact
+    # patient_id match against the authoritative list.
+    requested_ids = set(id_list["patient_id"].dropna().unique())
+    filtered = source[source["patient_id"].isin(requested_ids)].copy()
+    output_ids = set(filtered["patient_id"].dropna().unique())
+
+    # Keep the cohort boundary explicit at the point where it is established,
+    # before any Step 00 output is constructed or written.
+    assert output_ids.issubset(requested_ids)
+
     metrics = {
-        "n_rows_before_longitudinal_filter": len(source),
-        "n_rows_after_longitudinal_filter": len(filtered),
-        "n_longitudinal_patient_ids": requested_ids.nunique(),
-        "n_longitudinal_patient_ids_matched": int(matched_ids),
+        "n_ids_requested": len(requested_ids),
+        "n_ids_matched": len(output_ids),
+        "n_ids_not_found": len(requested_ids - output_ids),
+        "n_patients_after_filter": len(output_ids),
     }
     return filtered, metrics
 
