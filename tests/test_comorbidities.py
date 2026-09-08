@@ -174,6 +174,53 @@ def test_progression_exposure_selection_does_not_depend_on_display_family_label(
     assert result[renamed.name].tolist() == [1, 0]
 
 
+def test_mixed_model_converts_pandas_string_dtypes_before_patsy(monkeypatch):
+    spec = comorbidities.PAST_MEDICAL_HISTORY_CONDITIONS[0]
+    patient_ids = [f"P{i}" for i in range(10) for _ in range(2)]
+    frame = pd.DataFrame({
+        "patient_id": pd.Series(patient_ids, dtype="string"),
+        "essdai_total": np.arange(20, dtype=float),
+        "time_since_clinical_baseline_days": [30, 60] * 10,
+        "time_since_clinical_baseline_years": [30 / 365.25, 60 / 365.25] * 10,
+        spec.name: [i < 10 for i in range(20)],
+        "baseline_essdai": np.arange(20, dtype=float),
+        "baseline_pop": pd.Series(["Pop1", "Pop2"] * 10, dtype="string"),
+        "age_baseline": np.arange(40, 60, dtype=float),
+        "sex": pd.Series(["Female", "Male"] * 10, dtype="string"),
+    })
+    captured = {}
+
+    class FakeResult:
+        cov_re = pd.DataFrame([[1.0]])
+        converged = True
+        params = {spec.name: 0.0}
+        bse = {spec.name: 1.0}
+        pvalues = {spec.name: 1.0}
+
+    exposure_term = f"Q('{spec.name}')"
+    interaction_term = f"time_since_clinical_baseline_years:Q('{spec.name}')"
+    FakeResult.params = {exposure_term: 0.0, interaction_term: 0.0}
+    FakeResult.bse = {exposure_term: 1.0, interaction_term: 1.0}
+    FakeResult.pvalues = {exposure_term: 1.0, interaction_term: 1.0}
+
+    class FakeModel:
+        def fit(self, **kwargs):
+            return FakeResult()
+
+    def fake_mixedlm(formula, data, groups):
+        captured["dtypes"] = data[["patient_id", "baseline_pop", "sex"]].dtypes
+        return FakeModel()
+
+    import statsmodels.formula.api as smf
+    monkeypatch.setattr(smf, "mixedlm", fake_mixedlm)
+
+    rows, diagnostic = comorbidities.fit_mixed_model(frame, spec)
+
+    assert captured["dtypes"].eq(np.dtype("O")).all()
+    assert len(rows) == 2
+    assert diagnostic["model_status"] == "ok"
+
+
 def _pop_frame(positives):
     rows=[]
     spec=comorbidities.RHEUMATOLOGIC_NON_SAID_CONDITIONS[0]
