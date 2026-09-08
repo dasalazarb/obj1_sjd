@@ -31,11 +31,20 @@ def test_filter_longitudinal_patients_keeps_only_listed_ids() -> None:
 
     assert filtered["clinical_episode_id"].tolist() == [2, 3]
     assert metrics == {
-        "n_rows_before_longitudinal_filter": 4,
-        "n_rows_after_longitudinal_filter": 2,
-        "n_longitudinal_patient_ids": 2,
-        "n_longitudinal_patient_ids_matched": 1,
+        "n_ids_requested": 2,
+        "n_ids_matched": 1,
+        "n_ids_not_found": 1,
+        "n_patients_after_filter": 1,
     }
+
+
+def test_filter_longitudinal_patients_uses_exact_id_matching() -> None:
+    source = pd.DataFrame({"patient_id": [10, "10", 20]})
+    id_list = pd.DataFrame({"patient_id": ["10"]})
+
+    filtered, _ = MODULE.filter_longitudinal_patients(source, id_list)
+
+    assert filtered["patient_id"].tolist() == ["10"]
 
 
 @pytest.mark.parametrize("missing_from", ["source", "id_list"])
