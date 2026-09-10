@@ -211,7 +211,14 @@ def transition_associations(frame: pd.DataFrame, availability: pd.DataFrame, res
             if destination == origin: continue
             events = int(origin_frame.to_pop.eq(destination).sum())
             for feature in eligible:
-                source = resolved[feature][1]; exposure = f"from_{source}"
+                source = resolved[feature][1]
+                canonical_exposure = f"from_{feature}"
+                source_exposure = f"from_{source}"
+                exposure = (
+                    canonical_exposure
+                    if canonical_exposure in origin_frame.columns
+                    else source_exposure
+                )
                 validate_predictors([exposure])
                 sample = origin_frame[["patient_id", "to_pop", "interval_years", exposure]].dropna().copy()
                 sample["event"] = sample.to_pop.eq(destination).astype(int)
