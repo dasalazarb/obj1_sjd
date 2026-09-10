@@ -232,7 +232,11 @@ def transition_associations(frame: pd.DataFrame, availability: pd.DataFrame, res
                             if interpreted.notna().sum() == 0 and x.dropna().nunique() == 2:
                                 interpreted = pd.Series(pd.factorize(x)[0], index=x.index).where(x.notna())
                             x = interpreted
-                        fitdata = pd.DataFrame({"event": sample.event, "x": _numeric(x), "time": sample.interval_years}).dropna()
+                        fitdata = pd.DataFrame({"event": sample.event, "x": _numeric(x), "time": sample.interval_years})
+                        fitdata["event"] = pd.to_numeric(fitdata["event"], errors="coerce").astype(float)
+                        fitdata["x"] = pd.to_numeric(fitdata["x"], errors="coerce").astype(float)
+                        fitdata["time"] = pd.to_numeric(fitdata["time"], errors="coerce").astype(float)
+                        fitdata = fitdata.dropna()
                         model = sm.GLM(fitdata.event, sm.add_constant(fitdata.x), family=sm.families.Poisson(),
                                        offset=np.log(fitdata.time)).fit(cov_type="HC0")
                         beta, se = model.params["x"], model.bse["x"]
@@ -321,9 +325,44 @@ def _plot_heatmap(table: pd.DataFrame, row: str, value: str, path: Path, title: 
     return True
 
 
+def _plot_longitudinal_trajectory(master: pd.DataFrame, source: str, path: Path,
+                                  title: str, ylabel: str) -> bool:
+    """Plot observations relative to each patient's first available assessment."""
+    work = master[["patient_id", "clinical_anchor_date", source]].copy()
+    work["value"] = _numeric(work[source])
+    work.dropna(subset=["value", "clinical_anchor_date"], inplace=True)
+    if work.empty:
+        return False
+    work["clinical_anchor_date"] = pd.to_datetime(work.clinical_anchor_date)
+    first_assessment = work.groupby("patient_id").clinical_anchor_date.transform("min")
+    work["time_years"] = (work.clinical_anchor_date - first_assessment).dt.days / 365.25
+
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(9, 5))
+    for _, patient in work.sort_values("time_years").groupby("patient_id"):
+        ax.plot(patient.time_years, patient.value, color="tab:blue", alpha=.12,
+                linewidth=.7, marker="o", markersize=2)
+
+    if work.time_years.nunique() == 1:
+        aggregate = work.groupby("time_years", as_index=False).value.median()
+    else:
+        bins = min(12, max(2, int(np.sqrt(len(work)))))
+        edges = np.linspace(work.time_years.min(), work.time_years.max(), bins + 1)
+        work["time_bin"] = pd.cut(work.time_years, bins=np.unique(edges), include_lowest=True)
+        aggregate = work.groupby("time_bin", observed=True).agg(
+            time_years=("time_years", "median"), value=("value", "median")).dropna()
+    ax.plot(aggregate.time_years, aggregate.value, color="black", linewidth=2.2,
+            marker="o", markersize=4, label="Median trajectory")
+    ax.set_xlabel("Years since first available assessment")
+    ax.set_ylabel(ylabel)
+    ax.set_title(f"{title}\n{work.patient_id.nunique()} patients; {len(work)} observations")
+    ax.legend(); fig.tight_layout(); fig.savefig(path); plt.close(fig)
+    return True
+
+
 def make_plots(frame: pd.DataFrame, associations: pd.DataFrame, essdai: pd.DataFrame,
                domains: pd.DataFrame, components: pd.DataFrame, labs: pd.DataFrame,
-               figures: Path) -> set[str]:
+               master: pd.DataFrame, resolved: dict, figures: Path) -> set[str]:
     import matplotlib.pyplot as plt
     made = set(); success = associations[associations.model_status.eq("success")]
     path = figures / "01_pharma_transition_associations_forest.pdf"
@@ -348,6 +387,16 @@ def make_plots(frame: pd.DataFrame, associations: pd.DataFrame, essdai: pd.DataF
         standardized["standardized_change"] = standardized.groupby("variable").median_change.transform(lambda x: x / x.std() if x.std() else np.nan)
         name = "01_pharma_labs_change_heatmap.pdf"
         if _plot_heatmap(standardized, "variable", "standardized_change", figures/name, "Standardized laboratory change"): made.add(name)
+    longitudinal_specs = [
+        ("essdai_total", "01_pharma_essdai_longitudinal_trajectory.pdf",
+         "Longitudinal ESSDAI trajectory", "ESSDAI total"),
+        ("esspri_total", "01_pharma_esspri_longitudinal_trajectory.pdf",
+         "Longitudinal ESSPRI trajectory", "ESSPRI total observed"),
+    ]
+    for feature, name, title, ylabel in longitudinal_specs:
+        if feature in resolved and _plot_longitudinal_trajectory(
+                master, resolved[feature][1], figures/name, title, ylabel):
+            made.add(name)
     return made
 
 
@@ -367,9 +416,9 @@ def run(args: argparse.Namespace) -> None:
     analytic.to_parquet(dirs["analytic"] / "01_pharma_transition_intervals.parquet", index=False)
     associations = transition_associations(analytic, availability, resolved, config)
     essdai = _change_table(analytic, {"ESSDAI total": "essdai"})
-    esspri = _change_table(analytic, {"ESSPRI total": "esspri"})
-    components = _change_table(analytic, {x: x for x in ("esspri", "dryness", "fatigue", "pain")})
-    if not components.empty: components.variable = components.variable.replace({"esspri": "ESSPRI total"})
+    esspri = _change_table(analytic, {"ESSPRI total": "esspri_total"})
+    components = _change_table(analytic, {"ESSPRI total": "esspri_total",
+                                          "dryness": "dryness", "fatigue": "fatigue", "pain": "pain"})
     domain_map = {source: source for source in domain_sources}
     domains = _change_table(analytic, domain_map).rename(columns={"variable": "domain"})
     if not domains.empty:
@@ -391,19 +440,22 @@ def run(args: argparse.Namespace) -> None:
               "01_pharma_ml_feasibility.csv": feasibility,
               "01_pharma_longitudinal_models.csv": longitudinal}
     for name, table in tables.items(): _save(table, dirs["tables"] / name)
-    made = set() if args.dry_run else make_plots(analytic, associations, essdai, domains, components, labs, dirs["figures"])
+    made = set() if args.dry_run else make_plots(
+        analytic, associations, essdai, domains, components, labs, master, resolved, dirs["figures"])
     order = ["01_pharma_feature_availability.csv", "01_pharma_transition_associations.csv",
              "01_pharma_transition_associations_forest.pdf", "01_pharma_essdai_change_by_transition.csv",
              "01_pharma_essdai_change_by_transition.pdf", "01_pharma_essdai_domains_change_by_transition.csv",
              "01_pharma_essdai_domains_heatmap.pdf", "01_pharma_esspri_change_by_transition.csv",
              "01_pharma_esspri_components_change_by_transition.csv", "01_pharma_esspri_components_heatmap.pdf",
              "01_pharma_labs_change_by_transition.csv", "01_pharma_labs_change_heatmap.pdf",
-             "01_pharma_serology_status_by_transition.csv", "01_pharma_ml_feasibility.csv"]
+             "01_pharma_serology_status_by_transition.csv", "01_pharma_ml_feasibility.csv",
+             "01_pharma_longitudinal_models.csv", "01_pharma_essdai_longitudinal_trajectory.pdf",
+             "01_pharma_esspri_longitudinal_trajectory.pdf"]
     print("ORDER TO REVIEW PHARMA MAIN OUTPUTS\n")
     for number, name in enumerate(order, 1):
         available = name in tables or name in made
         print(f"{number}. {name}" + ("" if available else " — NOT AVAILABLE"))
-    print("\nAnalytic dataset:\n15. 01_pharma_transition_intervals.parquet")
+    print(f"\nAnalytic dataset:\n{len(order) + 1}. 01_pharma_transition_intervals.parquet")
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
