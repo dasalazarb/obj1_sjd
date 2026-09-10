@@ -149,8 +149,14 @@ def build_analytic(intervals: pd.DataFrame, master: pd.DataFrame, resolved: dict
                     enriched.rename(columns={fcol: f"from_{canonical}", tcol: f"to_{canonical}"}, inplace=True)
     for feature, (family, source) in resolved.items():
         if family == "essdai_domain":
-            both = enriched[f"from_{source}"].notna() & enriched[f"to_{source}"].notna()
-            enriched[f"delta_{source}"] = (_numeric(enriched[f"to_{source}"]) - _numeric(enriched[f"from_{source}"])).where(both)
+            if source.endswith("_active"):
+                from_value = _binary(enriched[f"from_{source}"])
+                to_value = _binary(enriched[f"to_{source}"])
+            else:
+                from_value = _numeric(enriched[f"from_{source}"])
+                to_value = _numeric(enriched[f"to_{source}"])
+            both = from_value.notna() & to_value.notna()
+            enriched[f"delta_{source}"] = (to_value - from_value).where(both)
     return enriched[CORE + [c for c in enriched.columns if c not in CORE]]
 
 
