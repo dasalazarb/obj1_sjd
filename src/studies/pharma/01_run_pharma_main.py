@@ -336,7 +336,7 @@ def make_plots(frame: pd.DataFrame, associations: pd.DataFrame, essdai: pd.DataF
     path = figures / "01_pharma_essdai_change_by_transition.pdf"
     if "delta_essdai" in frame and frame.delta_essdai.notna().any():
         groups = [(name, g.delta_essdai.dropna()) for name, g in frame.groupby("transition_pair") if g.delta_essdai.notna().any()]
-        fig, ax = plt.subplots(figsize=(10, 5)); ax.boxplot([x[1] for x in groups], tick_labels=[f"{x[0]}\nn={len(x[1])}" for x in groups])
+        fig, ax = plt.subplots(figsize=(10, 5)); ax.boxplot([x[1] for x in groups], labels=[f"{x[0]}\nn={len(x[1])}" for x in groups])
         ax.axhline(0, color="grey", ls="--"); ax.set_ylabel("Change in ESSDAI"); ax.tick_params(axis="x", rotation=45)
         fig.tight_layout(); fig.savefig(path); plt.close(fig); made.add(path.name)
     specs = [(domains, "domain", "median_change", "01_pharma_essdai_domains_heatmap.pdf", "ESSDAI domain change"),
