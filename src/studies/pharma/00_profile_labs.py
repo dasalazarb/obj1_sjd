@@ -57,8 +57,10 @@ DATA_SUFFICIENCY_ORDER = {"adequate": 0, "limited": 1, "insufficient": 2}
 def _clean_text(series: pd.Series) -> pd.Series:
     """Return valid textual values without modifying the source series."""
     cleaned = series.dropna().copy()
+    cleaned = cleaned.map(
+        lambda value: value.strip() if isinstance(value, str) else value
+    )
     is_string = cleaned.map(lambda value: isinstance(value, str))
-    cleaned.loc[is_string] = cleaned.loc[is_string].str.strip()
     return cleaned.loc[~(is_string & cleaned.eq(""))]
 
 
