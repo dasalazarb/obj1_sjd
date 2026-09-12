@@ -222,21 +222,34 @@ def transition_associations(frame: pd.DataFrame, availability: pd.DataFrame, res
                 validate_predictors([exposure])
                 sample = origin_frame[["patient_id", "to_pop", "interval_years", exposure]].dropna().copy()
                 sample["event"] = sample.to_pop.eq(destination).astype(int)
+                x = sample[exposure]
+                if not pd.api.types.is_numeric_dtype(x):
+                    interpreted = _binary(x)
+                    if interpreted.notna().sum() == 0 and x.dropna().nunique() == 2:
+                        interpreted = pd.Series(pd.factorize(x)[0], index=x.index).where(x.notna())
+                    x = interpreted
+                fitdata = pd.DataFrame({"patient_id": sample.patient_id,
+                                        "event": sample.event, "x": _numeric(x),
+                                        "time": sample.interval_years}).dropna()
+                fitdata["event"] = pd.to_numeric(fitdata["event"], errors="coerce").astype(float)
+                fitdata["x"] = pd.to_numeric(fitdata["x"], errors="coerce").astype(float)
+                fitdata["time"] = pd.to_numeric(fitdata["time"], errors="coerce").astype(float)
+                fitdata = fitdata.dropna()
+                modeled_as_binary = (not fitdata.empty and
+                                     set(fitdata.x.unique()).issubset({0.0, 1.0}))
+                cell_counts = {"n_exposed_events": np.nan, "n_unexposed_events": np.nan,
+                               "n_exposed_nonevents": np.nan, "n_unexposed_nonevents": np.nan}
+                if modeled_as_binary:
+                    cell_counts = {
+                        "n_exposed_events": int(((fitdata.x == 1) & (fitdata.event == 1)).sum()),
+                        "n_unexposed_events": int(((fitdata.x == 0) & (fitdata.event == 1)).sum()),
+                        "n_exposed_nonevents": int(((fitdata.x == 1) & (fitdata.event == 0)).sum()),
+                        "n_unexposed_nonevents": int(((fitdata.x == 0) & (fitdata.event == 0)).sum()),
+                    }
                 status = "insufficient_events"; estimate = low = high = pvalue = np.nan
                 if int(sample.event.sum()) >= minimum and int((1-sample.event).sum()) >= minimum and sample[exposure].nunique() > 1:
                     try:
                         import statsmodels.api as sm
-                        x = sample[exposure]
-                        if not pd.api.types.is_numeric_dtype(x):
-                            interpreted = _binary(x)
-                            if interpreted.notna().sum() == 0 and x.dropna().nunique() == 2:
-                                interpreted = pd.Series(pd.factorize(x)[0], index=x.index).where(x.notna())
-                            x = interpreted
-                        fitdata = pd.DataFrame({"event": sample.event, "x": _numeric(x), "time": sample.interval_years})
-                        fitdata["event"] = pd.to_numeric(fitdata["event"], errors="coerce").astype(float)
-                        fitdata["x"] = pd.to_numeric(fitdata["x"], errors="coerce").astype(float)
-                        fitdata["time"] = pd.to_numeric(fitdata["time"], errors="coerce").astype(float)
-                        fitdata = fitdata.dropna()
                         model = sm.GLM(fitdata.event, sm.add_constant(fitdata.x), family=sm.families.Poisson(),
                                        offset=np.log(fitdata.time)).fit(cov_type="HC0")
                         beta, se = model.params["x"], model.bse["x"]
@@ -245,12 +258,32 @@ def transition_associations(frame: pd.DataFrame, availability: pd.DataFrame, res
                     except Exception as exc:
                         logging.warning("Intensity model failed for %s %s->%s: %s", feature, origin, destination, exc)
                         status = "model_failed"
+                interpretability_status, interpretability_reason = "not_estimable", f"model_status_{status}"
+                if status == "success":
+                    if modeled_as_binary and any(value < 5 for value in cell_counts.values()):
+                        interpretability_status = "unstable_sparse_cells"
+                        interpretability_reason = "one_or_more_2x2_cells_lt_5"
+                    elif not all(np.isfinite(value) and value > 0 for value in (estimate, low, high)):
+                        interpretability_status = "unstable_extreme_estimate"
+                        interpretability_reason = "ci_or_estimate_non_finite_or_nonpositive"
+                    elif estimate < 0.1 or estimate > 10:
+                        interpretability_status = "unstable_extreme_estimate"
+                        interpretability_reason = "estimate_outside_0.1_to_10"
+                    elif low < 0.1 or high > 10:
+                        interpretability_status = "unstable_extreme_estimate"
+                        interpretability_reason = "ci_extends_outside_0.1_to_10"
+                    else:
+                        interpretability_status = "interpretable"
+                        interpretability_reason = ""
                 rows.append({"from_pop": origin, "to_pop": destination, "exposure": feature,
-                             "n_intervals": len(sample), "n_patients": int(sample.patient_id.nunique()),
-                             "events": int(sample.event.sum()), "estimate": estimate, "ci95_low": low,
-                             "ci95_high": high, "p_value": pvalue, "model_status": status})
-    return pd.DataFrame(rows, columns=["from_pop", "to_pop", "exposure", "n_intervals", "n_patients",
-                                      "events", "estimate", "ci95_low", "ci95_high", "p_value", "model_status"])
+                             "n_intervals": len(fitdata), "n_patients": int(fitdata.patient_id.nunique()),
+                             "events": int(fitdata.event.sum()),
+                             "nonevents": int((1-fitdata.event).sum()), **cell_counts,
+                             "estimate": estimate, "ci95_low": low, "ci95_high": high,
+                             "p_value": pvalue, "model_status": status,
+                             "interpretability_status": interpretability_status,
+                             "interpretability_reason": interpretability_reason})
+    return pd.DataFrame(rows)
 
 
 def ml_feasibility(frame: pd.DataFrame, availability: pd.DataFrame, config: dict) -> pd.DataFrame:
@@ -364,7 +397,9 @@ def make_plots(frame: pd.DataFrame, associations: pd.DataFrame, essdai: pd.DataF
                domains: pd.DataFrame, components: pd.DataFrame, labs: pd.DataFrame,
                master: pd.DataFrame, resolved: dict, figures: Path) -> set[str]:
     import matplotlib.pyplot as plt
-    made = set(); success = associations[associations.model_status.eq("success")]
+    made = set(); success = associations[
+        associations.model_status.eq("success") &
+        associations.interpretability_status.eq("interpretable")]
     path = figures / "01_pharma_transition_associations_forest.pdf"
     if len(success):
         labels = success.from_pop + "→" + success.to_pop + ": " + success.exposure
@@ -414,7 +449,9 @@ def run(args: argparse.Namespace) -> None:
     availability = _availability(master, resolved, coverage)
     analytic = build_analytic(intervals, master, resolved)
     analytic.to_parquet(dirs["analytic"] / "01_pharma_transition_intervals.parquet", index=False)
-    associations = transition_associations(analytic, availability, resolved, config)
+    diagnostics = transition_associations(analytic, availability, resolved, config)
+    associations = diagnostics.drop(columns=["n_exposed_events", "n_unexposed_events",
+                                               "n_exposed_nonevents", "n_unexposed_nonevents"])
     essdai = _change_table(analytic, {"ESSDAI total": "essdai"})
     esspri = _change_table(analytic, {"ESSPRI total": "esspri_total"})
     components = _change_table(analytic, {"ESSPRI total": "esspri_total",
@@ -431,6 +468,7 @@ def run(args: argparse.Namespace) -> None:
     longitudinal = longitudinal_models(master, resolved)
     tables = {"01_pharma_feature_availability.csv": availability,
               "01_pharma_transition_associations.csv": associations,
+              "01_pharma_transition_model_diagnostics.csv": diagnostics,
               "01_pharma_essdai_change_by_transition.csv": essdai.drop(columns="variable", errors="ignore"),
               "01_pharma_essdai_domains_change_by_transition.csv": domains,
               "01_pharma_esspri_change_by_transition.csv": esspri.drop(columns="variable", errors="ignore"),
@@ -443,6 +481,7 @@ def run(args: argparse.Namespace) -> None:
     made = set() if args.dry_run else make_plots(
         analytic, associations, essdai, domains, components, labs, master, resolved, dirs["figures"])
     order = ["01_pharma_feature_availability.csv", "01_pharma_transition_associations.csv",
+             "01_pharma_transition_model_diagnostics.csv",
              "01_pharma_transition_associations_forest.pdf", "01_pharma_essdai_change_by_transition.csv",
              "01_pharma_essdai_change_by_transition.pdf", "01_pharma_essdai_domains_change_by_transition.csv",
              "01_pharma_essdai_domains_heatmap.pdf", "01_pharma_esspri_change_by_transition.csv",
