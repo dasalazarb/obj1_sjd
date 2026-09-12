@@ -594,11 +594,17 @@ def longitudinal_models(master: pd.DataFrame, resolved: dict) -> pd.DataFrame:
 
 
 def _plot_heatmap(table: pd.DataFrame, row: str, value: str, path: Path, title: str) -> bool:
-    if table.empty or table[value].notna().sum() == 0: return False
+    if table.empty:
+        return False
+    plot_table = table.copy()
+    plot_table[value] = pd.to_numeric(plot_table[value], errors="coerce")
+    if plot_table[value].notna().sum() == 0:
+        return False
     import matplotlib.pyplot as plt
-    pivot = table.pivot(index=row, columns="transition_pair", values=value)
+    pivot = plot_table.pivot(index=row, columns="transition_pair", values=value)
     fig, ax = plt.subplots(figsize=(max(8, .9*len(pivot.columns)), max(3, .55*len(pivot))))
-    image = ax.imshow(pivot, aspect="auto", cmap="RdBu_r")
+    image = ax.imshow(pivot.to_numpy(dtype=float, na_value=np.nan),
+                      aspect="auto", cmap="RdBu_r")
     ax.set_xticks(range(len(pivot.columns)), pivot.columns, rotation=45, ha="right")
     ax.set_yticks(range(len(pivot.index)), pivot.index); ax.set_title(title)
     fig.colorbar(image, ax=ax, label=value.replace("_", " ")); fig.tight_layout(); fig.savefig(path); plt.close(fig)
