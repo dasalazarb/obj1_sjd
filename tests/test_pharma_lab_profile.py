@@ -64,3 +64,17 @@ def test_multiple_units_preserves_numeric_type_but_requires_review():
     assert row.n_units == 2
     assert row.recommended_use == "review_or_exclude"
     assert "multiple_units" in row.review_reason
+
+
+def test_numeric_values_do_not_require_the_string_accessor():
+    frame = pd.DataFrame({
+        "patient_id": ["a", "b", "c", "d"],
+        "glucose__value": [1, 2, pd.NA, 4],
+    })
+
+    row = profile_module.profile_labs(frame).iloc[0]
+
+    assert row.inferred_type == "numeric"
+    assert row.n_nonmissing == 3
+    assert row.n_unique == 3
+    assert row.sample_values == "1 | 2 | 4"
