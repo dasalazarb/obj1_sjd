@@ -40,15 +40,14 @@ FEATURES = {
     "ana": ("serology", ["ana_status", "baseline_ana"]),
     "rf": ("serology", ["rf_status", "baseline_rf"]),
     "cryoglobulinemia": ("serology", ["cryoglobulinemia_status", "baseline_cryoglobulinemia"]),
-    "igg": ("laboratory", ["igg__value", "immunoglobulin_g__value", "igg"]),
-    "c3": ("laboratory", ["c3__value", "complement_c3__value", "c3"]),
-    "c4": ("laboratory", ["c4__value", "complement_c4__value", "c4"]),
     "essdai_total": ("essdai", ["essdai_total"]),
     "esspri_total": ("esspri", ["esspri_total_observed"]),
     "dryness": ("esspri", ["esspri_dryness", "dryness"]),
     "fatigue": ("esspri", ["esspri_fatigue", "fatigue"]),
     "pain": ("esspri", ["esspri_pain", "pain"]),
 }
+DEFAULT_LAB_PROFILE = (common.STUDIES_TABLES_DIR / "pharma" /
+                       "00_profile_labs" / "00_pharma_lab_profile.csv")
 DOMAIN_NAMES = ("constitutional", "lymphadenopathy", "glandular", "articular",
                 "cutaneous", "pulmonary", "renal", "muscular", "pns", "cns",
                 "hematological", "hematologic", "biological")
@@ -63,6 +62,43 @@ def load_config(path: Path) -> dict:
     if not isinstance(config, dict):
         raise ValueError("Pharma configuration must be a mapping")
     return config
+
+
+def load_lab_profile(path: Path) -> pd.DataFrame:
+    """Read and minimally validate the laboratory profiler's data contract."""
+    profile = pd.read_csv(path)
+    required = {"lab", "recommended_use", "result_source", "value_column"}
+    missing = required.difference(profile.columns)
+    if missing:
+        raise ValueError(f"Laboratory profile missing required columns: {sorted(missing)}")
+    duplicated = profile.lab.astype(str).duplicated()
+    if duplicated.any():
+        raise ValueError("Laboratory profile contains duplicate lab names")
+    return profile
+
+
+def _profile_column(row: pd.Series) -> str:
+    """Resolve the episode column selected by the profiler without guessing."""
+    source = str(row["result_source"])
+    key = {"value": "value_column", "text": "text_column",
+           "reference_status": "reference_status_column"}.get(source)
+    if key is None or key not in row or pd.isna(row[key]):
+        return ""
+    return str(row[key]).strip()
+
+
+def _lab_specs(profile: pd.DataFrame, master: pd.DataFrame, use: str) -> list[dict]:
+    specs = []
+    for _, row in profile.loc[profile.recommended_use.eq(use)].iterrows():
+        column = _profile_column(row)
+        if not column or column not in master:
+            logging.warning("Profiled lab %s has no usable source column %s", row.lab, column)
+            continue
+        unit_column = str(row.get("unit_column", "")).strip()
+        specs.append({"lab": str(row.lab), "column": column,
+                      "result_source": str(row.result_source),
+                      "unit_column": unit_column if unit_column in master else ""})
+    return specs
 
 
 def _resolve(master: pd.DataFrame) -> tuple[dict[str, tuple[str, str]], list[str]]:
@@ -115,8 +151,14 @@ def _availability(master: pd.DataFrame, resolved: dict, coverage: float) -> pd.D
     return pd.DataFrame(rows)
 
 
-def build_analytic(intervals: pd.DataFrame, master: pd.DataFrame, resolved: dict) -> pd.DataFrame:
-    columns = list(dict.fromkeys(column for _, column in resolved.values()))
+def build_analytic(intervals: pd.DataFrame, master: pd.DataFrame, resolved: dict,
+                   numeric_labs: list[dict] | None = None,
+                   categorical_labs: list[dict] | None = None) -> pd.DataFrame:
+    numeric_labs, categorical_labs = numeric_labs or [], categorical_labs or []
+    lab_columns = [spec["column"] for spec in numeric_labs + categorical_labs]
+    lab_columns += [spec["unit_column"] for spec in numeric_labs + categorical_labs
+                    if spec["unit_column"]]
+    columns = list(dict.fromkeys([column for _, column in resolved.values()] + lab_columns))
     enriched = enrich_transition_intervals(intervals, master, columns, columns)
     if not {"from_clinical_anchor_date", "to_clinical_anchor_date"}.issubset(enriched):
         dates = master[["patient_id", "clinical_episode_id", "clinical_anchor_date"]]
@@ -135,7 +177,7 @@ def build_analytic(intervals: pd.DataFrame, master: pd.DataFrame, resolved: dict
               "to_esspri_total_observed": "to_esspri_total"}
     enriched.rename(columns=rename, inplace=True)
     aliases = {feature: column for feature, (_, column) in resolved.items()}
-    for feature in ("essdai_total", "esspri_total", "dryness", "fatigue", "pain", "igg", "c3", "c4"):
+    for feature in ("essdai_total", "esspri_total", "dryness", "fatigue", "pain"):
         source = aliases.get(feature)
         if source:
             fcol = "from_esspri_total" if feature == "esspri_total" else f"from_{source}"
@@ -147,6 +189,27 @@ def build_analytic(intervals: pd.DataFrame, master: pd.DataFrame, resolved: dict
                 enriched[f"delta_{canonical}_per_year"] = enriched[f"delta_{canonical}"] / enriched.interval_years
                 if source != canonical and feature not in ("essdai_total", "esspri_total"):
                     enriched.rename(columns={fcol: f"from_{canonical}", tcol: f"to_{canonical}"}, inplace=True)
+    for spec in numeric_labs:
+        lab, source = spec["lab"], spec["column"]
+        fcol, tcol = f"from_lab__{lab}", f"to_lab__{lab}"
+        enriched[fcol] = _numeric(enriched[f"from_{source}"])
+        enriched[tcol] = _numeric(enriched[f"to_{source}"])
+        both = enriched[fcol].notna() & enriched[tcol].notna()
+        enriched[f"delta_lab__{lab}"] = (enriched[tcol] - enriched[fcol]).where(both)
+        enriched[f"delta_per_year_lab__{lab}"] = (
+            enriched[f"delta_lab__{lab}"] / enriched.interval_years)
+        lab_sd = _numeric(master[source]).std()
+        enriched[f"delta_z_lab__{lab}"] = (
+            enriched[f"delta_lab__{lab}"] / lab_sd
+            if pd.notna(lab_sd) and lab_sd > 0 else np.nan)
+    for spec in categorical_labs:
+        lab, source = spec["lab"], spec["column"]
+        for side in ("from", "to"):
+            values = enriched[f"{side}_{source}"].copy()
+            normalized = values.astype("string").str.strip().str.lower()
+            values = values.mask(normalized.isin(["", "unknown", "not reported",
+                                                   "not_reported", "indeterminate"]))
+            enriched[f"{side}_lab__{lab}"] = values
     for feature, (family, source) in resolved.items():
         if family == "essdai_domain":
             if source.endswith("_active"):
@@ -177,6 +240,190 @@ def _change_table(frame: pd.DataFrame, variables: dict[str, str]) -> pd.DataFram
                          "median_change_per_year": (delta / paired.interval_years).median()})
     return pd.DataFrame(rows, columns=["transition_pair", "variable", "n_paired", "from_median",
         "to_median", "median_change", "q1_change", "q3_change", "median_change_per_year"])
+
+
+def _transition_pairs() -> list[str]:
+    return [f"{origin} -> {destination}" for origin in POPS for destination in POPS]
+
+
+def _lab_unit(group: pd.DataFrame, spec: dict) -> str:
+    column = spec.get("unit_column", "")
+    if not column:
+        return ""
+    values = pd.concat([group.get(f"from_{column}", pd.Series(dtype=object)),
+                        group.get(f"to_{column}", pd.Series(dtype=object))]).dropna()
+    return " | ".join(map(str, values.astype(str).str.strip().replace("", np.nan).dropna().unique()))
+
+
+def lab_availability(frame: pd.DataFrame, labs: list[dict], config: dict) -> pd.DataFrame:
+    """Assess each profiled lab in each transition, rather than globally."""
+    change_minimum = int(config["minimum_counts"]["cell_for_modeling"])
+    association_minimum = int(config["minimum_counts"]["events_for_multivariable_model"])
+    rows = []
+    for spec in labs:
+        lab = spec["lab"]
+        fcol, tcol = f"from_lab__{lab}", f"to_lab__{lab}"
+        for pair in _transition_pairs():
+            origin, destination = pair.split(" -> ")
+            group = frame[frame.transition_pair.eq(pair)]
+            origin_group = frame[frame.from_pop.eq(origin)]
+            before, after = group[fcol].notna(), group[tcol].notna()
+            paired = before & after
+            association_sample = origin_group[origin_group[fcol].notna()]
+            events = int(association_sample.to_pop.eq(destination).sum())
+            nonevents = len(association_sample) - events
+            n_unique_from = int(group.loc[before, fcol].nunique())
+            n_unique_to = int(group.loc[after, tcol].nunique())
+            eligible_change = bool(paired.sum() >= change_minimum and
+                                   n_unique_from > 1 and n_unique_to > 1)
+            if association_sample.empty:
+                reason = "insufficient_coverage"
+            elif association_sample[fcol].nunique() <= 1:
+                reason = "insufficient_variability"
+            elif events < association_minimum:
+                reason = "insufficient_events"
+            elif nonevents < association_minimum:
+                reason = "insufficient_nonevents"
+            else:
+                reason = ""
+            rows.append({"lab": lab, "transition_pair": pair,
+                         "result_source": spec["result_source"], "unit": _lab_unit(group, spec),
+                         "n_from": int(before.sum()), "n_to": int(after.sum()),
+                         "n_paired": int(paired.sum()),
+                         "n_patients_paired": int(group.loc[paired, "patient_id"].nunique()),
+                         "pct_from_available": float(before.mean()) if len(group) else 0.0,
+                         "pct_to_available": float(after.mean()) if len(group) else 0.0,
+                         "pct_paired": float(paired.mean()) if len(group) else 0.0,
+                         "n_unique_from": n_unique_from, "n_unique_to": n_unique_to,
+                         "eligible_for_change": eligible_change,
+                         "eligible_for_association": not bool(reason),
+                         "exclusion_reason": reason})
+    return pd.DataFrame(rows, columns=[
+        "lab", "transition_pair", "result_source", "unit", "n_from", "n_to",
+        "n_paired", "n_patients_paired", "pct_from_available", "pct_to_available",
+        "pct_paired", "n_unique_from", "n_unique_to", "eligible_for_change",
+        "eligible_for_association", "exclusion_reason",
+    ])
+
+
+def lab_changes_by_transition(frame: pd.DataFrame, labs: list[dict]) -> pd.DataFrame:
+    rows = []
+    for spec in labs:
+        lab = spec["lab"]
+        fcol, tcol = f"from_lab__{lab}", f"to_lab__{lab}"
+        for pair in _transition_pairs():
+            group = frame[frame.transition_pair.eq(pair)]
+            paired = group[fcol].notna() & group[tcol].notna()
+            values = group.loc[paired]
+            delta = values[f"delta_lab__{lab}"]
+            rows.append({"transition_pair": pair, "lab": lab, "unit": _lab_unit(group, spec),
+                         "n_paired": int(paired.sum()),
+                         "n_patients": int(values.patient_id.nunique()),
+                         "from_median": values[fcol].median(), "to_median": values[tcol].median(),
+                         "median_change": delta.median(), "q1_change": delta.quantile(.25),
+                         "q3_change": delta.quantile(.75),
+                         "median_change_per_year": values[f"delta_per_year_lab__{lab}"].median(),
+                         "median_standardized_change": values[f"delta_z_lab__{lab}"].median()})
+    return pd.DataFrame(rows, columns=[
+        "transition_pair", "lab", "unit", "n_paired", "n_patients",
+        "from_median", "to_median", "median_change", "q1_change", "q3_change",
+        "median_change_per_year", "median_standardized_change",
+    ])
+
+
+def lab_reference_transitions(frame: pd.DataFrame, labs: list[dict]) -> pd.DataFrame:
+    rows = []
+    for spec in labs:
+        lab = spec["lab"]
+        for pair in _transition_pairs():
+            group = frame[frame.transition_pair.eq(pair)]
+            fcol, tcol = f"from_lab__{lab}", f"to_lab__{lab}"
+            known = group[fcol].notna() & group[tcol].notna()
+            counts = group.loc[known].groupby([fcol, tcol], dropna=False).size()
+            total = int(counts.sum())
+            for (before, after), count in counts.items():
+                rows.append({"transition_pair": pair, "lab": lab,
+                             "from_status": before, "to_status": after,
+                             "n": int(count), "pct": count / total if total else np.nan})
+    return pd.DataFrame(rows, columns=["transition_pair", "lab", "from_status", "to_status", "n", "pct"])
+
+
+def _bh_adjust(pvalues: pd.Series) -> pd.Series:
+    result = pd.Series(np.nan, index=pvalues.index, dtype=float)
+    valid = pvalues.dropna().sort_values()
+    if valid.empty:
+        return result
+    adjusted = valid * len(valid) / np.arange(1, len(valid) + 1)
+    adjusted = adjusted.iloc[::-1].cummin().iloc[::-1].clip(upper=1)
+    result.loc[adjusted.index] = adjusted
+    return result
+
+
+def lab_transition_associations(frame: pd.DataFrame, labs: list[dict], config: dict) -> pd.DataFrame:
+    """Fit exploratory univariable intensity models using FROM labs only."""
+    minimum = int(config["minimum_counts"]["events_for_multivariable_model"])
+    rows = []
+    for origin in POPS:
+        origin_frame = frame[frame.from_pop.eq(origin)]
+        for destination in POPS:
+            if destination == origin:
+                continue
+            for spec in labs:
+                lab, exposure = spec["lab"], f"from_lab__{spec['lab']}"
+                sample = origin_frame[["patient_id", "to_pop", "interval_years", exposure]].copy()
+                sample["x"] = _numeric(sample[exposure])
+                sample["event"] = sample.to_pop.eq(destination).astype(int)
+                fitdata = sample.dropna(subset=["x", "interval_years"]).copy()
+                events = int(fitdata.event.sum()); nonevents = len(fitdata) - events
+                if fitdata.empty:
+                    status = "insufficient_coverage"
+                elif fitdata.x.nunique() <= 1:
+                    status = "insufficient_variability"
+                elif events < minimum:
+                    status = "insufficient_events"
+                elif nonevents < minimum:
+                    status = "insufficient_nonevents"
+                else:
+                    status = "ready"
+                estimate = low = high = pvalue = np.nan
+                if status == "ready":
+                    try:
+                        import statsmodels.api as sm
+                        fit = sm.GLM(fitdata.event.astype(float), sm.add_constant(fitdata.x.astype(float)),
+                                     family=sm.families.Poisson(),
+                                     offset=np.log(fitdata.interval_years.astype(float))).fit(cov_type="HC0")
+                        beta, se = fit.params["x"], fit.bse["x"]
+                        estimate, low, high = math.exp(beta), math.exp(beta - 1.96*se), math.exp(beta + 1.96*se)
+                        pvalue, status = fit.pvalues["x"], "success"
+                    except Exception as exc:
+                        logging.warning("Lab intensity model failed for %s %s->%s: %s", lab, origin, destination, exc)
+                        status = "model_failed"
+                interpretation, reason = "not_estimable", f"model_status_{status}"
+                if status == "success":
+                    if not all(np.isfinite(x) and x > 0 for x in (estimate, low, high)):
+                        interpretation, reason = "unstable_extreme_estimate", "ci_or_estimate_non_finite_or_nonpositive"
+                    elif estimate < .1 or estimate > 10:
+                        interpretation, reason = "unstable_extreme_estimate", "estimate_outside_0.1_to_10"
+                    elif low < .1 or high > 10:
+                        interpretation, reason = "unstable_extreme_estimate", "ci_extends_outside_0.1_to_10"
+                    else:
+                        interpretation, reason = "interpretable", ""
+                rows.append({"from_pop": origin, "to_pop": destination, "lab": lab,
+                             "n_intervals": len(fitdata), "n_patients": int(fitdata.patient_id.nunique()),
+                             "events": events, "nonevents": nonevents, "estimate": estimate,
+                             "ci95_low": low, "ci95_high": high, "p_value": pvalue,
+                             "q_value": np.nan, "model_status": status,
+                             "interpretability_status": interpretation,
+                             "interpretability_reason": reason})
+    output = pd.DataFrame(rows, columns=[
+        "from_pop", "to_pop", "lab", "n_intervals", "n_patients", "events",
+        "nonevents", "estimate", "ci95_low", "ci95_high", "p_value", "q_value",
+        "model_status", "interpretability_status", "interpretability_reason",
+    ])
+    if not output.empty:
+        output["q_value"] = output.groupby(
+            ["from_pop", "to_pop"])["p_value"].transform(_bh_adjust)
+    return output
 
 
 def _serology(frame: pd.DataFrame, resolved: dict) -> pd.DataFrame:
@@ -312,7 +559,7 @@ def longitudinal_models(master: pd.DataFrame, resolved: dict) -> pd.DataFrame:
     """Fit simple time-aware repeated-measure models when data support them."""
     rows = []
     for feature, (family, source) in resolved.items():
-        if feature not in ("essdai_total", "esspri_total", "igg", "c3", "c4") and family != "essdai_domain":
+        if feature not in ("essdai_total", "esspri_total") and family != "essdai_domain":
             continue
         work = master[["patient_id", "clinical_anchor_date", source]].copy()
         work["value"] = _binary(work[source]) if family == "essdai_domain" else _numeric(work[source])
@@ -417,11 +664,23 @@ def make_plots(frame: pd.DataFrame, associations: pd.DataFrame, essdai: pd.DataF
              (components, "variable", "median_change", "01_pharma_esspri_components_heatmap.pdf", "ESSPRI component change")]
     for table, row, value, name, title in specs:
         if _plot_heatmap(table, row, value, figures/name, title): made.add(name)
+    name = "01_pharma_lab_change_heatmap.pdf"
     if not labs.empty:
-        standardized = labs.copy()
-        standardized["standardized_change"] = standardized.groupby("variable").median_change.transform(lambda x: x / x.std() if x.std() else np.nan)
-        name = "01_pharma_labs_change_heatmap.pdf"
-        if _plot_heatmap(standardized, "variable", "standardized_change", figures/name, "Standardized laboratory change"): made.add(name)
+        displayed = labs.copy()
+        displayed.loc[displayed.n_paired < 5, "median_standardized_change"] = np.nan
+        if _plot_heatmap(displayed, "lab", "median_standardized_change", figures/name,
+                         "Median individual standardized laboratory change"):
+            made.add(name)
+        else:
+            fig, ax = plt.subplots(figsize=(8, 3)); ax.axis("off")
+            ax.text(.5, .5, "No lab/transition cells have at least 5 paired measurements",
+                    ha="center", va="center")
+            fig.tight_layout(); fig.savefig(figures/name); plt.close(fig); made.add(name)
+    else:
+        fig, ax = plt.subplots(figsize=(8, 3)); ax.axis("off")
+        ax.text(.5, .5, "No numeric longitudinal laboratories selected by profile",
+                ha="center", va="center")
+        fig.tight_layout(); fig.savefig(figures/name); plt.close(fig); made.add(name)
     longitudinal_specs = [
         ("essdai_total", "01_pharma_essdai_longitudinal_trajectory.pdf",
          "Longitudinal ESSDAI trajectory", "ESSDAI total"),
@@ -445,9 +704,12 @@ def run(args: argparse.Namespace) -> None:
     logging.basicConfig(filename=dirs["logs"] / "01_run_pharma_main.log", level=logging.INFO, force=True)
     master, intervals = load_parquet(args.integrated), load_parquet(args.transitions)
     validate_integrated_dataset(master); validate_transition_intervals(intervals, master)
+    profile = load_lab_profile(args.lab_profile)
+    numeric_labs = _lab_specs(profile, master, "numeric_longitudinal")
+    categorical_labs = _lab_specs(profile, master, "categorical_longitudinal")
     resolved, domain_sources = _resolve(master)
     availability = _availability(master, resolved, coverage)
-    analytic = build_analytic(intervals, master, resolved)
+    analytic = build_analytic(intervals, master, resolved, numeric_labs, categorical_labs)
     analytic.to_parquet(dirs["analytic"] / "01_pharma_transition_intervals.parquet", index=False)
     diagnostics = transition_associations(analytic, availability, resolved, config)
     associations = diagnostics.drop(columns=["n_exposed_events", "n_unexposed_events",
@@ -462,7 +724,11 @@ def run(args: argparse.Namespace) -> None:
         domains["from_summary"] = domains.from_median; domains["to_summary"] = domains.to_median
         domains["change_summary"] = domains.median_change
         domains = domains[["transition_pair", "domain", "n_paired", "from_summary", "to_summary", "change_summary", "median_change"]]
-    labs = _change_table(analytic, {x.upper() if x == "igg" else x.upper(): x for x in ("igg", "c3", "c4")})
+    lab_available = lab_availability(analytic, numeric_labs + categorical_labs, config)
+    labs = lab_changes_by_transition(analytic, numeric_labs)
+    lab_diagnostics = lab_transition_associations(analytic, numeric_labs, config)
+    lab_associations = lab_diagnostics.copy()
+    lab_reference = lab_reference_transitions(analytic, categorical_labs)
     serology = _serology(analytic, resolved)
     feasibility = ml_feasibility(analytic, availability, config)
     longitudinal = longitudinal_models(master, resolved)
@@ -473,7 +739,11 @@ def run(args: argparse.Namespace) -> None:
               "01_pharma_essdai_domains_change_by_transition.csv": domains,
               "01_pharma_esspri_change_by_transition.csv": esspri.drop(columns="variable", errors="ignore"),
               "01_pharma_esspri_components_change_by_transition.csv": components,
-              "01_pharma_labs_change_by_transition.csv": labs,
+              "01_pharma_lab_availability.csv": lab_available,
+              "01_pharma_lab_changes_by_transition.csv": labs,
+              "01_pharma_lab_transition_associations.csv": lab_associations,
+              "01_pharma_lab_transition_model_diagnostics.csv": lab_diagnostics,
+              "01_pharma_lab_reference_transitions.csv": lab_reference,
               "01_pharma_serology_status_by_transition.csv": serology,
               "01_pharma_ml_feasibility.csv": feasibility,
               "01_pharma_longitudinal_models.csv": longitudinal}
@@ -486,7 +756,9 @@ def run(args: argparse.Namespace) -> None:
              "01_pharma_essdai_change_by_transition.pdf", "01_pharma_essdai_domains_change_by_transition.csv",
              "01_pharma_essdai_domains_heatmap.pdf", "01_pharma_esspri_change_by_transition.csv",
              "01_pharma_esspri_components_change_by_transition.csv", "01_pharma_esspri_components_heatmap.pdf",
-             "01_pharma_labs_change_by_transition.csv", "01_pharma_labs_change_heatmap.pdf",
+             "01_pharma_lab_availability.csv", "01_pharma_lab_changes_by_transition.csv",
+             "01_pharma_lab_change_heatmap.pdf", "01_pharma_lab_transition_associations.csv",
+             "01_pharma_lab_transition_model_diagnostics.csv", "01_pharma_lab_reference_transitions.csv",
              "01_pharma_serology_status_by_transition.csv", "01_pharma_ml_feasibility.csv",
              "01_pharma_longitudinal_models.csv", "01_pharma_essdai_longitudinal_trajectory.pdf",
              "01_pharma_esspri_longitudinal_trajectory.pdf"]
@@ -502,6 +774,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--integrated", type=Path, default=common.INTEGRATED_LONGITUDINAL_PARQUET)
     parser.add_argument("--transitions", type=Path, default=common.POP_TRANSITION_INTERVALS_PARQUET)
     parser.add_argument("--config", type=Path, default=Path(__file__).with_name("config.yaml"))
+    parser.add_argument("--lab-profile", type=Path, default=DEFAULT_LAB_PROFILE)
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args(argv)
 
