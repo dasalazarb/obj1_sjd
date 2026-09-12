@@ -11,6 +11,7 @@ import argparse
 import logging
 import math
 import sys
+import warnings
 from pathlib import Path
 from typing import Sequence
 
@@ -20,6 +21,7 @@ if str(ROOT) not in sys.path:
 
 import numpy as np
 import pandas as pd
+from statsmodels.tools.sm_exceptions import PerfectSeparationWarning
 
 import common
 from src.studies._shared import (create_study_dirs, enrich_transition_intervals,
@@ -386,12 +388,22 @@ def lab_transition_associations(frame: pd.DataFrame, labs: list[dict], config: d
                 else:
                     status = "ready"
                 estimate = low = high = pvalue = np.nan
+                perfect_separation = False
                 if status == "ready":
                     try:
                         import statsmodels.api as sm
-                        fit = sm.GLM(fitdata.event.astype(float), sm.add_constant(fitdata.x.astype(float)),
-                                     family=sm.families.Poisson(),
-                                     offset=np.log(fitdata.interval_years.astype(float))).fit(cov_type="HC0")
+                        with warnings.catch_warnings(record=True) as caught:
+                            warnings.simplefilter("always")
+                            fit = sm.GLM(
+                                fitdata.event.astype(float),
+                                sm.add_constant(fitdata.x.astype(float)),
+                                family=sm.families.Poisson(),
+                                offset=np.log(fitdata.interval_years.astype(float)),
+                            ).fit(cov_type="HC0")
+                            perfect_separation = any(
+                                issubclass(warning.category, PerfectSeparationWarning)
+                                for warning in caught
+                            )
                         beta, se = fit.params["x"], fit.bse["x"]
                         estimate, low, high = math.exp(beta), math.exp(beta - 1.96*se), math.exp(beta + 1.96*se)
                         pvalue, status = fit.pvalues["x"], "success"
@@ -400,7 +412,10 @@ def lab_transition_associations(frame: pd.DataFrame, labs: list[dict], config: d
                         status = "model_failed"
                 interpretation, reason = "not_estimable", f"model_status_{status}"
                 if status == "success":
-                    if not all(np.isfinite(x) and x > 0 for x in (estimate, low, high)):
+                    if perfect_separation:
+                        interpretation, reason = ("unstable_perfect_separation",
+                                                  "perfect_separation_detected")
+                    elif not all(np.isfinite(x) and x > 0 for x in (estimate, low, high)):
                         interpretation, reason = "unstable_extreme_estimate", "ci_or_estimate_non_finite_or_nonpositive"
                     elif estimate < .1 or estimate > 10:
                         interpretation, reason = "unstable_extreme_estimate", "estimate_outside_0.1_to_10"
@@ -471,10 +486,19 @@ def transition_associations(frame: pd.DataFrame, availability: pd.DataFrame, res
                 sample["event"] = sample.to_pop.eq(destination).astype(int)
                 x = sample[exposure]
                 if not pd.api.types.is_numeric_dtype(x):
-                    interpreted = _binary(x)
-                    if interpreted.notna().sum() == 0 and x.dropna().nunique() == 2:
-                        interpreted = pd.Series(pd.factorize(x)[0], index=x.index).where(x.notna())
-                    x = interpreted
+                    numeric_candidate = pd.to_numeric(x, errors="coerce")
+                    nonmissing = int(x.notna().sum())
+                    numeric_fraction = (numeric_candidate.notna().sum() / nonmissing
+                                        if nonmissing else 0.0)
+                    if numeric_fraction >= 0.8:
+                        x = numeric_candidate
+                    else:
+                        interpreted = _binary(x)
+                        if interpreted.notna().sum() == 0 and x.dropna().nunique() == 2:
+                            interpreted = pd.Series(
+                                pd.factorize(x)[0], index=x.index
+                            ).where(x.notna())
+                        x = interpreted
                 fitdata = pd.DataFrame({"patient_id": sample.patient_id,
                                         "event": sample.event, "x": _numeric(x),
                                         "time": sample.interval_years}).dropna()
@@ -602,8 +626,9 @@ def _plot_heatmap(table: pd.DataFrame, row: str, value: str, path: Path, title: 
         return False
     import matplotlib.pyplot as plt
     pivot = plot_table.pivot(index=row, columns="transition_pair", values=value)
+    pivot = pivot.apply(pd.to_numeric, errors="coerce").astype(float)
     fig, ax = plt.subplots(figsize=(max(8, .9*len(pivot.columns)), max(3, .55*len(pivot))))
-    image = ax.imshow(pivot.to_numpy(dtype=float, na_value=np.nan),
+    image = ax.imshow(pivot.to_numpy(dtype=float),
                       aspect="auto", cmap="RdBu_r")
     ax.set_xticks(range(len(pivot.columns)), pivot.columns, rotation=45, ha="right")
     ax.set_yticks(range(len(pivot.index)), pivot.index); ax.set_title(title)
