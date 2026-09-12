@@ -168,11 +168,24 @@ def _resolve_exposure(frame: pd.DataFrame, exposure: str, family: str) -> str | 
 
 def _fit_poisson(data: pd.DataFrame, adjusted: bool) -> tuple[dict, bool]:
     import statsmodels.api as sm
+
     columns = ["x", "age"] if adjusted else ["x"]
+    endog = pd.to_numeric(data["event"], errors="coerce").astype(float)
+    exog = data[columns].apply(pd.to_numeric, errors="coerce").astype(float)
+    exog = sm.add_constant(exog, has_constant="add")
+    offset = np.log(pd.to_numeric(data["time"], errors="coerce").astype(float))
+
+    if not np.isfinite(endog.to_numpy(dtype=float)).all():
+        raise ValueError("Non-finite values in endog")
+    if not np.isfinite(exog.to_numpy(dtype=float)).all():
+        raise ValueError("Non-finite values in exog")
+    if not np.isfinite(np.asarray(offset, dtype=float)).all():
+        raise ValueError("Non-finite values in offset")
+
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        fit = sm.GLM(data.event, sm.add_constant(data[columns], has_constant="add"),
-                     family=sm.families.Poisson(), offset=np.log(data.time)).fit(cov_type="HC0")
+        fit = sm.GLM(endog, exog, family=sm.families.Poisson(),
+                     offset=offset).fit(cov_type="HC0")
     perfect = any(issubclass(item.category, PerfectSeparationWarning) for item in caught)
     values = {}
     for name in columns:
@@ -224,7 +237,9 @@ def fit_selected(row: pd.Series, analytic: pd.DataFrame, config: dict) -> dict:
     except Exception as exc:
         logging.warning("Sensitivity model failed for %s %s: %s", row.transition_pair,
                         row.exposure, exc)
-        output["interpretability_reason"] = f"model_failed:{type(exc).__name__}"
+        message = str(exc).replace("\n", " ")[:200]
+        output["interpretability_reason"] = (
+            f"model_failed:{type(exc).__name__}:{message}")
         return output
     ux, ax, age = unadjusted["x"], adjusted["x"], adjusted["age"]
     output.update(same_sample_estimate=ux[0], same_sample_ci95_low=ux[1],
