@@ -5,10 +5,19 @@ from pathlib import Path
 import pandas as pd
 
 
-SCRIPT = Path(__file__).parents[1] / "src/studies/pharma/00_profile_labs.py"
+SCRIPT = Path(__file__).parents[1] / "src/studies/pharma/00_pharma_lab_profile.py"
 SPEC = importlib.util.spec_from_file_location("pharma_lab_profile", SCRIPT)
 profile_module = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(profile_module)
+
+
+def test_default_output_matches_script_name_in_pharma_study_directory():
+    args = profile_module.parse_args([])
+
+    assert args.output == (
+        Path(__file__).parents[1]
+        / "outputs/studies/pharma/00_pharma_lab_profile.csv"
+    )
 
 
 def test_categorical_result_can_come_from_reference_status():
@@ -64,3 +73,17 @@ def test_multiple_units_preserves_numeric_type_but_requires_review():
     assert row.n_units == 2
     assert row.recommended_use == "review_or_exclude"
     assert "multiple_units" in row.review_reason
+
+
+def test_numeric_values_do_not_require_the_string_accessor():
+    frame = pd.DataFrame({
+        "patient_id": ["a", "b", "c", "d"],
+        "glucose__value": [1, 2, pd.NA, 4],
+    })
+
+    row = profile_module.profile_labs(frame).iloc[0]
+
+    assert row.inferred_type == "numeric"
+    assert row.n_nonmissing == 3
+    assert row.n_unique == 3
+    assert row.sample_values == "1 | 2 | 4"

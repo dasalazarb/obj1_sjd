@@ -52,13 +52,16 @@ CLINICAL_CATEGORIES = {
     "not detected", "present", "absent",
 }
 DATA_SUFFICIENCY_ORDER = {"adequate": 0, "limited": 1, "insufficient": 2}
+DEFAULT_OUTPUT = common.OUTPUTS_DIR / "studies" / "pharma" / f"{Path(__file__).stem}.csv"
 
 
 def _clean_text(series: pd.Series) -> pd.Series:
     """Return valid textual values without modifying the source series."""
     cleaned = series.dropna().copy()
+    cleaned = cleaned.map(
+        lambda value: value.strip() if isinstance(value, str) else value
+    )
     is_string = cleaned.map(lambda value: isinstance(value, str))
-    cleaned.loc[is_string] = cleaned.loc[is_string].str.strip()
     return cleaned.loc[~(is_string & cleaned.eq(""))]
 
 
@@ -255,7 +258,7 @@ def profile_labs(frame: pd.DataFrame) -> pd.DataFrame:
     ).reset_index(drop=True))
 
 
-def _print_summary(profile: pd.DataFrame) -> None:
+def _print_summary(profile: pd.DataFrame, output: Path) -> None:
     inferred = profile["inferred_type"]
     recommended = profile["recommended_use"]
     print(f"Total labs detected: {len(profile)}")
@@ -268,7 +271,7 @@ def _print_summary(profile: pd.DataFrame) -> None:
     sufficiency = profile["data_sufficiency"]
     for category in DATA_SUFFICIENCY_ORDER:
         print(f"{category.capitalize()} data: {(sufficiency == category).sum()}")
-    print("\nReview first:\n00_pharma_lab_profile.csv")
+    print(f"\nReview first:\n{output}")
 
 
 def run(args: argparse.Namespace) -> pd.DataFrame:
@@ -277,7 +280,7 @@ def run(args: argparse.Namespace) -> pd.DataFrame:
     profile = profile_labs(master)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     profile.to_csv(args.output, index=False)
-    _print_summary(profile)
+    _print_summary(profile, args.output)
     return profile
 
 
@@ -288,8 +291,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Integrated clinical-episode Parquet dataset",
     )
     parser.add_argument(
-        "--output", type=Path, default=Path("00_pharma_lab_profile.csv"),
-        help="Destination CSV (default: 00_pharma_lab_profile.csv)",
+        "--output", type=Path, default=DEFAULT_OUTPUT,
+        help=f"Destination CSV (default: {DEFAULT_OUTPUT})",
     )
     return parser.parse_args(argv)
 
