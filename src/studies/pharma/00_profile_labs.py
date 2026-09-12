@@ -21,7 +21,7 @@ import common
 from src.studies._shared import load_parquet, validate_integrated_dataset
 
 SCRIPT_NAME = Path(__file__).stem
-OUTPUT_DIR = common.OUTPUTS_DIR / "studies" / "pharma" / SCRIPT_NAME
+OUTPUT_DIR = common.STUDIES_TABLES_DIR / "pharma" / SCRIPT_NAME
 DEFAULT_OUTPUT = OUTPUT_DIR / "00_pharma_lab_profile.csv"
 VALUE_SUFFIX = "__value"
 ASSOCIATED_SUFFIXES = (

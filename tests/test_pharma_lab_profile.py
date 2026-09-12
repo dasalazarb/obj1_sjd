@@ -22,7 +22,7 @@ def test_default_output_is_in_script_named_study_directory(tmp_path):
 
     assert output == (
         Path(__file__).parents[1]
-        / "outputs/studies/pharma/00_profile_labs/00_pharma_lab_profile.csv"
+        / "outputs/tables/studies/pharma/00_profile_labs/00_pharma_lab_profile.csv"
     )
 
 
