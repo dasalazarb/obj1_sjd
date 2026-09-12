@@ -49,7 +49,16 @@ RECOMMENDATION_ORDER = {
 CLINICAL_CATEGORIES = {
     "normal", "abnormal", "high", "low", "positive", "negative",
     "pos", "neg", "+", "-", "reactive", "nonreactive", "detected",
-    "not detected", "present", "absent",
+    "not detected", "present", "absent", "within range", "within_range",
+}
+INFORMATIVE_REFERENCE_STATUSES = {
+    "positive", "negative", "normal", "abnormal", "high", "low",
+    "reactive", "nonreactive", "detected", "not detected", "present",
+    "absent", "within range", "within_range",
+}
+NON_INFORMATIVE_RESULT_VALUES = {
+    "uninterpretable", "unknown", "not reported", "not_reported",
+    "indeterminate",
 }
 DATA_SUFFICIENCY_ORDER = {"adequate": 0, "limited": 1, "insufficient": 2}
 
@@ -86,16 +95,36 @@ def _display(values: list[object], limit: int = 20) -> str:
     return " | ".join(str(value) for value in shown)
 
 
+def _normalized_text(value: object) -> str:
+    """Normalize a result label for small, explicit category comparisons."""
+    return str(value).strip().lower()
+
+
+def _is_informative_reference_status(value: object) -> bool:
+    """Return whether a reference status carries a clinical interpretation."""
+    return _normalized_text(value) in INFORMATIVE_REFERENCE_STATUSES
+
+
+def _has_useful_text(values: list[object]) -> bool:
+    """Return whether text contains information beyond placeholder labels."""
+    return any(
+        _normalized_text(value) not in NON_INFORMATIVE_RESULT_VALUES
+        for value in values
+    )
+
+
 def _infer_type(n_nonmissing: int, n_unique: int, numeric_parse_pct: float,
                 reference_values: list[object], n_reference: int,
                 text_values: list[object], n_text: int) -> tuple[str, str]:
     """Apply deliberately small and inspectable type-inference rules."""
     if n_nonmissing and numeric_parse_pct >= 0.90:
         return "numeric", "value"
-    if n_reference >= 2 and len(reference_values) <= 20:
+    if any(_is_informative_reference_status(value) for value in reference_values):
         return "categorical", "reference_status"
-    if n_text >= 2 and len(text_values) <= 20:
+    if n_text and _has_useful_text(text_values):
         return "categorical", "text"
+    if n_reference:
+        return "categorical", "reference_status"
     if n_text:
         return "categorical", "text"
     if 0.10 < numeric_parse_pct < 0.90:
