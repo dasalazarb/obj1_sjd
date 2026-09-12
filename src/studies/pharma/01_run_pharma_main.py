@@ -518,11 +518,22 @@ def transition_associations(frame: pd.DataFrame, availability: pd.DataFrame, res
                         "n_unexposed_nonevents": int(((fitdata.x == 0) & (fitdata.event == 0)).sum()),
                     }
                 status = "insufficient_events"; estimate = low = high = pvalue = np.nan
+                perfect_separation = False
                 if int(sample.event.sum()) >= minimum and int((1-sample.event).sum()) >= minimum and sample[exposure].nunique() > 1:
                     try:
                         import statsmodels.api as sm
-                        model = sm.GLM(fitdata.event, sm.add_constant(fitdata.x), family=sm.families.Poisson(),
-                                       offset=np.log(fitdata.time)).fit(cov_type="HC0")
+                        with warnings.catch_warnings(record=True) as caught:
+                            warnings.simplefilter("always")
+                            model = sm.GLM(
+                                fitdata.event,
+                                sm.add_constant(fitdata.x),
+                                family=sm.families.Poisson(),
+                                offset=np.log(fitdata.time),
+                            ).fit(cov_type="HC0")
+                            perfect_separation = any(
+                                issubclass(warning.category, PerfectSeparationWarning)
+                                for warning in caught
+                            )
                         beta, se = model.params["x"], model.bse["x"]
                         estimate, low, high, pvalue = math.exp(beta), math.exp(beta-1.96*se), math.exp(beta+1.96*se), model.pvalues["x"]
                         status = "success"
@@ -531,7 +542,10 @@ def transition_associations(frame: pd.DataFrame, availability: pd.DataFrame, res
                         status = "model_failed"
                 interpretability_status, interpretability_reason = "not_estimable", f"model_status_{status}"
                 if status == "success":
-                    if modeled_as_binary and any(value < 5 for value in cell_counts.values()):
+                    if perfect_separation:
+                        interpretability_status = "unstable_perfect_separation"
+                        interpretability_reason = "perfect_separation_detected"
+                    elif modeled_as_binary and any(value < 5 for value in cell_counts.values()):
                         interpretability_status = "unstable_sparse_cells"
                         interpretability_reason = "one_or_more_2x2_cells_lt_5"
                     elif not all(np.isfinite(value) and value > 0 for value in (estimate, low, high)):
