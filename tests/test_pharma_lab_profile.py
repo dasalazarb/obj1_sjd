@@ -1,5 +1,6 @@
 """Behavioral tests for the Pharma laboratory inventory."""
 import importlib.util
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -9,6 +10,20 @@ SCRIPT = Path(__file__).parents[1] / "src/studies/pharma/00_profile_labs.py"
 SPEC = importlib.util.spec_from_file_location("pharma_lab_profile", SCRIPT)
 profile_module = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(profile_module)
+
+
+def test_default_output_is_in_script_named_study_directory(tmp_path):
+    original_cwd = Path.cwd()
+    try:
+        os.chdir(tmp_path)
+        output = profile_module.parse_args([]).output
+    finally:
+        os.chdir(original_cwd)
+
+    assert output == (
+        Path(__file__).parents[1]
+        / "outputs/studies/pharma/00_profile_labs/00_pharma_lab_profile.csv"
+    )
 
 
 def test_categorical_result_can_come_from_reference_status():

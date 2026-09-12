@@ -20,6 +20,9 @@ import pandas as pd
 import common
 from src.studies._shared import load_parquet, validate_integrated_dataset
 
+SCRIPT_NAME = Path(__file__).stem
+OUTPUT_DIR = common.OUTPUTS_DIR / "studies" / "pharma" / SCRIPT_NAME
+DEFAULT_OUTPUT = OUTPUT_DIR / "00_pharma_lab_profile.csv"
 VALUE_SUFFIX = "__value"
 ASSOCIATED_SUFFIXES = (
     "text", "unit", "reference_status", "measurement_date",
@@ -286,7 +289,7 @@ def profile_labs(frame: pd.DataFrame) -> pd.DataFrame:
     ).reset_index(drop=True))
 
 
-def _print_summary(profile: pd.DataFrame) -> None:
+def _print_summary(profile: pd.DataFrame, output: Path = DEFAULT_OUTPUT) -> None:
     inferred = profile["inferred_type"]
     recommended = profile["recommended_use"]
     print(f"Total labs detected: {len(profile)}")
@@ -299,7 +302,7 @@ def _print_summary(profile: pd.DataFrame) -> None:
     sufficiency = profile["data_sufficiency"]
     for category in DATA_SUFFICIENCY_ORDER:
         print(f"{category.capitalize()} data: {(sufficiency == category).sum()}")
-    print("\nReview first:\n00_pharma_lab_profile.csv")
+    print(f"\nReview first:\n{output}")
 
 
 def run(args: argparse.Namespace) -> pd.DataFrame:
@@ -308,7 +311,7 @@ def run(args: argparse.Namespace) -> pd.DataFrame:
     profile = profile_labs(master)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     profile.to_csv(args.output, index=False)
-    _print_summary(profile)
+    _print_summary(profile, args.output)
     return profile
 
 
@@ -319,8 +322,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Integrated clinical-episode Parquet dataset",
     )
     parser.add_argument(
-        "--output", type=Path, default=Path("00_pharma_lab_profile.csv"),
-        help="Destination CSV (default: 00_pharma_lab_profile.csv)",
+        "--output", type=Path, default=DEFAULT_OUTPUT,
+        help=f"Destination CSV (default: {DEFAULT_OUTPUT})",
     )
     return parser.parse_args(argv)
 
