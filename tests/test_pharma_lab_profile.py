@@ -32,6 +32,36 @@ def test_categorical_result_can_come_from_reference_status():
     assert row.data_sufficiency == "adequate"
 
 
+def test_non_informative_reference_status_does_not_hide_useful_text():
+    frame = pd.DataFrame({
+        "patient_id": [f"p{i}" for i in range(10)],
+        "ana_pattern__value": [pd.NA] * 10,
+        "ana_pattern__text": ["Homogeneous", "Speckled"] * 5,
+        "ana_pattern__reference_status": [" Uninterpretable "] * 10,
+    })
+
+    row = profile_module.profile_labs(frame).iloc[0]
+
+    assert row.inferred_type == "categorical"
+    assert row.result_source == "text"
+    assert row.recommended_use == "descriptive_only"
+
+
+def test_informative_reference_status_still_takes_priority_over_text():
+    frame = pd.DataFrame({
+        "patient_id": ["a", "b"],
+        "ana_status__value": [pd.NA, pd.NA],
+        "ana_status__text": ["Homogeneous", "Speckled"],
+        "ana_status__reference_status": [" WITHIN RANGE ", "negative"],
+    })
+
+    row = profile_module.profile_labs(frame).iloc[0]
+
+    assert row.inferred_type == "categorical"
+    assert row.result_source == "reference_status"
+    assert row.recommended_use == "categorical_longitudinal"
+
+
 def test_text_fallback_and_numeric_sufficiency_are_independent():
     frame = pd.DataFrame({
         "patient_id": ["a", "b", "c"],
