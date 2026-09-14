@@ -78,7 +78,8 @@ SUMMARY_COLUMNS = [
     "iqr_intervals_per_patient", "n_patients_with_1_measurement",
     "n_patients_with_ge2_measurements", "n_patients_with_ge3_measurements",
     "n_supported_transitions", "n_estimable_effects",
-    "n_directionally_consistent_with_02_when_comparable", "overall_status",
+    "n_directionally_comparable_with_02", "n_directionally_consistent_with_02",
+    "overall_status",
 ]
 
 
@@ -288,7 +289,7 @@ def _metadata_for_transition(source: pd.DataFrame, biomarker: str,
         exact = rows.loc[normalized.eq(f"{origin}→{destination}")]
         if not exact.empty:
             return exact.iloc[0]
-    return rows.iloc[0] if not rows.empty else None
+    return None
 
 
 def fit_biomarker(biomarker: str, stacked: pd.DataFrame, support: pd.DataFrame,
@@ -358,7 +359,18 @@ def summarize_biomarkers(candidates: pd.DataFrame, long_data: pd.DataFrame,
         effects = models.loc[(models.biomarker.eq(biomarker)) &
                              models.model_status.eq("success") &
                              models.interpretability_status.eq("interpretable")]
-        comparable = effects.direction_consistent_with_02.dropna()
+        # Each biomarker-transition is one scientific hypothesis.  Prefer the
+        # primary age-adjusted result and use the unadjusted result only when
+        # that transition has no estimable adjusted model.
+        adjusted_effects = effects.loc[effects.model_version.eq("age_adjusted_clustered")]
+        fallback_effects = effects.loc[
+            effects.model_version.eq("same_sample_clustered") &
+            ~effects.transition_id.isin(adjusted_effects.transition_id)
+        ]
+        selected_effects = pd.concat([adjusted_effects, fallback_effects], ignore_index=True)
+        # Comparability with step 02 is assessed only with the primary model;
+        # unadjusted and adjusted versions must not duplicate a comparison.
+        comparable = adjusted_effects.direction_consistent_with_02.dropna()
         if effects.empty:
             overall = ("insufficient_transition_support" if not biomarker_support.supported_for_model.any()
                        else "not_estimable")
@@ -372,11 +384,22 @@ def summarize_biomarkers(candidates: pd.DataFrame, long_data: pd.DataFrame,
                 "n_patients_with_1_measurement", "n_patients_with_ge2_measurements",
                 "n_patients_with_ge3_measurements")},
             "n_supported_transitions": int(biomarker_support.supported_for_model.sum()),
-            "n_estimable_effects": effects.transition_id.nunique(),
-            "n_directionally_consistent_with_02_when_comparable": int(comparable.astype(bool).sum()),
+            "n_estimable_effects": selected_effects.transition_id.nunique(),
+            "n_directionally_comparable_with_02": len(comparable),
+            "n_directionally_consistent_with_02": int(comparable.astype(bool).sum()),
             "overall_status": overall,
         })
     return pd.DataFrame(rows, columns=SUMMARY_COLUMNS)
+
+
+def apply_fdr_by_model(models: pd.DataFrame) -> None:
+    """Assign BH q-values within each model-version family, in place."""
+    for model_version in ("same_sample_clustered", "age_adjusted_clustered"):
+        estimable = (models.model_version.eq(model_version) &
+                     models.model_status.eq("success") &
+                     pd.to_numeric(models.p_value, errors="coerce").notna())
+        models.loc[estimable, "q_value"] = benjamini_hochberg(
+            pd.to_numeric(models.loc[estimable, "p_value"], errors="coerce").to_numpy())
 
 
 def forest_plot(models: pd.DataFrame, path: Path) -> None:
@@ -444,9 +467,7 @@ def run(args: argparse.Namespace) -> None:
     support = pd.concat(all_support, ignore_index=True) if all_support else pd.DataFrame(columns=SUPPORT_COLUMNS)
     models = pd.DataFrame(all_models, columns=MODEL_COLUMNS)
     if len(models):
-        estimable = models.model_status.eq("success") & pd.to_numeric(models.p_value, errors="coerce").notna()
-        models.loc[estimable, "q_value"] = benjamini_hochberg(
-            pd.to_numeric(models.loc[estimable, "p_value"], errors="coerce").to_numpy())
+        apply_fdr_by_model(models)
     summary = summarize_biomarkers(candidates, long_data, support, models)
     support.to_csv(dirs["tables"] / "03_pharma_multistate_support.csv", index=False)
     models.to_csv(dirs["tables"] / "03_pharma_multistate_models.csv", index=False)
@@ -470,12 +491,15 @@ def run(args: argparse.Namespace) -> None:
           "4. 03_pharma_multistate_summary.csv\n"
           "5. 03_pharma_multistate_forest.pdf\n"
           "6. 03_pharma_multistate_long.parquet\n")
-    modeled_intervals = long_data.drop_duplicates(
+    biomarker_intervals = long_data.drop_duplicates(
         ["biomarker", "patient_id", "from_clinical_episode_id", "to_clinical_episode_id"])
+    clinical_intervals = long_data.drop_duplicates(
+        ["patient_id", "from_clinical_episode_id", "to_clinical_episode_id"])
     print(f"Candidate biomarkers from 02: {len(candidates)}")
     print(f"Eligible biomarkers: {int(candidates.eligible_for_03.sum())}")
     print(f"Patients modeled: {long_data.patient_id.nunique() if len(long_data) else 0}")
-    print(f"Intervals modeled: {len(modeled_intervals)}")
+    print(f"Unique clinical intervals modeled: {len(clinical_intervals)}")
+    print(f"Biomarker-interval observations modeled: {len(biomarker_intervals)}")
     print(f"Supported transitions: {int(support.supported_for_model.sum()) if len(support) else 0}")
     print(f"Estimable biomarker-transition effects: {estimable_effects}")
     print(f"Non-estimable effects: {possible_effects - estimable_effects}")
