@@ -1,0 +1,33 @@
+study_name: graph
+contract_version: clinical_episode_v1
+random_seed: 20260831
+
+feature_selection:
+  minimum_baseline_coverage: 0.70
+
+pca:
+  variance_target: 0.80
+  max_components: 10
+
+mapper:
+  n_cubes: 8
+  perc_overlap: 0.40
+  min_samples: 3
+  eps_k_neighbors: 4
+  eps_percentile: 65
+  minimum_node_support: 3
+  minimum_branch_patients: 8
+  soft_membership_tau: 1.0
+
+bootstrap:
+  replicates: 60
+  patient_fraction: 0.80
+  branch_match_jaccard: 0.50
+  stable_branch_threshold: 0.80
+
+permutation:
+  ari_replicates: 5000
+
+persistent_homology:
+  enabled: true
+  permutation_replicates: 150
