@@ -37,21 +37,13 @@ from src.studies._shared import (benjamini_hochberg, create_study_dirs,
                                  write_json)
 
 POPS = ("Pop1", "Pop2", "Pop3")
-PROS = ("sf36_pcs", "sf36_mcs", "profad_total", "mdafs_global")
+PRO_FEATURES = ("sf36_pcs", "sf36_mcs", "profad_total", "mdafs_global")
+OVERLAP_FEATURES = ("overlap_baseline",)
 OUTCOMES = ("essdai_total", "esspri_total_observed", "sf36_pcs",
             "profad_total", "mdafs_global")
 ADMIN = ("protocol", "ids__protocol", "ids__protocol_number", "parent_protocol")
 AGES = ("ids__age_at_visit", "age_at_visit", "age")
 SEXES = ("ids__sex", "ids__gender", "sex", "gender")
-IDS = {"patient_id", "clinical_episode_id", "clinical_baseline_episode_id",
-       "previous_clinical_episode_id"}
-STRUCTURAL = {"clinical_anchor_date", "clinical_baseline_date", "episode_start_date",
-              "episode_end_date", "clinical_visit", "clinical_visit_number", "visit_type",
-              "is_clinical_baseline", "is_last_clinical_visit", "integration_version",
-              "integration_run_date"}
-EXACT_POP = {"pop_status", "previous_pop_status", "essdai_total", "esspri_total",
-             "esspri_total_observed", "previous_essdai_total", "previous_esspri_total",
-             "delta_essdai_from_previous", "delta_esspri_from_previous"}
 COLORS = ["#2E5A87", "#C1666B", "#5B8C5A", "#B08B4F", "#6C6C8C",
           "#7A5C8E", "#3C8DAD", "#C77C3B"]
 plt.rcParams.update({"figure.dpi": 130, "font.size": 10, "axes.grid": True,
@@ -74,11 +66,27 @@ def load_real_inputs(integrated: Path, lab_profile: Path) -> tuple[pd.DataFrame,
     master = load_parquet(integrated)
     contract = validate_integrated_dataset(master)
     profile = pd.read_csv(lab_profile)
-    required = {"recommended_use", "value_column"}
+    required = {"lab", "recommended_use", "value_column"}
     missing = required - set(profile)
     if missing:
         raise ValueError(f"Laboratory profile missing required columns: {sorted(missing)}")
     return master, profile, contract
+
+
+def load_age_at_diagnosis(path: Path) -> pd.DataFrame:
+    """Load Block A's canonical patient-level age-at-diagnosis derivation."""
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Baseline metrics file not found: {path}. Run "
+            "src/block_A/01_table1_baseline.py first."
+        )
+    metrics = pd.read_csv(path, usecols=lambda column: column in {"patient_id", "age_dx"})
+    missing = {"patient_id", "age_dx"} - set(metrics)
+    if missing:
+        raise ValueError(f"Baseline metrics missing required columns: {sorted(missing)}")
+    if metrics["patient_id"].duplicated().any():
+        raise ValueError("Baseline metrics must contain one row per patient")
+    return metrics[["patient_id", "age_dx"]]
 
 
 def select_baseline(master: pd.DataFrame) -> pd.DataFrame:
@@ -86,54 +94,6 @@ def select_baseline(master: pd.DataFrame) -> pd.DataFrame:
     if baseline["patient_id"].duplicated().any():
         raise ValueError("Clinical baseline must contain at most one row per patient")
     return baseline.reset_index(drop=True)
-
-
-def _exclusion(column: str) -> tuple[str, str]:
-    """Return simple manifest family and a leakage-safe exclusion reason."""
-    low = column.lower()
-    if column in IDS:
-        return "structural", "identifier"
-    if column in STRUCTURAL:
-        return "structural", "visit_or_date_structure"
-    if column in ADMIN or any(x in low for x in ("protocol_number", "site_id", "center_id")):
-        return "administrative", "administrative"
-    esspri_component = low in {"dryness", "fatigue", "pain"} or (
-        "esspri" in low and any(x in low for x in ("dry", "fatigue", "pain")))
-    domain_names = ("constitutional", "lymphadenopathy", "articular", "cutaneous",
-                    "pulmonary", "renal", "muscular", "pns", "cns", "hematolog",
-                    "biological")
-    essdai_component = (("essdai" in low and any(x in low for x in ("domain", "score", "active")))
-                        or (any(x in low for x in domain_names)
-                            and (low.endswith("_domain_score") or low.endswith("_active"))))
-    pop_derived = low.startswith("pop_") or low.endswith("_pop") or "pop_status" in low
-    if column in EXACT_POP or pop_derived or esspri_component or essdai_component:
-        return "pop_essdai_esspri", "pop_essdai_esspri_leakage"
-    if low.startswith(("time_since_", "time_from_previous_", "previous_", "delta_", "next_", "to_")):
-        return "longitudinal_derived", "longitudinal_or_future"
-    suffixes = ("_n_measurements", "_days_from_anchor", "_conflict", "_selection_status",
-                "_episode_status", "_measurement_date", "_unit", "_text")
-    if low.startswith("has_") or low in {"n_integrated_blocks_available", "n_clinical_visits_patient"} or low.endswith(suffixes):
-        return "metadata", "availability_qc_or_metadata"
-    # Every laboratory result is governed by the Pharma profile.  The selected
-    # numeric columns are overridden to ``lab`` in build_feature_manifest.
-    if low.endswith("__value"):
-        return "lab", "laboratory_not_recommended_numeric_longitudinal"
-    if column in PROS:
-        return "pro", ""
-    if "overlap" in low or low.startswith("ov_"):
-        return "overlap", ""
-    if "gland" in low:
-        return "glandular", ""
-    return "other_clinical", ""
-
-
-def _numeric_candidate(series: pd.Series) -> pd.Series | None:
-    if pd.api.types.is_bool_dtype(series.dtype):
-        return series.astype("Float64")
-    numeric = pd.to_numeric(series, errors="coerce")
-    # Do not treat incidental numeric-looking identifiers/categories as clinical measures.
-    observed = int(series.notna().sum())
-    return numeric if observed and int(numeric.notna().sum()) == observed else None
 
 
 def build_feature_manifest(baseline: pd.DataFrame, profile: pd.DataFrame,
@@ -148,26 +108,27 @@ def build_feature_manifest(baseline: pd.DataFrame, profile: pd.DataFrame,
             allowed_labs[column] = str(getattr(row, "lab", column))
             lab_names[str(getattr(row, "lab", column)).lower()] = column
 
+    curated = ({column: ("lab", "pharma_00_lab_profile") for column in allowed_labs}
+               | {column: ("pro", "integrated_master") for column in PRO_FEATURES}
+               | {column: ("overlap", "integrated_master") for column in OVERLAP_FEATURES}
+               | {"age_dx": ("age_at_diagnosis", "blockA_01_table1_baseline")})
     rows, values = [], {}
     for column in baseline.columns:
-        family, reason = _exclusion(column)
-        source = "integrated_master"
-        numeric = None
-        if column in allowed_labs:
-            family, source = "lab", "pharma_lab_profile"
-            reason = ""
-            numeric = pd.to_numeric(baseline[column], errors="coerce")
-        elif not reason:
-            numeric = _numeric_candidate(baseline[column])
-        nonmissing = int(numeric.notna().sum()) if numeric is not None else int(baseline[column].notna().sum())
+        selected = column in curated
+        family, source = curated.get(column, ("", "integrated_master"))
+        reason = "" if selected else "not_in_curated_graph_feature_set"
+        numeric = pd.to_numeric(baseline[column], errors="coerce") if selected else None
+        nonmissing = (int(numeric.notna().sum()) if numeric is not None
+                      else int(baseline[column].notna().sum()))
         pct = nonmissing / len(baseline) if len(baseline) else 0.0
-        unique = int(numeric.nunique(dropna=True)) if numeric is not None else int(baseline[column].nunique(dropna=True))
-        if not reason and numeric is None:
-            reason = "not_numeric_or_boolean"
-        elif not reason and pct < minimum_coverage:
-            reason = "below_minimum_baseline_coverage"
-        elif not reason and unique < 2:
+        unique = (int(numeric.nunique(dropna=True)) if numeric is not None
+                  else int(baseline[column].nunique(dropna=True)))
+        if selected and not int(numeric.notna().sum()):
+            reason = "no_observed_numeric_baseline_data"
+        elif selected and unique < 2:
             reason = "no_baseline_variability"
+        elif selected and column not in PRO_FEATURES and pct < minimum_coverage:
+            reason = "below_minimum_baseline_coverage"
         included = not reason
         if included:
             values[column] = numeric.astype(float)
@@ -283,7 +244,6 @@ def soft_membership(counts: np.ndarray, tau: float) -> tuple[np.ndarray, np.ndar
     probabilities = np.full((n, branches), np.nan)
     hard = np.full(n, np.nan)
     if branches:
-        probabilities[~covered] = 1.0 / branches
         logits = counts[covered] / float(tau)
         exp = np.exp(logits - logits.max(axis=1, keepdims=True))
         probabilities[covered] = exp / exp.sum(axis=1, keepdims=True)
@@ -351,6 +311,8 @@ def branch_pop_crosswalk(membership: pd.DataFrame) -> pd.DataFrame:
 
 
 def administrative_sensitivity(baseline: pd.DataFrame, membership: pd.DataFrame) -> dict:
+    if membership.loc[membership.mapper_covered, "hard_branch"].nunique() < 2:
+        return {"status": "not_estimable_single_branch"}
     column = next((x for x in ADMIN if x in baseline), None)
     if not column:
         logging.info("Administrative sensitivity omitted: no protocol column is available")
@@ -405,6 +367,13 @@ def fit_longitudinal_models(master: pd.DataFrame, baseline: pd.DataFrame,
     result_columns = ["outcome", "n_observations", "n_patients", "n_branches", "model",
                       "interaction_lr", "interaction_df", "interaction_p_value",
                       "interaction_q_value", "model_status"]
+    if membership.loc[membership.mapper_covered, "hard_branch"].nunique() < 2:
+        rows = [{"outcome": outcome, "n_observations": 0, "n_patients": 0,
+                 "n_branches": int(membership.loc[membership.mapper_covered, "hard_branch"].nunique()),
+                 "model": "", "interaction_lr": np.nan, "interaction_df": np.nan,
+                 "interaction_p_value": np.nan, "interaction_q_value": np.nan,
+                 "model_status": "not_estimable_single_branch"} for outcome in OUTCOMES]
+        return pd.DataFrame(rows, columns=result_columns), pd.DataFrame(), []
     if "time_since_clinical_baseline_years" not in master:
         logging.warning("Longitudinal models omitted: time_since_clinical_baseline_years unavailable")
         return pd.DataFrame(columns=result_columns), pd.DataFrame(), []
@@ -565,16 +534,44 @@ def run(args: argparse.Namespace) -> None:
     logging.info("Integrated input: %s", args.integrated)
     master, profile, contract = load_real_inputs(args.integrated, args.lab_profile)
     baseline = select_baseline(master)
+    age_dx = load_age_at_diagnosis(args.baseline_metrics)
+    baseline = baseline.merge(age_dx, on="patient_id", how="left", validate="one_to_one",
+                              suffixes=("", "_blockA"))
+    if "age_dx_blockA" in baseline:
+        baseline["age_dx"] = baseline.pop("age_dx_blockA")
     n_master = master.patient_id.nunique(); n_baseline = baseline.patient_id.nunique()
     logging.info("Master episodes=%d patients=%d baseline patients=%d excluded without baseline=%d", len(master), n_master, n_baseline, n_master-n_baseline)
     manifest, numeric_values, lab_names = build_feature_manifest(
         baseline, profile, float(config["feature_selection"]["minimum_baseline_coverage"]))
     manifest_path = dirs["tables"] / "01_graph_feature_manifest.csv"; manifest.to_csv(manifest_path, index=False)
-    logging.info("Candidate features=%d included features=%d", len(manifest), len(numeric_values))
+    included_manifest = manifest.loc[manifest.included_in_embedding].copy()
+    family_counts = included_manifest.groupby("family").size().to_dict()
+    logging.info("Labs selected from pharma/00: %d", family_counts.get("lab", 0))
+    logging.info("PRO scores selected: %d", family_counts.get("pro", 0))
+    logging.info("Overlap features selected: %d", family_counts.get("overlap", 0))
+    logging.info("Age-at-diagnosis selected: %d", family_counts.get("age_at_diagnosis", 0))
+    logging.info("Total embedding features: %d; feature count by family: %s",
+                 len(numeric_values), family_counts)
     # Keep raw missingness for bootstrap preprocessing; impute only representation copies.
     raw_matrix = pd.DataFrame(numeric_values)
     matrix, n_imputed, pct_imputed = build_baseline_matrix(numeric_values)
+    embedding_features = included_manifest[["feature", "family", "source",
+                                             "n_nonmissing_baseline",
+                                             "pct_nonmissing_baseline",
+                                             "n_unique_baseline"]].copy()
+    missing_by_feature = raw_matrix.isna().sum()
+    embedding_features["n_imputed"] = embedding_features.feature.map(missing_by_feature).astype(int)
+    embedding_features["pct_imputed"] = embedding_features["n_imputed"] / len(raw_matrix)
+    embedding_features.to_csv(dirs["tables"] / "01_graph_embedding_feature_set.csv", index=False)
+    logging.info("Missing values before imputation=%d; after imputation=%d",
+                 n_imputed, int(matrix.isna().sum().sum()))
     logging.info("Imputed values=%d (%.2f%%)", n_imputed, 100*pct_imputed)
+    print("\nGRAPH CURATED EMBEDDING FEATURES")
+    print(f"Total features: {len(numeric_values)}")
+    print(f"Labs: {family_counts.get('lab', 0)}")
+    print(f"PROs: {family_counts.get('pro', 0)}")
+    print(f"Overlap: {family_counts.get('overlap', 0)}")
+    print(f"Age at diagnosis: {family_counts.get('age_at_diagnosis', 0)}")
     embedding, pca, _ = fit_patient_embedding(matrix, config)
     cumulative = float(pca.explained_variance_ratio_.sum())
     logging.info("PCA retained=%d cumulative variance=%.4f", embedding.shape[1], cumulative)
@@ -596,13 +593,19 @@ def run(args: argparse.Namespace) -> None:
     for branch in range(probabilities.shape[1]): patient_embedding[f"pi_branch_{branch}"] = probabilities[:, branch]
     membership_columns = ["patient_id", "baseline_clinical_episode_id", "baseline_pop", "mapper_covered", "hard_branch"]
     membership = patient_embedding[membership_columns].copy()
-    membership["max_membership"] = np.nanmax(probabilities, axis=1) if probabilities.shape[1] else np.nan
+    membership["max_membership"] = (pd.DataFrame(probabilities).max(axis=1).to_numpy()
+                                         if probabilities.shape[1] else np.nan)
     for branch in range(probabilities.shape[1]): membership[f"pi_branch_{branch}"] = probabilities[:, branch]
     reference_sets = [set(np.flatnonzero(counts[:, branch] > 0)) for branch in range(counts.shape[1])]
     stability = bootstrap_stability(raw_matrix, reference_sets, config)
     stable = [int(i) for i, value in enumerate(stability) if value >= float(config["bootstrap"]["stable_branch_threshold"])]
     valid = covered & baseline.pop_status.isin(POPS).to_numpy()
-    ari, ari_p = ari_permutation(hard[valid].astype(int), baseline.loc[valid, "pop_status"].to_numpy(), int(config["permutation"]["ari_replicates"]), int(config["random_seed"]))
+    single_branch = len(components) < 2
+    if single_branch:
+        ari, ari_p, ari_status = np.nan, np.nan, "not_estimable_single_branch"
+    else:
+        ari, ari_p = ari_permutation(hard[valid].astype(int), baseline.loc[valid, "pop_status"].to_numpy(), int(config["permutation"]["ari_replicates"]), int(config["random_seed"]))
+        ari_status = "estimated" if np.isfinite(ari) else "not_estimable"
     crosswalk = branch_pop_crosswalk(membership)
     administrative = administrative_sensitivity(baseline, membership)
     included = manifest.loc[manifest.included_in_embedding, "feature"].tolist()
@@ -620,7 +623,12 @@ def run(args: argparse.Namespace) -> None:
     summary = {"input": str(args.integrated), "contract_validation": contract,
                "n_patients_master": int(n_master), "n_baseline_patients": int(n_baseline),
                "n_patients_excluded_no_baseline": int(n_master-n_baseline),
-               "n_embedding_features": len(included), "n_imputed_values": n_imputed,
+               "n_embedding_features": len(included),
+               "embedding_feature_families": {family: int(family_counts.get(family, 0))
+                                                for family in ("lab", "pro", "overlap", "age_at_diagnosis")},
+               "embedding_feature_names": included,
+               "embedding_feature_manifest_file": "01_graph_embedding_feature_set.csv",
+               "n_imputed_values": n_imputed,
                "pct_imputed_values": pct_imputed, "pca_retained_components": embedding.shape[1],
                "pca_cumulative_variance": cumulative, "mapper_parameters": mapper_cfg,
                "dbscan_eps": eps, "number_mapper_nodes": len(nodes),
@@ -628,6 +636,7 @@ def run(args: argparse.Namespace) -> None:
                "mapper_coverage": float(covered.mean()), "mapper_pruning": pruning,
                "branch_bootstrap_stability": {str(x): float(v) for x, v in enumerate(stability)},
                "stable_branches": stable, "ari_vs_baseline_pop": ari,
+               "ari_vs_baseline_pop_status": ari_status,
                "ari_permutation_p": ari_p, "administrative_sensitivity": administrative,
                "longitudinal_outcomes_modeled": models.loc[models.model_status.eq("estimated"), "outcome"].tolist() if len(models) else [],
                "persistent_homology": {key: value for key, value in t4.items() if key not in {"diagram", "null"}}}
@@ -635,7 +644,7 @@ def run(args: argparse.Namespace) -> None:
     if not args.dry_run:
         make_figures(embedding, membership, graph, components, nodes, stability,
                      crosswalk, ari, ari_p, longitudinal, models, plotted, t4, dirs["figures"])
-    names = ["01_graph_feature_manifest.csv", "01_graph_patient_embedding.csv",
+    names = ["01_graph_embedding_feature_set.csv", "01_graph_feature_manifest.csv", "01_graph_patient_embedding.csv",
              "01_graph_branch_membership.csv", "01_graph_branch_pop_crosswalk.csv",
              "01_graph_branch_characterization.csv", "01_graph_longitudinal_models.csv",
              "01_graph_results_summary.json", "01_graph_embedding_mapper.png",
@@ -652,6 +661,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--integrated", type=Path, default=common.INTEGRATED_LONGITUDINAL_PARQUET)
     parser.add_argument("--lab-profile", type=Path, default=common.STUDIES_TABLES_DIR / "pharma" / "00_profile_labs" / "00_pharma_lab_profile.csv")
+    parser.add_argument(
+        "--baseline-metrics", type=Path,
+        default=common.BLOCKA_INTERMEDIATE_DATA_DIR / "01_table1_baseline" /
+        "01_table1_from_clinical_episode_spine_sjd__baseline_patient_metrics_after_eligibility.csv")
     parser.add_argument("--config", type=Path, default=folder / "config.yaml")
     parser.add_argument("--dry-run", action="store_true", help="Generate tables/JSON but omit figures")
     return parser.parse_args(argv)
