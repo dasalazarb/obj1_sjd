@@ -385,7 +385,10 @@ def branch_characterization(baseline: pd.DataFrame, membership: pd.DataFrame,
     rows = []
     for branch, group in data.groupby("hard_branch"):
         for feature in columns:
-            values = pd.to_numeric(group[feature], errors="coerce").dropna()
+            # ``to_numeric`` preserves boolean dtype.  NumPy cannot interpolate
+            # boolean values while calculating quartiles, so normalize every
+            # characterization feature to a common floating-point dtype.
+            values = pd.to_numeric(group[feature], errors="coerce").dropna().astype(float)
             rows.append({"hard_branch": int(branch), "feature": feature, "n": len(values),
                          "median": values.median(), "q1": values.quantile(.25),
                          "q3": values.quantile(.75), "mean": values.mean(),
