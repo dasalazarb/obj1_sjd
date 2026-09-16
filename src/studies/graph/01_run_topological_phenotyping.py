@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import logging
 import math
+import re
 import sys
 from pathlib import Path
 
@@ -44,6 +45,9 @@ from src.studies._shared import (benjamini_hochberg, create_study_dirs,
 POPS = ("Pop1", "Pop2", "Pop3")
 PRO_FEATURES = ("sf36_pcs", "sf36_mcs", "profad_total", "mdafs_global")
 OVERLAP_FEATURES = ("overlap_baseline",)
+EXPECTED_LAB_AUDIT = ("anti_ro_ssa", "anti_la_ssb", "ana", "rheumatoid_factor",
+                      "cryoglobulin", "complement_c3", "complement_c4", "igg",
+                      "iga", "igm", "esr", "crp")
 OUTCOMES = ("essdai_total", "esspri_total_observed", "sf36_pcs",
             "profad_total", "mdafs_global")
 ADMIN = ("protocol", "ids__protocol", "ids__protocol_number", "parent_protocol")
@@ -67,15 +71,22 @@ def load_config(path: Path) -> dict:
     return config
 
 
-def load_real_inputs(integrated: Path, lab_profile: Path) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+def load_real_inputs(integrated: Path, candidates_path: Path) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    if not candidates_path.exists():
+        raise FileNotFoundError(
+            f"Graph lab candidate file not found: {candidates_path}. "
+            "Run src/studies/pharma/00_profile_labs.py first"
+        )
     master = load_parquet(integrated)
     contract = validate_integrated_dataset(master)
-    profile = pd.read_csv(lab_profile)
-    required = {"lab", "recommended_use", "value_column"}
-    missing = required - set(profile)
+    candidates = pd.read_csv(candidates_path)
+    required = {"lab", "graph_candidate_status", "graph_encoding_hint",
+                "primary_result_source", "value_column", "text_column",
+                "reference_status_column"}
+    missing = required - set(candidates)
     if missing:
-        raise ValueError(f"Laboratory profile missing required columns: {sorted(missing)}")
-    return master, profile, contract
+        raise ValueError(f"Graph lab candidates missing required columns: {sorted(missing)}")
+    return master, candidates, contract
 
 
 def load_age_at_diagnosis(path: Path) -> pd.DataFrame:
@@ -101,47 +112,155 @@ def select_baseline(master: pd.DataFrame) -> pd.DataFrame:
     return baseline.reset_index(drop=True)
 
 
-def build_feature_manifest(baseline: pd.DataFrame, profile: pd.DataFrame,
-                           minimum_coverage: float) -> tuple[pd.DataFrame, dict[str, pd.Series], dict[str, str]]:
-    lab_rows = profile.loc[profile["recommended_use"].eq("numeric_longitudinal")].copy()
-    allowed_labs: dict[str, str] = {}
-    lab_names: dict[str, str] = {}
-    for row in lab_rows.itertuples(index=False):
-        value = getattr(row, "value_column", None)
-        if pd.notna(value) and str(value).strip() in baseline.columns:
-            column = str(value).strip()
-            allowed_labs[column] = str(getattr(row, "lab", column))
-            lab_names[str(getattr(row, "lab", column)).lower()] = column
+LEAKAGE_PATTERNS = ("ever_positive", "through_episode", "future", "next_",
+                    "delta_", "previous_", "time_to_", "post_baseline")
+UNKNOWN_CATEGORIES = {"", "unknown", "not reported", "not_reported", "n/a", "na",
+                      "uninterpretable", "indeterminate", "not tested", "not_tested"}
+BINARY_PAIRS = ({"positive", "negative"}, {"pos", "neg"},
+                {"reactive", "nonreactive"}, {"detected", "not detected"},
+                {"present", "absent"}, {"high", "normal"}, {"low", "normal"})
+BINARY_POSITIVE = {"positive", "pos", "reactive", "detected", "present", "high", "low"}
 
-    curated = ({column: ("lab", "pharma_00_lab_profile") for column in allowed_labs}
-               | {column: ("pro", "integrated_master") for column in PRO_FEATURES}
-               | {column: ("overlap", "integrated_master") for column in OVERLAP_FEATURES}
-               | {"age_dx": ("age_at_diagnosis", "blockA_01_table1_baseline")})
-    rows, values = [], {}
-    for column in baseline.columns:
-        selected = column in curated
-        family, source = curated.get(column, ("", "integrated_master"))
-        reason = "" if selected else "not_in_curated_graph_feature_set"
-        numeric = pd.to_numeric(baseline[column], errors="coerce") if selected else None
-        nonmissing = (int(numeric.notna().sum()) if numeric is not None
-                      else int(baseline[column].notna().sum()))
-        pct = nonmissing / len(baseline) if len(baseline) else 0.0
-        unique = (int(numeric.nunique(dropna=True)) if numeric is not None
-                  else int(baseline[column].nunique(dropna=True)))
-        if selected and not int(numeric.notna().sum()):
-            reason = "no_observed_numeric_baseline_data"
-        elif selected and unique < 2:
+
+def normalize_clinical_category(value: object) -> str | None:
+    """Normalize a reported category without treating missing/unknown as a result."""
+    if pd.isna(value):
+        return None
+    normalized = re.sub(r"\s+", " ", str(value).strip().lower()).replace("non-reactive", "nonreactive")
+    return None if normalized in UNKNOWN_CATEGORIES else normalized
+
+
+def _category_slug(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", value).strip("_")
+
+
+def _candidate_source_column(row: object) -> str:
+    primary = str(getattr(row, "primary_result_source", "")).strip().lower()
+    field = {
+        "reference_status_column": "reference_status_column",
+        "reference_status_categorical": "reference_status_column",
+        "text_column": "text_column", "text_categorical": "text_column",
+        "value_column": "value_column", "value_numeric": "value_column",
+        "value_categorical": "value_column",
+    }.get(primary, "value_column" if getattr(row, "graph_candidate_status", "") == "include_numeric" else "")
+    value = getattr(row, field, "") if field else ""
+    return "" if pd.isna(value) else str(value).strip()
+
+
+def build_feature_manifest(baseline: pd.DataFrame, candidates: pd.DataFrame,
+                           minimum_coverage: float) -> tuple[pd.DataFrame, dict[str, pd.Series], dict[str, str], pd.DataFrame]:
+    rows: list[dict] = []
+    audits: list[dict] = []
+    values: dict[str, pd.Series] = {}
+    lab_names: dict[str, str] = {}
+    denominator = len(baseline)
+
+    for candidate in candidates.itertuples(index=False):
+        lab = str(candidate.lab).strip()
+        status = str(candidate.graph_candidate_status).strip()
+        hint = str(candidate.graph_encoding_hint).strip()
+        source_column = _candidate_source_column(candidate)
+        approved = status in {"include_numeric", "include_categorical"}
+        found = bool(source_column and source_column in baseline)
+        leakage = any(pattern in source_column.lower() for pattern in LEAKAGE_PATTERNS)
+        raw = baseline[source_column] if found else pd.Series(np.nan, index=baseline.index)
+        normalized = raw.map(normalize_clinical_category) if status == "include_categorical" else raw
+        nonmissing = int(normalized.notna().sum())
+        coverage = nonmissing / denominator if denominator else 0.0
+        unique = int(normalized.nunique(dropna=True))
+        feature_series: dict[str, pd.Series] = {}
+        representation = "numeric" if status == "include_numeric" else hint
+        reason = ""
+        if not approved:
+            reason = "review_before_graph_not_approved" if status == "review_before_graph" else "candidate_not_approved"
+        elif leakage:
+            reason = "temporal_leakage_risk"
+        elif not found:
+            reason = "candidate_source_column_missing"
+            logging.warning("Approved Graph lab %s skipped: source column %r is missing", lab, source_column)
+        elif not nonmissing:
+            reason = "no_observed_baseline_data"
+        elif unique < 2:
             reason = "no_baseline_variability"
-        elif selected and column not in PRO_FEATURES and pct < minimum_coverage:
-            reason = "below_minimum_baseline_coverage"
+        elif status == "include_numeric":
+            numeric = pd.to_numeric(raw, errors="coerce")
+            nonmissing = int(numeric.notna().sum()); coverage = nonmissing / denominator if denominator else 0.0
+            unique = int(numeric.nunique(dropna=True))
+            if not nonmissing:
+                reason = "no_observed_numeric_baseline_data"
+            elif unique < 2:
+                reason = "no_baseline_variability"
+            elif coverage < minimum_coverage:
+                reason = "below_minimum_baseline_coverage"
+            else:
+                feature_series[f"{lab}__value"] = numeric.astype(float)
+        elif hint == "binary":
+            categories = set(normalized.dropna().unique())
+            if len(categories) != 2 or categories not in BINARY_PAIRS:
+                reason = "invalid_binary_clinical_categories"
+            else:
+                feature_series[f"{lab}__binary"] = normalized.map(
+                    lambda value: np.nan if value is None else float(value in BINARY_POSITIVE))
+        elif hint == "categorical_one_hot":
+            categories = sorted(normalized.dropna().unique())
+            slugs = {_category_slug(category): category for category in categories}
+            if len(slugs) != len(categories) or "" in slugs:
+                reason = "non_unique_normalized_category_names"
+                categories = []
+            slugged = normalized.map(lambda value: _category_slug(value) if value is not None else None)
+            categorical = pd.Categorical(slugged, categories=sorted(slugs) if categories else [])
+            dummies = pd.get_dummies(categorical, prefix=f"{lab}__cat", prefix_sep="_", dtype=float)
+            dummies.index = baseline.index
+            # get_dummies represents missing as an all-zero row; restore NaN for later imputation.
+            dummies.loc[normalized.isna(), :] = np.nan
+            if categories:
+                feature_series.update({column: dummies[column] for column in dummies})
+        else:
+            reason = "unsupported_graph_encoding_hint"
+
+        if feature_series:
+            for feature, series in feature_series.items():
+                values[feature] = series
+                lab_names.setdefault(lab.lower(), feature)
+                rows.append({"feature": feature, "family": "lab", "source": "pharma_00_graph_lab_candidates",
+                             "lab": lab, "representation_type": representation,
+                             "graph_candidate_status": status, "graph_encoding_hint": hint,
+                             "source_column": source_column, "n_nonmissing_baseline": int(series.notna().sum()),
+                             "pct_nonmissing_baseline": float(series.notna().mean()),
+                             "n_unique_baseline": int(series.nunique(dropna=True)), "included": True,
+                             "exclusion_reason": "categorical_coverage_exception" if status == "include_categorical" and coverage < minimum_coverage else ""})
+        else:
+            rows.append({"feature": source_column or lab, "family": "lab", "source": "pharma_00_graph_lab_candidates",
+                         "lab": lab, "representation_type": representation,
+                         "graph_candidate_status": status, "graph_encoding_hint": hint,
+                         "source_column": source_column, "n_nonmissing_baseline": nonmissing,
+                         "pct_nonmissing_baseline": coverage, "n_unique_baseline": unique,
+                         "included": False, "exclusion_reason": reason})
+        audits.append({"lab": lab, "graph_candidate_status": status, "graph_encoding_hint": hint,
+                       "primary_result_source": getattr(candidate, "primary_result_source", ""),
+                       "source_column": source_column, "source_column_found": found,
+                       "baseline_nonmissing": nonmissing, "baseline_coverage": coverage,
+                       "final_graph_feature_names": " | ".join(feature_series),
+                       "included_in_graph": bool(feature_series), "exclusion_reason": reason})
+
+    fixed = [(column, "pro", "integrated_master") for column in PRO_FEATURES]
+    fixed += [(column, "overlap", "integrated_master") for column in OVERLAP_FEATURES]
+    fixed += [("age_dx", "age_at_diagnosis", "blockA_01_table1_baseline")]
+    for column, family, source in fixed:
+        found = column in baseline
+        numeric = pd.to_numeric(baseline[column], errors="coerce") if found else pd.Series(np.nan, index=baseline.index)
+        nonmissing, unique = int(numeric.notna().sum()), int(numeric.nunique(dropna=True))
+        reason = "" if found and nonmissing and unique > 1 else ("source_column_missing" if not found else "no_baseline_variability")
         included = not reason
         if included:
             values[column] = numeric.astype(float)
-        rows.append({"feature": column, "family": family, "source": source,
-                     "dtype": str(baseline[column].dtype), "n_nonmissing_baseline": nonmissing,
-                     "pct_nonmissing_baseline": pct, "n_unique_baseline": unique,
-                     "included_in_embedding": included, "exclusion_reason": reason})
-    return pd.DataFrame(rows), values, lab_names
+        rows.append({"feature": column, "family": family, "source": source, "lab": "",
+                     "representation_type": "numeric", "graph_candidate_status": "",
+                     "graph_encoding_hint": "", "source_column": column,
+                     "n_nonmissing_baseline": nonmissing,
+                     "pct_nonmissing_baseline": nonmissing / denominator if denominator else 0.0,
+                     "n_unique_baseline": unique, "included": included, "exclusion_reason": reason})
+    return pd.DataFrame(rows), values, lab_names, pd.DataFrame(audits)
 
 
 def build_baseline_matrix(values: dict[str, pd.Series]) -> tuple[pd.DataFrame, int, float]:
@@ -628,7 +747,7 @@ def run(args: argparse.Namespace) -> None:
     dirs = create_study_dirs("graph/01_run_topological_phenotyping")
     _configure_logging(dirs["logs"] / "01_run_topological_phenotyping.log")
     logging.info("Integrated input: %s", args.integrated)
-    master, profile, contract = load_real_inputs(args.integrated, args.lab_profile)
+    master, candidates, contract = load_real_inputs(args.integrated, args.graph_lab_candidates)
     baseline = select_baseline(master)
     age_dx = load_age_at_diagnosis(args.baseline_metrics)
     baseline = baseline.merge(age_dx, on="patient_id", how="left", validate="one_to_one",
@@ -637,10 +756,11 @@ def run(args: argparse.Namespace) -> None:
         baseline["age_dx"] = baseline.pop("age_dx_blockA")
     n_master = master.patient_id.nunique(); n_baseline = baseline.patient_id.nunique()
     logging.info("Master episodes=%d patients=%d baseline patients=%d excluded without baseline=%d", len(master), n_master, n_baseline, n_master-n_baseline)
-    manifest, numeric_values, lab_names = build_feature_manifest(
-        baseline, profile, float(config["feature_selection"]["minimum_baseline_coverage"]))
+    manifest, numeric_values, lab_names, lab_audit = build_feature_manifest(
+        baseline, candidates, float(config["feature_selection"]["minimum_baseline_coverage"]))
     manifest_path = dirs["tables"] / "01_graph_feature_manifest.csv"; manifest.to_csv(manifest_path, index=False)
-    included_manifest = manifest.loc[manifest.included_in_embedding].copy()
+    lab_audit.to_csv(dirs["tables"] / "01_graph_lab_ingestion_audit.csv", index=False)
+    included_manifest = manifest.loc[manifest.included].copy()
     family_counts = included_manifest.groupby("family").size().to_dict()
     logging.info("Labs selected from pharma/00: %d", family_counts.get("lab", 0))
     logging.info("PRO scores selected: %d", family_counts.get("pro", 0))
@@ -651,10 +771,11 @@ def run(args: argparse.Namespace) -> None:
     # Keep raw missingness for bootstrap preprocessing; impute only representation copies.
     raw_matrix = pd.DataFrame(numeric_values)
     matrix, n_imputed, pct_imputed = build_baseline_matrix(numeric_values)
-    embedding_features = included_manifest[["feature", "family", "source",
+    embedding_features = included_manifest[["feature", "family", "source", "lab", "representation_type",
                                              "n_nonmissing_baseline",
                                              "pct_nonmissing_baseline",
                                              "n_unique_baseline"]].copy()
+    embedding_features = embedding_features.rename(columns={"lab": "source_lab"})
     missing_by_feature = raw_matrix.isna().sum()
     embedding_features["n_imputed"] = embedding_features.feature.map(missing_by_feature).astype(int)
     embedding_features["pct_imputed"] = embedding_features["n_imputed"] / len(raw_matrix)
@@ -662,12 +783,31 @@ def run(args: argparse.Namespace) -> None:
     logging.info("Missing values before imputation=%d; after imputation=%d",
                  n_imputed, int(matrix.isna().sum().sum()))
     logging.info("Imputed values=%d (%.2f%%)", n_imputed, 100*pct_imputed)
-    print("\nGRAPH CURATED EMBEDDING FEATURES")
-    print(f"Total features: {len(numeric_values)}")
-    print(f"Labs: {family_counts.get('lab', 0)}")
-    print(f"PROs: {family_counts.get('pro', 0)}")
-    print(f"Overlap: {family_counts.get('overlap', 0)}")
-    print(f"Age at diagnosis: {family_counts.get('age_at_diagnosis', 0)}")
+    status_counts = candidates.graph_candidate_status.value_counts()
+    numeric_labs = lab_audit.loc[lab_audit.graph_candidate_status.eq("include_numeric") & lab_audit.included_in_graph, "lab"].nunique()
+    categorical_labs = lab_audit.loc[lab_audit.graph_candidate_status.eq("include_categorical") & lab_audit.included_in_graph, "lab"].nunique()
+    expected_approved = lab_audit.loc[
+        lab_audit.lab.str.lower().isin(EXPECTED_LAB_AUDIT)
+        & lab_audit.graph_candidate_status.isin({"include_numeric", "include_categorical"})]
+    for row in expected_approved.loc[~expected_approved.included_in_graph].itertuples(index=False):
+        logging.warning("Expected clinically important approved lab %s was not included: %s",
+                        row.lab, row.exclusion_reason)
+    print("\nGRAPH LAB INGESTION")
+    print("\nLab candidates from Pharma 00:")
+    print(f"Numeric approved: {status_counts.get('include_numeric', 0)}")
+    print(f"Categorical approved: {status_counts.get('include_categorical', 0)}")
+    print(f"Review-only: {status_counts.get('review_before_graph', 0)}")
+    print(f"Excluded: {status_counts.get('exclude', 0)}")
+    print(f"\nNumeric labs included in Graph: {numeric_labs}")
+    print(f"Categorical labs included in Graph: {categorical_labs}")
+    print(f"Labs skipped because source column missing: {(lab_audit.exclusion_reason == 'candidate_source_column_missing').sum()}")
+    print(f"Labs skipped due leakage risk: {(lab_audit.exclusion_reason == 'temporal_leakage_risk').sum()}")
+    print("\nFINAL EMBEDDING")
+    print(f"Lab-derived features: {family_counts.get('lab', 0)}")
+    print(f"PRO features: {family_counts.get('pro', 0)}")
+    print(f"Overlap features: {family_counts.get('overlap', 0)}")
+    print(f"Age-at-diagnosis features: {family_counts.get('age_at_diagnosis', 0)}")
+    print(f"Total: {len(numeric_values)}")
     embedding, pca, _ = fit_patient_embedding(matrix, config)
     cumulative = float(pca.explained_variance_ratio_.sum())
     logging.info("PCA retained=%d cumulative variance=%.4f", embedding.shape[1], cumulative)
@@ -762,9 +902,12 @@ def run(args: argparse.Namespace) -> None:
         ari_status = "estimated" if np.isfinite(ari) else "not_estimable"
     crosswalk = community_pop_crosswalk(membership)
     administrative = administrative_sensitivity(baseline, membership)
-    included = manifest.loc[manifest.included_in_embedding, "feature"].tolist()
+    included = manifest.loc[manifest.included, "feature"].tolist()
+    characterization_baseline = baseline.copy()
+    for feature, series in numeric_values.items():
+        characterization_baseline[feature] = series.to_numpy()
     characterization = community_characterization(
-        baseline, membership, included, lab_names, stability_status)
+        characterization_baseline, membership, included, lab_names, stability_status)
     models, longitudinal, plotted = fit_longitudinal_models(master, baseline, membership)
     t4 = persistent_homology_optional(embedding, config)
 
@@ -790,6 +933,16 @@ def run(args: argparse.Namespace) -> None:
                "n_patients_excluded_no_baseline": int(n_master-n_baseline), "n_embedding_features": len(included),
                "embedding_feature_families": {family: int(family_counts.get(family, 0)) for family in ("lab", "pro", "overlap", "age_at_diagnosis")},
                "embedding_feature_names": included, "embedding_feature_manifest_file": "01_graph_embedding_feature_set.csv",
+               "lab_ingestion": {
+                   "candidate_file": str(args.graph_lab_candidates),
+                   "n_numeric_candidates": int(status_counts.get("include_numeric", 0)),
+                   "n_categorical_candidates": int(status_counts.get("include_categorical", 0)),
+                   "n_numeric_included": int(numeric_labs),
+                   "n_categorical_included": int(categorical_labs),
+                   "n_lab_features_after_encoding": int(family_counts.get("lab", 0)),
+                   "n_review_only_excluded": int(status_counts.get("review_before_graph", 0)),
+                   "n_missing_source_columns": int((lab_audit.exclusion_reason == "candidate_source_column_missing").sum()),
+               },
                "n_imputed_values": n_imputed, "pct_imputed_values": pct_imputed,
                "pca_retained_components": embedding.shape[1], "pca_cumulative_variance": cumulative,
                "mapper_parameters": mapper_cfg, "dbscan_eps": eps,
@@ -821,12 +974,13 @@ def run(args: argparse.Namespace) -> None:
     if not args.dry_run:
         make_figures(embedding, membership, nerve, nodes, node_to_community, stability, threshold,
                      crosswalk, ari, ari_p, longitudinal, models, plotted, t4, dirs["figures"])
-    names = ["01_graph_pca_variance.csv", "01_graph_pca_top_loadings.csv",
-             "01_graph_embedding_outlier_qc.csv", "01_graph_mapper_node_communities.csv",
-             "01_graph_community_size_summary.csv", "01_graph_embedding_feature_set.csv",
+    names = ["01_graph_lab_ingestion_audit.csv", "01_graph_embedding_feature_set.csv",
+             "01_graph_feature_manifest.csv", "01_graph_pca_variance.csv", "01_graph_pca_top_loadings.csv",
+             "01_graph_mapper_node_communities.csv", "01_graph_community_size_summary.csv",
+             "01_graph_results_summary.json",
              "01_graph_community_membership.csv", "01_graph_patient_embedding.csv",
              "01_graph_community_pop_crosswalk.csv", "01_graph_community_characterization.csv",
-             "01_graph_longitudinal_models.csv", "01_graph_results_summary.json",
+             "01_graph_longitudinal_models.csv",
              "01_graph_embedding_mapper.png", "02_graph_community_stability.png",
              "03_graph_soft_membership.png", "04_graph_communities_vs_pop.png",
              "05_graph_community_trajectories.png"]
@@ -847,7 +1001,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     folder = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--integrated", type=Path, default=common.INTEGRATED_LONGITUDINAL_PARQUET)
-    parser.add_argument("--lab-profile", type=Path, default=common.STUDIES_TABLES_DIR / "pharma" / "00_profile_labs" / "00_pharma_lab_profile.csv")
+    parser.add_argument(
+        "--graph-lab-candidates", type=Path,
+        default=common.STUDIES_TABLES_DIR / "pharma" / "00_profile_labs" /
+        "00_pharma_graph_lab_candidates.csv")
     parser.add_argument(
         "--baseline-metrics", type=Path,
         default=common.BLOCKA_INTERMEDIATE_DATA_DIR / "01_table1_baseline" /
