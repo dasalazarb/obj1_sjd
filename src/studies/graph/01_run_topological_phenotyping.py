@@ -8,7 +8,6 @@ parameters for this cohort.
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import math
 import sys
@@ -23,6 +22,12 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+try:
+    import networkx as nx
+except ImportError as exc:
+    raise RuntimeError(
+        "networkx is required for weighted Mapper community detection"
+    ) from exc
 from scipy.stats import chi2, chi2_contingency
 from sklearn.cluster import DBSCAN
 from sklearn.decomposition import PCA
@@ -219,7 +224,9 @@ def branches_from_nerve(graph: dict, n_patients: int, minimum_node_support: int,
             seen.add(current); component.append(current)
             stack.extend(adjacency[current] - seen)
         all_components.append(component)
-    all_components.sort(key=lambda c: -len(set().union(*(nodes[x] for x in c))))
+    all_components.sort(key=lambda component: (
+        -len(set().union(*(nodes[node] for node in component))),
+        -len(component), min(map(str, component))))
     retained, discarded_patients, discarded_nodes = [], set(), 0
     for component in all_components:
         patients = set().union(*(nodes[x] for x in component))
@@ -247,115 +254,160 @@ def soft_membership(counts: np.ndarray, tau: float) -> tuple[np.ndarray, np.ndar
         logits = counts[covered] / float(tau)
         exp = np.exp(logits - logits.max(axis=1, keepdims=True))
         probabilities[covered] = exp / exp.sum(axis=1, keepdims=True)
-        hard[covered] = probabilities[covered].argmax(axis=1)
+        covered_probabilities = probabilities[covered]
+        maxima = covered_probabilities.max(axis=1, keepdims=True)
+        unique_maximum = np.isclose(covered_probabilities, maxima, rtol=0, atol=0).sum(axis=1) == 1
+        covered_hard = np.full(len(covered_probabilities), np.nan)
+        covered_hard[unique_maximum] = covered_probabilities[unique_maximum].argmax(axis=1)
+        hard[covered] = covered_hard
     return probabilities, covered, hard
+
+
+def mapper_communities(graph: dict, nodes: dict[str, set[int]], n_patients: int
+                       ) -> tuple[nx.Graph, list[list[str]], np.ndarray, float]:
+    """Build the retained weighted nerve and detect deterministic communities."""
+    nerve = nx.Graph()
+    nerve.add_nodes_from(nodes)
+    for node, linked in graph.get("links", {}).items():
+        if node not in nodes:
+            continue
+        for other in linked:
+            if other not in nodes or nerve.has_edge(node, other):
+                continue
+            shared = len(nodes[node] & nodes[other])
+            union = len(nodes[node] | nodes[other])
+            jaccard = shared / union if union else 0.0
+            nerve.add_edge(node, other, weight=jaccard,
+                           n_shared_patients=shared, jaccard=jaccard)
+    if not nerve:
+        return nerve, [], np.zeros((n_patients, 0)), np.nan
+    if nerve.number_of_edges() == 0:
+        detected = [{node} for node in nerve.nodes]
+    else:
+        detected = list(nx.community.greedy_modularity_communities(nerve, weight="weight"))
+    detected.sort(key=lambda community: (
+        -len(set().union(*(nodes[node] for node in community))),
+        -len(community), min(map(str, community))))
+    communities = [sorted(community, key=str) for community in detected]
+    counts = np.zeros((n_patients, len(communities)), dtype=float)
+    for community, node_names in enumerate(communities):
+        for node in node_names:
+            counts[list(nodes[node]), community] += 1
+    modularity = (float(nx.community.modularity(nerve, detected, weight="weight"))
+                  if nerve.number_of_edges() else 0.0)
+    return nerve, communities, counts, modularity
 
 
 def bootstrap_stability(raw_matrix: pd.DataFrame, reference_sets: list[set[int]],
                         config: dict) -> np.ndarray:
-    boot = config["bootstrap"]; mapper = config["mapper"]
+    """Repeat the complete representation/Mapper/community pipeline."""
+    boot, mapper = config["bootstrap"], config["mapper"]
     replicates = int(boot["replicates"]); scores = np.zeros(len(reference_sets))
-    if not len(reference_sets) or not replicates:
+    if not reference_sets or not replicates:
         return scores
     rng = np.random.default_rng(int(config["random_seed"])); n = len(raw_matrix)
     sample_n = max(2, min(n, int(math.floor(float(boot["patient_fraction"]) * n))))
     for _ in range(replicates):
         indices = np.sort(rng.choice(n, size=sample_n, replace=False))
-        sample = raw_matrix.iloc[indices]
+        sample = raw_matrix.iloc[indices].copy()
         sample = sample.fillna(sample.median(axis=0))
         scaled = RobustScaler().fit_transform(sample)
         limit = min(int(config["pca"]["max_components"]), *scaled.shape)
         if limit < 2:
             continue
         probe = PCA(n_components=limit, random_state=int(config["random_seed"])).fit(scaled)
-        cumulative = np.cumsum(probe.explained_variance_ratio_)
-        hit = np.flatnonzero(cumulative >= float(config["pca"]["variance_target"]))
-        dimensions = max(2, int(hit[0] + 1) if len(hit) else limit)
+        hits = np.flatnonzero(np.cumsum(probe.explained_variance_ratio_) >= float(config["pca"]["variance_target"]))
+        dimensions = max(2, int(hits[0] + 1) if len(hits) else limit)
         embedded = PCA(n_components=dimensions, random_state=int(config["random_seed"])).fit_transform(scaled)
         try:
             eps = eps_kdist(embedded, int(mapper["eps_k_neighbors"]), float(mapper["eps_percentile"]))
             graph = run_mapper(embedded[:, :2], embedded, config, eps)
-            counts, _, _, _ = branches_from_nerve(
-                graph, sample_n, int(mapper["minimum_node_support"]),
-                int(mapper["minimum_branch_patients"]))
-        except (ValueError, RuntimeError):
+            _, _, nodes, _ = branches_from_nerve(
+                graph, sample_n, int(mapper["minimum_node_support"]), 0)
+            _, boot_communities, _, _ = mapper_communities(graph, nodes, sample_n)
+        except (ValueError, RuntimeError, ZeroDivisionError):
             continue
-        sampled_sets = [set(indices[np.flatnonzero(counts[:, c] > 0)]) for c in range(counts.shape[1])]
-        sampled_reference = [reference & set(indices) for reference in reference_sets]
-        for branch, reference in enumerate(sampled_reference):
+        sampled_sets = [set(indices[list(set().union(*(nodes[node] for node in community)))])
+                        for community in boot_communities]
+        sampled_indices = set(indices)
+        for community, reference in enumerate(reference_sets):
+            reference = reference & sampled_indices
             best = max((len(reference & candidate) / len(reference | candidate)
                         if reference | candidate else 0.0 for candidate in sampled_sets), default=0.0)
-            scores[branch] += best >= float(boot["branch_match_jaccard"])
+            scores[community] += best >= float(boot["branch_match_jaccard"])
     return scores / replicates
 
 
-def ari_permutation(branch: np.ndarray, pop: np.ndarray, replicates: int,
+def ari_permutation(community: np.ndarray, pop: np.ndarray, replicates: int,
                     seed: int) -> tuple[float, float]:
-    if len(branch) < 2 or len(np.unique(branch)) < 1 or len(np.unique(pop)) < 1:
+    if len(community) < 2 or len(np.unique(community)) < 2 or len(np.unique(pop)) < 1:
         return np.nan, np.nan
-    observed = float(adjusted_rand_score(pop, branch))
+    observed = float(adjusted_rand_score(pop, community))
     rng = np.random.default_rng(seed)
-    null = np.array([adjusted_rand_score(rng.permutation(pop), branch)
+    null = np.array([adjusted_rand_score(rng.permutation(pop), community)
                      for _ in range(replicates)])
     return observed, float((1 + np.sum(null >= observed)) / (replicates + 1))
 
 
-def branch_pop_crosswalk(membership: pd.DataFrame) -> pd.DataFrame:
-    valid = membership.mapper_covered & membership.baseline_pop.isin(POPS)
-    frame = membership.loc[valid, ["hard_branch", "baseline_pop"]]
+def community_pop_crosswalk(membership: pd.DataFrame) -> pd.DataFrame:
+    valid = (membership.mapper_covered & ~membership.community_membership_tie
+             & membership.hard_community.notna() & membership.community_supported
+             & membership.baseline_pop.isin(POPS))
+    frame = membership.loc[valid, ["hard_community", "baseline_pop"]]
+    columns = ["hard_community", "baseline_pop", "n_patients", "pct_within_community"]
     if frame.empty:
-        return pd.DataFrame(columns=["hard_branch", "baseline_pop", "n_patients", "pct_within_branch"])
-    table = frame.groupby(["hard_branch", "baseline_pop"], observed=True).size().rename("n_patients").reset_index()
-    table["pct_within_branch"] = table.n_patients / table.groupby("hard_branch").n_patients.transform("sum")
-    return table
+        return pd.DataFrame(columns=columns)
+    table = frame.groupby(["hard_community", "baseline_pop"], observed=True).size().rename("n_patients").reset_index()
+    table["pct_within_community"] = table.n_patients / table.groupby("hard_community").n_patients.transform("sum")
+    return table[columns]
 
 
 def administrative_sensitivity(baseline: pd.DataFrame, membership: pd.DataFrame) -> dict:
-    if membership.loc[membership.mapper_covered, "hard_branch"].nunique() < 2:
-        return {"status": "not_estimable_single_branch"}
-    column = next((x for x in ADMIN if x in baseline), None)
+    eligible = membership.loc[
+        membership.community_supported & ~membership.community_membership_tie
+    ].dropna(subset=["hard_community"])
+    if eligible.hard_community.nunique() < 2:
+        return {"status": "not_estimable_single_community"}
+    column = next((candidate for candidate in ADMIN if candidate in baseline), None)
     if not column:
-        logging.info("Administrative sensitivity omitted: no protocol column is available")
         return {"status": "omitted", "reason": "no protocol column available"}
-    frame = membership[["patient_id", "mapper_covered", "hard_branch"]].merge(
-        baseline[["patient_id", column]], on="patient_id", validate="one_to_one")
-    frame = frame.loc[frame.mapper_covered].dropna(subset=["hard_branch", column])
-    contingency = pd.crosstab(frame.hard_branch, frame[column])
+    frame = eligible[["patient_id", "hard_community"]].merge(
+        baseline[["patient_id", column]], on="patient_id", validate="one_to_one"
+    ).dropna(subset=[column])
+    contingency = pd.crosstab(frame.hard_community, frame[column])
     if contingency.empty or min(contingency.shape) < 2:
         value = np.nan
     else:
-        chi, _, _, _ = chi2_contingency(contingency)
-        value = math.sqrt(chi / (contingency.to_numpy().sum() * (min(contingency.shape) - 1)))
-    records = []
-    for branch, row in contingency.iterrows():
-        total = row.sum()
-        records.extend({"hard_branch": int(branch), "protocol": str(protocol),
-                        "n_patients": int(count), "pct_within_branch": float(count / total)}
-                       for protocol, count in row.items() if count)
-    return {"status": "completed", "protocol_column": column, "cramers_v": value,
-            "crosswalk": records}
+        statistic, _, _, _ = chi2_contingency(contingency)
+        denominator = contingency.to_numpy().sum() * (min(contingency.shape) - 1)
+        value = math.sqrt(statistic / denominator)
+    return {"status": "completed", "protocol_column": column, "cramers_v": value}
+
+
+def community_characterization(baseline: pd.DataFrame, membership: pd.DataFrame,
+                                 features: list[str], lab_names: dict[str, str]) -> pd.DataFrame:
+    extras = [lab_names[key] for key in ("protein_total", "mcv", "bun", "lymphocyte_count") if key in lab_names]
+    columns = list(dict.fromkeys(features + extras))
+    data = membership.loc[membership.community_supported,
+                          ["patient_id", "hard_community"]].dropna().merge(
+        baseline[["patient_id", *columns]], on="patient_id", validate="one_to_one")
+    rows = []
+    for community, group in data.groupby("hard_community"):
+        for feature in columns:
+            values = pd.to_numeric(group[feature], errors="coerce").dropna().astype(float)
+            rows.append({"hard_community": int(community), "feature": feature, "n": len(values),
+                         "median": values.median(), "q1": values.quantile(.25),
+                         "q3": values.quantile(.75), "mean": values.mean(), "sd": values.std()})
+    return pd.DataFrame(rows, columns=["hard_community", "feature", "n", "median", "q1", "q3", "mean", "sd"])
 
 
 def branch_characterization(baseline: pd.DataFrame, membership: pd.DataFrame,
                             features: list[str], lab_names: dict[str, str]) -> pd.DataFrame:
-    extras = [lab_names[key] for key in ("protein_total", "mcv", "bun", "lymphocyte_count")
-              if key in lab_names]
-    columns = list(dict.fromkeys(features + extras))
-    data = membership[["patient_id", "mapper_covered", "hard_branch"]].merge(
-        baseline[["patient_id", *columns]], on="patient_id", validate="one_to_one")
-    data = data.loc[data.mapper_covered]
-    rows = []
-    for branch, group in data.groupby("hard_branch"):
-        for feature in columns:
-            # ``to_numeric`` preserves boolean dtype.  NumPy cannot interpolate
-            # boolean values while calculating quartiles, so normalize every
-            # characterization feature to a common floating-point dtype.
-            values = pd.to_numeric(group[feature], errors="coerce").dropna().astype(float)
-            rows.append({"hard_branch": int(branch), "feature": feature, "n": len(values),
-                         "median": values.median(), "q1": values.quantile(.25),
-                         "q3": values.quantile(.75), "mean": values.mean(),
-                         "sd": values.std()})
-    return pd.DataFrame(rows, columns=["hard_branch", "feature", "n", "median", "q1", "q3", "mean", "sd"])
+    """Compatibility helper for the historical connected-component output."""
+    compatible = membership.rename(columns={"hard_branch": "hard_community"}).copy()
+    compatible["community_supported"] = compatible["mapper_covered"]
+    result = community_characterization(baseline, compatible, features, lab_names)
+    return result.rename(columns={"hard_community": "hard_branch"})
 
 
 def _baseline_covariate(baseline: pd.DataFrame, choices: tuple[str, ...]) -> str | None:
@@ -364,66 +416,52 @@ def _baseline_covariate(baseline: pd.DataFrame, choices: tuple[str, ...]) -> str
 
 def fit_longitudinal_models(master: pd.DataFrame, baseline: pd.DataFrame,
                             membership: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
-    result_columns = ["outcome", "n_observations", "n_patients", "n_branches", "model",
+    result_columns = ["outcome", "n_observations", "n_patients", "n_communities", "model",
                       "interaction_lr", "interaction_df", "interaction_p_value",
                       "interaction_q_value", "model_status"]
-    if membership.loc[membership.mapper_covered, "hard_branch"].nunique() < 2:
+    eligible = membership.loc[membership.community_supported & ~membership.community_membership_tie].dropna(subset=["hard_community"])
+    n_communities = eligible.hard_community.nunique()
+    if n_communities < 2:
         rows = [{"outcome": outcome, "n_observations": 0, "n_patients": 0,
-                 "n_branches": int(membership.loc[membership.mapper_covered, "hard_branch"].nunique()),
-                 "model": "", "interaction_lr": np.nan, "interaction_df": np.nan,
-                 "interaction_p_value": np.nan, "interaction_q_value": np.nan,
-                 "model_status": "not_estimable_single_branch"} for outcome in OUTCOMES]
+                 "n_communities": int(n_communities), "model": "", "interaction_lr": np.nan,
+                 "interaction_df": np.nan, "interaction_p_value": np.nan,
+                 "interaction_q_value": np.nan, "model_status": "not_estimable_single_community"}
+                for outcome in OUTCOMES]
         return pd.DataFrame(rows, columns=result_columns), pd.DataFrame(), []
     if "time_since_clinical_baseline_years" not in master:
-        logging.warning("Longitudinal models omitted: time_since_clinical_baseline_years unavailable")
         return pd.DataFrame(columns=result_columns), pd.DataFrame(), []
-    assigned = membership.loc[membership.mapper_covered, ["patient_id", "hard_branch"]]
+    assigned = eligible[["patient_id", "hard_community"]]
     long = master.merge(assigned, on="patient_id", how="inner", validate="many_to_one")
     long["time"] = pd.to_numeric(long["time_since_clinical_baseline_years"], errors="coerce")
     age, sex = _baseline_covariate(baseline, AGES), _baseline_covariate(baseline, SEXES)
     covars = ["patient_id"] + [x for x in (age, sex) if x]
-    base_covars = baseline[covars].rename(columns={age: "baseline_age", sex: "baseline_sex"})
-    long = long.merge(base_covars, on="patient_id", how="left", validate="many_to_one")
+    long = long.merge(baseline[covars].rename(columns={age: "baseline_age", sex: "baseline_sex"}), on="patient_id", how="left", validate="many_to_one")
     rows, plotted = [], []
     for outcome in OUTCOMES:
         if outcome not in long:
-            rows.append({"outcome": outcome, "n_observations": 0, "n_patients": 0,
-                         "n_branches": 0, "model": "", "interaction_lr": np.nan,
-                         "interaction_df": np.nan, "interaction_p_value": np.nan,
-                         "interaction_q_value": np.nan,
-                         "model_status": "outcome_not_available"})
-            continue
-        keep = ["patient_id", "hard_branch", "time", outcome]
-        if age: keep.append("baseline_age")
-        if sex: keep.append("baseline_sex")
+            rows.append({"outcome": outcome, "n_observations": 0, "n_patients": 0, "n_communities": 0, "model": "", "interaction_lr": np.nan, "interaction_df": np.nan, "interaction_p_value": np.nan, "interaction_q_value": np.nan, "model_status": "outcome_not_available"}); continue
+        keep = ["patient_id", "hard_community", "time", outcome] + (["baseline_age"] if age else []) + (["baseline_sex"] if sex else [])
         data = long[keep].copy(); data[outcome] = pd.to_numeric(data[outcome], errors="coerce")
         if age: data["baseline_age"] = pd.to_numeric(data.baseline_age, errors="coerce")
-        data = data.dropna(); n_branches = data.hard_branch.nunique()
+        data = data.dropna(); number = data.hard_community.nunique()
         adjustment = (["baseline_age"] if age else []) + (["C(baseline_sex)"] if sex else [])
-        rhs_full = "C(hard_branch) * time" + (" + " + " + ".join(adjustment) if adjustment else "")
-        rhs_reduced = "C(hard_branch) + time" + (" + " + " + ".join(adjustment) if adjustment else "")
-        model_name = f"{outcome} ~ {rhs_full}; random intercept patient"
-        row = {"outcome": outcome, "n_observations": len(data),
-               "n_patients": data.patient_id.nunique(), "n_branches": n_branches,
-               "model": model_name, "interaction_lr": np.nan, "interaction_df": np.nan,
-               "interaction_p_value": np.nan, "interaction_q_value": np.nan,
-               "model_status": "insufficient_information"}
-        if len(data) >= 10 and data.patient_id.nunique() >= 3 and n_branches >= 2 and data.time.nunique() >= 2:
+        suffix = (" + " + " + ".join(adjustment)) if adjustment else ""
+        rhs_full, rhs_reduced = "C(hard_community) * time" + suffix, "C(hard_community) + time" + suffix
+        row = {"outcome": outcome, "n_observations": len(data), "n_patients": data.patient_id.nunique(), "n_communities": number,
+               "model": f"{outcome} ~ {rhs_full}; random intercept patient", "interaction_lr": np.nan, "interaction_df": np.nan,
+               "interaction_p_value": np.nan, "interaction_q_value": np.nan, "model_status": "insufficient_information"}
+        if len(data) >= 10 and data.patient_id.nunique() >= 3 and number >= 2 and data.time.nunique() >= 2:
             try:
-                full = smf.mixedlm(f"Q('{outcome}') ~ {rhs_full}", data,
-                                   groups=data.patient_id, re_formula="~1").fit(reml=False, method="lbfgs")
-                reduced = smf.mixedlm(f"Q('{outcome}') ~ {rhs_reduced}", data,
-                                      groups=data.patient_id, re_formula="~1").fit(reml=False, method="lbfgs")
-                lr = max(0.0, 2 * (full.llf - reduced.llf)); dfree = n_branches - 1
-                row.update(interaction_lr=lr, interaction_df=dfree,
-                           interaction_p_value=float(chi2.sf(lr, dfree)), model_status="estimated")
+                full = smf.mixedlm(f"Q('{outcome}') ~ {rhs_full}", data, groups=data.patient_id, re_formula="~1").fit(reml=False, method="lbfgs")
+                reduced = smf.mixedlm(f"Q('{outcome}') ~ {rhs_reduced}", data, groups=data.patient_id, re_formula="~1").fit(reml=False, method="lbfgs")
+                lr = max(0.0, 2 * (full.llf - reduced.llf)); dfree = number - 1
+                row.update(interaction_lr=lr, interaction_df=dfree, interaction_p_value=float(chi2.sf(lr, dfree)), model_status="estimated")
                 if len(plotted) < 3: plotted.append(outcome)
             except Exception as exc:
                 row["model_status"] = f"failed: {type(exc).__name__}: {exc}"
         rows.append(row)
     results = pd.DataFrame(rows, columns=result_columns)
-    if len(results):
-        results["interaction_q_value"] = benjamini_hochberg(results.interaction_p_value)
+    results["interaction_q_value"] = benjamini_hochberg(results.interaction_p_value)
     return results, long, plotted
 
 
@@ -456,71 +494,71 @@ def _save(fig, path: Path) -> None:
     fig.tight_layout(); fig.savefig(path, bbox_inches="tight"); plt.close(fig)
 
 
-def make_figures(embedding: np.ndarray, membership: pd.DataFrame, graph: dict,
-                 components: list[list[str]], nodes: dict, stability: np.ndarray,
-                 crosswalk: pd.DataFrame, ari: float, ari_p: float,
+def make_figures(embedding: np.ndarray, membership: pd.DataFrame, nerve: nx.Graph,
+                 nodes: dict, node_to_community: dict[str, int], stability: np.ndarray,
+                 stable_threshold: float, crosswalk: pd.DataFrame, ari: float, ari_p: float,
                  longitudinal: pd.DataFrame, models: pd.DataFrame, plotted: list[str],
                  t4: dict, figure_dir: Path) -> None:
-    hard = membership.hard_branch.to_numpy(dtype=float); covered = membership.mapper_covered.to_numpy()
+    hard = membership.hard_community.to_numpy(dtype=float)
+    unambiguous = membership.mapper_covered.to_numpy() & ~membership.community_membership_tie.to_numpy()
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.6))
-    axes[0].scatter(embedding[~covered, 0], embedding[~covered, 1], c="#BBBBBB", s=20, label="not covered")
-    for branch in range(len(components)):
-        mask = covered & (hard == branch)
-        axes[0].scatter(embedding[mask, 0], embedding[mask, 1], s=24,
-                        color=COLORS[branch % len(COLORS)], label=f"branch {branch}")
+    axes[0].scatter(embedding[~unambiguous, 0], embedding[~unambiguous, 1], c="#BBBBBB", s=20, label="not covered / ambiguous")
+    for community in sorted(set(node_to_community.values())):
+        mask = unambiguous & (hard == community)
+        axes[0].scatter(embedding[mask, 0], embedding[mask, 1], s=24, color=COLORS[community % len(COLORS)], label=f"community {community}")
     axes[0].set(xlabel="PC1", ylabel="PC2", title="A · Baseline patient embedding"); axes[0].legend(frameon=False, fontsize=8)
-    branch_of = {node: branch for branch, component in enumerate(components) for node in component}
     centers = {node: embedding[list(members), :2].mean(axis=0) for node, members in nodes.items()}
-    for node, linked in graph.get("links", {}).items():
-        if node not in centers: continue
-        for other in linked:
-            if other in centers:
-                axes[1].plot(*zip(centers[node], centers[other]), color="#999999", lw=.8, zorder=1)
+    for node, other, attrs in nerve.edges(data=True):
+        axes[1].plot(*zip(centers[node], centers[other]), color="#999999", lw=.5 + 4 * attrs["jaccard"], zorder=1)
     for node, center in centers.items():
-        color = COLORS[branch_of[node] % len(COLORS)] if node in branch_of else "#BBBBBB"
-        axes[1].scatter(*center, s=30 + 7 * len(nodes[node]), color=color, edgecolor="white", zorder=2)
+        community = node_to_community[node]
+        axes[1].scatter(*center, s=30 + 7 * len(nodes[node]), color=COLORS[community % len(COLORS)], edgecolor="white", zorder=2)
     axes[1].set(xlabel="PC1", ylabel="PC2", title=f"B · Mapper nerve ({len(nodes)} retained nodes)")
-    fig.suptitle("Multimodal baseline patient representation and Mapper branches", fontweight="bold")
+    fig.suptitle("Multimodal baseline patient representation and Mapper communities", fontweight="bold")
     _save(fig, figure_dir / "01_graph_embedding_mapper.png")
 
     fig, ax = plt.subplots(figsize=(6, 4)); x = np.arange(len(stability))
-    ax.bar(x, stability, color=[COLORS[i % len(COLORS)] for i in x]); ax.axhline(.8, color="#333", ls="--")
-    ax.set(xticks=x, xticklabels=[f"branch {i}" for i in x], ylim=(0, 1), ylabel="Bootstrap stability",
-           title="Mapper branch stability (Jaccard matching)"); _save(fig, figure_dir / "02_graph_branch_stability.png")
+    ax.bar(x, stability, color=[COLORS[i % len(COLORS)] for i in x]); ax.axhline(stable_threshold, color="#333", ls="--")
+    ax.set(xticks=x, xticklabels=[f"community {i}" for i in x], ylim=(0, 1), ylabel="Bootstrap stability", title="Mapper community stability (Jaccard matching)")
+    _save(fig, figure_dir / "02_graph_community_stability.png")
 
-    pi_cols = [x for x in membership if x.startswith("pi_branch_")]
-    order = membership.assign(_max=membership[pi_cols].max(axis=1)).sort_values(["hard_branch", "_max"], ascending=[True, False]).index
+    pi_cols = [column for column in membership if column.startswith("pi_community_")]
+    shown = membership.loc[membership.mapper_covered & ~membership.community_membership_tie].copy()
+    order = shown.sort_values(["hard_community", "max_community_membership"], ascending=[True, False]).index
     fig, ax = plt.subplots(figsize=(8, max(2.8, .45 * len(pi_cols))))
-    if pi_cols: im = ax.imshow(membership.loc[order, pi_cols].to_numpy().T, aspect="auto", cmap="viridis", vmin=0, vmax=1); fig.colorbar(im, ax=ax, label="π_map")
-    ax.set(yticks=np.arange(len(pi_cols)), yticklabels=pi_cols, xlabel="Patients (ordered; no identifiers)", title="Soft Mapper membership")
+    if pi_cols and len(order):
+        im = ax.imshow(membership.loc[order, pi_cols].to_numpy().T, aspect="auto", cmap="viridis", vmin=0, vmax=1); fig.colorbar(im, ax=ax, label="π community")
+    ax.set(yticks=np.arange(len(pi_cols)), yticklabels=pi_cols, xlabel="Unambiguous covered patients (ordered)", title="Soft Mapper community membership")
     _save(fig, figure_dir / "03_graph_soft_membership.png")
 
-    fig, ax = plt.subplots(figsize=(7, 4)); pivot = crosswalk.pivot(index="hard_branch", columns="baseline_pop", values="pct_within_branch").fillna(0) if len(crosswalk) else pd.DataFrame()
+    fig, ax = plt.subplots(figsize=(7, 4))
+    pivot = crosswalk.pivot(index="hard_community", columns="baseline_pop", values="pct_within_community").fillna(0) if len(crosswalk) else pd.DataFrame()
     bottom = np.zeros(len(pivot))
     for index, pop in enumerate(POPS):
         values = pivot[pop].to_numpy() if pop in pivot else np.zeros(len(pivot)); ax.bar(pivot.index.astype(str), values, bottom=bottom, label=pop, color=COLORS[index]); bottom += values
-    ax.set(xlabel="Mapper branch", ylabel="Proportion within branch", ylim=(0, 1), title=f"Branches vs baseline Pop · ARI={ari:.3f}, permutation p={ari_p:.4g}"); ax.legend(frameon=False)
-    _save(fig, figure_dir / "04_graph_branches_vs_pop.png")
+    title = "Topological communities vs baseline Pop"
+    if np.isfinite(ari): title += f" · ARI={ari:.3f}, permutation p={ari_p:.4g}"
+    ax.set(xlabel="Community", ylabel="Proportion within community", ylim=(0, 1), title=title); ax.legend(frameon=False)
+    _save(fig, figure_dir / "04_graph_communities_vs_pop.png")
 
     fig, axes = plt.subplots(1, max(1, len(plotted)), figsize=(4.7 * max(1, len(plotted)), 4), squeeze=False)
     if not plotted: axes[0, 0].text(.5, .5, "No longitudinal outcome was estimable", ha="center", va="center"); axes[0, 0].set_axis_off()
     for ax, outcome in zip(axes[0], plotted):
-        data = longitudinal[["hard_branch", "time", outcome]].copy(); data[outcome] = pd.to_numeric(data[outcome], errors="coerce"); data = data.dropna()
-        data["time_bin"] = data.time.round(1)
-        for branch, group in data.groupby("hard_branch"):
-            summary = group.groupby("time_bin")[outcome].agg(["mean", "sem"]); ax.plot(summary.index, summary["mean"], "-o", ms=3, color=COLORS[int(branch) % len(COLORS)], label=f"branch {int(branch)}"); ax.fill_between(summary.index.to_numpy(float), (summary["mean"]-summary["sem"].fillna(0)).to_numpy(float), (summary["mean"]+summary["sem"].fillna(0)).to_numpy(float), alpha=.15, color=COLORS[int(branch) % len(COLORS)])
-        row = models.loc[models.outcome.eq(outcome)].iloc[0]; ax.set(xlabel="Years since clinical baseline", ylabel=outcome, title=f"{outcome}\nbranch×time p={row.interaction_p_value:.3g}, q={row.interaction_q_value:.3g}"); ax.legend(frameon=False, fontsize=8)
-    fig.suptitle("Longitudinal outcomes after baseline branch assignment", fontweight="bold"); _save(fig, figure_dir / "05_graph_branch_trajectories.png")
+        data = longitudinal[["hard_community", "time", outcome]].copy(); data[outcome] = pd.to_numeric(data[outcome], errors="coerce"); data = data.dropna(); data["time_bin"] = data.time.round(1)
+        for community, group in data.groupby("hard_community"):
+            summary = group.groupby("time_bin")[outcome].agg(["mean", "sem"]); color = COLORS[int(community) % len(COLORS)]
+            ax.plot(summary.index, summary["mean"], "-o", ms=3, color=color, label=f"community {int(community)}"); ax.fill_between(summary.index.to_numpy(float), (summary["mean"]-summary["sem"].fillna(0)).to_numpy(float), (summary["mean"]+summary["sem"].fillna(0)).to_numpy(float), alpha=.15, color=color)
+        row = models.loc[models.outcome.eq(outcome)].iloc[0]; ax.set(xlabel="Years since clinical baseline", ylabel=outcome, title=f"{outcome}\ncommunity×time p={row.interaction_p_value:.3g}, q={row.interaction_q_value:.3g}"); ax.legend(frameon=False, fontsize=8)
+    fig.suptitle("Longitudinal outcomes after baseline community assignment", fontweight="bold"); _save(fig, figure_dir / "05_graph_branch_trajectories.png")
 
     if t4.get("status") == "completed":
         diagram, null = t4["diagram"], t4["null"]; finite = diagram[np.isfinite(diagram).all(axis=1)] if len(diagram) else diagram
-        fig, axes = plt.subplots(1, 2, figsize=(9.5, 4));
+        fig, axes = plt.subplots(1, 2, figsize=(9.5, 4))
         if len(finite): axes[0].scatter(finite[:, 0], finite[:, 1], color=COLORS[0]); limit=max(float(finite.max()), 1e-6)
         else: limit=1.0
         axes[0].plot([0, limit], [0, limit], "--", color="#999"); axes[0].set(xlabel="Birth", ylabel="Death", title="H1 persistence diagram")
         axes[1].hist(null, bins=30, color="#BBBBBB"); axes[1].axvline(t4["total_h1_persistence"], color=COLORS[1], lw=2); axes[1].set(xlabel="Total H1 persistence under column permutation", ylabel="Frequency", title=f"Observed={t4['total_h1_persistence']:.3g}; p={t4['permutation_p_value']:.3g}")
         fig.suptitle("Topological sensitivity analysis", fontweight="bold"); _save(fig, figure_dir / "06_graph_persistent_homology.png")
-
 
 def _configure_logging(path: Path) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
@@ -576,84 +614,119 @@ def run(args: argparse.Namespace) -> None:
     cumulative = float(pca.explained_variance_ratio_.sum())
     logging.info("PCA retained=%d cumulative variance=%.4f", embedding.shape[1], cumulative)
     mapper_cfg = config["mapper"]
+    community_cfg = config["community_detection"]
     eps = eps_kdist(embedding, int(mapper_cfg["eps_k_neighbors"]), float(mapper_cfg["eps_percentile"]))
     graph = run_mapper(embedding[:, :2], embedding, config, eps)
-    counts, components, nodes, pruning = branches_from_nerve(
-        graph, len(baseline), int(mapper_cfg["minimum_node_support"]),
-        int(mapper_cfg["minimum_branch_patients"]))
-    if not components:
-        logging.warning("Mapper produced no analytic branch after configured pruning")
+    component_counts, components, nodes, pruning = branches_from_nerve(
+        graph, len(baseline), int(mapper_cfg["minimum_node_support"]), 0)
+    nerve, communities, counts, modularity = mapper_communities(graph, nodes, len(baseline))
     probabilities, covered, hard = soft_membership(counts, float(mapper_cfg["soft_membership_tau"]))
+    ties = covered & np.isnan(hard)
+    community_sets = [set().union(*(nodes[node] for node in community)) for community in communities]
+    minimum_patients = int(community_cfg["minimum_patients"])
+    supported = np.array([len(patients) >= minimum_patients for patients in community_sets], dtype=bool)
+    node_to_component = {node: component for component, group in enumerate(components) for node in group}
+    node_to_community = {node: community for community, group in enumerate(communities) for node in group}
+    node_rows = []
+    for node, patients in nodes.items():
+        center = embedding[list(patients), :2].mean(axis=0)
+        node_rows.append({"mapper_node": node, "connected_component": node_to_component[node],
+                          "community": node_to_community[node], "n_patients_node": len(patients),
+                          "pc1_centroid": center[0], "pc2_centroid": center[1],
+                          "degree": nerve.degree(node), "weighted_degree": nerve.degree(node, weight="weight")})
+    node_table = pd.DataFrame(node_rows)
+
     baseline_episode = baseline["clinical_episode_id"]
     patient_embedding = pd.DataFrame({"patient_id": baseline.patient_id,
                                       "baseline_clinical_episode_id": baseline_episode,
                                       "baseline_pop": baseline.pop_status})
     for index in range(embedding.shape[1]): patient_embedding[f"PC{index+1}"] = embedding[:, index]
-    patient_embedding["mapper_covered"] = covered; patient_embedding["hard_branch"] = pd.array(hard, dtype="Int64")
-    for branch in range(probabilities.shape[1]): patient_embedding[f"pi_branch_{branch}"] = probabilities[:, branch]
-    membership_columns = ["patient_id", "baseline_clinical_episode_id", "baseline_pop", "mapper_covered", "hard_branch"]
+    patient_embedding["mapper_covered"] = covered
+    patient_embedding["community_membership_tie"] = ties
+    patient_embedding["hard_community"] = pd.array(hard, dtype="Int64")
+    patient_embedding["max_community_membership"] = (pd.DataFrame(probabilities).max(axis=1).to_numpy() if probabilities.shape[1] else np.nan)
+    for community in range(probabilities.shape[1]): patient_embedding[f"pi_community_{community}"] = probabilities[:, community]
+    membership_columns = ["patient_id", "baseline_clinical_episode_id", "baseline_pop", "mapper_covered",
+                          "community_membership_tie", "hard_community", "max_community_membership"]
     membership = patient_embedding[membership_columns].copy()
-    membership["max_membership"] = (pd.DataFrame(probabilities).max(axis=1).to_numpy()
-                                         if probabilities.shape[1] else np.nan)
-    for branch in range(probabilities.shape[1]): membership[f"pi_branch_{branch}"] = probabilities[:, branch]
-    reference_sets = [set(np.flatnonzero(counts[:, branch] > 0)) for branch in range(counts.shape[1])]
+    for community in range(probabilities.shape[1]): membership[f"pi_community_{community}"] = probabilities[:, community]
+    membership["community_supported"] = membership.hard_community.map(
+        {index: bool(value) for index, value in enumerate(supported)}).fillna(False).astype(bool)
+
+    # Preserve connected-component membership as a secondary topological output.
+    branch_probabilities, branch_covered, branch_hard = soft_membership(component_counts, float(mapper_cfg["soft_membership_tau"]))
+    branch_membership = patient_embedding[["patient_id", "baseline_clinical_episode_id", "baseline_pop"]].copy()
+    branch_membership["mapper_covered"] = branch_covered
+    branch_membership["hard_branch"] = pd.array(branch_hard, dtype="Int64")
+    branch_membership["max_membership"] = pd.DataFrame(branch_probabilities).max(axis=1).to_numpy() if branch_probabilities.shape[1] else np.nan
+    for component in range(branch_probabilities.shape[1]): branch_membership[f"pi_branch_{component}"] = branch_probabilities[:, component]
+
+    reference_sets = community_sets
     stability = bootstrap_stability(raw_matrix, reference_sets, config)
-    stable = [int(i) for i, value in enumerate(stability) if value >= float(config["bootstrap"]["stable_branch_threshold"])]
-    valid = covered & baseline.pop_status.isin(POPS).to_numpy()
-    single_branch = len(components) < 2
-    if single_branch:
-        ari, ari_p, ari_status = np.nan, np.nan, "not_estimable_single_branch"
+    threshold = float(config["bootstrap"].get("stable_community_threshold", config["bootstrap"].get("stable_branch_threshold", .8)))
+    stable = [int(i) for i, value in enumerate(stability) if value >= threshold]
+    valid = (covered & ~ties & pd.notna(hard) & baseline.pop_status.isin(POPS).to_numpy()
+             & np.array([supported[int(value)] if np.isfinite(value) else False for value in hard]))
+    if supported.sum() < 2:
+        ari, ari_p, ari_status = np.nan, np.nan, "not_estimable_single_community"
     else:
         ari, ari_p = ari_permutation(hard[valid].astype(int), baseline.loc[valid, "pop_status"].to_numpy(), int(config["permutation"]["ari_replicates"]), int(config["random_seed"]))
         ari_status = "estimated" if np.isfinite(ari) else "not_estimable"
-    crosswalk = branch_pop_crosswalk(membership)
+    crosswalk = community_pop_crosswalk(membership)
     administrative = administrative_sensitivity(baseline, membership)
     included = manifest.loc[manifest.included_in_embedding, "feature"].tolist()
-    characterization = branch_characterization(baseline, membership, included, lab_names)
+    characterization = community_characterization(baseline, membership, included, lab_names)
     models, longitudinal, plotted = fit_longitudinal_models(master, baseline, membership)
     t4 = persistent_homology_optional(embedding, config)
-    logging.info("Mapper eps=%.4g nodes=%d branches=%d coverage=%.3f sizes=%s", eps, len(nodes), len(components), covered.mean(), [int(np.sum(covered & (hard == x))) for x in range(len(components))])
-    logging.info("Bootstrap stability=%s; ARI vs Pop=%.4g p=%.4g", stability.tolist(), ari, ari_p)
-    logging.info("Longitudinal statuses=%s; T4=%s", models.model_status.tolist() if len(models) else [], t4.get("status"))
+
+    node_table.to_csv(dirs["tables"] / "01_graph_mapper_node_communities.csv", index=False)
     patient_embedding.to_csv(dirs["tables"] / "01_graph_patient_embedding.csv", index=False)
-    membership.to_csv(dirs["tables"] / "01_graph_branch_membership.csv", index=False)
-    crosswalk.to_csv(dirs["tables"] / "01_graph_branch_pop_crosswalk.csv", index=False)
-    characterization.to_csv(dirs["tables"] / "01_graph_branch_characterization.csv", index=False)
+    membership.to_csv(dirs["tables"] / "01_graph_community_membership.csv", index=False)
+    branch_membership.to_csv(dirs["tables"] / "01_graph_branch_membership.csv", index=False)
+    crosswalk.to_csv(dirs["tables"] / "01_graph_community_pop_crosswalk.csv", index=False)
+    characterization.to_csv(dirs["tables"] / "01_graph_community_characterization.csv", index=False)
     models.to_csv(dirs["tables"] / "01_graph_longitudinal_models.csv", index=False)
+    sizes = {str(i): len(patients) for i, patients in enumerate(community_sets)}
+    node_counts = {str(i): len(group) for i, group in enumerate(communities)}
     summary = {"input": str(args.integrated), "contract_validation": contract,
                "n_patients_master": int(n_master), "n_baseline_patients": int(n_baseline),
-               "n_patients_excluded_no_baseline": int(n_master-n_baseline),
-               "n_embedding_features": len(included),
-               "embedding_feature_families": {family: int(family_counts.get(family, 0))
-                                                for family in ("lab", "pro", "overlap", "age_at_diagnosis")},
-               "embedding_feature_names": included,
-               "embedding_feature_manifest_file": "01_graph_embedding_feature_set.csv",
-               "n_imputed_values": n_imputed,
-               "pct_imputed_values": pct_imputed, "pca_retained_components": embedding.shape[1],
-               "pca_cumulative_variance": cumulative, "mapper_parameters": mapper_cfg,
-               "dbscan_eps": eps, "number_mapper_nodes": len(nodes),
-               "number_retained_branches": len(components), "branch_sizes": {str(x): int(np.sum(covered & (hard == x))) for x in range(len(components))},
-               "mapper_coverage": float(covered.mean()), "mapper_pruning": pruning,
-               "branch_bootstrap_stability": {str(x): float(v) for x, v in enumerate(stability)},
-               "stable_branches": stable, "ari_vs_baseline_pop": ari,
-               "ari_vs_baseline_pop_status": ari_status,
-               "ari_permutation_p": ari_p, "administrative_sensitivity": administrative,
+               "n_patients_excluded_no_baseline": int(n_master-n_baseline), "n_embedding_features": len(included),
+               "embedding_feature_families": {family: int(family_counts.get(family, 0)) for family in ("lab", "pro", "overlap", "age_at_diagnosis")},
+               "embedding_feature_names": included, "embedding_feature_manifest_file": "01_graph_embedding_feature_set.csv",
+               "n_imputed_values": n_imputed, "pct_imputed_values": pct_imputed,
+               "pca_retained_components": embedding.shape[1], "pca_cumulative_variance": cumulative,
+               "mapper_parameters": mapper_cfg, "dbscan_eps": eps, "mapper_coverage": float(covered.mean()), "mapper_pruning": pruning,
+               "mapper_topology": {"n_nodes": len(nodes), "n_connected_components": len(components)},
+               "community_detection": {"method": community_cfg["method"], "edge_weight": community_cfg["edge_weight"],
+                   "n_communities_detected": len(communities), "n_supported_communities": int(supported.sum()),
+                   "modularity": modularity, "community_sizes": sizes, "community_node_counts": node_counts,
+                   "community_supported": {str(i): bool(value) for i, value in enumerate(supported)},
+                   "stable_communities": stable,
+                   "bootstrap_stability": {str(i): float(value) for i, value in enumerate(stability)}},
+               "ari_communities_vs_baseline_pop": ari, "ari_status": ari_status, "ari_permutation_p": ari_p,
+               "administrative_sensitivity": administrative,
                "longitudinal_outcomes_modeled": models.loc[models.model_status.eq("estimated"), "outcome"].tolist() if len(models) else [],
                "persistent_homology": {key: value for key, value in t4.items() if key not in {"diagram", "null"}}}
     write_json(dirs["tables"] / "01_graph_results_summary.json", summary)
     if not args.dry_run:
-        make_figures(embedding, membership, graph, components, nodes, stability,
+        make_figures(embedding, membership, nerve, nodes, node_to_community, stability, threshold,
                      crosswalk, ari, ari_p, longitudinal, models, plotted, t4, dirs["figures"])
-    names = ["01_graph_embedding_feature_set.csv", "01_graph_feature_manifest.csv", "01_graph_patient_embedding.csv",
-             "01_graph_branch_membership.csv", "01_graph_branch_pop_crosswalk.csv",
-             "01_graph_branch_characterization.csv", "01_graph_longitudinal_models.csv",
-             "01_graph_results_summary.json", "01_graph_embedding_mapper.png",
-             "02_graph_branch_stability.png", "03_graph_soft_membership.png",
-             "04_graph_branches_vs_pop.png", "05_graph_branch_trajectories.png"]
+    names = ["01_graph_embedding_feature_set.csv", "01_graph_mapper_node_communities.csv",
+             "01_graph_community_membership.csv", "01_graph_patient_embedding.csv",
+             "01_graph_community_pop_crosswalk.csv", "01_graph_community_characterization.csv",
+             "01_graph_longitudinal_models.csv", "01_graph_results_summary.json",
+             "01_graph_embedding_mapper.png", "02_graph_community_stability.png",
+             "03_graph_soft_membership.png", "04_graph_communities_vs_pop.png",
+             "05_graph_branch_trajectories.png"]
     if config["persistent_homology"].get("enabled"): names.append("06_graph_persistent_homology.png   [if available]")
     print("\nORDER TO REVIEW GRAPH OUTPUTS")
     for index, name in enumerate(names, 1): print(f"{index}. {name}")
-    print(f"\nBaseline patients: {n_baseline}\nEmbedding features: {len(included)}\nPCA dimensions: {embedding.shape[1]}\nMapper coverage: {covered.mean():.1%}\nMapper branches: {len(components)}\nStable branches: {stable}\nARI vs Pop: {ari:.4g}\nLongitudinal outcomes modeled: {summary['longitudinal_outcomes_modeled']}")
+    print(f"\nMapper nodes: {len(nodes)}\nMapper connected components: {len(components)}")
+    print(f"\nCommunities detected: {len(communities)}\nSupported communities: {int(supported.sum())}")
+    print(f"Community modularity: {modularity:.4g}\nCommunity sizes: {sizes}\nCommunity stability: {stability.tolist()}")
+    print(f"\nMapper coverage: {covered.mean():.1%}\nAmbiguous community assignments: {int(ties.sum())}")
+    ari_text = f"{ari:.4g} (permutation p={ari_p:.4g})" if np.isfinite(ari) else ari_status
+    print(f"\nARI communities vs Pop: {ari_text}\nLongitudinal outcomes modeled: {summary['longitudinal_outcomes_modeled']}")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
