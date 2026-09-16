@@ -42,7 +42,7 @@ WIDE_SPINE_COLUMNS = [
     "time_since_clinical_baseline_years",
 ]
 MATCH_KEY = ["_patient_id_match", "clinical_episode_id"]
-ANALYTE_KEY = KEY + ["canonical_analyte"]
+ANALYTE_KEY = KEY + ["lab_id"]
 DEFAULT_LABS = Path(
     "/data/salazarda/data/eda_sjd/data_analytic/BTRIS/20_btris_lab_records_long.parquet"
 )
@@ -96,7 +96,10 @@ QC_DETAIL = [
     "clinical_anchor_date",
     "clinical_visit",
     "visit_type",
+    "lab_id",
     "canonical_analyte",
+    "order_name_original",
+    "cluster_name_original",
     "lab_family",
     "analytic_role",
     "lab_date",
@@ -260,7 +263,10 @@ def _coerce_analyte_output_schema(frame: pd.DataFrame) -> pd.DataFrame:
     string_columns = [
         "patient_id",
         "clinical_episode_id",
+        "lab_id",
         "canonical_analyte",
+        "order_name_original",
+        "cluster_name_original",
         "lab_family",
         "analytic_role",
         "selected_value_type",
@@ -367,6 +373,25 @@ def _mapping_valid(labs: pd.DataFrame) -> pd.Series:
     return status.notna() & ~status.str.contains(INVALID_MAPPING, na=True)
 
 
+def _slug(value: object) -> str:
+    """Return a deterministic identifier component for BTRIS nomenclature."""
+    text = "" if pd.isna(value) else str(value).strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "_", text)
+    return re.sub(r"_+", "_", text).strip("_")
+
+
+def _add_lab_id(labs: pd.DataFrame) -> pd.DataFrame:
+    """Add canonical-or-provenance lab identity without changing source fields."""
+    out = labs.copy()
+    canonical = _column(out, "canonical_analyte").astype("string")
+    order = _column(out, "order_name_original").map(_slug)
+    observation = _column(out, "cluster_name_original").map(_slug)
+    fallback = (order + "__" + observation).astype("string")
+    fallback = fallback.where(order.ne("") & observation.ne(""), pd.NA)
+    out["lab_id"] = canonical.where(canonical.notna(), fallback)
+    return out
+
+
 def _normal_unit(value: Any) -> Any:
     return (
         pd.NA
@@ -389,7 +414,7 @@ def harmonize_selected_units(selected: pd.DataFrame) -> pd.DataFrame:
     )
     harmonized_units, harmonized_values, statuses = [], [], []
     for analyte, unit_raw, value, conflict in zip(
-        _column(out, "canonical_analyte"),
+        _column(out, "lab_id"),
         original_unit,
         original_value,
         _column(out, "unit_conflict", False),
@@ -428,7 +453,7 @@ def harmonize_selected_units(selected: pd.DataFrame) -> pd.DataFrame:
     out["unit_harmonization_status"] = pd.Series(statuses, index=out.index)
 
     # Never silently choose among genuinely different units across episodes.
-    for analyte, indexes in out.groupby("canonical_analyte", dropna=False).groups.items():
+    for analyte, indexes in out.groupby("lab_id", dropna=False).groups.items():
         units = {
             _normal_unit(x)
             for x in out.loc[indexes, "selected_unit_original"].dropna()
@@ -752,7 +777,11 @@ def select_episode_analytes(
             "visit_type": spine_row.get("visit_type", pd.NA),
             "episode_start_date": spine_row.get("episode_start_date", pd.NaT),
             "episode_end_date": spine_row.get("episode_end_date", pd.NaT),
-            "canonical_analyte": key[2], "lab_family": chosen.get("lab_family"),
+            "lab_id": key[2],
+            "canonical_analyte": chosen.get("canonical_analyte"),
+            "order_name_original": chosen.get("order_name_original"),
+            "cluster_name_original": chosen.get("cluster_name_original"),
+            "lab_family": chosen.get("lab_family"),
             "analytic_role": chosen.get("analytic_role"), "selected_lab_date": chosen.get("lab_date"),
             "selected_days_from_clinical_anchor": chosen.get("days_from_clinical_anchor"),
             "selected_value_type": value_type, "selected_value_numeric": selected_numeric,
@@ -825,14 +854,14 @@ def build_wide(
     for source, suffix in fields.items():
         if selected.empty:
             continue
-        pivot = selected.pivot(index=KEY, columns="canonical_analyte", values=source)
+        pivot = selected.pivot(index=KEY, columns="lab_id", values=source)
         pivot.columns = [f"{c}__{suffix}" for c in pivot.columns]
         feature_frames.append(pivot.reindex(wide_index))
     # Include analytes observed only in nonclinical episodes: their dynamic
     # episode value stays missing, but dated stable/genetic history may still
     # legitimately become known at a later clinical visit.
     families = (
-        usable.groupby("canonical_analyte")["lab_family"].first()
+        usable.groupby("lab_id")["lab_family"].first()
         if not usable.empty
         else pd.Series(dtype="object")
     )
@@ -842,7 +871,7 @@ def build_wide(
     derived_columns: dict[str, pd.Series] = {}
     for analyte, family in families.items():
         part = (
-            selected[selected.canonical_analyte.eq(analyte)]
+            selected[selected.lab_id.eq(analyte)]
             if not selected.empty
             else selected
         )
@@ -855,12 +884,16 @@ def build_wide(
                 .astype("string")
             )
         derived_columns[f"{analyte}__episode_status"] = status_series
-        evidence = usable[usable.canonical_analyte.eq(analyte)].copy()
+        evidence = usable[usable.lab_id.eq(analyte)].copy()
         evidence["_date"] = lab_dates.reindex(evidence.index)
         evidence["_status"] = evidence.apply(
             lambda r: _status_is_positive(_reference_status(r)), axis=1
         )
-        if family == "stable_autoimmune" and evidence["_status"].notna().any():
+        if (
+            pd.notna(family)
+            and family == "stable_autoimmune"
+            and evidence["_status"].notna().any()
+        ):
             values = []
             for (pid, _), date in zip(wide_index, anchors):
                 prior = evidence[
@@ -872,7 +905,7 @@ def build_wide(
             derived_columns[f"{analyte}__ever_positive_through_episode"] = pd.Series(
                 pd.array(values, dtype="boolean"), index=wide_index
             )
-        if family == "fixed_genetic":
+        if pd.notna(family) and family == "fixed_genetic":
             consensus, consensus_conflict = {}, {}
             for pid, patient in evidence.groupby("patient_id"):
                 vals = {
@@ -993,6 +1026,7 @@ def main(argv: list[str] | None = None) -> None:
         pd.read_parquet(args.baseline_labs),
     )
     labs = labs.copy()
+    labs = _add_lab_id(labs)
     labs["_lab_record_id"] = pd.RangeIndex(start=0, stop=len(labs), step=1)
     if labs["_lab_record_id"].duplicated().any():
         raise AssertionError("Duplicate _lab_record_id")
@@ -1000,6 +1034,8 @@ def main(argv: list[str] | None = None) -> None:
     required_labs = {
         "patient_id",
         "canonical_analyte",
+        "order_name_original",
+        "cluster_name_original",
         "semantic_mapping_status",
         "result_valid_for_analysis",
         "matched_clinical_episode_id",
@@ -1050,7 +1086,7 @@ def main(argv: list[str] | None = None) -> None:
     valid_result = _bool(labs.result_valid_for_analysis)
     matched = labs.matched_clinical_episode_id.notna()
     ambiguous = _bool(labs.episode_match_ambiguous)
-    eligible = mapped & valid_result & matched & ~ambiguous
+    eligible = valid_result & matched & ~ambiguous
     usable_all = labs[eligible].copy()
     usable_all["clinical_episode_id"] = usable_all.matched_clinical_episode_id
 
@@ -1160,7 +1196,12 @@ def main(argv: list[str] | None = None) -> None:
                 f"Lab-source {column} disagrees with authoritative all-episode spine"
             )
         usable_all = usable_all.drop(columns=f"{column}__lab_source")
-    selected_all, conflict_record_ids = select_episode_analytes(usable_all, all_spine)
+    # A missing canonical mapping is valid: only records lacking both canonical
+    # and complete BTRIS provenance lack a safe identity for analytical grouping.
+    identifiable_usable = usable_all.loc[usable_all["lab_id"].notna()].copy()
+    selected_all, conflict_record_ids = select_episode_analytes(
+        identifiable_usable, all_spine
+    )
     selected_all = harmonize_selected_units(selected_all)
     if (
         "clinical_visit_number" in selected_all
@@ -1172,7 +1213,9 @@ def main(argv: list[str] | None = None) -> None:
     if not selected_all.empty and selected_all.duplicated(ANALYTE_KEY).any():
         raise AssertionError("Duplicate analyte-level keys")
     clinical_keys = pd.MultiIndex.from_frame(clinical_spine[KEY])
-    usable_clinical = usable_all.loc[_bool(usable_all["clinical_visit"])].copy()
+    usable_clinical = identifiable_usable.loc[
+        _bool(identifiable_usable["clinical_visit"])
+    ].copy()
     if selected_all.empty:
         selected_clinical = selected_all.copy()
     else:
@@ -1180,7 +1223,9 @@ def main(argv: list[str] | None = None) -> None:
         selected_clinical = selected_all.loc[
             selected_all_index.isin(clinical_keys)
         ].copy()
-    wide, future_violations = build_wide(clinical_spine, selected_clinical, usable_all)
+    wide, future_violations = build_wide(
+        clinical_spine, selected_clinical, identifiable_usable
+    )
     unexpected_spine_columns = set(clinical_spine.columns) - set(WIDE_SPINE_COLUMNS)
     leaked_columns = [c for c in wide.columns if c in unexpected_spine_columns]
     if leaked_columns:
@@ -1270,8 +1315,8 @@ def main(argv: list[str] | None = None) -> None:
     conflict_df["reason_for_review"] = "episode_result_or_unit_conflict"
     conflict_df = conflict_df.reindex(columns=QC_DETAIL)
     if not conflict_df.empty:
-        if conflict_df["canonical_analyte"].isna().any():
-            raise AssertionError("Conflict QC contains rows without canonical_analyte")
+        if conflict_df["lab_id"].isna().any():
+            raise AssertionError("Conflict QC contains rows without lab_id")
         if conflict_df["clinical_episode_id"].isna().any():
             raise AssertionError("Conflict QC contains rows without clinical_episode_id")
         if conflict_df["_lab_record_id"].duplicated().any():
@@ -1291,7 +1336,10 @@ def main(argv: list[str] | None = None) -> None:
         "visit_type",
         "lab_date",
         "days_from_clinical_anchor",
+        "lab_id",
         "canonical_analyte",
+        "order_name_original",
+        "cluster_name_original",
         "lab_family",
         "analytic_role",
         "result_raw",
@@ -1328,6 +1376,25 @@ def main(argv: list[str] | None = None) -> None:
         .reset_index()
     )
     inventory.to_csv(common.BLOCKA_QC_DIR / "01_serological_profile" / "01_labs_unit_inventory.csv", index=False)
+    lab_id_inventory = (
+        identifiable_usable.groupby("lab_id", dropna=False)
+        .agg(
+            canonical_analyte=("canonical_analyte", "first"),
+            order_name_original=("order_name_original", "first"),
+            cluster_name_original=("cluster_name_original", "first"),
+            lab_family=("lab_family", "first"),
+            analytic_role=("analytic_role", "first"),
+            n_records=("patient_id", "size"),
+            n_patients=("patient_id", "nunique"),
+        )
+        .reset_index()
+    )
+    lab_id_inventory.to_csv(
+        common.BLOCKA_QC_DIR
+        / "01_serological_profile"
+        / "01_labs_lab_id_inventory.csv",
+        index=False,
+    )
     unit_conflicts = (
         selected_all[selected_all.unit_conflict]
         if not selected_all.empty
