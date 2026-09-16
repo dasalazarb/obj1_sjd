@@ -111,7 +111,8 @@ def _resolve(master: pd.DataFrame) -> tuple[dict[str, tuple[str, str]], list[str
             resolved[feature] = (family, found[0])
     domains = []
     for domain in DOMAIN_NAMES:
-        score = [f"essdai_{domain}_score", f"{domain}_domain_score"]
+        score = [f"eg_{domain}_ordinal_score", f"essdai_{domain}_score",
+                 f"{domain}_domain_score"]
         flag = [f"essdai_{domain}_active", f"eg_{domain}_active", f"{domain}_active"]
         found = next((x for x in score if x in master.columns), None)
         found = found or next((x for x in flag if x in master.columns), None)
@@ -474,6 +475,15 @@ def transition_associations(frame: pd.DataFrame, availability: pd.DataFrame, res
             events = int(origin_frame.to_pop.eq(destination).sum())
             for feature in eligible:
                 source = resolved[feature][1]
+                if source.endswith("_ordinal_score"):
+                    predictor_type = "ordinal"
+                    effect_scale = "per_1_level_increase"
+                elif source.endswith("_active"):
+                    predictor_type = "binary"
+                    effect_scale = "active_vs_inactive"
+                else:
+                    predictor_type = "continuous"
+                    effect_scale = "per_1_unit_increase"
                 canonical_exposure = f"from_{feature}"
                 source_exposure = f"from_{source}"
                 exposure = (
@@ -506,8 +516,7 @@ def transition_associations(frame: pd.DataFrame, availability: pd.DataFrame, res
                 fitdata["x"] = pd.to_numeric(fitdata["x"], errors="coerce").astype(float)
                 fitdata["time"] = pd.to_numeric(fitdata["time"], errors="coerce").astype(float)
                 fitdata = fitdata.dropna()
-                modeled_as_binary = (not fitdata.empty and
-                                     set(fitdata.x.unique()).issubset({0.0, 1.0}))
+                modeled_as_binary = predictor_type == "binary"
                 cell_counts = {"n_exposed_events": np.nan, "n_unexposed_events": np.nan,
                                "n_exposed_nonevents": np.nan, "n_unexposed_nonevents": np.nan}
                 if modeled_as_binary:
@@ -561,6 +570,7 @@ def transition_associations(frame: pd.DataFrame, availability: pd.DataFrame, res
                         interpretability_status = "interpretable"
                         interpretability_reason = ""
                 rows.append({"from_pop": origin, "to_pop": destination, "exposure": feature,
+                             "predictor_type": predictor_type, "effect_scale": effect_scale,
                              "n_intervals": len(fitdata), "n_patients": int(fitdata.patient_id.nunique()),
                              "events": int(fitdata.event.sum()),
                              "nonevents": int((1-fitdata.event).sum()), **cell_counts,
@@ -600,7 +610,8 @@ def longitudinal_models(master: pd.DataFrame, resolved: dict) -> pd.DataFrame:
         if feature not in ("essdai_total", "esspri_total") and family != "essdai_domain":
             continue
         work = master[["patient_id", "clinical_anchor_date", source]].copy()
-        work["value"] = _binary(work[source]) if family == "essdai_domain" else _numeric(work[source])
+        binary_domain = family == "essdai_domain" and source.endswith("_active")
+        work["value"] = _binary(work[source]) if binary_domain else _numeric(work[source])
         work.dropna(subset=["value", "clinical_anchor_date"], inplace=True)
         work["time_years"] = (pd.to_datetime(work.clinical_anchor_date) -
                               pd.to_datetime(work.groupby("patient_id").clinical_anchor_date.transform("min"))).dt.days / 365.25
@@ -609,7 +620,7 @@ def longitudinal_models(master: pd.DataFrame, resolved: dict) -> pd.DataFrame:
         if len(work) >= 10 and repeated >= 3 and work.time_years.nunique() > 1:
             try:
                 import statsmodels.api as sm
-                if family == "essdai_domain":
+                if binary_domain:
                     fit = sm.GEE(work.value.astype(float), sm.add_constant(work.time_years),
                                  groups=work.patient_id, family=sm.families.Binomial()).fit()
                     model = "GEE_binomial"; beta, se = fit.params["time_years"], fit.bse["time_years"]
@@ -621,9 +632,9 @@ def longitudinal_models(master: pd.DataFrame, resolved: dict) -> pd.DataFrame:
                 pvalue, status = fit.pvalues["time_years"], "success"
             except Exception as exc:
                 logging.warning("Longitudinal model failed for %s: %s", feature, exc)
-                model, status = ("GEE_binomial" if family == "essdai_domain" else "linear_mixed_effects"), "model_failed"
+                model, status = ("GEE_binomial" if binary_domain else "linear_mixed_effects"), "model_failed"
         else:
-            model = "GEE_binomial" if family == "essdai_domain" else "linear_mixed_effects"
+            model = "GEE_binomial" if binary_domain else "linear_mixed_effects"
         rows.append({"feature": feature, "model": model, "n_observations": len(work),
                      "n_patients": int(work.patient_id.nunique()), "patients_with_repeated_measures": int(repeated),
                      "time_effect": estimate, "ci95_low": low, "ci95_high": high,
