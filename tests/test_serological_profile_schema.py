@@ -81,6 +81,7 @@ def test_build_wide_does_not_create_mixed_episode_value():
         {
             "patient_id": ["1"],
             "clinical_episode_id": ["episode-1"],
+            "lab_id": ["anti_ro_ssa"],
             "canonical_analyte": ["anti_ro_ssa"],
             "selected_value_numeric": [pd.NA],
             "selected_value_text": ["positive"],
@@ -96,6 +97,7 @@ def test_build_wide_does_not_create_mixed_episode_value():
     usable = pd.DataFrame(
         {
             "patient_id": ["1"],
+            "lab_id": ["anti_ro_ssa"],
             "canonical_analyte": ["anti_ro_ssa"],
             "lab_family": ["stable_autoimmune"],
             "lab_date": pd.to_datetime(["2023-12-31"]),
@@ -131,6 +133,7 @@ def test_valid_result_wins_without_conflict_over_invalid_placeholder():
         {
             "patient_id": ["1", "1"],
             "clinical_episode_id": ["episode-1", "episode-1"],
+            "lab_id": ["ana", "ana"],
             "canonical_analyte": ["ana", "ana"],
             "days_from_clinical_anchor": [0, 0],
             "lab_date": pd.to_datetime(["2024-01-01", "2024-01-01"]),
@@ -161,6 +164,64 @@ def test_valid_result_wins_without_conflict_over_invalid_placeholder():
     assert selected.loc[0, "n_valid_measurements_in_episode"] == 1
     assert selected.loc[0, "conflict_resolved_by_invalid_token_filter"]
     assert conflict_ids == set()
+
+
+def test_lab_id_uses_canonical_then_complete_slugged_provenance():
+    labs = pd.DataFrame(
+        {
+            "canonical_analyte": ["anti_ro_ssa", pd.NA, pd.NA],
+            "order_name_original": ["ignored", "Acute Care Panel", pd.NA],
+            "cluster_name_original": ["ignored", "Sodium (Blood)", "Sodium"],
+        }
+    )
+
+    result = serology._add_lab_id(labs)
+
+    assert result["lab_id"].tolist()[:2] == [
+        "anti_ro_ssa",
+        "acute_care_panel__sodium_blood",
+    ]
+    assert pd.isna(result.loc[2, "lab_id"])
+    assert pd.isna(result.loc[1, "canonical_analyte"])
+
+
+def test_build_wide_uses_fallback_lab_id():
+    spine = pd.DataFrame(
+        {
+            "patient_id": ["1"],
+            "clinical_episode_id": ["episode-1"],
+            "clinical_anchor_date": pd.to_datetime(["2024-01-01"]),
+        }
+    )
+    selected = pd.DataFrame(
+        {
+            "patient_id": ["1"],
+            "clinical_episode_id": ["episode-1"],
+            "lab_id": ["acute_care_panel__sodium_blood"],
+            "selected_value_numeric": [140.0],
+            "selected_value_text": [pd.NA],
+            "selected_unit": ["mmol/L"],
+            "selected_reference_status": ["within_range"],
+            "selected_lab_date": pd.to_datetime(["2024-01-01"]),
+            "selected_days_from_clinical_anchor": [0],
+            "n_measurements_in_episode": [1],
+            "result_conflict": [False],
+            "selection_status": ["selected_single"],
+        }
+    )
+    usable = pd.DataFrame(
+        {
+            "patient_id": ["1"],
+            "lab_id": ["acute_care_panel__sodium_blood"],
+            "lab_family": [pd.NA],
+            "lab_date": pd.to_datetime(["2024-01-01"]),
+            "result_numeric_exact": [140.0],
+        }
+    )
+
+    result, _ = serology.build_wide(spine, selected, usable)
+
+    assert result.loc[0, "acute_care_panel__sodium_blood__value"] == 140.0
 
 
 def test_invalid_token_qc_preserves_source_record_counts():
