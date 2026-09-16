@@ -107,7 +107,9 @@ def test_multiple_units_preserves_numeric_type_but_requires_review():
 
     assert row.inferred_type == "numeric"
     assert row.n_units == 2
-    assert row.recommended_use == "review_or_exclude"
+    assert row.recommended_use == "numeric_requires_harmonization"
+    assert row.graph_candidate_status == "review_before_graph"
+    assert row.requires_unit_review
     assert "multiple_units" in row.review_reason
 
 
@@ -123,3 +125,39 @@ def test_numeric_values_do_not_require_the_string_accessor():
     assert row.n_nonmissing == 3
     assert row.n_unique == 3
     assert row.sample_values == "1 | 2 | 4"
+
+
+def test_discovers_text_and_reference_only_stems_and_baseline_coverage():
+    frame = pd.DataFrame({
+        "patient_id": ["a", "a", "b", "b"],
+        "is_clinical_baseline": [True, False, True, False],
+        "anti_ro_ssa__reference_status": ["positive", "positive", "negative", pd.NA],
+        "anti_ro_ssa__text": [pd.NA] * 4,
+    })
+
+    row = profile_module.profile_labs(frame).iloc[0]
+
+    assert row.lab == "anti_ro_ssa"
+    assert row.value_column == ""
+    assert row.primary_result_source == "reference_status_categorical"
+    assert row.recommended_use == "categorical_longitudinal"
+    assert row.graph_candidate_status == "include_categorical"
+    assert row.graph_encoding_hint == "binary"
+    assert row.n_baseline_any_result == 2
+    assert row.n_baseline_patients == 2
+    assert row.n_patients_with_ge2_results == 1
+
+
+def test_expected_audit_does_not_silently_choose_multiple_alias_matches():
+    frame = pd.DataFrame({
+        "patient_id": ["a", "b"],
+        "ro52__reference_status": ["positive", "negative"],
+        "ro60__reference_status": ["negative", "positive"],
+    })
+
+    audit = profile_module.expected_lab_audit(profile_module.profile_labs(frame))
+    row = audit.set_index("expected_lab").loc["anti_ro_ssa"]
+
+    assert row.match_status == "found_multiple_candidates"
+    assert row.matched_lab_stem == "ro52 | ro60"
+    assert row.value_column == ""
