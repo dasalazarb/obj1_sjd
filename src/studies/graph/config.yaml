@@ -19,11 +19,16 @@ mapper:
   minimum_branch_patients: 8
   soft_membership_tau: 1.0
 
+community_detection:
+  method: greedy_modularity
+  edge_weight: jaccard
+  minimum_patients: 8
+
 bootstrap:
   replicates: 60
   patient_fraction: 0.80
   branch_match_jaccard: 0.50
-  stable_branch_threshold: 0.80
+  stable_community_threshold: 0.80
 
 permutation:
   ari_replicates: 5000
