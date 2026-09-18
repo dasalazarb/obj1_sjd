@@ -11,11 +11,6 @@ redundancy:
   spearman_abs_threshold: 0.95
   conceptual_pairs:
     - [hemoglobin_a1c, estimated_average_glucose]
-    - [immature_granulocyte_absolute, immature_granulocyte_percent]
-    - [eosinophil_absolute, eosinophil_percent]
-    - [basophil_absolute, basophil_percent]
-    - [lymphocyte_count, lymphocyte_percent]
-    - [monocyte_absolute, monocyte_percent]
 
 pca:
   variance_target: 0.80

@@ -25,6 +25,7 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 from sklearn.decomposition import PCA
+from sklearn.metrics import adjusted_rand_score
 from sklearn.preprocessing import RobustScaler
 
 import common
@@ -69,20 +70,6 @@ def family_name(value: str) -> str:
 def feature_stem(feature: str) -> str:
     """Return the lab concept before encoding suffixes."""
     return feature.split("__", 1)[0].strip().lower()
-
-
-def drop_reference_one_hot(values: dict[str, pd.Series], manifest: pd.DataFrame
-                           ) -> tuple[dict[str, pd.Series], set[str]]:
-    """Use k-1 columns per categorical lab while preserving NaN rows."""
-    result, removed = dict(values), set()
-    included = manifest.loc[manifest["included"].astype(bool)]
-    categorical = included.loc[included.representation_type.eq("categorical_one_hot")]
-    for _, group in categorical.groupby("lab", sort=True):
-        columns = sorted(set(group.feature) & set(result))
-        if columns:
-            removed.add(columns[0])  # deterministic lexicographic reference category
-            result.pop(columns[0], None)
-    return result, removed
 
 
 def coverage_filter(values: dict[str, pd.Series], families: dict[str, str],
@@ -132,11 +119,12 @@ def reduce_redundancy(values: dict[str, pd.Series], config: dict
     for primary, secondary in config["redundancy"].get("conceptual_pairs", []):
         first = sorted(name for name in remaining if feature_stem(name) == primary)
         second = sorted(name for name in remaining if feature_stem(name) == secondary)
-        for kept, removed in zip(first, second):
-            pair = pd.concat([remaining[kept], remaining[removed]], axis=1).dropna()
+        for left, right in zip(first, second):
+            kept, removed = sorted((left, right), key=lambda x: _priority(x, coverage))
+            pair = pd.concat([remaining[left], remaining[right]], axis=1).dropna()
             rho = float(pair.corr(method="spearman").iloc[0, 1]) if len(pair) >= 2 else np.nan
             remove(kept, removed, rho, len(pair),
-                   "conceptual_or_deterministic_pair; configured_primary_kept")
+                   "configured_conceptual_pair; higher_coverage_then_clinical_primacy_then_lexical")
 
     threshold = float(config["redundancy"]["spearman_abs_threshold"])
     # Greedy deterministic pruning makes every decision reproducible.
@@ -168,14 +156,8 @@ def select_features(all_values: dict[str, pd.Series], families: dict[str, str],
                     ) -> tuple[dict[str, pd.Series], pd.DataFrame, pd.DataFrame]:
     settings = SCENARIOS[scenario]
     values = dict(all_values)
-    reference_removed: set[str] = set()
     if settings["coverage"]:
-        values, reference_removed = drop_reference_one_hot(values, manifest)
         values, audit = coverage_filter(values, families, config)
-        for feature in sorted(reference_removed):
-            audit.loc[len(audit)] = [feature, families[feature],
-                                     float(all_values[feature].notna().mean()), False,
-                                     "one_hot_reference_category_k_minus_1"]
     else:
         audit = pd.DataFrame([
             {"feature": feature, "family": families[feature],
@@ -245,7 +227,8 @@ def analyze_mapper(rep: Representation, config: dict) -> dict:
         graph, len(rep.raw), int(mapper["minimum_node_support"]), 0)
     nerve, communities, counts, modularity = CANON.mapper_communities(
         graph, nodes, len(rep.raw))
-    _, covered, hard = CANON.soft_membership(counts, float(mapper["soft_membership_tau"]))
+    probabilities, covered, hard = CANON.soft_membership(
+        counts, float(mapper["soft_membership_tau"]))
     ties = covered & np.isnan(hard)
     community_sets = [set().union(*(nodes[node] for node in group)) for group in communities]
     minimum = int(config["community_detection"]["minimum_patients"])
@@ -253,7 +236,8 @@ def analyze_mapper(rep: Representation, config: dict) -> dict:
     return {"graph": graph, "nerve": nerve, "nodes": nodes, "components": components,
             "communities": communities, "community_sets": community_sets,
             "modularity": modularity, "covered": covered, "hard": hard,
-            "ties": ties, "supported": supported, "component_counts": component_counts}
+            "probabilities": probabilities, "ties": ties, "supported": supported,
+            "component_counts": component_counts}
 
 
 def bootstrap_stability(all_values: dict[str, pd.Series], families: dict[str, str],
@@ -287,6 +271,97 @@ def bootstrap_stability(all_values: dict[str, pd.Series], families: dict[str, st
                         for other in candidates), default=0.0)
             scores[community] += best >= float(settings["branch_match_jaccard"])
     return scores / replicates
+
+
+def patient_membership(scenario: str, baseline: pd.DataFrame, mapped: dict) -> pd.DataFrame:
+    """Create the common patient-level assignment contract for one scenario."""
+    hard, probabilities = mapped["hard"], mapped["probabilities"]
+    result = pd.DataFrame({
+        "scenario": scenario, "patient_id": baseline["patient_id"].to_numpy(),
+        "mapper_covered": mapped["covered"], "community_membership_tie": mapped["ties"],
+        "hard_community": pd.array(hard, dtype="Int64"),
+        "community_supported": [bool(mapped["supported"][int(value)])
+                                if np.isfinite(value) else False for value in hard],
+        "max_community_membership": (probabilities.max(axis=1)
+                                     if probabilities.shape[1] else np.nan),
+        "baseline_pop": baseline["pop_status"].to_numpy(),
+    })
+    for community in range(probabilities.shape[1]):
+        result[f"pi_community_{community}"] = probabilities[:, community]
+    return result
+
+
+def community_pop_crosswalk(membership: pd.DataFrame, stability: pd.DataFrame) -> pd.DataFrame:
+    columns = ["scenario", "hard_community", "baseline_pop", "n_patients",
+               "pct_within_community", "community_supported", "bootstrap_stability",
+               "stability_status"]
+    valid = (membership.mapper_covered & ~membership.community_membership_tie
+             & membership.community_supported & membership.hard_community.notna()
+             & membership.baseline_pop.isin(CANON.POPS))
+    counts = (membership.loc[valid].groupby(
+        ["scenario", "hard_community", "baseline_pop"], observed=True)
+        .size().rename("n_patients").reset_index())
+    if counts.empty:
+        return pd.DataFrame(columns=columns)
+    counts["pct_within_community"] = counts.n_patients / counts.groupby(
+        ["scenario", "hard_community"]).n_patients.transform("sum")
+    counts["community_supported"] = True
+    merged = counts.merge(stability, left_on=["scenario", "hard_community"],
+                          right_on=["scenario", "community"], how="left")
+    return merged.drop(columns="community")[columns]
+
+
+def eligible_community_sets(membership: pd.DataFrame) -> dict[int, set]:
+    """Patient sets for direct overlap: Mapper-covered hard assignments without ties."""
+    valid = (membership.mapper_covered & ~membership.community_membership_tie
+             & membership.hard_community.notna())
+    return {int(community): set(group.patient_id) for community, group in
+            membership.loc[valid].groupby("hard_community")}
+
+
+def cross_scenario_tables(memberships: dict[str, pd.DataFrame], stable_ids: dict[str, int | None]
+                          ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    overlap_rows, stable_rows, ari_rows = [], [], []
+    scenarios = list(SCENARIOS)
+    for i, scenario_a in enumerate(scenarios):
+        frame_a = memberships[scenario_a]
+        sets_a = eligible_community_sets(frame_a)
+        for scenario_b in scenarios[i + 1:]:
+            frame_b = memberships[scenario_b]
+            sets_b = eligible_community_sets(frame_b)
+            for community_a, patients_a in sets_a.items():
+                for community_b, patients_b in sets_b.items():
+                    intersection, union = patients_a & patients_b, patients_a | patients_b
+                    overlap_rows.append({"scenario_a": scenario_a, "community_a": community_a,
+                        "scenario_b": scenario_b, "community_b": community_b,
+                        "n_a": len(patients_a), "n_b": len(patients_b),
+                        "n_intersection": len(intersection), "n_union": len(union),
+                        "jaccard": len(intersection) / len(union) if union else np.nan,
+                        "overlap_coefficient": len(intersection) / min(len(patients_a), len(patients_b))
+                        if patients_a and patients_b else np.nan})
+            stable_a, stable_b = stable_ids[scenario_a], stable_ids[scenario_b]
+            patients_a = sets_a.get(stable_a, set()) if stable_a is not None else set()
+            patients_b = sets_b.get(stable_b, set()) if stable_b is not None else set()
+            intersection, union = patients_a & patients_b, patients_a | patients_b
+            stable_rows.append({"scenario_a": scenario_a, "stable_community_a": stable_a,
+                "scenario_b": scenario_b, "stable_community_b": stable_b,
+                "n_a": len(patients_a), "n_b": len(patients_b),
+                "n_intersection": len(intersection),
+                "jaccard": (len(intersection) / len(union)
+                            if stable_a is not None and stable_b is not None and union else np.nan),
+                "overlap_coefficient": (len(intersection) / min(len(patients_a), len(patients_b))
+                                        if patients_a and patients_b else np.nan)})
+            joined = frame_a.merge(frame_b, on="patient_id", suffixes=("_a", "_b"))
+            valid = (joined.mapper_covered_a & joined.mapper_covered_b
+                     & ~joined.community_membership_tie_a & ~joined.community_membership_tie_b
+                     & joined.community_supported_a & joined.community_supported_b
+                     & joined.hard_community_a.notna() & joined.hard_community_b.notna())
+            used = joined.loc[valid]
+            ari_rows.append({"scenario_a": scenario_a, "scenario_b": scenario_b,
+                             "n_patients_used": len(used),
+                             "ari": adjusted_rand_score(used.hard_community_a, used.hard_community_b)
+                             if len(used) else np.nan})
+    return pd.DataFrame(overlap_rows), pd.DataFrame(stable_rows), pd.DataFrame(ari_rows)
 
 
 def pca_table(rep: Representation) -> pd.DataFrame:
@@ -330,6 +405,33 @@ def draw_figures(results: dict[str, dict], stability_rows: pd.DataFrame,
     fig.tight_layout(); fig.savefig(figure_dir / "02_graph_representation_sensitivity_stability.png", bbox_inches="tight"); plt.close(fig)
 
 
+def draw_stable_core_heatmap(stable_overlap: pd.DataFrame, figure_dir: Path) -> None:
+    scenarios = list(SCENARIOS)
+    matrix = np.full((len(scenarios), len(scenarios)), np.nan)
+    positions = {scenario: index for index, scenario in enumerate(scenarios)}
+    for row in stable_overlap.itertuples(index=False):
+        left, right = positions[row.scenario_a], positions[row.scenario_b]
+        matrix[left, right] = matrix[right, left] = row.jaccard
+        if pd.notna(row.stable_community_a):
+            matrix[left, left] = 1.0
+        if pd.notna(row.stable_community_b):
+            matrix[right, right] = 1.0
+    fig, axis = plt.subplots(figsize=(6, 5.2))
+    image = axis.imshow(np.ma.masked_invalid(matrix), cmap="Blues", vmin=0, vmax=1)
+    for row in range(len(scenarios)):
+        for column in range(len(scenarios)):
+            label = "NA" if np.isnan(matrix[row, column]) else f"{matrix[row, column]:.2f}"
+            axis.text(column, row, label, ha="center", va="center",
+                      color="white" if np.isfinite(matrix[row, column]) and matrix[row, column] > .55 else "black")
+    axis.set(xticks=range(len(scenarios)), yticks=range(len(scenarios)),
+             xticklabels=scenarios, yticklabels=scenarios,
+             title="Stable-core Jaccard across representations")
+    fig.colorbar(image, ax=axis, label="Jaccard")
+    fig.tight_layout()
+    fig.savefig(figure_dir / "02_graph_stable_core_overlap.png", bbox_inches="tight")
+    plt.close(fig)
+
+
 def interpretation_check(summary: pd.DataFrame) -> str:
     """Transparent QC only; never a scientific scenario-selection rule."""
     cleaned = summary.loc[summary.scenario.isin(["S1", "S2", "S3"])]
@@ -362,7 +464,8 @@ def run(args: argparse.Namespace) -> None:
     full_families = {row.feature: family_name(row.family)
                      for row in full_manifest.loc[full_manifest.included].itertuples()}
     current_families = {name: full_families[name] for name in current_values}
-    results, summary_rows, coverage_rows, redundancy_rows, feature_rows, stability_rows = {}, [], [], [], [], []
+    results, memberships, stable_ids = {}, {}, {}
+    summary_rows, coverage_rows, redundancy_rows, feature_rows, stability_rows = [], [], [], [], []
 
     for scenario in SCENARIOS:
         universe = current_values if scenario == "S0" else full_values
@@ -387,6 +490,15 @@ def run(args: argparse.Namespace) -> None:
                                    "n_patients_node_union": len(mapped["community_sets"][community]),
                                    "bootstrap_stability": score,
                                    "stability_status": "stable" if score >= stable_threshold else "provisional"})
+        # When several communities pass the descriptive threshold, use one
+        # deterministic representative for the pairwise stable-core comparison.
+        stable_candidates = [community for community, score in enumerate(stability)
+                             if score >= stable_threshold]
+        stable_id = (sorted(stable_candidates, key=lambda community:
+                     (-stability[community], -len(mapped["community_sets"][community]), community))[0]
+                     if stable_candidates else None)
+        stable_ids[scenario] = stable_id
+        memberships[scenario] = patient_membership(scenario, baseline, mapped)
         hard, covered, ties, supported = mapped["hard"], mapped["covered"], mapped["ties"], mapped["supported"]
         pop = baseline["pop_status"].to_numpy()
         valid = covered & ~ties & np.isfinite(hard) & np.isin(pop, CANON.POPS)
@@ -412,6 +524,11 @@ def run(args: argparse.Namespace) -> None:
             "mapper_coverage": float(covered.mean()), "n_mapper_nodes": len(mapped["nodes"]),
             "n_connected_components": len(mapped["components"]), "n_communities": len(mapped["communities"]),
             "n_supported_communities": int(supported.sum()), "n_stable_communities": int((stability >= stable_threshold).sum()),
+            "stable_community_id": stable_id,
+            "stable_community_n_patients": (len(mapped["community_sets"][stable_id])
+                                             if stable_id is not None else np.nan),
+            "stable_community_bootstrap_stability": (stability[stable_id]
+                                                      if stable_id is not None else np.nan),
             "modularity": mapped["modularity"], "n_unambiguous": unambiguous,
             "pct_unambiguous": unambiguous / len(baseline), "ari_vs_pop": ari,
             "ari_permutation_p": ari_p, "ari_n_used": int(valid.sum()),
@@ -423,13 +540,22 @@ def run(args: argparse.Namespace) -> None:
     coverage_all = pd.concat(coverage_rows, ignore_index=True)
     redundancy_all = pd.concat(redundancy_rows, ignore_index=True)
     stability_all = pd.DataFrame(stability_rows)
+    membership_all = pd.concat(memberships.values(), ignore_index=True, sort=False)
+    crosswalk = community_pop_crosswalk(membership_all, stability_all)
+    overlap, stable_overlap, cross_ari = cross_scenario_tables(memberships, stable_ids)
     coverage_all.to_csv(dirs["tables"] / "02_graph_coverage_audit.csv", index=False)
     redundancy_all.to_csv(dirs["tables"] / "02_graph_redundancy_audit.csv", index=False)
     pd.DataFrame(feature_rows).to_csv(dirs["tables"] / "02_graph_scenario_feature_sets.csv", index=False)
     stability_all.to_csv(dirs["tables"] / "02_graph_scenario_community_stability.csv", index=False)
+    membership_all.to_csv(dirs["tables"] / "02_graph_scenario_patient_membership.csv", index=False)
+    crosswalk.to_csv(dirs["tables"] / "02_graph_scenario_community_pop_crosswalk.csv", index=False)
+    overlap.to_csv(dirs["tables"] / "02_graph_cross_scenario_community_overlap.csv", index=False)
+    stable_overlap.to_csv(dirs["tables"] / "02_graph_stable_core_overlap.csv", index=False)
+    cross_ari.to_csv(dirs["tables"] / "02_graph_cross_scenario_ari.csv", index=False)
     summary.to_csv(dirs["tables"] / "02_graph_representation_sensitivity_summary.csv", index=False)
     if not args.dry_run:
         draw_figures(results, stability_all, dirs["figures"])
+        draw_stable_core_heatmap(stable_overlap, dirs["figures"])
 
     print("\nGRAPH REPRESENTATION SENSITIVITY")
     print(f"\nBaseline patients: {len(baseline)}")
@@ -443,12 +569,30 @@ def run(args: argparse.Namespace) -> None:
     print("\nINTERPRETATION CHECK")
     print("Does the stable-core + peripheral-continuum pattern persist across cleaned representations?")
     print(interpretation_check(summary))
+    print("\nCROSS-SCENARIO STABLE CORE")
+    for scenario in SCENARIOS:
+        community = stable_ids[scenario]
+        print(f"{scenario} stable community: {'C' + str(community) if community is not None else 'NA'}")
+    print("\nStable-core Jaccard:")
+    for row in stable_overlap.itertuples(index=False):
+        value = "NA" if pd.isna(row.jaccard) else f"{row.jaccard:.3f}"
+        print(f"{row.scenario_a}-{row.scenario_b} = {value}")
+    print("\nCross-scenario ARI:")
+    for row in cross_ari.itertuples(index=False):
+        value = "NA" if pd.isna(row.ari) else f"{row.ari:.3f}"
+        print(f"{row.scenario_a}-{row.scenario_b} = {value} (n={row.n_patients_used})")
     print("\nORDER TO REVIEW GRAPH REPRESENTATION SENSITIVITY")
     names = ["02_graph_coverage_audit.csv", "02_graph_redundancy_audit.csv",
              "02_graph_scenario_feature_sets.csv", "02_graph_representation_sensitivity_summary.csv",
-             "02_graph_scenario_community_stability.csv", "PCA variance outputs",
+             "02_graph_scenario_community_stability.csv",
+             "02_graph_scenario_patient_membership.csv",
+             "02_graph_scenario_community_pop_crosswalk.csv",
+             "02_graph_cross_scenario_community_overlap.csv",
+             "02_graph_stable_core_overlap.csv", "02_graph_cross_scenario_ari.csv",
+             "PCA variance outputs",
              "02_graph_representation_sensitivity_mapper.png",
-             "02_graph_representation_sensitivity_stability.png"]
+             "02_graph_representation_sensitivity_stability.png",
+             "02_graph_stable_core_overlap.png"]
     for index, name in enumerate(names, 1):
         print(f"{index}. {name}")
 
