@@ -276,6 +276,81 @@ def omnibus_numeric(frame: pd.DataFrame, feature: str) -> dict:
             "effect_name": "epsilon_squared", "effect": eps2, "p_value": float(p)}
 
 
+def pairwise_numeric_tests(frame: pd.DataFrame, features: list[str],
+                           scenario: str, feature_role: str) -> list[dict]:
+    """Direct community-vs-community tests; useful when K > 2 and transparent when K = 2."""
+    rows: list[dict] = []
+    communities = sorted(frame.hard_community.dropna().astype(int).unique())
+    for left, right in itertools.combinations(communities, 2):
+        for feature in features:
+            if feature not in frame:
+                continue
+            x = pd.to_numeric(
+                frame.loc[frame.hard_community.eq(left), feature], errors="coerce"
+            ).dropna()
+            y = pd.to_numeric(
+                frame.loc[frame.hard_community.eq(right), feature], errors="coerce"
+            ).dropna()
+            if len(x) < 3 or len(y) < 3:
+                continue
+            if is_binary(frame[feature]):
+                a = int((x == 1).sum()); b = int((x == 0).sum())
+                c = int((y == 1).sum()); d = int((y == 0).sum())
+                _, p = fisher_exact([[a, b], [c, d]], alternative="two-sided")
+                effect = odds_ratio_2x2(a, b, c, d)
+                rows.append({
+                    "scenario": scenario, "community_a": left, "community_b": right,
+                    "feature": feature, "feature_role": feature_role,
+                    "variable_type": "binary", "test": "Fisher_exact",
+                    "n_a": len(x), "n_b": len(y),
+                    "summary_a": float(x.mean()), "summary_b": float(y.mean()),
+                    "summary_metric": "proportion_1", "effect_name": "odds_ratio_a_vs_b",
+                    "effect": effect, "p_value": float(p),
+                })
+            else:
+                _, p = mannwhitneyu(x, y, alternative="two-sided")
+                delta = cliffs_delta(x.to_numpy(), y.to_numpy())
+                rows.append({
+                    "scenario": scenario, "community_a": left, "community_b": right,
+                    "feature": feature, "feature_role": feature_role,
+                    "variable_type": "continuous", "test": "Mann_Whitney_U",
+                    "n_a": len(x), "n_b": len(y),
+                    "summary_a": float(x.median()), "summary_b": float(y.median()),
+                    "summary_metric": "median", "effect_name": "cliffs_delta_a_vs_b",
+                    "effect": delta, "p_value": float(p),
+                })
+    return rows
+
+
+def pairwise_tables(membership: pd.DataFrame, baseline_raw: pd.DataFrame,
+                    feature_sets: pd.DataFrame, external: pd.DataFrame,
+                    external_kinds: dict[str, str]) -> pd.DataFrame:
+    rows: list[dict] = []
+    for scenario in SCENARIOS:
+        mem = eligible_members(membership, scenario)
+        if mem.hard_community.nunique() < 2:
+            continue
+        defining = feature_sets.loc[
+            feature_sets.scenario.eq(scenario) & feature_sets.included, "feature"
+        ].tolist()
+        data = mem.merge(baseline_raw, on="patient_id", how="left", validate="one_to_one")
+        rows.extend(pairwise_numeric_tests(data, defining, scenario, "defining_feature"))
+
+        numeric_external = [f for f, kind in external_kinds.items()
+                            if kind == "continuous" and f in external]
+        ext = mem.merge(external, on="patient_id", how="left", validate="one_to_one")
+        rows.extend(pairwise_numeric_tests(
+            ext, numeric_external, scenario, "external_characterizer"
+        ))
+
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        out["q_value"] = out.groupby(
+            ["scenario", "feature_role"], group_keys=False
+        )["p_value"].transform(bh_qvalues)
+    return out
+
+
 def categorical_external_tests(frame: pd.DataFrame, feature: str, community: int) -> list[dict]:
     data = frame[["hard_community", feature]].dropna().copy()
     data["in_community"] = data.hard_community.eq(community)
@@ -305,7 +380,7 @@ def add_characteristic_flag(rows: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     if rows.empty:
         return rows
     rows = rows.copy()
-    rows["q_value"] = bh_qvalues(rows["p_value"])
+    rows["q_value"] = rows.groupby(["scenario", "feature_role"], group_keys=False)["p_value"].transform(bh_qvalues)
     alpha = float(cfg["statistics"]["fdr_alpha"])
     delta_min = float(cfg["statistics"]["minimum_abs_cliffs_delta"])
     or_min = float(cfg["statistics"]["minimum_odds_ratio"])
@@ -547,6 +622,7 @@ def run(args: argparse.Namespace) -> None:
     signatures, omnibus, missing = hard_signature_tables(
         membership, raw, feature_sets, external, external_kinds, cfg
     )
+    pairwise = pairwise_tables(membership, raw, feature_sets, external, external_kinds)
     soft = soft_membership_table(membership, raw, feature_sets, external, cfg)
     robust = robust_s2_s3_signatures(signatures, alignment)
 
@@ -560,6 +636,7 @@ def run(args: argparse.Namespace) -> None:
     alignment.to_csv(dirs["tables"] / "03_graph_s2_s3_community_alignment.csv", index=False)
     omnibus.to_csv(dirs["tables"] / "03_graph_community_feature_omnibus.csv", index=False)
     signatures.to_csv(dirs["tables"] / "03_graph_community_signatures.csv", index=False)
+    pairwise.to_csv(dirs["tables"] / "03_graph_community_pairwise.csv", index=False)
     robust.to_csv(dirs["tables"] / "03_graph_robust_s2_s3_signatures.csv", index=False)
     soft.to_csv(dirs["tables"] / "03_graph_soft_membership_associations.csv", index=False)
     missing.to_csv(dirs["tables"] / "03_graph_community_missingness.csv", index=False)
@@ -580,6 +657,7 @@ def run(args: argparse.Namespace) -> None:
         "03_graph_s2_s3_community_alignment.csv",
         "03_graph_community_feature_omnibus.csv",
         "03_graph_community_signatures.csv",
+        "03_graph_community_pairwise.csv",
         "03_graph_robust_s2_s3_signatures.csv",
         "03_graph_soft_membership_associations.csv",
         "03_graph_community_missingness.csv",
