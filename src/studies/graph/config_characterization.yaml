@@ -1,0 +1,24 @@
+study_name: graph_community_characterization
+contract_version: clinical_episode_v1
+
+primary_representation_scenarios:
+  - S2
+  - S3
+
+statistics:
+  fdr_alpha: 0.05
+  # Small-but-nontrivial lower bound; effect size is required in addition to FDR.
+  minimum_abs_cliffs_delta: 0.147
+  # Binary/categorical one-vs-rest signals must be at least 1.5x enriched
+  # (or <= 1/1.5 depleted) in addition to passing FDR.
+  minimum_odds_ratio: 1.5
+
+# These were intentionally not used to discover the Mapper communities in 01_.
+# They therefore serve as external clinical annotations/characterizers, not
+# defining features of the topology.
+external_numeric:
+  - essdai_total
+  - esspri_total_observed
+
+external_categorical:
+  - pop_status
