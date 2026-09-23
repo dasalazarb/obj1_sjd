@@ -6,8 +6,11 @@ This step does not reconstruct, collapse, merge, or split clinical episodes.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import shutil
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -47,6 +50,76 @@ QC_CSV = common.BLOCKA_QC_DIR / "00_episode_spine_qc.csv"
 QC_JSON = common.BLOCKA_QC_DIR / "00_episode_spine_qc.json"
 
 
+def sha256_file(path: Path) -> str:
+    """Return the SHA256 checksum for a file."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def sync_upstream_episode_spine(
+    source: Path,
+    destination: Path,
+    provenance_path: Path,
+) -> dict[str, object]:
+    """Synchronize and document the authoritative EDA episode-spine output."""
+    if not source.exists():
+        raise FileNotFoundError(
+            f"Authoritative eda_sjd clinical episode spine not found: {source}"
+        )
+    if not source.is_file():
+        raise FileNotFoundError(
+            f"Authoritative eda_sjd clinical episode spine is not a file: {source}"
+        )
+
+    print(f"[SYNC] Upstream spine:\n       {source}")
+    print(f"[SYNC] Local snapshot:\n       {destination}")
+    source_hash = sha256_file(source)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    copy_performed = True
+    if destination.exists() and sha256_file(destination) == source_hash:
+        copy_performed = False
+        print("[SYNC] Local clinical episode spine already matches upstream.")
+    else:
+        shutil.copy2(source, destination)
+
+    copied_hash = sha256_file(destination)
+    if copied_hash != source_hash:
+        raise RuntimeError("Clinical episode spine copy failed SHA256 validation.")
+
+    source_stat = source.stat()
+    provenance: dict[str, object] = {
+        "upstream_repository": "eda_sjd",
+        "upstream_pipeline_step": "src/11_build_clinical_episode_spine.py",
+        "source_path": str(source),
+        "local_snapshot_path": str(destination),
+        "sha256": source_hash,
+        "source_size_bytes": source_stat.st_size,
+        "source_modified_time_utc": datetime.fromtimestamp(
+            source_stat.st_mtime, tz=timezone.utc
+        ).isoformat(),
+        "synced_at_utc": datetime.now(timezone.utc).isoformat(),
+        "copy_performed": copy_performed,
+    }
+    provenance_path.parent.mkdir(parents=True, exist_ok=True)
+    provenance_path.write_text(
+        json.dumps(provenance, indent=2) + "\n", encoding="utf-8"
+    )
+
+    print(f"[SYNC] SHA256:\n       {source_hash}")
+    print(f"[SYNC] Copy performed: {copy_performed}")
+    return {
+        "input_mode": "eda_sjd_auto_sync",
+        "upstream_source_path": str(source),
+        "local_snapshot_path": str(destination),
+        "upstream_sha256": source_hash,
+        "copy_performed": copy_performed,
+    }
+
+
 def read_source(path: Path) -> pd.DataFrame:
     """Read a supported episode-spine format without altering its rows."""
     suffix = path.suffix.lower()
@@ -55,6 +128,13 @@ def read_source(path: Path) -> pd.DataFrame:
     if suffix == ".csv":
         return pd.read_csv(path)
     raise ValueError(f"Unsupported input format {suffix!r}; use .parquet or .csv")
+
+
+def validate_required_columns(source: pd.DataFrame) -> None:
+    """Validate the minimum contract before cohort filtering or derivation."""
+    missing = sorted(REQUIRED_COLUMNS.difference(source.columns))
+    if missing:
+        raise ValueError(f"Missing required columns: {', '.join(missing)}")
 
 
 def filter_longitudinal_patients(
@@ -93,9 +173,7 @@ def build_episode_spines(
     source: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, bool], dict[str, object]]:
     """Validate, order, derive compatibility fields, and make clinical view."""
-    missing = sorted(REQUIRED_COLUMNS.difference(source.columns))
-    if missing:
-        raise ValueError(f"Missing required columns: {', '.join(missing)}")
+    validate_required_columns(source)
 
     episode_spine = source.copy()
     for column in DATE_COLUMNS:
@@ -236,12 +314,35 @@ def write_outputs(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", type=Path, default=common.UNFILTERED_EPISODE_SPINE)
+    parser.add_argument(
+        "--input",
+        type=Path,
+        default=None,
+        help=(
+            "Optional explicit episode-spine input. If omitted, Step 00 "
+            "synchronizes the canonical spine from eda_sjd automatically."
+        ),
+    )
     parser.add_argument("--id-list", type=Path, default=common.LONGITUDINAL_ID_LIST)
     parser.add_argument("--overwrite", dest="overwrite", action="store_true", default=True)
     parser.add_argument("--no-overwrite", dest="overwrite", action="store_false")
     args = parser.parse_args()
     common.ensure_output_dirs()
+    if args.input is None:
+        sync_metrics = sync_upstream_episode_spine(
+            source=common.EDA_SJD_CLINICAL_EPISODE_SPINE,
+            destination=common.UNFILTERED_EPISODE_SPINE,
+            provenance_path=common.UNFILTERED_EPISODE_SPINE_PROVENANCE,
+        )
+        input_path = common.UNFILTERED_EPISODE_SPINE
+        print("[STEP 00] Reading synchronized episode spine...")
+    else:
+        input_path = args.input
+        sync_metrics = {
+            "input_mode": "explicit_cli_override",
+            "input_path": str(input_path),
+        }
+        print(f"[STEP 00] Reading explicit episode-spine input: {input_path}")
     output_paths = (
         common.SOURCE_EPISODE_SPINE,
         common.SOURCE_EPISODE_SPINE_CSV,
@@ -256,11 +357,15 @@ def main() -> None:
     if existing and not args.overwrite:
         raise FileExistsError("Output file(s) already exist: " + ", ".join(existing))
 
-    source = read_source(args.input)
+    source = read_source(input_path)
+    validate_required_columns(source)
+    print("[STEP 00] Filtering longitudinal cohort...")
     id_list = pd.read_csv(args.id_list)
     source, filter_metrics = filter_longitudinal_patients(source, id_list)
+    print("[STEP 00] Validating authoritative clinical episodes...")
     episode_spine, clinical_spine, assertions, metrics = build_episode_spines(source)
-    metrics = {**filter_metrics, **metrics}
+    metrics = {**sync_metrics, **filter_metrics, **metrics}
+    print("[STEP 00] Writing outputs...")
     write_outputs(episode_spine, clinical_spine, assertions, metrics)
     print(json.dumps({"metrics": metrics, "hard_assertions": assertions}, indent=2))
 

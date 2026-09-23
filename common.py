@@ -5,10 +5,23 @@ repository-relative locations. Paths are intentionally lightweight and do not
 create files on import, except via helper functions called by scripts.
 """
 
+import os
 from pathlib import Path
 
 # Repository root is the directory containing this file.
 PROJECT_ROOT = Path(__file__).resolve().parent
+
+# Authoritative upstream repository.  The environment override keeps Step 00
+# portable while retaining the standard Biowulf location as its default.
+EDA_SJD_ROOT = Path(
+    os.environ.get(
+        "EDA_SJD_ROOT",
+        "/data/salazarda/data/eda_sjd",
+    )
+)
+EDA_SJD_CLINICAL_EPISODE_SPINE = (
+    EDA_SJD_ROOT / "data_analytic" / "clinical_episode_spine_sjd.parquet"
+)
 
 DATA_DIR = PROJECT_ROOT / "data"
 RAW_DATA_DIR = DATA_DIR / "raw"
@@ -30,6 +43,9 @@ DEFAULT_POP_DISTRIBUTION_INPUT = DEFAULT_ANALYTIC_DATASET
 # this stable filename for downstream analyses.
 SOURCE_EPISODE_SPINE = RAW_DATA_DIR / "clinical_episode_spine_sjd.parquet"
 UNFILTERED_EPISODE_SPINE = RAW_DATA_DIR / "clinical_episode_spine_sjd_11D_15D.parquet"
+UNFILTERED_EPISODE_SPINE_PROVENANCE = (
+    RAW_DATA_DIR / "clinical_episode_spine_sjd_11D_15D.provenance.json"
+)
 LONGITUDINAL_ID_LIST = RAW_DATA_DIR / "list_ids_longitudinal.csv"
 SOURCE_EPISODE_SPINE_CSV = RAW_DATA_DIR / "clinical_episode_spine_sjd.csv"
 DEFAULT_CODEBOOK = METADATA_DIR / "Consolidated_Codebook_all_columns.xlsx"
