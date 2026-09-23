@@ -107,6 +107,7 @@ def lab_group_lookup(mapping: pd.DataFrame) -> dict[str, str]:
 
 def validate_s4_mapping(values: dict[str, pd.Series], families: dict[str, str],
                         mapping: pd.DataFrame,
+                        feature_to_lab: dict[str, str],
                         included: set[str] | None = None) -> pd.DataFrame:
     """Audit mapping of LAB features and reject any retained, unmapped feature."""
     indexed = mapping.set_index("lab")
@@ -114,7 +115,11 @@ def validate_s4_mapping(values: dict[str, pd.Series], families: dict[str, str],
     for feature in sorted(values):
         if families[feature] != "LAB":
             continue
-        lab = feature_stem(feature)
+        lab = feature_to_lab.get(feature, "")
+        if not lab:
+            raise ValueError(
+                f"LAB feature is missing canonical lab metadata in manifest: {feature}"
+            )
         mapped = lab in indexed.index and indexed.at[lab, "mapping_status"] == "MAPPED"
         rows.append({"feature": feature, "lab": lab,
                      "s4_group": indexed.at[lab, "s4_group"] if mapped else "",
@@ -253,14 +258,17 @@ def _weight_existing_block(block: np.ndarray, block_name: str) -> tuple[np.ndarr
 
 def prepare_matrix(raw: pd.DataFrame, families: dict[str, str], balance: bool,
                    lab_group_balance: bool = False,
-                   lab_group_by_stem: dict[str, str] | None = None,
+                   lab_group_by_lab: dict[str, str] | None = None,
+                   feature_to_lab: dict[str, str] | None = None,
                    scenario: str = "") -> tuple[np.ndarray, list[str], pd.DataFrame]:
     """Fit median imputation/RobustScaler, optionally followed by MFA weights."""
     blocks, names, audit = [], [], []
     if lab_group_balance and not balance:
         raise ValueError("LAB-group balancing requires family balancing")
-    if lab_group_balance and lab_group_by_stem is None:
+    if lab_group_balance and lab_group_by_lab is None:
         raise ValueError("S4 LAB-group balancing requires a lab group mapping")
+    if lab_group_balance and feature_to_lab is None:
+        raise ValueError("S4 LAB-group balancing requires canonical feature-to-lab metadata")
     groups = FAMILY_ORDER if balance else ("ALL",)
     for family in groups:
         columns = list(raw) if family == "ALL" else [x for x in raw if families[x] == family]
@@ -269,10 +277,17 @@ def prepare_matrix(raw: pd.DataFrame, families: dict[str, str], balance: bool,
         if family == "LAB" and lab_group_balance:
             grouped: dict[str, list[str]] = {}
             for column in columns:
-                stem = feature_stem(column)
-                if stem not in lab_group_by_stem:
-                    raise ValueError(f"S4 LAB feature has no mapped clinical group: {column}")
-                grouped.setdefault(lab_group_by_stem[stem], []).append(column)
+                lab = feature_to_lab.get(column, "")
+                if not lab:
+                    raise ValueError(
+                        f"S4 LAB feature is absent from canonical manifest mapping: {column}"
+                    )
+                if lab not in lab_group_by_lab:
+                    raise ValueError(
+                        "S4 LAB feature has no mapped clinical group: "
+                        f"feature={column}, lab={lab}"
+                    )
+                grouped.setdefault(lab_group_by_lab[lab], []).append(column)
             nested, columns = [], []
             for group in sorted(grouped):
                 group_columns = grouped[group]
@@ -302,10 +317,12 @@ def prepare_matrix(raw: pd.DataFrame, families: dict[str, str], balance: bool,
 
 def fit_embedding(raw: pd.DataFrame, families: dict[str, str], scenario: str,
                   config: dict,
-                  lab_group_by_stem: dict[str, str] | None = None) -> Representation:
+                  lab_group_by_lab: dict[str, str] | None = None,
+                  feature_to_lab: dict[str, str] | None = None) -> Representation:
     transformed, names, balance_audit = prepare_matrix(
         raw, families, SCENARIOS[scenario]["balance"],
-        SCENARIOS[scenario]["lab_group_balance"], lab_group_by_stem, scenario)
+        SCENARIOS[scenario]["lab_group_balance"], lab_group_by_lab,
+        feature_to_lab, scenario)
     max_possible = min(len(raw) - 1, transformed.shape[1])
     if max_possible < 2:
         raise ValueError("At least three patients and two features are required")
@@ -349,7 +366,8 @@ def analyze_mapper(rep: Representation, config: dict) -> dict:
 def bootstrap_stability(all_values: dict[str, pd.Series], families: dict[str, str],
                         manifest: pd.DataFrame, scenario: str,
                         reference_sets: list[set[int]], config: dict,
-                        lab_group_by_stem: dict[str, str] | None = None) -> np.ndarray:
+                        lab_group_by_lab: dict[str, str] | None = None,
+                        feature_to_lab: dict[str, str] | None = None) -> np.ndarray:
     settings = config["bootstrap"]
     replicates, n = int(settings["replicates"]), len(next(iter(all_values.values())))
     scores = np.zeros(len(reference_sets))
@@ -366,8 +384,9 @@ def bootstrap_stability(all_values: dict[str, pd.Series], families: dict[str, st
             raw = pd.DataFrame(selected)
             local_families = {name: families[name] for name in raw}
             # All learned S4 weights are deliberately refit within each replicate.
-            fitted = fit_embedding(raw, local_families, scenario, config,
-                                   lab_group_by_stem=lab_group_by_stem)
+            fitted = fit_embedding(
+                raw, local_families, scenario, config,
+                lab_group_by_lab=lab_group_by_lab, feature_to_lab=feature_to_lab)
             result = analyze_mapper(fitted, config)
         except (ValueError, RuntimeError, ZeroDivisionError, np.linalg.LinAlgError) as exc:
             logging.warning("Skipped %s bootstrap replicate: %s", scenario, exc)
@@ -559,7 +578,7 @@ def interpretation_check(summary: pd.DataFrame) -> str:
 def run(args: argparse.Namespace) -> None:
     config = CANON.load_config(args.config)
     lab_group_frame = load_lab_group_map(args.lab_group_map)
-    lab_group_by_stem = lab_group_lookup(lab_group_frame)
+    lab_group_by_lab = lab_group_lookup(lab_group_frame)
     dirs = create_study_dirs("graph/02_graph_representation_sensitivity")
     CANON._configure_logging(dirs["logs"] / "02_graph_representation_sensitivity.log")
     master, candidates, _ = CANON.load_real_inputs(args.integrated, args.graph_lab_candidates)
@@ -572,6 +591,12 @@ def run(args: argparse.Namespace) -> None:
     # A zero threshold obtains the complete eligible universe. S0 is then rebuilt
     # with the canonical threshold to reproduce current coverage exceptions exactly.
     full_manifest, full_values, _, _ = CANON.build_feature_manifest(baseline, candidates, 0.0)
+    feature_to_lab = {
+        str(row.feature): str(row.lab).strip().lower()
+        for row in full_manifest.loc[
+            full_manifest["included"] & full_manifest["family"].eq("lab")
+        ].itertuples(index=False)
+    }
     current_manifest, current_values, _, _ = CANON.build_feature_manifest(
         baseline, candidates, float(CANON.load_config(Path(__file__).with_name("config.yaml"))["feature_selection"]["minimum_baseline_coverage"]))
     full_families = {row.feature: family_name(row.family)
@@ -592,9 +617,17 @@ def run(args: argparse.Namespace) -> None:
         final_families = {name: families[name] for name in raw}
         if scenario == "S4":
             s4_mapping_audit = validate_s4_mapping(
-                universe, families, lab_group_frame, included=set(raw))
+                universe, families, lab_group_frame, feature_to_lab, included=set(raw))
+            s4_labs = {
+                feature_to_lab[feature]
+                for feature in raw.columns
+                if final_families[feature] == "LAB"
+            }
+            unmapped = sorted(lab for lab in s4_labs if lab not in lab_group_by_lab)
+            if unmapped:
+                raise ValueError(f"S4 selected canonical labs are unmapped: {unmapped}")
         for feature in sorted(universe):
-            lab = feature_stem(feature) if families[feature] == "LAB" else ""
+            lab = feature_to_lab.get(feature, "") if families[feature] == "LAB" else ""
             map_row = lab_group_index.loc[lab] if lab and lab in lab_group_index.index else None
             feature_rows.append({"scenario": scenario, "feature": feature,
                                  "family": families[feature], "included": feature in raw,
@@ -603,12 +636,14 @@ def run(args: argparse.Namespace) -> None:
                                  "s4_subgroup": (map_row["s4_subgroup"] if map_row is not None else ""),
                                  "exclusion_stage": "" if feature in raw else
                                  ("redundancy" if feature in set(redundancy.feature_removed) else "coverage_or_encoding")})
-        rep = fit_embedding(raw, final_families, scenario, config,
-                            lab_group_by_stem=lab_group_by_stem)
+        rep = fit_embedding(
+            raw, final_families, scenario, config,
+            lab_group_by_lab=lab_group_by_lab, feature_to_lab=feature_to_lab)
         mapped = analyze_mapper(rep, config)
         stability = bootstrap_stability(universe, families, full_manifest, scenario,
                                         mapped["community_sets"], config,
-                                        lab_group_by_stem=lab_group_by_stem)
+                                        lab_group_by_lab=lab_group_by_lab,
+                                        feature_to_lab=feature_to_lab)
         stable_threshold = float(config["bootstrap"]["stable_community_threshold"])
         for community, score in enumerate(stability):
             stability_rows.append({"scenario": scenario, "community": community,

@@ -76,8 +76,10 @@ def test_s4_hierarchical_balance_preserves_features_and_audits_weights():
                 "lab_c__binary": "LAB", "pro_score": "PRO", "age": "CLINICAL"}
     transformed, names, audit = MODULE.prepare_matrix(
         raw, families, balance=True, lab_group_balance=True,
-        lab_group_by_stem={"lab_a": "HEMATOLOGY", "lab_b": "HEMATOLOGY",
-                           "lab_c": "COAGULATION"}, scenario="S4")
+        lab_group_by_lab={"lab_a": "HEMATOLOGY", "lab_b": "HEMATOLOGY",
+                          "lab_c": "COAGULATION"},
+        feature_to_lab={"lab_a__value": "lab_a", "lab_b__value": "lab_b",
+                        "lab_c__binary": "lab_c"}, scenario="S4")
 
     assert set(names) == set(raw)
     assert transformed.shape == raw.shape
@@ -98,9 +100,42 @@ def test_lab_group_map_validation_and_retained_mapping_audit(tmp_path):
     assert MODULE.lab_group_lookup(mapping) == {"lab_a": "HEM"}
     values = {"lab_a__value": pd.Series([1.0]), "lab_b__value": pd.Series([2.0])}
     families = {name: "LAB" for name in values}
+    feature_to_lab = {"lab_a__value": "lab_a", "lab_b__value": "lab_b"}
     try:
-        MODULE.validate_s4_mapping(values, families, mapping, included=set(values))
+        MODULE.validate_s4_mapping(
+            values, families, mapping, feature_to_lab, included=set(values))
     except ValueError as exc:
         assert "lab_b__value" in str(exc)
     else:
         raise AssertionError("An included UNMAPPED lab must be rejected")
+
+
+def test_s4_uses_manifest_metadata_for_compound_lab_names():
+    feature = "acute_care_panel__chloride_blood__value"
+    lab = "acute_care_panel__chloride_blood"
+    raw = pd.DataFrame({feature: [100.0, 101.0, 102.0],
+                        "pro_score": [1.0, 3.0, 2.0]})
+    families = {feature: "LAB", "pro_score": "PRO"}
+
+    transformed, names, audit = MODULE.prepare_matrix(
+        raw, families, balance=True, lab_group_balance=True,
+        lab_group_by_lab={lab: "METABOLIC_ENDOCRINE"},
+        feature_to_lab={feature: lab}, scenario="S4")
+
+    assert names == [feature, "pro_score"]
+    assert transformed.shape == raw.shape
+    assert audit.query("level == 'LAB_GROUP'").block.tolist() == ["METABOLIC_ENDOCRINE"]
+
+
+def test_s4_rejects_lab_feature_absent_from_manifest_metadata():
+    values = {"lab_a__value": pd.Series([1.0])}
+    families = {"lab_a__value": "LAB"}
+    mapping = pd.DataFrame({"lab": ["lab_a"], "s4_group": ["HEM"],
+                            "s4_subgroup": ["CBC"], "mapping_status": ["MAPPED"]})
+
+    try:
+        MODULE.validate_s4_mapping(values, families, mapping, {}, included=set(values))
+    except ValueError as exc:
+        assert "missing canonical lab metadata" in str(exc)
+    else:
+        raise AssertionError("Missing manifest metadata must be rejected")
