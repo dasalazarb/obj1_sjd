@@ -2,6 +2,14 @@ study_name: graph_representation_sensitivity
 contract_version: clinical_episode_v1
 random_seed: 20260831
 
+lab_grouping:
+  enabled_scenario: S4
+  key_column: lab
+  group_column: s4_group
+  subgroup_column: s4_subgroup
+  require_complete_mapping: true
+  map_file: data/raw/graph_s4_lab_group_map.csv
+
 feature_selection:
   lab_minimum_baseline_coverage: 0.70
   pro_minimum_baseline_coverage: 0.60

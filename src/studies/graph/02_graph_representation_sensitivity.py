@@ -43,11 +43,13 @@ def _load_canonical():
 
 
 CANON = _load_canonical()
+DEFAULT_LAB_GROUP_MAP = ROOT / "data" / "raw" / "graph_s4_lab_group_map.csv"
 SCENARIOS = {
-    "S0": {"coverage": False, "redundancy": False, "balance": False},
-    "S1": {"coverage": True, "redundancy": False, "balance": False},
-    "S2": {"coverage": True, "redundancy": True, "balance": False},
-    "S3": {"coverage": True, "redundancy": True, "balance": True},
+    "S0": {"coverage": False, "redundancy": False, "balance": False, "lab_group_balance": False},
+    "S1": {"coverage": True, "redundancy": False, "balance": False, "lab_group_balance": False},
+    "S2": {"coverage": True, "redundancy": True, "balance": False, "lab_group_balance": False},
+    "S3": {"coverage": True, "redundancy": True, "balance": True, "lab_group_balance": False},
+    "S4": {"coverage": True, "redundancy": True, "balance": True, "lab_group_balance": True},
 }
 FAMILY_ORDER = ("LAB", "PRO", "CLINICAL")
 
@@ -55,12 +57,13 @@ FAMILY_ORDER = ("LAB", "PRO", "CLINICAL")
 class Representation:
     def __init__(self, raw: pd.DataFrame, families: dict[str, str],
                  embedding: np.ndarray, pca: PCA,
-                 transformed_features: list[str]) -> None:
+                 transformed_features: list[str], balance_audit: pd.DataFrame) -> None:
         self.raw = raw
         self.families = families
         self.embedding = embedding
         self.pca = pca
         self.transformed_features = transformed_features
+        self.balance_audit = balance_audit
 
 
 def family_name(value: str) -> str:
@@ -70,6 +73,60 @@ def family_name(value: str) -> str:
 def feature_stem(feature: str) -> str:
     """Return the lab concept before encoding suffixes."""
     return feature.split("__", 1)[0].strip().lower()
+
+
+def load_lab_group_map(path: Path) -> pd.DataFrame:
+    """Load and strictly validate the fixed clinical metadata used by S4."""
+    if not path.is_file():
+        raise FileNotFoundError(f"S4 lab group map does not exist: {path}")
+    mapping = pd.read_csv(path)
+    required = {"lab", "s4_group", "s4_subgroup", "mapping_status"}
+    missing = required - set(mapping)
+    if missing:
+        raise ValueError(f"S4 lab group map lacks required columns: {sorted(missing)}")
+    for column in ("lab", "s4_group"):
+        blank = mapping[column].isna() | mapping[column].astype(str).str.strip().eq("")
+        if blank.any():
+            raise ValueError(f"S4 lab group map has blank {column} values at rows "
+                             f"{(mapping.index[blank] + 2).tolist()}")
+    mapping = mapping.copy()
+    mapping["lab"] = mapping["lab"].astype(str).str.strip().str.lower()
+    mapping["s4_group"] = mapping["s4_group"].astype(str).str.strip()
+    mapping["s4_subgroup"] = mapping["s4_subgroup"].fillna("").astype(str).str.strip()
+    mapping["mapping_status"] = mapping["mapping_status"].astype(str).str.strip()
+    duplicated = mapping.loc[mapping["lab"].duplicated(keep=False), "lab"].unique().tolist()
+    if duplicated:
+        raise ValueError(f"S4 lab group map has duplicate lab values: {duplicated}")
+    return mapping
+
+
+def lab_group_lookup(mapping: pd.DataFrame) -> dict[str, str]:
+    used = mapping.loc[mapping["mapping_status"].eq("MAPPED")]
+    return used.set_index("lab")["s4_group"].to_dict()
+
+
+def validate_s4_mapping(values: dict[str, pd.Series], families: dict[str, str],
+                        mapping: pd.DataFrame,
+                        included: set[str] | None = None) -> pd.DataFrame:
+    """Audit mapping of LAB features and reject any retained, unmapped feature."""
+    indexed = mapping.set_index("lab")
+    rows = []
+    for feature in sorted(values):
+        if families[feature] != "LAB":
+            continue
+        lab = feature_stem(feature)
+        mapped = lab in indexed.index and indexed.at[lab, "mapping_status"] == "MAPPED"
+        rows.append({"feature": feature, "lab": lab,
+                     "s4_group": indexed.at[lab, "s4_group"] if mapped else "",
+                     "s4_subgroup": indexed.at[lab, "s4_subgroup"] if mapped else "",
+                     "mapped": mapped,
+                     "included_S4": feature in included if included is not None else False})
+    audit = pd.DataFrame(rows, columns=["feature", "lab", "s4_group", "s4_subgroup",
+                                        "mapped", "included_S4"])
+    bad = audit.loc[audit["included_S4"] & ~audit["mapped"], "feature"].tolist()
+    if bad:
+        raise ValueError(f"S4 retained LAB features lack a MAPPED clinical group: {bad}")
+    return audit
 
 
 def coverage_filter(values: dict[str, pd.Series], families: dict[str, str],
@@ -173,33 +230,82 @@ def select_features(all_values: dict[str, pd.Series], families: dict[str, str],
     return values, audit, redundancy
 
 
-def prepare_matrix(raw: pd.DataFrame, families: dict[str, str], balance: bool
-                  ) -> tuple[np.ndarray, list[str]]:
+def scale_mfa_block(block: pd.DataFrame, block_name: str) -> tuple[np.ndarray, float]:
+    medians = block.median(axis=0)
+    if medians.isna().any():
+        raise ValueError(f"{block_name} features lack a finite median: "
+                         f"{medians[medians.isna()].index.tolist()}")
+    scaled = RobustScaler().fit_transform(block.fillna(medians))
+    singular = np.linalg.svd(scaled, full_matrices=False, compute_uv=False)
+    sigma1 = float(singular[0]) if len(singular) else 0.0
+    if not np.isfinite(sigma1) or sigma1 <= 0:
+        raise ValueError(f"{block_name} block has no positive first singular value")
+    return scaled / sigma1, sigma1
+
+
+def _weight_existing_block(block: np.ndarray, block_name: str) -> tuple[np.ndarray, float]:
+    singular = np.linalg.svd(block, full_matrices=False, compute_uv=False)
+    sigma1 = float(singular[0]) if len(singular) else 0.0
+    if not np.isfinite(sigma1) or sigma1 <= 0:
+        raise ValueError(f"{block_name} block has no positive first singular value")
+    return block / sigma1, sigma1
+
+
+def prepare_matrix(raw: pd.DataFrame, families: dict[str, str], balance: bool,
+                   lab_group_balance: bool = False,
+                   lab_group_by_stem: dict[str, str] | None = None,
+                   scenario: str = "") -> tuple[np.ndarray, list[str], pd.DataFrame]:
     """Fit median imputation/RobustScaler, optionally followed by MFA weights."""
-    blocks, names = [], []
+    blocks, names, audit = [], [], []
+    if lab_group_balance and not balance:
+        raise ValueError("LAB-group balancing requires family balancing")
+    if lab_group_balance and lab_group_by_stem is None:
+        raise ValueError("S4 LAB-group balancing requires a lab group mapping")
     groups = FAMILY_ORDER if balance else ("ALL",)
     for family in groups:
         columns = list(raw) if family == "ALL" else [x for x in raw if families[x] == family]
         if not columns:
             continue
-        block = raw[columns]
-        medians = block.median(axis=0)
-        if medians.isna().any():
-            raise ValueError(f"Features lack a finite median: {medians[medians.isna()].index.tolist()}")
-        scaled = RobustScaler().fit_transform(block.fillna(medians))
+        if family == "LAB" and lab_group_balance:
+            grouped: dict[str, list[str]] = {}
+            for column in columns:
+                stem = feature_stem(column)
+                if stem not in lab_group_by_stem:
+                    raise ValueError(f"S4 LAB feature has no mapped clinical group: {column}")
+                grouped.setdefault(lab_group_by_stem[stem], []).append(column)
+            nested, columns = [], []
+            for group in sorted(grouped):
+                group_columns = grouped[group]
+                weighted, sigma1 = scale_mfa_block(raw[group_columns], f"LAB_GROUP:{group}")
+                nested.append(weighted); columns.extend(group_columns)
+                audit.append({"scenario": scenario, "level": "LAB_GROUP", "block": group,
+                              "n_features": len(group_columns), "sigma1_before_weighting": sigma1,
+                              "weight_applied": 1.0 / sigma1})
+            scaled, sigma1 = _weight_existing_block(np.column_stack(nested), "LAB")
+        elif balance:
+            scaled, sigma1 = scale_mfa_block(raw[columns], family)
+        else:
+            medians = raw[columns].median(axis=0)
+            if medians.isna().any():
+                raise ValueError(f"Features lack a finite median: {medians[medians.isna()].index.tolist()}")
+            scaled = RobustScaler().fit_transform(raw[columns].fillna(medians))
+            sigma1 = np.nan
         if balance:
-            singular = np.linalg.svd(scaled, full_matrices=False, compute_uv=False)
-            first = float(singular[0]) if len(singular) else 0.0
-            if not np.isfinite(first) or first <= 0:
-                raise ValueError(f"{family} block has no positive first singular value")
-            scaled = scaled / first
+            audit.append({"scenario": scenario, "level": "FAMILY", "block": family,
+                          "n_features": len(columns), "sigma1_before_weighting": sigma1,
+                          "weight_applied": 1.0 / sigma1})
         blocks.append(scaled); names.extend(columns)
-    return np.column_stack(blocks), names
+    audit_columns = ["scenario", "level", "block", "n_features",
+                     "sigma1_before_weighting", "weight_applied"]
+    return np.column_stack(blocks), names, pd.DataFrame(audit, columns=audit_columns)
 
 
 def fit_embedding(raw: pd.DataFrame, families: dict[str, str], scenario: str,
-                  config: dict) -> Representation:
-    transformed, names = prepare_matrix(raw, families, SCENARIOS[scenario]["balance"])
+                  config: dict,
+                  lab_group_by_stem: dict[str, str] | None = None) -> Representation:
+    transformed, names, balance_audit = prepare_matrix(
+        raw, families, SCENARIOS[scenario]["balance"],
+        SCENARIOS[scenario]["lab_group_balance"], lab_group_by_stem, scenario)
     max_possible = min(len(raw) - 1, transformed.shape[1])
     if max_possible < 2:
         raise ValueError("At least three patients and two features are required")
@@ -215,7 +321,7 @@ def fit_embedding(raw: pd.DataFrame, families: dict[str, str], scenario: str,
         raise ValueError(f"{scenario} PCA could not reach target variance {target:.0%}")
     dimensions = max(2, int(hits[0] + 1) if len(hits) else limit)
     pca = PCA(n_components=dimensions, random_state=seed).fit(transformed)
-    return Representation(raw, families, pca.transform(transformed), pca, names)
+    return Representation(raw, families, pca.transform(transformed), pca, names, balance_audit)
 
 
 def analyze_mapper(rep: Representation, config: dict) -> dict:
@@ -242,7 +348,8 @@ def analyze_mapper(rep: Representation, config: dict) -> dict:
 
 def bootstrap_stability(all_values: dict[str, pd.Series], families: dict[str, str],
                         manifest: pd.DataFrame, scenario: str,
-                        reference_sets: list[set[int]], config: dict) -> np.ndarray:
+                        reference_sets: list[set[int]], config: dict,
+                        lab_group_by_stem: dict[str, str] | None = None) -> np.ndarray:
     settings = config["bootstrap"]
     replicates, n = int(settings["replicates"]), len(next(iter(all_values.values())))
     scores = np.zeros(len(reference_sets))
@@ -258,7 +365,9 @@ def bootstrap_stability(all_values: dict[str, pd.Series], families: dict[str, st
             selected, _, _ = select_features(sampled, families, scenario, config, manifest)
             raw = pd.DataFrame(selected)
             local_families = {name: families[name] for name in raw}
-            fitted = fit_embedding(raw, local_families, scenario, config)
+            # All learned S4 weights are deliberately refit within each replicate.
+            fitted = fit_embedding(raw, local_families, scenario, config,
+                                   lab_group_by_stem=lab_group_by_stem)
             result = analyze_mapper(fitted, config)
         except (ValueError, RuntimeError, ZeroDivisionError, np.linalg.LinAlgError) as exc:
             logging.warning("Skipped %s bootstrap replicate: %s", scenario, exc)
@@ -377,7 +486,9 @@ def pca_table(rep: Representation) -> pd.DataFrame:
 
 def draw_figures(results: dict[str, dict], stability_rows: pd.DataFrame,
                  figure_dir: Path) -> None:
-    fig, axes = plt.subplots(1, 4, figsize=(18, 4.4))
+    n_scenarios = len(results)
+    fig, axes = plt.subplots(1, n_scenarios, figsize=(4.5 * n_scenarios, 4.4))
+    axes = np.atleast_1d(axes)
     for axis, (scenario, result) in zip(axes, results.items()):
         embedding, nodes, nerve = result["rep"].embedding, result["mapper"]["nodes"], result["mapper"]["nerve"]
         centers = {node: embedding[list(members), :2].mean(axis=0) for node, members in nodes.items()}
@@ -434,7 +545,7 @@ def draw_stable_core_heatmap(stable_overlap: pd.DataFrame, figure_dir: Path) -> 
 
 def interpretation_check(summary: pd.DataFrame) -> str:
     """Transparent QC only; never a scientific scenario-selection rule."""
-    cleaned = summary.loc[summary.scenario.isin(["S1", "S2", "S3"])]
+    cleaned = summary.loc[summary.scenario.isin(["S1", "S2", "S3", "S4"])]
     connected = int(cleaned.n_connected_components.eq(1).sum())
     has_stable = int(cleaned.n_stable_communities.ge(1).sum())
     separated = int(cleaned.n_stable_communities.gt(1).sum())
@@ -447,6 +558,8 @@ def interpretation_check(summary: pd.DataFrame) -> str:
 
 def run(args: argparse.Namespace) -> None:
     config = CANON.load_config(args.config)
+    lab_group_frame = load_lab_group_map(args.lab_group_map)
+    lab_group_by_stem = lab_group_lookup(lab_group_frame)
     dirs = create_study_dirs("graph/02_graph_representation_sensitivity")
     CANON._configure_logging(dirs["logs"] / "02_graph_representation_sensitivity.log")
     master, candidates, _ = CANON.load_real_inputs(args.integrated, args.graph_lab_candidates)
@@ -464,8 +577,10 @@ def run(args: argparse.Namespace) -> None:
     full_families = {row.feature: family_name(row.family)
                      for row in full_manifest.loc[full_manifest.included].itertuples()}
     current_families = {name: full_families[name] for name in current_values}
+    lab_group_index = lab_group_frame.set_index("lab")
     results, memberships, stable_ids = {}, {}, {}
     summary_rows, coverage_rows, redundancy_rows, feature_rows, stability_rows = [], [], [], [], []
+    s4_mapping_audit: pd.DataFrame | None = None
 
     for scenario in SCENARIOS:
         universe = current_values if scenario == "S0" else full_values
@@ -475,15 +590,25 @@ def run(args: argparse.Namespace) -> None:
         redundancy.insert(0, "scenario", scenario); redundancy_rows.append(redundancy)
         raw = pd.DataFrame(selected, index=baseline.index)
         final_families = {name: families[name] for name in raw}
+        if scenario == "S4":
+            s4_mapping_audit = validate_s4_mapping(
+                universe, families, lab_group_frame, included=set(raw))
         for feature in sorted(universe):
+            lab = feature_stem(feature) if families[feature] == "LAB" else ""
+            map_row = lab_group_index.loc[lab] if lab and lab in lab_group_index.index else None
             feature_rows.append({"scenario": scenario, "feature": feature,
                                  "family": families[feature], "included": feature in raw,
+                                 "lab": lab,
+                                 "s4_group": (map_row["s4_group"] if map_row is not None else ""),
+                                 "s4_subgroup": (map_row["s4_subgroup"] if map_row is not None else ""),
                                  "exclusion_stage": "" if feature in raw else
                                  ("redundancy" if feature in set(redundancy.feature_removed) else "coverage_or_encoding")})
-        rep = fit_embedding(raw, final_families, scenario, config)
+        rep = fit_embedding(raw, final_families, scenario, config,
+                            lab_group_by_stem=lab_group_by_stem)
         mapped = analyze_mapper(rep, config)
         stability = bootstrap_stability(universe, families, full_manifest, scenario,
-                                        mapped["community_sets"], config)
+                                        mapped["community_sets"], config,
+                                        lab_group_by_stem=lab_group_by_stem)
         stable_threshold = float(config["bootstrap"]["stable_community_threshold"])
         for community, score in enumerate(stability):
             stability_rows.append({"scenario": scenario, "community": community,
@@ -537,6 +662,14 @@ def run(args: argparse.Namespace) -> None:
         results[scenario] = {"rep": rep, "mapper": mapped, "config": config}
 
     summary = pd.DataFrame(summary_rows)
+    s3_features = set(results["S3"]["rep"].raw)
+    s4_features = set(results["S4"]["rep"].raw)
+    if s3_features != s4_features:
+        raise AssertionError("S3 and S4 feature sets differ")
+    s3_missing = int(results["S3"]["rep"].raw.isna().sum().sum())
+    s4_missing = int(results["S4"]["rep"].raw.isna().sum().sum())
+    if s3_missing != s4_missing:
+        raise AssertionError("S3 and S4 missing-value counts differ")
     coverage_all = pd.concat(coverage_rows, ignore_index=True)
     redundancy_all = pd.concat(redundancy_rows, ignore_index=True)
     stability_all = pd.DataFrame(stability_rows)
@@ -553,6 +686,12 @@ def run(args: argparse.Namespace) -> None:
     stable_overlap.to_csv(dirs["tables"] / "02_graph_stable_core_overlap.csv", index=False)
     cross_ari.to_csv(dirs["tables"] / "02_graph_cross_scenario_ari.csv", index=False)
     summary.to_csv(dirs["tables"] / "02_graph_representation_sensitivity_summary.csv", index=False)
+    if s4_mapping_audit is None:
+        raise RuntimeError("S4 mapping audit was not generated")
+    s4_mapping_audit.to_csv(
+        dirs["tables"] / "02_graph_S4_lab_group_mapping_audit.csv", index=False)
+    results["S4"]["rep"].balance_audit.to_csv(
+        dirs["tables"] / "02_graph_S4_balance_weights.csv", index=False)
     if not args.dry_run:
         draw_figures(results, stability_all, dirs["figures"])
         draw_stable_core_heatmap(stable_overlap, dirs["figures"])
@@ -582,8 +721,10 @@ def run(args: argparse.Namespace) -> None:
         value = "NA" if pd.isna(row.ari) else f"{row.ari:.3f}"
         print(f"{row.scenario_a}-{row.scenario_b} = {value} (n={row.n_patients_used})")
     print("\nORDER TO REVIEW GRAPH REPRESENTATION SENSITIVITY")
-    names = ["02_graph_coverage_audit.csv", "02_graph_redundancy_audit.csv",
-             "02_graph_scenario_feature_sets.csv", "02_graph_representation_sensitivity_summary.csv",
+    names = ["02_graph_S4_lab_group_mapping_audit.csv",
+             "02_graph_scenario_feature_sets.csv", "02_graph_coverage_audit.csv",
+             "02_graph_redundancy_audit.csv", "02_graph_S4_balance_weights.csv",
+             "02_graph_representation_sensitivity_summary.csv",
              "02_graph_scenario_community_stability.csv",
              "02_graph_scenario_patient_membership.csv",
              "02_graph_scenario_community_pop_crosswalk.csv",
@@ -607,6 +748,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         default=common.BLOCKA_INTERMEDIATE_DATA_DIR / "01_table1_baseline" /
                         "01_table1_from_clinical_episode_spine_sjd__baseline_patient_metrics_after_eligibility.csv")
     parser.add_argument("--config", type=Path, default=folder / "config_sensitivity.yaml")
+    parser.add_argument("--lab-group-map", type=Path, default=DEFAULT_LAB_GROUP_MAP,
+                        help="CSV mapping canonical lab stems to S4 clinical laboratory groups")
     parser.add_argument("--dry-run", action="store_true", help="Generate tables but omit figures")
     return parser.parse_args(argv)
 
