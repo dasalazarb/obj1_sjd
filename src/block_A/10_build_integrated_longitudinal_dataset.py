@@ -28,6 +28,10 @@ STRUCTURAL_COLUMNS = [
     "time_since_clinical_baseline_days", "time_since_clinical_baseline_years",
 ]
 DATE_COLUMNS = {"clinical_anchor_date", "episode_start_date", "episode_end_date", "clinical_baseline_date"}
+EXTENDED_CLINICAL_PRIMARY_FEATURES = [
+    "biopsy_focus_score", "salivary_flow_unstimulated", "ocular_schirmer_min",
+    "ocular_staining_positive", "sicca_any_symptom", "sgus_available",
+]
 
 
 def require_columns(frame: pd.DataFrame, columns: list[str], source: str) -> None:
@@ -141,7 +145,16 @@ def derive_longitudinal(frame: pd.DataFrame, lab_columns: set[str]) -> pd.DataFr
     frame["has_overlap_data"] = frame.get("overlap_evaluable", pd.Series(False, index=frame.index)).eq(True)
     primaries = [c for c in ["esspri_total", "sf36_pcs", "sf36_mcs", "profad_total", "mdafs_global"] if c in frame]
     frame["has_pro_data"] = frame[primaries].notna().any(axis=1) if primaries else False
-    frame["n_integrated_blocks_available"] = frame[["has_pop_state", "has_lab_measurement", "has_overlap_data", "has_pro_data"]].sum(axis=1).astype("Int64")
+    extended = [c for c in EXTENDED_CLINICAL_PRIMARY_FEATURES if c in frame]
+    # Availability flags summarize populated fields.  For block-level
+    # coverage, only True (at least one populated SGUS field) counts as data.
+    evidence = []
+    for column in extended:
+        evidence.append(frame[column].eq(True) if column == "sgus_available" else frame[column].notna())
+    frame["has_extended_clinical_data"] = (
+        pd.concat(evidence, axis=1).any(axis=1) if evidence else False
+    )
+    frame["n_integrated_blocks_available"] = frame[["has_pop_state", "has_lab_measurement", "has_overlap_data", "has_pro_data", "has_extended_clinical_data"]].sum(axis=1).astype("Int64")
     frame["n_clinical_visits_patient"] = grouped["clinical_episode_id"].transform("size").astype("Int64")
     frame["is_last_clinical_visit"] = grouped.cumcount().eq(frame["n_clinical_visits_patient"] - 1)
     frame["previous_clinical_episode_id"] = grouped["clinical_episode_id"].shift()
@@ -169,10 +182,14 @@ def derive_longitudinal(frame: pd.DataFrame, lab_columns: set[str]) -> pd.DataFr
 
 
 def build_integrated(clinical_spine: pd.DataFrame, pop: pd.DataFrame, labs: pd.DataFrame,
-                     overlap: pd.DataFrame, pros: pd.DataFrame) -> tuple[pd.DataFrame, list[dict]]:
+                     overlap: pd.DataFrame, pros: pd.DataFrame,
+                     extended_clinical: pd.DataFrame | None = None) -> tuple[pd.DataFrame, list[dict]]:
     spine = validate_spine(clinical_spine)
     integrated, summaries = spine.copy(), []
-    for name, source in [("pop", pop), ("labs", labs), ("overlap", overlap), ("pros", pros)]:
+    sources = [("pop", pop), ("labs", labs), ("overlap", overlap), ("pros", pros)]
+    if extended_clinical is not None:
+        sources.append(("extended_clinical", extended_clinical))
+    for name, source in sources:
         clean, summary, _, _ = validate_source(spine, source, name)
         feature_columns = [column for column in clean if column not in KEYS]
         collisions = set(feature_columns) & (set(integrated) - set(STRUCTURAL_COLUMNS))
@@ -241,13 +258,14 @@ def main() -> None:
     parser.add_argument("--labs", type=Path, default=common.LABS_EPISODE_WIDE_PARQUET)
     parser.add_argument("--overlap", type=Path, default=common.OVERLAP_LONGITUDINAL_PARQUET)
     parser.add_argument("--pros", type=Path, default=common.PROS_LONGITUDINAL_PARQUET)
+    parser.add_argument("--extended-clinical", type=Path, default=common.EXTENDED_CLINICAL_LONGITUDINAL_PARQUET)
     parser.add_argument("--output", type=Path, default=common.INTEGRATED_LONGITUDINAL_PARQUET)
     args = parser.parse_args()
     common.ensure_output_dirs()
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    names = ["pop", "labs", "overlap", "pros"]
+    names = ["pop", "labs", "overlap", "pros", "extended_clinical"]
     spine = pd.read_parquet(args.spine)
-    sources = [pd.read_parquet(path) for path in [args.pop, args.labs, args.overlap, args.pros]]
+    sources = [pd.read_parquet(path) for path in [args.pop, args.labs, args.overlap, args.pros, args.extended_clinical]]
     # Validate separately so QC files can be emitted with stable schemas on successful runs.
     validated_spine = validate_spine(spine)
     details = [validate_source(validated_spine, source, name) for name, source in zip(names, sources)]
@@ -262,7 +280,7 @@ def main() -> None:
     discrepancy_columns = ["source", *KEYS, "variable", "spine_value", "source_value"]
     pd.DataFrame([x for detail in details for x in detail[2]], columns=mismatch_columns).to_csv(qc_dir / "10_integrated_key_mismatch_qc.csv", index=False)
     pd.DataFrame([x for detail in details for x in detail[3]], columns=discrepancy_columns).to_csv(qc_dir / "10_integrated_structural_discrepancy_qc.csv", index=False)
-    coverage_columns = KEYS + ["has_pop_state", "has_essdai", "has_esspri_observed", "has_lab_measurement", "has_overlap_data", "has_pro_data", "n_integrated_blocks_available"]
+    coverage_columns = KEYS + ["has_pop_state", "has_essdai", "has_esspri_observed", "has_lab_measurement", "has_overlap_data", "has_pro_data", "has_extended_clinical_data", "n_integrated_blocks_available"]
     integrated[coverage_columns].to_csv(qc_dir / "10_integrated_longitudinal_coverage.csv", index=False)
     zero_block, zero_summary = build_zero_block_qc(integrated)
     zero_block_distribution(zero_block, "clinical_visit_number").to_csv(
