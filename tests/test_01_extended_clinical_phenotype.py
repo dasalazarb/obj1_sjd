@@ -72,3 +72,60 @@ def test_focus_score_parser_examples():
     result, _, _ = extended.build_extended_clinical_longitudinal(source)
     assert result.biopsy_focus_score.iloc[:2].tolist() == [2., 1.5]
     assert result.biopsy_focus_score.iloc[2:].isna().all()
+
+
+def test_salivary_concepts_and_equivalent_source_conflicts_are_separate():
+    source = pd.concat([spine().iloc[[0]]] * 2, ignore_index=True)
+    source["patient_id"] = ["a", "b"]
+    source["clinical_episode_id"] = ["a1", "b1"]
+    source["clinical_baseline_episode_id"] = source.clinical_episode_id
+    source["salivary_flow_form__flow_whole_unstim"] = [0.08, 0.08]
+    source["wus_only__flow_whole_unstim"] = [0.08, 0.12]
+    source["salivary_flow_form__tot_unsim_sal_flow"] = [1.2, 1.2]
+    result, _, conflicts = extended.build_extended_clinical_longitudinal(source)
+    assert result.loc[0, "salivary_flow_unstimulated"] == 0.08
+    assert result.loc[0, "salivary_total_unstimulated_flow"] == 1.2
+    assert not result.loc[0, "salivary_flow_unstimulated_conflict"]
+    assert pd.isna(result.loc[1, "salivary_flow_unstimulated"])
+    assert result.loc[1, "salivary_flow_unstimulated_conflict"]
+    assert [x["canonical_variable"] for x in conflicts] == ["salivary_flow_unstimulated"]
+
+
+def test_range_policies_lacrimal_correction_and_focus_conflict():
+    source = spine().iloc[[0]].copy()
+    source["eye_examination__oxford_r"] = 12
+    source["eye_examination__vanb_r"] = 10
+    source["salivary_flow_form__flow_whole_unstim"] = -150
+    source["wus_only__flow_whole_unstim"] = pd.NA
+    source["visit_summary_-_2016_classification_criteria__lacrimal_dysfunction"] = 2
+    source["biopsy_pathology__f_score"] = "2 | 1"
+    result, audit, conflicts = extended.build_extended_clinical_longitudinal(source)
+    assert result.loc[0, "ocular_oxford_right"] == 12
+    assert result.loc[0, "ocular_van_bijsterveld_right"] == 10
+    assert pd.isna(result.loc[0, "salivary_flow_unstimulated"])
+    assert result.loc[0, "lacrimal_dysfunction"]
+    assert result.loc[0, "biopsy_focus_score_conflict"] and pd.isna(result.loc[0, "biopsy_focus_score"])
+    issues = {(x["canonical_variable"], x["issue"]) for x in audit}
+    assert ("ocular_oxford_right", "outside_expected_range_retained") in issues
+    assert ("ocular_van_bijsterveld_right", "outside_expected_range_retained") in issues
+    assert ("salivary_flow_unstimulated", "outside_expected_range") in issues
+    correction = next(x for x in audit if x["issue"] == "known_source_value_correction")
+    assert correction["corrected_value"] == "1" and correction["canonical_value"] is True
+    assert any(x["canonical_variable"] == "biopsy_focus_score" for x in conflicts)
+
+
+def test_sgus_comments_are_metadata_only_and_boolean_qc_reports_coverage():
+    source = spine().iloc[[0]].copy()
+    grade = "sgus_grading_scale:_omeract_(2021)__r_parotid_grade"
+    comment = "sgus_grading_scale:_omeract_(2021)__r_parotid_comments"
+    source[grade] = pd.NA
+    source[comment] = "poor image quality"
+    result, audit, _ = extended.build_extended_clinical_longitudinal(source)
+    assert "sgus_omeract_r_parotid_comments" not in result
+    assert not result.loc[0, "sgus_available"]
+    assert not any(x["source_variable"] == comment for x in audit)
+    manifest = extended.build_source_manifest(result.columns, source.columns)
+    metadata = manifest.loc[manifest.source_variable.eq(comment)].iloc[0]
+    assert metadata.expected_type == "text_metadata" and not metadata.longitudinal_eligible
+    qc = extended.build_missingness_qc(result).set_index("variable")
+    assert qc.at["sgus_available", "n_false"] == 1
