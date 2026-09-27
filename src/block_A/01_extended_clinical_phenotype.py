@@ -219,13 +219,26 @@ def derive_pathology(source: pd.DataFrame, audit: list[dict], conflicts: list[di
 def _coalesce_measurements(source: pd.DataFrame, candidates: list[str], stem: str,
                            audit: list[dict], conflicts: list[dict]) -> pd.DataFrame:
     existing = [c for c in candidates if c in source]
-    parsed = pd.DataFrame({c: _numeric(source, c, stem, audit) for c in existing}, index=source.index)
     out = pd.DataFrame(index=source.index)
     if not existing:
         out[stem] = pd.Series(pd.NA, index=source.index, dtype="Float64")
         out[f"{stem}_source"] = pd.Series(pd.NA, index=source.index, dtype="string")
         out[f"{stem}_conflict"] = pd.Series(False, index=source.index, dtype="boolean")
+    elif len(existing) == 1:
+        source_column = existing[0]
+        value = _numeric(source, source_column, stem, audit)
+        out[stem] = value
+        out[f"{stem}_source"] = pd.Series(
+            source_column, index=source.index, dtype="string"
+        ).where(value.notna())
+        out[f"{stem}_conflict"] = pd.Series(
+            False, index=source.index, dtype="boolean"
+        )
     else:
+        parsed = pd.DataFrame(
+            {c: _numeric(source, c, stem, audit) for c in existing},
+            index=source.index,
+        )
         n_unique = parsed.nunique(axis=1, dropna=True)
         conflict = n_unique.gt(1)
         out[stem] = parsed.bfill(axis=1).iloc[:, 0].astype("Float64").mask(conflict)
@@ -239,6 +252,9 @@ def _coalesce_measurements(source: pd.DataFrame, candidates: list[str], stem: st
             audit.append({**record, "source_variable": out.at[idx, f"{stem}_source"],
                           "raw_value": record["candidate_values"], "issue": "discordant_sources"})
     out[f"{stem}_evaluable"] = out[stem].notna().astype("boolean")
+    assert (out[f"{stem}_evaluable"] == out[stem].notna()).all()
+    if len(candidates) == 1:
+        assert (out[stem].notna() == out[f"{stem}_source"].notna()).all()
     return out
 
 
@@ -247,6 +263,10 @@ def derive_salivary_function(source: pd.DataFrame, audit: list[dict], conflicts:
               for canonical, sources in SALIVARY_FLOW_COLUMNS.items()]
     out = pd.concat(blocks, axis=1)
     value = out["salivary_flow_unstimulated"]
+    assert (out["salivary_flow_unstimulated_evaluable"] == value.notna()).all()
+    assert not (
+        out["salivary_flow_unstimulated_conflict"] & value.notna()
+    ).any()
     out["low_unstimulated_salivary_flow"] = value.le(LOW_WUSF_THRESHOLD_ML_PER_MIN).astype("boolean").mask(value.isna())
     return out
 
@@ -383,9 +403,14 @@ def build_source_manifest(columns: Iterable[str] | None = None,
                      "notes": "Raw source remains episode-specific."})
     for canonical, sources in SALIVARY_FLOW_COLUMNS.items():
         for source in sources:
+            derivation = (
+                "numeric parse with direct source provenance"
+                if len(sources) == 1
+                else "coalesce only concordant numeric candidates; discordance => NA + conflict"
+            )
             rows.append({"canonical_variable": canonical, "clinical_domain": "salivary",
                          "source_variable": source, "source_form": source.split("__", 1)[0],
-                         "source_protocol": "episode-assigned upstream", "derivation": "coalesce only concordant numeric candidates; discordance => NA + conflict",
+                         "source_protocol": "episode-assigned upstream", "derivation": derivation,
                          "expected_type": "Float64", "valid_range_or_categories": ">=0 mL/min",
                          "time_behavior": "observed in episode only; never filled", "longitudinal_eligible": True,
                          "notes": "Source column(s) recorded in provenance feature."})
@@ -469,6 +494,35 @@ def build_structural_qc(spine: pd.DataFrame, output: pd.DataFrame) -> pd.DataFra
     return pd.DataFrame({"metric": metrics.keys(), "value": metrics.values()})
 
 
+def build_provenance_qc(output: pd.DataFrame) -> pd.DataFrame:
+    """Summarize agreement between canonical measurements and provenance."""
+    rows = []
+    for source_column in (c for c in output if c.endswith("_source")):
+        variable = source_column.removesuffix("_source")
+        if variable not in output:
+            continue
+        canonical_present = output[variable].notna()
+        source_present = output[source_column].notna()
+        conflict_column = f"{variable}_conflict"
+        conflicts = (
+            output[conflict_column].fillna(False).astype(bool)
+            if conflict_column in output
+            else pd.Series(False, index=output.index)
+        )
+        rows.append({
+            "variable": variable,
+            "n_canonical_nonmissing": int(canonical_present.sum()),
+            "n_source_nonmissing": int(source_present.sum()),
+            "n_canonical_without_source": int((canonical_present & ~source_present).sum()),
+            "n_source_without_canonical": int((source_present & ~canonical_present).sum()),
+            "n_conflicts": int(conflicts.sum()),
+        })
+    return pd.DataFrame(rows, columns=[
+        "variable", "n_canonical_nonmissing", "n_source_nonmissing",
+        "n_canonical_without_source", "n_source_without_canonical", "n_conflicts",
+    ])
+
+
 def build_dictionary(output: pd.DataFrame, manifest: pd.DataFrame) -> pd.DataFrame:
     lookup = manifest.groupby("canonical_variable").agg(source=("source_variable", lambda x: "|".join(x)), derivation=("derivation", "first"))
     rows = []
@@ -491,6 +545,9 @@ def write_outputs(spine: pd.DataFrame, output: pd.DataFrame, audit: list[dict], 
     manifest = build_source_manifest(output.columns, spine.columns)
     build_structural_qc(spine, output).to_csv(qc_dir / "01_extended_clinical_phenotype_qc.csv", index=False)
     build_missingness_qc(output).to_csv(qc_dir / "01_extended_clinical_phenotype_missingness.csv", index=False)
+    build_provenance_qc(output).to_csv(
+        qc_dir / "01_extended_clinical_phenotype_provenance_qc.csv", index=False
+    )
     manifest.to_csv(qc_dir / "01_extended_clinical_phenotype_source_manifest.csv", index=False)
     audit_columns = [*KEYS, "canonical_variable", "source_variable", "raw_value", "corrected_value",
                      "canonical_value", "issue", "action", "notes"]
