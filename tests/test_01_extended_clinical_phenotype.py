@@ -85,10 +85,65 @@ def test_salivary_concepts_and_equivalent_source_conflicts_are_separate():
     result, _, conflicts = extended.build_extended_clinical_longitudinal(source)
     assert result.loc[0, "salivary_flow_unstimulated"] == 0.08
     assert result.loc[0, "salivary_total_unstimulated_flow"] == 1.2
+    assert result.loc[0, "salivary_flow_unstimulated_source"] == (
+        "salivary_flow_form__flow_whole_unstim|wus_only__flow_whole_unstim"
+    )
     assert not result.loc[0, "salivary_flow_unstimulated_conflict"]
     assert pd.isna(result.loc[1, "salivary_flow_unstimulated"])
+    assert result.loc[1, "salivary_flow_unstimulated_source"] == (
+        "salivary_flow_form__flow_whole_unstim|wus_only__flow_whole_unstim"
+    )
     assert result.loc[1, "salivary_flow_unstimulated_conflict"]
+    assert not result.loc[1, "salivary_flow_unstimulated_evaluable"]
     assert [x["canonical_variable"] for x in conflicts] == ["salivary_flow_unstimulated"]
+
+
+@pytest.mark.parametrize(
+    "raw_column, canonical",
+    [
+        ("salivary_flow_form__flow_whole_stim", "salivary_flow_stimulated"),
+        ("salivary_flow_form__tot_unsim_sal_flow", "salivary_total_unstimulated_flow"),
+        ("salivary_flow_form__tot_sim_sal_flow", "salivary_total_stimulated_flow"),
+    ],
+)
+@pytest.mark.parametrize("raw_value, expected_evaluable", [(0.35, True), (pd.NA, False)])
+def test_single_source_salivary_provenance(
+    raw_column, canonical, raw_value, expected_evaluable
+):
+    source = spine().iloc[[0]].copy()
+    source[raw_column] = raw_value
+    result, _, _ = extended.build_extended_clinical_longitudinal(source)
+
+    if expected_evaluable:
+        assert result.loc[0, canonical] == 0.35
+        assert result.loc[0, f"{canonical}_source"] == raw_column
+    else:
+        assert pd.isna(result.loc[0, canonical])
+        assert pd.isna(result.loc[0, f"{canonical}_source"])
+    assert not result.loc[0, f"{canonical}_conflict"]
+    assert result.loc[0, f"{canonical}_evaluable"] == expected_evaluable
+
+
+def test_salivary_provenance_qc_distinguishes_conflicts():
+    source = pd.concat([spine().iloc[[0]]] * 2, ignore_index=True)
+    source["patient_id"] = ["a", "b"]
+    source["clinical_episode_id"] = ["a1", "b1"]
+    source["clinical_baseline_episode_id"] = source.clinical_episode_id
+    source["salivary_flow_form__flow_whole_unstim"] = [0.08, 0.08]
+    source["wus_only__flow_whole_unstim"] = [0.08, 0.12]
+    source["salivary_flow_form__flow_whole_stim"] = [0.35, pd.NA]
+    result, _, _ = extended.build_extended_clinical_longitudinal(source)
+    qc = extended.build_provenance_qc(result).set_index("variable")
+
+    assert qc.loc["salivary_flow_stimulated"].to_dict() == {
+        "n_canonical_nonmissing": 1,
+        "n_source_nonmissing": 1,
+        "n_canonical_without_source": 0,
+        "n_source_without_canonical": 0,
+        "n_conflicts": 0,
+    }
+    assert qc.at["salivary_flow_unstimulated", "n_source_without_canonical"] == 1
+    assert qc.at["salivary_flow_unstimulated", "n_conflicts"] == 1
 
 
 def test_range_policies_lacrimal_correction_and_focus_conflict():
