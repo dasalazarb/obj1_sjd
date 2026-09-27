@@ -32,6 +32,10 @@ EXTENDED_CLINICAL_PRIMARY_FEATURES = [
     "biopsy_focus_score", "salivary_flow_unstimulated", "ocular_schirmer_min",
     "ocular_staining_positive", "sicca_any_symptom", "sgus_available",
 ]
+REQUIRED_EXTENDED_CLINICAL_FEATURES = [
+    "biopsy_focus_score", "salivary_flow_unstimulated", "ocular_schirmer_min",
+    "sicca_any_symptom", "sgus_available",
+]
 
 
 def require_columns(frame: pd.DataFrame, columns: list[str], source: str) -> None:
@@ -183,12 +187,16 @@ def derive_longitudinal(frame: pd.DataFrame, lab_columns: set[str]) -> pd.DataFr
 
 def build_integrated(clinical_spine: pd.DataFrame, pop: pd.DataFrame, labs: pd.DataFrame,
                      overlap: pd.DataFrame, pros: pd.DataFrame,
-                     extended_clinical: pd.DataFrame | None = None) -> tuple[pd.DataFrame, list[dict]]:
+                     extended_clinical: pd.DataFrame) -> tuple[pd.DataFrame, list[dict]]:
     spine = validate_spine(clinical_spine)
     integrated, summaries = spine.copy(), []
-    sources = [("pop", pop), ("labs", labs), ("overlap", overlap), ("pros", pros)]
-    if extended_clinical is not None:
-        sources.append(("extended_clinical", extended_clinical))
+    sources = [
+        ("pop", pop),
+        ("labs", labs),
+        ("overlap", overlap),
+        ("pros", pros),
+        ("extended_clinical", extended_clinical),
+    ]
     for name, source in sources:
         clean, summary, _, _ = validate_source(spine, source, name)
         feature_columns = [column for column in clean if column not in KEYS]
@@ -207,9 +215,25 @@ def build_integrated(clinical_spine: pd.DataFrame, pop: pd.DataFrame, labs: pd.D
             clean = clean.drop(columns=sorted(collisions))
         integrated = integrated.merge(clean, on=KEYS, how="left", validate="one_to_one")
         summaries.append(summary)
+    require_columns(
+        integrated,
+        REQUIRED_EXTENDED_CLINICAL_FEATURES,
+        "integrated dataset",
+    )
     integrated = derive_longitudinal(integrated, set(labs) - set(STRUCTURAL_COLUMNS))
-    if len(integrated) != len(spine) or integrated.duplicated(KEYS).any():
+    integrated_keys = set(map(tuple, integrated[KEYS].itertuples(index=False, name=None)))
+    spine_keys = set(map(tuple, spine[KEYS].itertuples(index=False, name=None)))
+    if (len(integrated) != len(spine) or integrated.duplicated(KEYS).any()
+            or integrated_keys != spine_keys):
         raise AssertionError("integrated dataset does not preserve the clinical spine")
+    unexpected_merge_columns = [
+        column for column in integrated
+        if column.endswith("_x") or column.endswith("_y")
+    ]
+    if unexpected_merge_columns:
+        raise AssertionError(
+            f"integrated dataset has unexpected merge columns: {unexpected_merge_columns}"
+        )
     return integrated, summaries
 
 
