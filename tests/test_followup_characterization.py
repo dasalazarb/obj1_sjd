@@ -7,8 +7,8 @@ import pandas as pd
 import pytest
 
 
-SCRIPT = Path(__file__).parents[1] / "src" / "block_A" / "01_table1_baseline.py"
-SPEC = importlib.util.spec_from_file_location("table1_baseline", SCRIPT)
+SCRIPT = Path(__file__).parents[1] / "src" / "block_A" / "12_followup_characterization.py"
+SPEC = importlib.util.spec_from_file_location("followup_characterization", SCRIPT)
 table1 = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(table1)
