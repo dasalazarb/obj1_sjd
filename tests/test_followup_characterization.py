@@ -55,6 +55,10 @@ def test_same_day_episodes_are_retained_with_zero_gap():
     gaps = table1.build_intervisit_gaps(episodes)
     assert metrics.iloc[0].n_clinical_episodes == 2
     assert gaps.iloc[0].gap_zero_days
+    audit = table1.build_zero_day_gap_audit(episodes, gaps)
+    assert len(audit) == 1
+    assert audit.iloc[0].previous_clinical_episode_id == "e0"
+    assert audit.iloc[0].clinical_episode_id == "e1"
 
 
 def test_duplicate_episode_id_is_hard_failure():
@@ -91,6 +95,8 @@ def test_dual_protocol_membership_has_one_overall_row():
     assert metrics.iloc[0].in_protocol_11d and metrics.iloc[0].in_protocol_15d
     assert len(metrics) == 1
     assert len(episodes) == 2
+    assert list(episodes.episode_protocol) == ["11D", "15D"]
+    assert set(episodes.patient_protocol_membership) == {"11D | 15D"}
 
 
 @pytest.mark.parametrize("value,expected", [
