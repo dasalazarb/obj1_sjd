@@ -140,8 +140,12 @@ def derive_longitudinal(frame: pd.DataFrame, lab_columns: set[str]) -> pd.DataFr
     grouped = frame.groupby("patient_id", sort=False)
     frame["has_pop_state"] = frame.get("pop_status", pd.Series(pd.NA, index=frame.index)).isin(["Pop1", "Pop2", "Pop3"])
     frame["has_essdai"] = frame.get("essdai_total", pd.Series(pd.NA, index=frame.index)).notna()
-    observed = "esspri_total_observed" if "esspri_total_observed" in frame else "esspri_total"
-    frame["has_esspri_observed"] = frame.get(observed, pd.Series(pd.NA, index=frame.index)).notna()
+    # Population classification is based on observed ESSPRI only.
+    # 01_pop_distribution.py now guarantees esspri_total is the complete
+    # observed dryness/fatigue/pain mean, with no proxy substitution.
+    frame["has_esspri_observed"] = frame.get(
+        "esspri_total", pd.Series(pd.NA, index=frame.index)
+    ).notna()
     counts = [c for c in lab_columns if c.endswith("__n_measurements")]
     dates = [c for c in lab_columns if c.endswith("__measurement_date")]
     frame["has_lab_measurement"] = (frame[counts].fillna(0).gt(0).any(axis=1) if counts else
@@ -179,7 +183,7 @@ def derive_longitudinal(frame: pd.DataFrame, lab_columns: set[str]) -> pd.DataFr
     for source, output in delta_map.items():
         if source in frame:
             frame[output] = grouped[source].diff()
-    frame["integration_version"] = "v2_clinical_episode"
+    frame["integration_version"] = "v3_clinical_episode_observed_esspri_only"
     frame["integration_run_date"] = date.today().isoformat()
     assert not any(column.startswith("next_") for column in frame)
     return frame
@@ -188,6 +192,22 @@ def derive_longitudinal(frame: pd.DataFrame, lab_columns: set[str]) -> pd.DataFr
 def build_integrated(clinical_spine: pd.DataFrame, pop: pd.DataFrame, labs: pd.DataFrame,
                      overlap: pd.DataFrame, pros: pd.DataFrame,
                      extended_clinical: pd.DataFrame) -> tuple[pd.DataFrame, list[dict]]:
+    legacy_proxy_columns = [
+        column for column in pop.columns
+        if (
+            "proxy" in column.lower()
+            or column.startswith("esspri_total_s")
+            or column.startswith("pop_status_s")
+            or column.startswith("esspri_total_replace_")
+        )
+    ]
+    if legacy_proxy_columns:
+        raise AssertionError(
+            "pop source contains deprecated ESSPRI proxy/sensitivity columns. "
+            "Re-run 01_pop_distribution.py with the observed-only contract before Step 10. "
+            f"Examples: {legacy_proxy_columns[:10]}"
+        )
+
     spine = validate_spine(clinical_spine)
     integrated, summaries = spine.copy(), []
     sources = [
