@@ -38,7 +38,7 @@ SENSITIVITY_TOKENS = ("sensitivity", "_proxy", "_s0_", "_s1_", "_s2_", "relaxed"
 # This is the publication contract.  The master baseline remains deliberately
 # wide; only these canonical, clinically interpretable fields may reach Table 1.
 TABLE1_VARIABLES = {
-    "Cohort / demographics": ["age_at_baseline", "sex", "race"],
+    "Cohort / demographics": ["age_at_baseline", "sex", "race", "ethnicity"],
     "Disease history": ["age_at_diagnosis", "disease_duration", "diagnostic_delay", "sjogren_class_norm"],
     "Disease activity": ["essdai_total", "esspri_total", "esspri_dryness", "esspri_fatigue", "esspri_pain", "pop_status"],
     "Serology": ["anti_ro_ssa__ever_positive_through_episode", "anti_la_ssb__ever_positive_through_episode",
@@ -49,6 +49,21 @@ TABLE1_VARIABLES = {
     "Organ involvement": ["n_extraglandular_domains_active", "overlap_status"],
     "PROs": ["sf36_pcs", "sf36_mcs", "profad_total", "mdafs_global"],
 }
+BY_POP_EXCLUDED_VARIABLES = {"pop_status"}
+# Binary rows report the clinically meaningful event rather than emitting
+# separate True/False categories. The accepted values cover pandas booleans
+# and common upstream string encodings without changing the source values.
+BINARY_EVENT_LABELS = {
+    "anti_ro_ssa__ever_positive_through_episode": "Anti-Ro/SSA positive, n/N (%)",
+    "anti_la_ssb__ever_positive_through_episode": "Anti-La/SSB positive, n/N (%)",
+    "ana__ever_positive_through_episode": "ANA positive, n/N (%)",
+    "rf__ever_positive_through_episode": "Rheumatoid factor positive, n/N (%)",
+    "ocular_staining_positive": "Ocular staining positive, n/N (%)",
+    "sicca_any_symptom": "Any sicca symptom present, n/N (%)",
+    "sgus_available": "SGUS available, n/N (%)",
+    "sgus_abnormal": "SGUS abnormal, n/N (%)",
+}
+POSITIVE_BINARY_VALUES = {"1", "true", "yes", "y", "positive", "present", "active", "abnormal", "available"}
 CANONICAL_VARIABLES = {variable for variables in TABLE1_VARIABLES.values() for variable in variables}
 RANGES = {
     "essdai_total": (0, 123), "esspri_total": (0, 10),
@@ -88,6 +103,8 @@ VARIABLE_SCHEMA = {
     "ocular_staining_positive": ("Extended phenotype", "Positive ocular staining", "01_extended_clinical_phenotype.py"),
     "sicca_any_symptom": ("Extended phenotype", "Any sicca symptom", "01_extended_clinical_phenotype.py"),
     "sgus_available": ("Extended phenotype", "SGUS availability", "01_extended_clinical_phenotype.py"),
+    "race": ("Cohort / demographics", "Canonical self-reported race category", "ids__race"),
+    "ethnicity": ("Cohort / demographics", "Canonical self-reported ethnicity category", "ids__ethnicity"),
 }
 
 
@@ -191,7 +208,23 @@ def add_demographic_history_derivations(baseline: pd.DataFrame) -> pd.DataFrame:
         baseline["diagnostic_delay"] = (pd.to_datetime(baseline.dx_date) - pd.to_datetime(baseline.symptom_onset_date)).dt.days / 365.25
     if "sjogren_class_norm" not in baseline and CLASS_COLUMN in baseline:
         baseline["sjogren_class_norm"] = baseline[CLASS_COLUMN].map(normalize_sjogren_class)
+    for canonical, raw in (("race", "ids__race"), ("ethnicity", "ids__ethnicity")):
+        source = canonical if canonical in baseline else raw if raw in baseline else None
+        if source is not None:
+            baseline[canonical] = normalize_demographic_categories(baseline[source])
     return baseline
+
+
+def normalize_demographic_categories(series: pd.Series) -> pd.Series:
+    """Clean source categories without inventing or combining classifications."""
+    values = series.astype("string").str.strip().replace(
+        {r"(?i)^(|na|n/a|nan|none|missing|not reported)$": pd.NA}, regex=True
+    )
+    # Consolidate capitalization variants while retaining an observed label.
+    labels = {}
+    for value in values.dropna():
+        labels.setdefault(value.casefold(), value)
+    return values.map(lambda value: labels.get(value.casefold(), value) if pd.notna(value) else pd.NA).astype("string")
 
 
 def validity_mask(frame: pd.DataFrame, variable: str) -> pd.Series:
@@ -312,8 +345,16 @@ def categorical_summary(baseline: pd.DataFrame, variables: list[str] | None = No
             continue
         for group in ["Overall", *POP_ORDER]:
             subset = baseline if group == "Overall" else baseline.loc[baseline.get("pop_status", pd.Series(pd.NA, index=baseline.index)).eq(group)]
-            denominator = len(subset)
-            for level, count in subset[variable].astype("string").fillna("Missing").value_counts(dropna=False, sort=False).items():
+            observed = subset[variable].dropna()
+            denominator = len(observed)
+            if variable in BINARY_EVENT_LABELS:
+                normalized = observed.astype("string").str.strip().str.casefold()
+                count = int(normalized.isin(POSITIVE_BINARY_VALUES).sum())
+                rows.append({"variable": variable, "clinical_block": clinical_block(variable), "level": "positive",
+                             "group": group, "n": int(count), "denominator": denominator,
+                             "pct": 100 * count / denominator if denominator else np.nan})
+                continue
+            for level, count in observed.astype("string").value_counts(dropna=False, sort=False).items():
                 rows.append({"variable": variable, "clinical_block": clinical_block(variable), "level": level,
                              "group": group, "n": int(count), "denominator": denominator,
                              "pct": 100 * count / denominator if denominator else np.nan})
@@ -331,9 +372,10 @@ def build_table1(baseline: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
         rows.append({"Section": row.clinical_block, "Variable": row.variable, "N available": row.n,
                      "N missing": len(baseline) - row.n, "Summary": value})
     for row in categorical.loc[categorical["group"].eq("Overall")].itertuples():
-        rows.append({"Section": row.clinical_block, "Variable": f"{row.variable}: {row.level}",
+        label = BINARY_EVENT_LABELS.get(row.variable, f"{row.variable}: {row.level}")
+        rows.append({"Section": row.clinical_block, "Variable": label,
                      "N available": row.denominator, "N missing": int(baseline[row.variable].isna().sum()),
-                     "Summary": f"{row.n} ({row.pct:.1f}%)"})
+                     "Summary": "NA" if not row.denominator else f"{row.n}/{row.denominator} ({row.pct:.1f}%)"})
     overall = pd.DataFrame(rows)
     pop = baseline.get("pop_status", pd.Series(pd.NA, index=baseline.index))
     long_rows = [{"Section": "Cohort / demographics", "Variable": "N patients", "group": group,
@@ -343,8 +385,11 @@ def build_table1(baseline: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
         long_rows.append({"Section": row.clinical_block, "Variable": row.variable, "group": row.group,
                           "value": "NA" if not row.n else f"{row.median:.1f} ({row.q1:.1f}–{row.q3:.1f}); n={row.n}"})
     for row in categorical.itertuples():
-        long_rows.append({"Section": row.clinical_block, "Variable": f"{row.variable}: {row.level}", "group": row.group,
-                          "value": f"{row.n} ({row.pct:.1f}%)"})
+        if row.variable in BY_POP_EXCLUDED_VARIABLES:
+            continue
+        label = BINARY_EVENT_LABELS.get(row.variable, f"{row.variable}: {row.level}")
+        long_rows.append({"Section": row.clinical_block, "Variable": label, "group": row.group,
+                          "value": "NA" if not row.denominator else f"{row.n}/{row.denominator} ({row.pct:.1f}%)"})
     by_pop = pd.DataFrame(long_rows).pivot(index=["Section", "Variable"], columns="group", values="value").reset_index()
     by_pop.columns.name = None
     return overall, by_pop.reindex(columns=["Section", "Variable", "Overall", *POP_ORDER])
