@@ -29,6 +29,27 @@ REQUIRED_COLUMNS = [
 ]
 POP_ORDER = ["Pop1", "Pop2", "Pop3", "Unclassifiable"]
 DATE_COLUMNS = ["clinical_anchor_date", "clinical_baseline_date", "episode_start_date", "episode_end_date"]
+IDENTIFIER_COLUMNS = {
+    "patient_id", "ids__patient_record_number", "ids__subject_number",
+    "clinical_episode_id", "clinical_baseline_episode_id",
+}
+SENSITIVITY_TOKENS = ("sensitivity", "_proxy", "_s0_", "_s1_", "_s2_", "relaxed")
+
+# This is the publication contract.  The master baseline remains deliberately
+# wide; only these canonical, clinically interpretable fields may reach Table 1.
+TABLE1_VARIABLES = {
+    "Cohort / demographics": ["age_at_baseline", "sex", "race"],
+    "Disease history": ["age_at_diagnosis", "disease_duration", "diagnostic_delay", "sjogren_class_norm"],
+    "Disease activity": ["essdai_total", "esspri_total", "esspri_dryness", "esspri_fatigue", "esspri_pain", "pop_status"],
+    "Serology": ["anti_ro_ssa__ever_positive_through_episode", "anti_la_ssb__ever_positive_through_episode",
+                 "ana__ever_positive_through_episode", "rf__ever_positive_through_episode"],
+    "Laboratories": ["complement_c3__value", "complement_c4__value", "igg__value", "esr__value", "crp__value"],
+    "Glandular / extended phenotype": ["biopsy_focus_score", "salivary_flow_unstimulated", "ocular_schirmer_min", "ocular_staining_positive", "sicca_any_symptom"],
+    "Imaging / SGUS": ["sgus_available", "sgus_summary_score", "sgus_abnormal"],
+    "Organ involvement": ["n_extraglandular_domains_active", "overlap_status"],
+    "PROs": ["sf36_pcs", "sf36_mcs", "profad_total", "mdafs_global"],
+}
+CANONICAL_VARIABLES = {variable for variables in TABLE1_VARIABLES.values() for variable in variables}
 RANGES = {
     "essdai_total": (0, 123), "esspri_total": (0, 10),
     "esspri_dryness": (0, 10), "esspri_fatigue": (0, 10),
@@ -154,6 +175,10 @@ def add_demographic_history_derivations(baseline: pd.DataFrame) -> pd.DataFrame:
     if "age_at_diagnosis" not in baseline and "dx_date" in baseline and DOB_COLUMN in baseline:
         dob = baseline[DOB_COLUMN].map(parse_partial_date)
         baseline["age_at_diagnosis"] = (pd.to_datetime(baseline.dx_date) - dob).dt.days / 365.25
+    if "disease_duration" not in baseline and "dx_date" in baseline:
+        baseline["disease_duration"] = (
+            pd.to_datetime(baseline.clinical_anchor_date) - pd.to_datetime(baseline.dx_date)
+        ).dt.days / 365.25
     # Compatibility alias for studies that historically named this metric age_dx.
     if "age_dx" not in baseline and "age_at_diagnosis" in baseline:
         baseline["age_dx"] = baseline["age_at_diagnosis"]
@@ -185,14 +210,43 @@ def validity_mask(frame: pd.DataFrame, variable: str) -> pd.Series:
 
 
 def clinical_block(variable: str) -> str:
+    for block, variables in TABLE1_VARIABLES.items():
+        if variable in variables:
+            return block
     if variable in VARIABLE_SCHEMA:
         return VARIABLE_SCHEMA[variable][0]
     low = variable.lower()
-    if "__" in variable or any(x in low for x in ("ssa", "ssb", "ana", "rf", "igg", "esr", "crp", "complement")):
-        return "Serology / laboratories"
     if low.startswith("eg_") or "domain" in low:
         return "Organ involvement"
-    return "Integrated"
+    return "Other / Integrated"
+
+
+def variable_role(baseline: pd.DataFrame, variable: str) -> str:
+    """Assign metadata roles without treating raw source fields as laboratory data."""
+    if variable in IDENTIFIER_COLUMNS or variable.endswith("_id"):
+        return "identifier"
+    if pd.api.types.is_datetime64_any_dtype(baseline[variable]) or variable in DATE_COLUMNS or variable.endswith("_date"):
+        return "datetime"
+    if any(token in variable.lower() for token in SENSITIVITY_TOKENS):
+        return "sensitivity"
+    if variable in {"age_at_baseline", "age_at_diagnosis", "disease_duration", "diagnostic_delay", "sjogren_class_norm"}:
+        return "derived"
+    if variable in CANONICAL_VARIABLES:
+        return "clinical_measure"
+    if any(token in variable.lower() for token in ("flag", "valid", "evaluable", "provenance", "version")):
+        return "technical"
+    return "raw"
+
+
+def resolved_table1_manifest(baseline: pd.DataFrame) -> dict[str, list[str]]:
+    manifest = {section: [v for v in variables if v in baseline] for section, variables in TABLE1_VARIABLES.items()}
+    selected = [v for variables in manifest.values() for v in variables]
+    if len(selected) != len(set(selected)):
+        raise ValueError("Table 1 manifest contains duplicate concepts")
+    forbidden = [v for v in selected if variable_role(baseline, v) in {"identifier", "datetime", "sensitivity", "technical"}]
+    if forbidden:
+        raise ValueError(f"Forbidden Table 1 variables: {forbidden}")
+    return manifest
 
 
 def variable_availability(baseline: pd.DataFrame) -> pd.DataFrame:
@@ -203,8 +257,21 @@ def variable_availability(baseline: pd.DataFrame) -> pd.DataFrame:
         rows.append({"variable": variable, "clinical_block": clinical_block(variable),
                      "n_baseline_total": len(baseline), "n_nonmissing": int(nonmissing.sum()),
                      "pct_nonmissing": 100 * nonmissing.mean(),
+                     "n_valid": int(available.sum()), "pct_valid": 100 * available.mean(),
+                     # Compatibility aliases for downstream consumers.
                      "n_available_for_analysis": int(available.sum()),
                      "pct_available_for_analysis": 100 * available.mean()})
+    return pd.DataFrame(rows)
+
+
+def missingness_qc(baseline: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for variable in baseline:
+        n_missing = int(baseline[variable].isna().sum())
+        pct = 100 * n_missing / len(baseline) if len(baseline) else np.nan
+        category = "<10% missing" if pct < 10 else "10–25%" if pct <= 25 else "25–50%" if pct <= 50 else ">50%"
+        rows.append({"variable": variable, "clinical_block": clinical_block(variable), "n_total": len(baseline),
+                     "n_missing": n_missing, "pct_missing": pct, "missingness_category": category})
     return pd.DataFrame(rows)
 
 
@@ -216,11 +283,12 @@ def _numeric_summary(series: pd.Series) -> dict[str, object]:
             "minimum": values.min(), "maximum": values.max()}
 
 
-def continuous_summary(baseline: pd.DataFrame) -> pd.DataFrame:
+def continuous_summary(baseline: pd.DataFrame, variables: list[str] | None = None) -> pd.DataFrame:
     rows = []
     excluded = set(KEYS + DATE_COLUMNS)
-    for variable in baseline.columns:
-        if variable in excluded or pd.api.types.is_bool_dtype(baseline[variable]):
+    for variable in (variables if variables is not None else baseline.columns):
+        if (variable in excluded or pd.api.types.is_bool_dtype(baseline[variable])
+                or pd.api.types.is_datetime64_any_dtype(baseline[variable])):
             continue
         converted = pd.to_numeric(baseline[variable], errors="coerce")
         if converted.notna().sum() and (pd.api.types.is_numeric_dtype(baseline[variable]) or converted.notna().mean() > .9):
@@ -232,11 +300,12 @@ def continuous_summary(baseline: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["variable", "clinical_block", "group", "n", "missing", "mean", "sd", "median", "q1", "q3", "minimum", "maximum"])
 
 
-def categorical_summary(baseline: pd.DataFrame) -> pd.DataFrame:
+def categorical_summary(baseline: pd.DataFrame, variables: list[str] | None = None) -> pd.DataFrame:
     rows = []
-    for variable in baseline.columns:
+    for variable in (variables if variables is not None else baseline.columns):
         series = baseline[variable]
-        if variable in KEYS + DATE_COLUMNS or (pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series)):
+        if (variable in KEYS + DATE_COLUMNS or pd.api.types.is_datetime64_any_dtype(series)
+                or (pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series))):
             continue
         # IDs/free text are not useful Table 1 categories.
         if series.nunique(dropna=True) > min(30, max(10, len(series) // 2)):
@@ -252,24 +321,33 @@ def categorical_summary(baseline: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_table1(baseline: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    continuous = continuous_summary(baseline)
-    categorical = categorical_summary(baseline)
-    rows = [{"section": "Cohort", "variable": "N patients", "level": "", "value": str(len(baseline))}]
+    manifest = resolved_table1_manifest(baseline)
+    variables = [v for section in manifest.values() for v in section]
+    continuous = continuous_summary(baseline, variables)
+    categorical = categorical_summary(baseline, variables)
+    rows = [{"Section": "Cohort / demographics", "Variable": "N patients", "N available": len(baseline), "N missing": 0, "Summary": str(len(baseline))}]
     for row in continuous.loc[continuous["group"].eq("Overall")].itertuples():
         value = "NA" if not row.n else f"{row.median:.1f} ({row.q1:.1f}–{row.q3:.1f}); n={row.n}"
-        rows.append({"section": row.clinical_block, "variable": row.variable, "level": "", "value": value})
+        rows.append({"Section": row.clinical_block, "Variable": row.variable, "N available": row.n,
+                     "N missing": len(baseline) - row.n, "Summary": value})
     for row in categorical.loc[categorical["group"].eq("Overall")].itertuples():
-        rows.append({"section": row.clinical_block, "variable": row.variable, "level": row.level,
-                     "value": f"{row.n} ({row.pct:.1f}%)"})
+        rows.append({"Section": row.clinical_block, "Variable": f"{row.variable}: {row.level}",
+                     "N available": row.denominator, "N missing": int(baseline[row.variable].isna().sum()),
+                     "Summary": f"{row.n} ({row.pct:.1f}%)"})
     overall = pd.DataFrame(rows)
-    population = pd.DataFrame([{"clinical_block": "Cohort", "variable": "N patients", "level": "", "group": group,
-                                "value": str(int(baseline.get("pop_status", pd.Series(pd.NA, index=baseline.index)).eq(group).sum()))}
-                               for group in POP_ORDER])
-    by_pop = pd.concat([population,
-        continuous.assign(level="", value=continuous.apply(lambda r: "NA" if not r.n else f"{r['median']:.1f} ({r.q1:.1f}–{r.q3:.1f}); n={int(r.n)}", axis=1)),
-        categorical.assign(value=categorical.apply(lambda r: f"{int(r.n)} ({r.pct:.1f}%)", axis=1)),
-    ], ignore_index=True, sort=False)
-    return overall, by_pop[["clinical_block", "variable", "level", "group", "value"]]
+    pop = baseline.get("pop_status", pd.Series(pd.NA, index=baseline.index))
+    long_rows = [{"Section": "Cohort / demographics", "Variable": "N patients", "group": group,
+                  "value": str(len(baseline) if group == "Overall" else int(pop.eq(group).sum()))}
+                 for group in ["Overall", *POP_ORDER]]
+    for row in continuous.itertuples():
+        long_rows.append({"Section": row.clinical_block, "Variable": row.variable, "group": row.group,
+                          "value": "NA" if not row.n else f"{row.median:.1f} ({row.q1:.1f}–{row.q3:.1f}); n={row.n}"})
+    for row in categorical.itertuples():
+        long_rows.append({"Section": row.clinical_block, "Variable": f"{row.variable}: {row.level}", "group": row.group,
+                          "value": f"{row.n} ({row.pct:.1f}%)"})
+    by_pop = pd.DataFrame(long_rows).pivot(index=["Section", "Variable"], columns="group", values="value").reset_index()
+    by_pop.columns.name = None
+    return overall, by_pop.reindex(columns=["Section", "Variable", "Overall", *POP_ORDER])
 
 
 def regression_comparison(old: pd.DataFrame | None, baseline: pd.DataFrame) -> pd.DataFrame:
@@ -320,6 +398,38 @@ def structural_qc(integrated: pd.DataFrame, baseline: pd.DataFrame) -> pd.DataFr
     return pd.DataFrame([{"qc_check": key, "value": value, "status": "pass" if value == 0 else "fail"} for key, value in checks.items()])
 
 
+def possible_duplicate_concepts(baseline: pd.DataFrame) -> pd.DataFrame:
+    """Flag related names for human review; never remove columns automatically."""
+    concepts = {
+        "ESSDAI": ("essdai",), "ESSPRI": ("esspri",), "sex": ("sex",), "race": ("race",),
+        "SSA": ("ssa", "ro52", "ro60"), "SSB": ("ssb", "la_"), "SGUS": ("sgus",),
+        "Schirmer": ("schirmer",), "focus score": ("focus_score", "focus score"),
+    }
+    rows = []
+    for concept, stems in concepts.items():
+        matches = [column for column in baseline if any(stem in column.lower() for stem in stems)]
+        if len(matches) > 1:
+            rows.append({"concept": concept, "n_columns": len(matches), "variables": " | ".join(matches),
+                         "review_status": "manual_review_required"})
+    return pd.DataFrame(rows, columns=["concept", "n_columns", "variables", "review_status"])
+
+
+def variable_qc(baseline: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for variable in baseline:
+        series = baseline[variable]
+        checks = [("all missing", int(series.isna().all()), "Variable has no observed baseline values."),
+                  ("zero variance", int(series.notna().any() and series.nunique(dropna=True) <= 1),
+                   "All observed baseline values are identical.")]
+        for qc_type, violations, details in checks:
+            rows.append({"variable": variable, "qc_type": qc_type, "n_violations": violations,
+                         "status": "warning" if violations else "pass", "details": details})
+    for variable, count in range_violations(baseline).groupby("variable").size().items():
+        rows.append({"variable": variable, "qc_type": "range violation", "n_violations": int(count),
+                     "status": "warning", "details": f"Outside documented range {RANGES[variable]}."})
+    return pd.DataFrame(rows, columns=["variable", "qc_type", "n_violations", "status", "details"])
+
+
 def git_commit() -> str | None:
     result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT, capture_output=True, text=True, check=False)
     return result.stdout.strip() or None
@@ -344,28 +454,29 @@ def main() -> None:
     baseline.to_parquet(args.output, index=False)
     baseline.to_csv(args.output.with_suffix(".csv"), index=False)
     availability = variable_availability(baseline)
-    continuous = continuous_summary(baseline)
-    categorical = categorical_summary(baseline)
     overall, by_pop = build_table1(baseline)
     overall.to_csv(args.tables_dir / "11_table1_overall.csv", index=False)
     by_pop.to_csv(args.tables_dir / "11_table1_by_pop.csv", index=False)
     availability.to_csv(args.tables_dir / "11_baseline_variable_availability.csv", index=False)
-    continuous.to_csv(args.tables_dir / "11_baseline_continuous_summary.csv", index=False)
-    categorical.to_csv(args.tables_dir / "11_baseline_categorical_summary.csv", index=False)
+    availability.to_csv(args.tables_dir / "11_baseline_full_variable_inventory.csv", index=False)
     with pd.ExcelWriter(args.tables_dir / "11_table1.xlsx") as writer:
         overall.to_excel(writer, sheet_name="Overall", index=False)
         by_pop.to_excel(writer, sheet_name="By Pop", index=False)
         availability.to_excel(writer, sheet_name="Availability", index=False)
     structural_qc(integrated, baseline).to_csv(args.qc_dir / "11_baseline_structural_qc.csv", index=False)
-    availability.to_csv(args.qc_dir / "11_baseline_variable_qc.csv", index=False)
-    availability.to_csv(args.qc_dir / "11_baseline_missingness_qc.csv", index=False)
+    variable_qc(baseline).to_csv(args.qc_dir / "11_baseline_variable_qc.csv", index=False)
+    missingness_qc(baseline).to_csv(args.qc_dir / "11_baseline_missingness_qc.csv", index=False)
+    possible_duplicate_concepts(baseline).to_csv(args.qc_dir / "11_baseline_possible_duplicate_concepts.csv", index=False)
     baseline.to_csv(args.qc_dir / "11_baseline_patient_audit.csv", index=False)
     range_violations(baseline).to_csv(args.qc_dir / "11_baseline_range_violations.csv", index=False)
     old = read_table(args.legacy_baseline) if args.legacy_baseline else None
     regression_comparison(old, baseline).to_csv(args.qc_dir / "baseline_refactor_regression_comparison.csv", index=False)
+    selected = {v for values in resolved_table1_manifest(baseline).values() for v in values}
     dictionary = [{"variable": column, "clinical_block": clinical_block(column),
+                   "role": variable_role(baseline, column), "is_canonical": column in CANONICAL_VARIABLES,
+                   "include_in_table1": column in selected,
                    "description": VARIABLE_SCHEMA.get(column, (None, "Integrated longitudinal variable", None))[1],
-                   "source": VARIABLE_SCHEMA.get(column, (None, None, "10_build_integrated_longitudinal_dataset.py"))[2],
+                   "source_script": VARIABLE_SCHEMA.get(column, (None, None, "10_build_integrated_longitudinal_dataset.py"))[2],
                    "dtype": str(baseline[column].dtype)} for column in baseline]
     pd.DataFrame(dictionary).to_csv(args.tables_dir / "11_variable_dictionary.csv", index=False)
     provenance = {"input_file": str(args.input.resolve()), "input_integration_version": sorted(map(str, baseline.get("integration_version", pd.Series(dtype=str)).dropna().unique())),

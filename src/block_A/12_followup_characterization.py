@@ -72,7 +72,13 @@ def prepare_longitudinal_clinical_episodes(
     clinical[CLINICAL_ANCHOR_DATE_COL] = pd.to_datetime(clinical[CLINICAL_ANCHOR_DATE_COL], errors="coerce")
     clinical[CLINICAL_BASELINE_DATE_COL] = pd.to_datetime(clinical[CLINICAL_BASELINE_DATE_COL], errors="coerce")
     protocol_col = resolve_protocol_column(clinical)
-    clinical["protocol_membership"] = clinical[protocol_col].map(normalize_protocol_membership) if protocol_col else ""
+    # Episode protocol and patient-ever membership are different concepts.
+    clinical["episode_protocol"] = clinical[protocol_col].map(normalize_protocol_membership) if protocol_col else ""
+    memberships = clinical.groupby(CANONICAL_PATIENT_ID_COL)["episode_protocol"].transform(
+        lambda values: " | ".join(code for code in ("11D", "15D") if values.str.contains(code, na=False).any()))
+    clinical["patient_protocol_membership"] = memberships
+    # Compatibility alias: historically this field described the episode.
+    clinical["protocol_membership"] = clinical["episode_protocol"]
     clinical["has_valid_anchor_date"] = clinical[CLINICAL_ANCHOR_DATE_COL].notna()
     clinical["is_prebaseline"] = (
         clinical["has_valid_anchor_date"] & clinical[CLINICAL_BASELINE_DATE_COL].notna()
@@ -83,7 +89,8 @@ def prepare_longitudinal_clinical_episodes(
         & ~clinical["is_prebaseline"]
     )
     audit_columns = [CANONICAL_PATIENT_ID_COL, CLINICAL_EPISODE_COL, CLINICAL_ANCHOR_DATE_COL,
-                     CLINICAL_BASELINE_DATE_COL, CLINICAL_VISIT_COL, "protocol_membership",
+                     CLINICAL_BASELINE_DATE_COL, CLINICAL_VISIT_COL, "episode_protocol",
+                     "patient_protocol_membership",
                      "is_prebaseline", "has_valid_anchor_date", "included_in_primary_followup"]
     return clinical, clinical[audit_columns].copy()
 
@@ -109,6 +116,28 @@ def build_intervisit_gaps(episodes: pd.DataFrame) -> pd.DataFrame:
         start = len(rows) - max(len(group) - 1, 0)
         for order, target in enumerate(range(start, len(rows)), 1):
             rows[target][6] = order
+    return pd.DataFrame(rows, columns=columns)
+
+
+def build_zero_day_gap_audit(episodes: pd.DataFrame, gaps: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Expose same-day consecutive episodes for review without collapsing them."""
+    gaps = build_intervisit_gaps(episodes) if gaps is None else gaps
+    columns = [CANONICAL_PATIENT_ID_COL, "previous_clinical_episode_id", CLINICAL_EPISODE_COL,
+               "previous_clinical_anchor_date", CLINICAL_ANCHOR_DATE_COL, "visit_type", "source_protocol"]
+    zero = gaps.loc[gaps["gap_zero_days"]].copy()
+    if zero.empty:
+        return pd.DataFrame(columns=columns)
+    metadata = episodes.set_index([CANONICAL_PATIENT_ID_COL, CLINICAL_EPISODE_COL])
+    rows = []
+    for row in zero.itertuples(index=False):
+        current = metadata.loc[(getattr(row, CANONICAL_PATIENT_ID_COL), getattr(row, CLINICAL_EPISODE_COL))]
+        rows.append({CANONICAL_PATIENT_ID_COL: getattr(row, CANONICAL_PATIENT_ID_COL),
+                     "previous_clinical_episode_id": row.previous_clinical_episode_id,
+                     CLINICAL_EPISODE_COL: getattr(row, CLINICAL_EPISODE_COL),
+                     "previous_clinical_anchor_date": row.previous_visit_date,
+                     CLINICAL_ANCHOR_DATE_COL: row.visit_date,
+                     "visit_type": current.get("visit_type", pd.NA),
+                     "source_protocol": current.get("episode_protocol", "")})
     return pd.DataFrame(rows, columns=columns)
 
 
@@ -147,8 +176,9 @@ def build_patient_followup_metrics(
             "has_gap_over_180d": bool((valid_gaps > 180).any()),
             "has_gap_over_365d": bool((valid_gaps > 365).any()),
             "has_gap_over_730d": bool((valid_gaps > 730).any()),
-            "in_protocol_11d": bool(all_patient["protocol_membership"].str.contains("11D", na=False).any()),
-            "in_protocol_15d": bool(all_patient["protocol_membership"].str.contains("15D", na=False).any()),
+            "patient_protocol_membership": all_patient["patient_protocol_membership"].iloc[0] if len(all_patient) else "",
+            "in_protocol_11d": bool(all_patient["patient_protocol_membership"].str.contains("11D", na=False).any()),
+            "in_protocol_15d": bool(all_patient["patient_protocol_membership"].str.contains("15D", na=False).any()),
         }
         for label, days in RETENTION_THRESHOLDS.items():
             row[RETENTION_COLUMNS[label]] = bool(pd.notna(followup_days) and followup_days >= days)
@@ -305,6 +335,7 @@ def main():
     metrics.to_csv(args.analytic_dir/"12_patient_followup_metrics.csv",index=False)
     gaps.to_csv(args.analytic_dir/"12_intervisit_gaps.csv",index=False)
     audit.to_csv(args.qc_dir/"12_followup_episode_audit.csv",index=False)
+    build_zero_day_gap_audit(episodes,gaps).to_csv(args.qc_dir/"12_zero_day_gap_audit.csv",index=False)
     build_followup_qc(episodes,metrics,gaps,resolve_protocol_column(data)).to_csv(args.qc_dir/"12_followup_qc.csv",index=False)
     print(f"Wrote follow-up characterization for {len(metrics):,} patients")
 if __name__ == "__main__": main()

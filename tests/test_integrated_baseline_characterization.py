@@ -51,3 +51,32 @@ def test_availability_respects_upstream_scoring_validity():
     row = baseline_module.variable_availability(baseline).set_index("variable").loc["sf36_pcs"]
     assert row.n_nonmissing == 2
     assert row.n_available_for_analysis == 1
+
+
+def test_table1_is_manifest_driven_and_excludes_ids_dates_and_sensitivity():
+    baseline = baseline_module.validate_integrated(baseline_module.normalize_integrated_dtypes(integrated_frame()))
+    baseline["ids__subject_number"] = [101, 102]
+    baseline["esspri_total_s1_one_proxy"] = [4.0, 5.0]
+    baseline["technical_measure"] = [99.0, 100.0]
+    overall, by_pop = baseline_module.build_table1(baseline)
+    rendered = " ".join(overall.Variable.astype(str))
+    assert "essdai_total" in rendered
+    assert "patient_id" not in rendered
+    assert "subject_number" not in rendered
+    assert "clinical_anchor_date" not in rendered
+    assert "s1_one_proxy" not in rendered
+    assert "technical_measure" not in rendered
+    assert set(["Overall", *baseline_module.POP_ORDER]) <= set(by_pop.columns)
+
+
+def test_datetime_never_enters_continuous_summary():
+    baseline = baseline_module.validate_integrated(baseline_module.normalize_integrated_dtypes(integrated_frame()))
+    summary = baseline_module.continuous_summary(baseline)
+    assert "clinical_anchor_date" not in set(summary.variable)
+
+
+def test_reporting_products_have_distinct_contracts():
+    baseline = baseline_module.validate_integrated(baseline_module.normalize_integrated_dtypes(integrated_frame()))
+    assert {"n_nonmissing", "n_valid"} <= set(baseline_module.variable_availability(baseline))
+    assert {"n_missing", "missingness_category"} <= set(baseline_module.missingness_qc(baseline))
+    assert {"qc_type", "n_violations", "status"} <= set(baseline_module.variable_qc(baseline))
