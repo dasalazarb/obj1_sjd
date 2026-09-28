@@ -94,7 +94,7 @@ def load_age_at_diagnosis(path: Path) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(
             f"Baseline metrics file not found: {path}. Run "
-            "src/block_A/01_table1_baseline.py first."
+            "src/block_A/11_integrated_baseline_characterization.py first."
         )
     metrics = pd.read_csv(path, usecols=lambda column: column in {"patient_id", "age_dx"})
     missing = {"patient_id", "age_dx"} - set(metrics)
@@ -245,7 +245,7 @@ def build_feature_manifest(baseline: pd.DataFrame, candidates: pd.DataFrame,
 
     fixed = [(column, "pro", "integrated_master") for column in PRO_FEATURES]
     fixed += [(column, "overlap", "integrated_master") for column in OVERLAP_FEATURES]
-    fixed += [("age_dx", "age_at_diagnosis", "blockA_01_table1_baseline")]
+    fixed += [("age_dx", "age_at_diagnosis", "blockA_11_integrated_baseline_characterization")]
     for column, family, source in fixed:
         found = column in baseline
         numeric = pd.to_numeric(baseline[column], errors="coerce") if found else pd.Series(np.nan, index=baseline.index)
@@ -1007,8 +1007,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "00_pharma_graph_lab_candidates.csv")
     parser.add_argument(
         "--baseline-metrics", type=Path,
-        default=common.BLOCKA_INTERMEDIATE_DATA_DIR / "01_table1_baseline" /
-        "01_table1_from_clinical_episode_spine_sjd__baseline_patient_metrics_after_eligibility.csv")
+        default=common.INTEGRATED_BASELINE_CSV)
     parser.add_argument("--config", type=Path, default=folder / "config.yaml")
     parser.add_argument("--dry-run", action="store_true", help="Generate tables/JSON but omit figures")
     return parser.parse_args(argv)

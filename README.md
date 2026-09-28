@@ -15,6 +15,13 @@ Analyze patient data, prepare clean datasets, and generate reproducible results 
 4. Save final datasets in `data/analytic/`.
 5. Export tables, figures, and logs to `outputs/`.
 
+Block A has a single directional characterization boundary: Step 10 publishes
+the canonical `patient_id × clinical_episode_id` integrated dataset; Step 11
+selects only `is_clinical_baseline == True` for the canonical patient-level
+baseline, Table 1, availability, and baseline QC; Step 12 independently
+describes longitudinal follow-up from the same Step 10 product. Downstream
+analyses must consume the Step 11 baseline rather than reconstructing one.
+
 ## Key folders
 
 - `data/`: project data files

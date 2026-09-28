@@ -42,7 +42,7 @@ MODEL_COLUMNS = ["clinical_block", "outcome", "outcome_type", "contrast", "refer
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--baseline-input", type=Path, default=common.INTERMEDIATE_DATA_DIR / "11_integrated_baseline_profile" / "11_integrated_baseline_patient_level.parquet")
+    p.add_argument("--baseline-input", type=Path, default=common.INTEGRATED_BASELINE_PARQUET)
     p.add_argument("--observation-input", type=Path, default=common.INTERMEDIATE_DATA_DIR / "20_missingness_and_observation_process" / "20_observation_process_patient_visit.parquet")
     p.add_argument("--comorbidity-input", type=Path, default=common.INTERMEDIATE_DATA_DIR / "07_comorbidities" / "07_comorbidities_baseline_patient.parquet")
     p.add_argument("--serology-input", type=Path, default=common.BLOCKA_QC_DIR / "01_serological_profile" / "01_serology_patient_level.csv")

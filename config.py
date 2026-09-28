@@ -41,7 +41,7 @@ COHORT_C2_FILE = OUT_DIR / "cohort_c2.parquet"
 # ── Centinelas de valor faltante ──────────────────────────────────────────────
 #
 # Unión de los distintos MISSING_STRINGS que existían duplicados (e inconsistentes
-# entre sí) en 01_pop_distribution.py, 01_table1_baseline.py, 06_overlap_glandular.py,
+# entre sí) en 01_pop_distribution.py, 11_integrated_baseline_characterization.py, 06_overlap_glandular.py,
 # 06_overlap_glandular_followup.py, 06_overlap_glandular_followup_base_1st_Visit.py,
 # src/derivations/pro_scoring.py and the canonical clinical episode spine.
 # Antes cada script reconocía un subconjunto distinto de centinelas (p.ej. "-99" se

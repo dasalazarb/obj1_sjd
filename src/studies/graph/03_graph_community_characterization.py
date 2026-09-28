@@ -676,8 +676,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         default=common.STUDIES_TABLES_DIR / "pharma" / "00_profile_labs" /
                         "00_pharma_graph_lab_candidates.csv")
     parser.add_argument("--baseline-metrics", type=Path,
-                        default=common.BLOCKA_INTERMEDIATE_DATA_DIR / "01_table1_baseline" /
-                        "01_table1_from_clinical_episode_spine_sjd__baseline_patient_metrics_after_eligibility.csv")
+                        default=common.INTEGRATED_BASELINE_CSV)
     parser.add_argument("--membership", type=Path,
                         default=tables02 / "02_graph_scenario_patient_membership.csv")
     parser.add_argument("--feature-sets", type=Path,

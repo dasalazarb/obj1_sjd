@@ -780,8 +780,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--graph-lab-candidates", type=Path,
                         default=common.STUDIES_TABLES_DIR / "pharma" / "00_profile_labs" / "00_pharma_graph_lab_candidates.csv")
     parser.add_argument("--baseline-metrics", type=Path,
-                        default=common.BLOCKA_INTERMEDIATE_DATA_DIR / "01_table1_baseline" /
-                        "01_table1_from_clinical_episode_spine_sjd__baseline_patient_metrics_after_eligibility.csv")
+                        default=common.INTEGRATED_BASELINE_CSV)
     parser.add_argument("--config", type=Path, default=folder / "config_sensitivity.yaml")
     parser.add_argument("--lab-group-map", type=Path, default=DEFAULT_LAB_GROUP_MAP,
                         help="CSV mapping canonical lab stems to S4 clinical laboratory groups")
