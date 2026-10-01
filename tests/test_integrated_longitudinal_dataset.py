@@ -111,6 +111,32 @@ def test_unknown_column_is_fail_closed():
         builder.build_curated(*inputs)
 
 
+@pytest.mark.parametrize(
+    ("name", "role"),
+    [
+        ("ids__race", "ANALYTIC"),
+        ("ids__ethnicity", "ANALYTIC"),
+        ("ids__age_at_visit", "ANALYTIC"),
+        ("visit_datetime", "CONTEXT"),
+        ("ids__interval_name", "CONTEXT"),
+        ("ids__time_24_hour", "CONTEXT"),
+        ("ids__visit_date", "PROVENANCE"),
+        ("ids__patient_record_number", "PROVENANCE"),
+        ("ids__subject_number", "PROVENANCE"),
+        ("ids__dob", "PROVENANCE"),
+        ("ids__sex", "PROVENANCE"),
+        ("ansar__e_i_ratio", "PROVENANCE"),
+        ("some_form__some_question", "PROVENANCE"),
+    ],
+)
+def test_spine_curated_exceptions_and_raw_form_default(name, role):
+    assert builder.classify_spine_column(name)["role"] == role
+
+
+def test_unknown_canonical_spine_column_remains_unclassified():
+    assert builder.classify_spine_column("new_clinical_score") is None
+
+
 def test_pop_proxy_legacy_is_explicit_failure():
     inputs = list(frames())
     inputs[1]["esspri_proxy_total"] = 1.0
