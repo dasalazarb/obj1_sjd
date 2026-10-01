@@ -31,7 +31,7 @@ STRUCTURAL_COLUMNS = [
 ]
 DATE_COLUMNS = {
     "clinical_anchor_date", "episode_start_date", "episode_end_date",
-    "clinical_baseline_date", "visit_date_clean", "event_date", "baseline_date",
+    "clinical_baseline_date", "visit_date", "visit_date_clean", "event_date", "baseline_date",
     "observed_baseline_date", "row_date_original", "row_date_min", "row_date_max",
 }
 ROLES = {
@@ -53,7 +53,8 @@ KNOWN_ALIASES = {
     "esspri_fatigue_observed": "esspri_fatigue",
     "esspri_pain_observed": "esspri_pain",
     "esspri_total_observed": "esspri_total",
-    "visit_id": "clinical_episode_id", "visit_date_clean": "clinical_anchor_date",
+    "visit_id": "clinical_episode_id", "visit_date": "clinical_anchor_date",
+    "visit_date_clean": "clinical_anchor_date",
     "event_date": "clinical_anchor_date", "visit_number": "clinical_visit_number",
     "baseline_date": "clinical_baseline_date",
     "observed_baseline_date": "clinical_baseline_date",
@@ -62,8 +63,8 @@ KNOWN_ALIASES = {
     "time_since_baseline_days": "time_since_clinical_baseline_days",
     "time_since_baseline_years": "time_since_clinical_baseline_years",
     "time_years": "time_since_clinical_baseline_years",
-    "row_date_original": "clinical_anchor_date", "row_date_min": "episode_start_date",
-    "row_date_max": "episode_end_date",
+    "row_date_original": "clinical_anchor_date", "row_date_min": "clinical_anchor_date",
+    "row_date_max": "clinical_anchor_date",
     "constitutional": "eg_constitutional_active",
     "lymphadenopathy": "eg_lymphadenopathy_active",
     "articular": "eg_articular_active", "cutaneous": "eg_cutaneous_active",
@@ -303,8 +304,17 @@ def classify_spine_column(name: str) -> dict | None:
 def classify_pop_column(name: str) -> dict | None:
     if name in {"essdai_total", "esspri_dryness", "esspri_fatigue", "esspri_pain", "esspri_total", "pop_status"}:
         return _decision("ANALYTIC", "pop", "pop.canonical", "Canonical observed ESSDAI/ESSPRI/Pop state")
-    if name == "pop_status_detailed":
-        return _decision("CONTEXT", "pop", "pop.detail", "Detailed interpretation of Pop state")
+    if name in {"pop_status_detailed", "pop_missingness_label", "protocol"}:
+        return _decision("CONTEXT", "pop", "pop.context", "Interpretive or protocol context for Pop classification")
+    if name in {
+        "pop_status_display", "clinical_baseline_pop_status",
+        "clinical_baseline_pop_status_detailed", "baseline_pop_status",
+        "baseline_pop_status_display",
+    }:
+        return _decision(
+            "DOWNSTREAM_DERIVED", "pop", "pop.derived_display_or_baseline",
+            "Derivable from canonical Pop state and clinical baseline",
+        )
     return None
 
 
@@ -333,6 +343,15 @@ def classify_pro_column(name: str, frame: pd.DataFrame) -> dict | None:
     }
     if name in scores or name in {"esspri_dryness", "esspri_fatigue", "esspri_pain", "esspri_total"}:
         return _decision("ANALYTIC", "pro", "pros.score", "Canonical patient-reported score")
+    if name in {"age_baseline", "sex"}:
+        return _decision("ANALYTIC", "pro_covariate", "pros.baseline_covariate", "Curated baseline covariate")
+    if name == "parent_protocol":
+        return _decision("CONTEXT", "protocol", "pros.protocol", "Protocol membership/context")
+    if name in {"baseline_pop", "overlap_baseline"}:
+        return _decision(
+            "DOWNSTREAM_DERIVED", "baseline_annotation", "pros.baseline_annotation",
+            "Derivable from canonical longitudinal state at clinical baseline",
+        )
     if name.endswith("_conflict"):
         return _decision("QC", "pro", "pros.conflict", "Scoring conflict flag")
     if name.endswith("_scoring_version") or name.endswith("_n_items_expected") or name == "sf36_norm_reference":
@@ -447,7 +466,23 @@ def build_variable_registry(sources: dict[str, pd.DataFrame]) -> pd.DataFrame:
 
 
 def _aligned(frame: pd.DataFrame, column: str, spine: pd.DataFrame) -> pd.Series:
-    return spine[KEYS].merge(frame[KEYS + [column]], on=KEYS, validate="one_to_one")[column]
+    """Align one column to authoritative spine order without duplicating key labels."""
+    if column not in frame.columns:
+        raise CurationContractError(
+            f"Column {column!r} not found for alias verification"
+        )
+
+    required = list(dict.fromkeys([*KEYS, column]))
+
+    aligned = spine[KEYS].merge(
+        frame[required],
+        on=KEYS,
+        how="left",
+        validate="one_to_one",
+        sort=False,
+    )
+
+    return aligned[column].reset_index(drop=True)
 
 
 def verify_aliases(sources: dict[str, pd.DataFrame], spine: pd.DataFrame, registry: pd.DataFrame) -> None:
