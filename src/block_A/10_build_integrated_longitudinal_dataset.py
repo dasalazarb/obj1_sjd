@@ -385,10 +385,16 @@ def classify_pro_column(name: str, frame: pd.DataFrame) -> dict | None:
     if name.endswith("_scoring_version") or name.endswith("_n_items_expected") or name == "sf36_norm_reference":
         role = "REGISTRY_METADATA" if frame[name].dropna().nunique() <= 1 else "CONTEXT"
         return _decision(role, "pro", "pros.scale_metadata", "Scale-level constant" if role == "REGISTRY_METADATA" else "Non-constant scoring context")
-    if (name.endswith(("_n_items_answered", "_scoring_status", "_available", "_complete", "_scoring_valid",
+    answered_item_count = (
+        name.startswith(("esspri_", "sf36_", "profad_", "mdafs_"))
+        and "_n_" in name
+        and name.endswith("_items_answered")
+    )
+    if (answered_item_count
+            or name.endswith(("_n_items_answered", "_scoring_status", "_available", "_complete", "_scoring_valid",
                        "_any_item_present", "_n_items_available", "_n_domains_available"))
             or name in {"esspri_n_components_available", "esspri_partial_mean"}):
-        return _decision("CONTEXT", "pro", "pros.completeness", "Availability or scoring completeness")
+        return _decision("CONTEXT", "pro", "pros.completeness", "Availability, answered item count, or scoring completeness")
     if name == "esspri_n_components":
         role = "REGISTRY_METADATA" if frame[name].dropna().nunique() <= 1 else "CONTEXT"
         return _decision(role, "pro", "pros.component_count", "Instrument component count")

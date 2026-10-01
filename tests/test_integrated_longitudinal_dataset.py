@@ -48,6 +48,7 @@ def frames():
     )
     pros = metadata.assign(sf36_pcs=[40., 35., 50.], sf36_mcs=[45., 46., 48.],
                            profad_total=[1., 2., 3.], mdafs_global=[2., 3., 4.],
+                           mdafs_n_activity_items_answered=[4., 5., 6.],
                            sf36_available=[True] * 3, sf36_conflict=[False] * 3,
                            sf36_scoring_version=["v1"] * 3)
     extended = metadata.assign(
@@ -69,6 +70,8 @@ def test_curated_outputs_preserve_spine_and_partition_roles():
     assert "ana__text" in result.analytic
     assert "crp__text" not in result.analytic  # numeric text is reconstructible
     assert {"crp__unit", "crp__measurement_date", "sf36_available", "biopsy_evaluable"} <= set(result.context)
+    assert "mdafs_n_activity_items_answered" in result.context
+    assert "mdafs_n_activity_items_answered" not in result.analytic
     assert "crp__conflict" not in result.analytic and "crp__conflict" not in result.context
     assert "biopsy_focus_score_source" not in result.analytic
     assert "esspri_total_observed" not in result.analytic
@@ -135,6 +138,21 @@ def test_spine_curated_exceptions_and_raw_form_default(name, role):
 
 def test_unknown_canonical_spine_column_remains_unclassified():
     assert builder.classify_spine_column("new_clinical_score") is None
+
+
+@pytest.mark.parametrize(
+    ("name", "role"),
+    [
+        ("mdafs_n_activity_items_answered", "CONTEXT"),
+        ("profad_n_items_answered", "CONTEXT"),
+        ("mdafs_global", "ANALYTIC"),
+        ("mdafs_conflict", "QC"),
+        ("new_unknown_canonical_score", "UNCLASSIFIED"),
+    ],
+)
+def test_pro_score_and_completeness_classification_is_fail_closed(name, role):
+    pros = pd.DataFrame({name: [1.0, pd.NA]})
+    assert builder.classify_column("pros", name, pros).role == role
 
 
 def test_pop_proxy_legacy_is_explicit_failure():
