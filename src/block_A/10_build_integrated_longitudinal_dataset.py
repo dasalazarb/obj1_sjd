@@ -37,13 +37,14 @@ DATE_COLUMNS = {
 ROLES = {
     "STRUCTURAL", "ANALYTIC", "CONTEXT", "QC", "PROVENANCE",
     "REGISTRY_METADATA", "DEPRECATED_ALIAS", "LEGACY",
-    "DOWNSTREAM_DERIVED", "UNCLASSIFIED",
+    "DOWNSTREAM_DERIVED", "INHERITED_COPY", "UNCLASSIFIED",
 }
 ROLE_DESTINATION = {
     "STRUCTURAL": "analytic", "ANALYTIC": "analytic", "CONTEXT": "context",
     "QC": "none", "PROVENANCE": "none", "REGISTRY_METADATA": "registry",
     "DEPRECATED_ALIAS": "none", "LEGACY": "none",
-    "DOWNSTREAM_DERIVED": "downstream", "UNCLASSIFIED": "none",
+    "DOWNSTREAM_DERIVED": "downstream", "INHERITED_COPY": "none",
+    "UNCLASSIFIED": "none",
 }
 DATASET_CONTRACT_VERSION = "clinical_episode_curated_v1"
 INTEGRATION_BUILD_VERSION = "v4_central_curation"
@@ -304,6 +305,11 @@ def classify_spine_column(name: str) -> dict | None:
             "spine.source_metadata",
             "Raw source metadata not promoted to the curated master",
         )
+    if name == "source_protocol":
+        return _decision(
+            "CONTEXT", "protocol", "spine.source_protocol",
+            "Protocol of origin for the authoritative clinical episode",
+        )
     qc = {"manual_review_required", "episode_has_unresolved_conflict", "essdai_has_unresolved_conflict",
           "essdai_total_consistency", "essdai_total_derived_from_domains"}
     provenance = {"assignment_rule", "manual_review_reason", "_essdai_resolution_method", "_essdai_version",
@@ -417,7 +423,12 @@ def classify_extended_column(name: str) -> dict | None:
     return None
 
 
-def classify_column(source: str, name: str, frame: pd.DataFrame) -> ColumnClassification:
+def classify_column(
+    source: str,
+    name: str,
+    frame: pd.DataFrame,
+    spine_columns: set[str] | None = None,
+) -> ColumnClassification:
     """Classify one observed column using deterministic, fail-closed precedence."""
     if name in STRUCTURAL_COLUMNS:
         decision = _decision("STRUCTURAL", "structure", "contract.structural", "Authoritative grain or temporal structure")
@@ -450,6 +461,18 @@ def classify_column(source: str, name: str, frame: pd.DataFrame) -> ColumnClassi
                 decision = _decision("CONTEXT", "extended_clinical", "generic.availability", "Clinical availability/evaluability")
             else:
                 decision = classify_extended_column(name)
+        if (
+            decision is None
+            and source != "clinical_spine"
+            and name in (spine_columns or set())
+        ):
+            decision = _decision(
+                "INHERITED_COPY",
+                "inherited_spine",
+                "source.inherited_spine",
+                "Inherited field already owned/classified by clinical_spine; "
+                "do not reintegrate from secondary source",
+            )
         if decision is None and name.endswith("_conflict"):
             decision = _decision("QC", "technical", "generic.conflict", "Conflict flag")
         if decision is None and name.endswith("_source"):
@@ -479,8 +502,19 @@ def classify_column(source: str, name: str, frame: pd.DataFrame) -> ColumnClassi
 
 
 def build_variable_registry(sources: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    rows = [asdict(classify_column(source, column, frame))
-            for source, frame in sources.items() for column in frame.columns]
+    spine_columns = set(sources["clinical_spine"].columns)
+    rows = [
+        asdict(
+            classify_column(
+                source,
+                column,
+                frame,
+                spine_columns=spine_columns,
+            )
+        )
+        for source, frame in sources.items()
+        for column in frame.columns
+    ]
     registry = pd.DataFrame(rows)
     if registry.empty or registry.groupby(["source", "variable"]).size().gt(1).any():
         raise AssertionError("registry must contain exactly one classification per source column")
@@ -697,6 +731,7 @@ def _write_audits(build: CuratedBuild, output: Path, qc_dir: Path) -> dict:
         "n_aliases_excluded": int(counts.get("DEPRECATED_ALIAS", 0)),
         "n_legacy_columns": int(counts.get("LEGACY", 0)),
         "n_downstream_derived": int(counts.get("DOWNSTREAM_DERIVED", 0)),
+        "n_inherited_copies": int(counts.get("INHERITED_COPY", 0)),
         "n_registry_metadata": int(counts.get("REGISTRY_METADATA", 0)),
         "n_unclassified": int(counts.get("UNCLASSIFIED", 0)),
         "input_column_counts": {row["source"]: row["n_columns"] for row in build.source_summaries},
