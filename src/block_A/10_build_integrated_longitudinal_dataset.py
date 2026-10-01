@@ -289,6 +289,21 @@ def classify_spine_column(name: str) -> dict | None:
         return _decision("CONTEXT", "episode_context", "spine.episode_composition", "Episode construction context")
     if name in {"sjd_ever_1_2_4", "sjogrens_class_patient_values"}:
         return _decision("ANALYTIC", "classification", "spine.curated_clinical", "Curated patient classification")
+    if name in {"ids__race", "ids__ethnicity", "ids__age_at_visit"}:
+        return _decision(
+            "ANALYTIC", "demographics", "spine.demographic", "Clinically useful demographic variable"
+        )
+    if name in {"visit_datetime", "ids__interval_name", "ids__time_24_hour"}:
+        return _decision(
+            "CONTEXT", "visit_context", "spine.visit_context", "Complementary source timing or visit context"
+        )
+    if name in {"ids__visit_date", "ids__patient_record_number", "ids__subject_number", "ids__dob", "ids__sex"}:
+        return _decision(
+            "PROVENANCE",
+            "source_metadata",
+            "spine.source_metadata",
+            "Raw source metadata not promoted to the curated master",
+        )
     qc = {"manual_review_required", "episode_has_unresolved_conflict", "essdai_has_unresolved_conflict",
           "essdai_total_consistency", "essdai_total_derived_from_domains"}
     provenance = {"assignment_rule", "manual_review_reason", "_essdai_resolution_method", "_essdai_version",
@@ -298,6 +313,13 @@ def classify_spine_column(name: str) -> dict | None:
         return _decision("QC", "spine_qc", "spine.qc", "Episode resolution quality control")
     if name in provenance:
         return _decision("PROVENANCE", "spine_provenance", "spine.provenance", "Episode construction provenance")
+    if "__" in name:
+        return _decision(
+            "PROVENANCE",
+            "raw_source_field",
+            "spine.raw_source_default",
+            "Raw source-form field retained upstream; not explicitly curated",
+        )
     return None
 
 
