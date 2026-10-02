@@ -306,7 +306,14 @@ def classify_lab_column(name: str, frame: pd.DataFrame) -> dict | None:
 
 
 def classify_spine_column(name: str) -> dict | None:
-    if name in {"n_raw_rows_in_episode", "n_collection_dates_in_episode", "intervals_involved", "episode_span_days"}:
+    if name in {
+        "n_raw_rows_in_episode",
+        "n_collection_dates_in_episode",
+        "intervals_involved",
+        "episode_span_days",
+        "n_source_dates",  # NEW
+        "n_raw_rows",      # NEW
+    }:
         return _decision("CONTEXT", "episode_context", "spine.episode_composition", "Episode construction context")
     if name in {"sjd_ever_1_2_4", "sjogrens_class_patient_values"}:
         return _decision("ANALYTIC", "classification", "spine.curated_clinical", "Curated patient classification")
@@ -330,11 +337,30 @@ def classify_spine_column(name: str) -> dict | None:
             "CONTEXT", "protocol", "spine.source_protocol",
             "Protocol of origin for the authoritative clinical episode",
         )
-    qc = {"manual_review_required", "episode_has_unresolved_conflict", "essdai_has_unresolved_conflict",
-          "essdai_total_consistency", "essdai_total_derived_from_domains"}
-    provenance = {"assignment_rule", "manual_review_reason", "_essdai_resolution_method", "_essdai_version",
-                  "_essdai_total_version", "preferred_essdai_r_raw_row", "analytic_resolution_quality",
-                  "essdai_total_source"}
+    qc = {
+        "manual_review_required",
+        "episode_has_unresolved_conflict",
+        "essdai_has_unresolved_conflict",
+        "essdai_total_consistency",
+        "essdai_total_derived_from_domains",
+        "cross_interval_merge",         # NEW
+        "cross_year_merge",             # NEW
+        "long_interval_span_warning",   # NEW
+        "possible_date_entry_error",    # NEW
+    }
+    provenance = {
+        "assignment_rule",
+        "manual_review_reason",
+        "_essdai_resolution_method",
+        "_essdai_version",
+        "_essdai_total_version",
+        "preferred_essdai_r_raw_row",
+        "analytic_resolution_quality",
+        "essdai_total_source",
+        "optional_adjudication",  # NEW
+        "optional_cluster_ids",   # NEW
+        "source_dates",           # NEW
+    }
     if name in qc:
         return _decision("QC", "spine_qc", "spine.qc", "Episode resolution quality control")
     if name in provenance:
