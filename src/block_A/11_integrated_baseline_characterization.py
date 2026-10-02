@@ -20,6 +20,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 import common  # noqa: E402
+from src.integrated_schema import add_legacy_aliases  # noqa: E402
 
 KEYS = ["patient_id", "clinical_episode_id"]
 REQUIRED_COLUMNS = [
@@ -110,8 +111,8 @@ VARIABLE_SCHEMA = {
 
 def read_table(path: Path) -> pd.DataFrame:
     if path.suffix.lower() == ".parquet":
-        return pd.read_parquet(path)
-    return pd.read_csv(path, low_memory=False)
+        return add_legacy_aliases(pd.read_parquet(path))
+    return add_legacy_aliases(pd.read_csv(path, low_memory=False))
 
 
 def normalize_integrated_dtypes(frame: pd.DataFrame) -> pd.DataFrame:

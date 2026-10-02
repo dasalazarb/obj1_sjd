@@ -26,6 +26,8 @@ def frames():
         "time_since_clinical_baseline_days": [0, 366, 0],
         "time_since_clinical_baseline_years": [0.0, 366 / 365.25, 0.0],
         "n_raw_rows_in_episode": [1, 2, 1],
+        "ids__interval_name": ["baseline", "year_1", pd.NA],
+        "ids__age_at_visit": [50., 51., pd.NA], "ids__sex": ["F", "F", "M"],
     })
     metadata = spine[[*builder.KEYS, "clinical_anchor_date", "clinical_visit_number"]]
     pop = metadata.assign(
@@ -50,7 +52,7 @@ def frames():
         eg_pulmonary_ordinal_score=[0.0, 1.0, 0.0],
         pulmonary=[False, True, False],
     )
-    pros = metadata.assign(sf36_pcs=[40., 35., 50.], sf36_mcs=[45., 46., 48.],
+    pros = metadata.assign(age_baseline=[50., 50., pd.NA], sex=["Female", "Female", "Male"], sf36_pcs=[40., 35., 50.], sf36_mcs=[45., 46., 48.],
                            profad_total=[1., 2., 3.], mdafs_global=[2., 3., 4.],
                            mdafs_n_activity_items_answered=[4., 5., 6.],
                            sf36_available=[True] * 3, sf36_conflict=[False] * 3,
@@ -70,17 +72,23 @@ def test_curated_outputs_preserve_spine_and_partition_roles():
     assert len(result.analytic) == len(inputs[0])
     assert not result.analytic.duplicated(builder.KEYS).any()
     assert set(map(tuple, result.analytic[builder.KEYS].to_numpy())) == set(map(tuple, inputs[0][builder.KEYS].to_numpy()))
-    assert "crp__value" in result.analytic
-    assert "ana__text" in result.analytic
-    assert "crp__text" not in result.analytic  # numeric text is reconstructible
-    assert {"crp__unit", "crp__measurement_date", "sf36_available", "biopsy_evaluable"} <= set(result.context)
-    assert "mdafs_n_activity_items_answered" in result.context
-    assert "mdafs_n_activity_items_answered" not in result.analytic
-    assert "crp__conflict" not in result.analytic and "crp__conflict" not in result.context
-    assert "biopsy_focus_score_source" not in result.analytic
+    assert "lab__crp__value" in result.analytic
+    assert "lab__ana__text" in result.analytic
+    assert "lab__crp__text" not in result.analytic  # numeric text is reconstructible
+    assert {"lab__crp__unit", "lab__crp__measurement_date", "pro__sf36_available", "ext__biopsy_evaluable"} <= set(result.context)
+    assert "pro__mdafs_n_activity_items_answered" in result.context
+    assert "pro__mdafs_n_activity_items_answered" not in result.analytic
+    assert "lab__crp__conflict" not in result.analytic and "lab__crp__conflict" not in result.context
+    assert "ext__biopsy_focus_score_source" not in result.analytic
     assert "esspri_total_observed" not in result.analytic
     assert "pulmonary" not in result.analytic
     assert not any(c.endswith(("_x", "_y")) for c in result.analytic)
+    assert {"spine__interval_name", "demo__age_at_visit", "demo__age_at_baseline", "demo__sex",
+            "pop__status", "essdai__total", "esspri__total", "pro__sf36_pcs"} <= set(result.analytic)
+    assert "ids__interval_name" not in result.analytic and "ids__interval_name" not in result.context
+    interval = result.registry.query("source == 'clinical_spine' and original_variable == 'ids__interval_name'").iloc[0]
+    assert interval.public_variable == "spine__interval_name" and interval.producer_script == "00_build_visit_spine.py"
+    assert set(builder.AUDIT_COLUMNS) == set(result.redundancy_audit.columns)
 
 
 @pytest.mark.parametrize("source_index", [1, 2, 3, 4, 5])
@@ -125,7 +133,7 @@ def test_unknown_column_is_fail_closed():
         ("ids__ethnicity", "ANALYTIC"),
         ("ids__age_at_visit", "ANALYTIC"),
         ("visit_datetime", "CONTEXT"),
-        ("ids__interval_name", "CONTEXT"),
+        ("ids__interval_name", "ANALYTIC"),
         ("ids__time_24_hour", "CONTEXT"),
         ("ids__visit_date", "PROVENANCE"),
         ("ids__patient_record_number", "PROVENANCE"),

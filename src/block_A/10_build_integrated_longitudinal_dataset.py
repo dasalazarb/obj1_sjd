@@ -46,8 +46,14 @@ ROLE_DESTINATION = {
     "DOWNSTREAM_DERIVED": "downstream", "INHERITED_COPY": "none",
     "UNCLASSIFIED": "none",
 }
-DATASET_CONTRACT_VERSION = "clinical_episode_curated_v1"
-INTEGRATION_BUILD_VERSION = "v4_central_curation"
+DATASET_CONTRACT_VERSION = "clinical_episode_curated_v2"
+INTEGRATION_BUILD_VERSION = "v5_public_names"
+PRODUCER_SCRIPTS = {
+    "clinical_spine": "00_build_visit_spine.py", "pop": "01_pop_distribution.py",
+    "labs": "01_serological_profile.py", "overlap": "06_overlap_glandular.py",
+    "pros": "09_pros_longitudinal.py",
+    "extended_clinical": "01_extended_clinical_phenotype.py",
+}
 
 KNOWN_ALIASES = {
     "esspri_dryness_observed": "esspri_dryness",
@@ -119,6 +125,12 @@ class ColumnClassification:
     n_unique: int = 0
     paired_variable: str | None = None
     notes: str = ""
+    producer_script: str = ""
+    original_variable: str = ""
+    canonical_concept: str = ""
+    clinical_domain: str = ""
+    public_variable: str | None = None
+    temporal_scope: str = ""
 
 
 @dataclass
@@ -130,6 +142,7 @@ class CuratedBuild:
     source_summaries: list[dict]
     key_mismatches: list[dict]
     structural_discrepancies: list[dict]
+    redundancy_audit: pd.DataFrame
 
 
 def require_columns(frame: pd.DataFrame, columns: Iterable[str], source: str) -> None:
@@ -158,6 +171,11 @@ def _different(left: pd.Series, right: pd.Series) -> pd.Series:
 def validate_spine(spine: pd.DataFrame) -> pd.DataFrame:
     require_columns(spine, STRUCTURAL_COLUMNS, "clinical_spine")
     spine = _normalise_structure(spine)
+    if "ids__interval_name" in spine:
+        # Source labels are authoritative: only trim whitespace and preserve NA.
+        # Step 10 deliberately does not infer intervals from dates.
+        interval = spine["ids__interval_name"].astype("string").str.strip()
+        spine["ids__interval_name"] = interval.mask(interval.eq(""), pd.NA)
     if spine.duplicated(KEYS).any():
         raise AssertionError("clinical_spine has duplicate patient_id + clinical_episode_id keys")
     if not spine["clinical_visit"].fillna(False).astype(bool).all():
@@ -292,11 +310,11 @@ def classify_spine_column(name: str) -> dict | None:
         return _decision("CONTEXT", "episode_context", "spine.episode_composition", "Episode construction context")
     if name in {"sjd_ever_1_2_4", "sjogrens_class_patient_values"}:
         return _decision("ANALYTIC", "classification", "spine.curated_clinical", "Curated patient classification")
-    if name in {"ids__race", "ids__ethnicity", "ids__age_at_visit"}:
+    if name in {"ids__race", "ids__ethnicity", "ids__age_at_visit", "ids__interval_name"}:
         return _decision(
             "ANALYTIC", "demographics", "spine.demographic", "Clinically useful demographic variable"
         )
-    if name in {"visit_datetime", "ids__interval_name", "ids__time_24_hour"}:
+    if name in {"visit_datetime", "ids__time_24_hour"}:
         return _decision(
             "CONTEXT", "visit_context", "spine.visit_context", "Complementary source timing or visit context"
         )
@@ -329,6 +347,48 @@ def classify_spine_column(name: str) -> dict | None:
             "Raw source-form field retained upstream; not explicitly curated",
         )
     return None
+
+
+def derive_public_name(source: str, family: str, original_variable: str, role: str) -> str:
+    """Return the stable public name at the Step-10 boundary.
+
+    Names describe clinical domains, not script order.  Laboratory suffixes are
+    preserved, so new analytes need no additions to this function.
+    """
+    if role == "STRUCTURAL":
+        return original_variable
+    semantic = {
+        ("clinical_spine", "ids__interval_name"): "spine__interval_name",
+        ("clinical_spine", "ids__age_at_visit"): "demo__age_at_visit",
+        ("clinical_spine", "ids__race"): "demo__race",
+        ("clinical_spine", "ids__ethnicity"): "demo__ethnicity",
+        ("pros", "age_baseline"): "demo__age_at_baseline",
+        ("pros", "sex"): "demo__sex",
+        ("pop", "pop_status"): "pop__status",
+        ("pop", "essdai_total"): "essdai__total",
+    }
+    if (source, original_variable) in semantic:
+        return semantic[(source, original_variable)]
+    if original_variable.startswith("esspri_"):
+        return "esspri__" + original_variable.removeprefix("esspri_")
+    if source == "labs":
+        prefix = "sero" if family in {"baseline_serology", "serology_history", "hla_consensus", "hla_asof"} else "lab"
+        return f"{prefix}__{original_variable}"
+    if source == "overlap":
+        if original_variable.startswith("eg_"):
+            return "essdai__" + original_variable.removeprefix("eg_")
+        return f"ovl__{original_variable.removeprefix('overlap_')}"
+    prefixes = {"pop": "pop", "pros": "pro", "extended_clinical": "ext", "clinical_spine": "spine"}
+    return f"{prefixes[source]}__{original_variable}"
+
+
+def _temporal_scope(family: str, name: str) -> str:
+    if "baseline" in family or name == "age_baseline": return "clinical_baseline"
+    if family == "serology_history": return "through_episode"
+    if family == "hla_asof": return "as_of_episode"
+    if family == "hla_consensus": return "patient_retrospective"
+    if family in {"structure", "visit_context", "demographics", "lab_measurement", "overlap", "pro"}: return "episode"
+    return ""
 
 
 def classify_pop_column(name: str) -> dict | None:
@@ -497,15 +557,19 @@ def classify_column(
     series = frame[name]
     n_nonmissing = int(series.notna().sum())
     n_unique = int(series.dropna().nunique())
+    public = derive_public_name(source, str(decision["family"]), name, role)
     return ColumnClassification(
         variable=name, source=source, family=str(decision["family"]), role=role,
         destination=ROLE_DESTINATION[role],
-        canonical_variable=decision.get("canonical_variable") or (name if role not in {"DEPRECATED_ALIAS", "LEGACY", "UNCLASSIFIED"} else None),
+        canonical_variable=decision.get("canonical_variable") or (public if role not in {"DEPRECATED_ALIAS", "LEGACY", "UNCLASSIFIED"} else None),
         alias_of=decision.get("alias_of"), classification_rule=str(decision["classification_rule"]),
         classification_reason=str(decision["classification_reason"]), dtype=str(series.dtype),
         n_nonmissing=n_nonmissing, pct_nonmissing=(100.0 * n_nonmissing / len(frame) if len(frame) else 0.0),
         n_unique=n_unique, paired_variable=decision.get("paired_variable"),
         included_in_analytic=role in {"STRUCTURAL", "ANALYTIC"}, included_in_context=role == "CONTEXT",
+        producer_script=PRODUCER_SCRIPTS[source], original_variable=name,
+        canonical_concept=public, clinical_domain=public.split("__", 1)[0] if "__" in public else "structure",
+        public_variable=public, temporal_scope=_temporal_scope(str(decision["family"]), name),
     )
 
 
@@ -524,6 +588,14 @@ def build_variable_registry(sources: dict[str, pd.DataFrame]) -> pd.DataFrame:
         for column in frame.columns
     ]
     registry = pd.DataFrame(rows)
+    if "ids__interval_name" not in sources["clinical_spine"]:
+        placeholder = sources["clinical_spine"].copy()
+        placeholder["ids__interval_name"] = pd.Series(pd.NA, index=placeholder.index, dtype="string")
+        missing = asdict(classify_column("clinical_spine", "ids__interval_name", placeholder,
+                                         spine_columns=set(placeholder.columns)))
+        missing.update(present_in_input=False, included_in_analytic=False,
+                       notes="Optional upstream field absent; no interval was inferred from dates.")
+        registry = pd.concat([registry, pd.DataFrame([missing])], ignore_index=True)
     if registry.empty or registry.groupby(["source", "variable"]).size().gt(1).any():
         raise AssertionError("registry must contain exactly one classification per source column")
     return registry
@@ -572,25 +644,95 @@ def _merge_partition(base: pd.DataFrame, sources: dict[str, pd.DataFrame], regis
                      role: str) -> pd.DataFrame:
     output = base.copy()
     for source_name, frame in sources.items():
-        selected = registry.loc[(registry.source == source_name) & (registry.role == role), "variable"].tolist()
-        selected = [c for c in selected if c not in STRUCTURAL_COLUMNS and c not in output.columns]
-        collisions = [c for c in registry.loc[(registry.source == source_name) & (registry.role == role), "variable"]
-                      if c in output.columns and c not in STRUCTURAL_COLUMNS]
+        rows = registry.loc[(registry.source == source_name) & (registry.role == role)
+                            & registry.present_in_input]
+        mapping = dict(zip(rows.variable, rows.public_variable))
+        mapping = {old: new for old, new in mapping.items() if old not in STRUCTURAL_COLUMNS}
+        candidate = frame[KEYS + list(mapping)].rename(columns=mapping)
+        collisions = [c for c in mapping.values() if c in output.columns]
         if collisions:
-            compared = output[KEYS + collisions].merge(frame[KEYS + collisions], on=KEYS, suffixes=("_existing", "_source"), validate="one_to_one")
+            compared = output[KEYS + collisions].merge(candidate[KEYS + collisions], on=KEYS, suffixes=("_existing", "_source"), validate="one_to_one")
             discordant = [c for c in collisions if _different(compared[f"{c}_existing"], compared[f"{c}_source"]).any()]
             if discordant:
                 raise AssertionError(f"{source_name} has conflicting duplicate features: {sorted(discordant)}")
+        selected = [c for c in mapping.values() if c not in output.columns]
         if selected:
-            output = output.merge(frame[KEYS + selected], on=KEYS, how="left", validate="one_to_one")
+            output = output.merge(candidate[KEYS + selected], on=KEYS, how="left", validate="one_to_one")
     return output
+
+
+AUDIT_COLUMNS = ["variable_a", "variable_b", "source_a", "source_b", "comparison_level",
+                 "n_both_present", "n_equal_after_normalization", "n_discordant", "n_a_only",
+                 "n_b_only", "clinical_semantics_equal", "decision", "reason"]
+
+
+def _normalise_sex(values: pd.Series) -> pd.Series:
+    mapped = values.astype("string").str.strip().str.casefold().replace({
+        "f": "female", "female": "female", "mujer": "female",
+        "m": "male", "male": "male", "hombre": "male",
+    })
+    return mapped.mask(mapped.eq(""), pd.NA)
+
+
+def _comparison(a: pd.Series, b: pd.Series, *, variable_a: str, variable_b: str,
+                source_a: str, source_b: str, level: str, decision: str,
+                semantics: bool | None, reason: str) -> dict:
+    both = a.notna() & b.notna(); equal = both & a.eq(b)
+    return {"variable_a": variable_a, "variable_b": variable_b, "source_a": source_a,
+            "source_b": source_b, "comparison_level": level,
+            "n_both_present": int(both.sum()), "n_equal_after_normalization": int(equal.sum()),
+            "n_discordant": int((both & ~a.eq(b)).sum()),
+            "n_a_only": int((a.notna() & b.isna()).sum()), "n_b_only": int((a.isna() & b.notna()).sum()),
+            "clinical_semantics_equal": semantics, "decision": decision, "reason": reason}
+
+
+def build_redundancy_audit(sources: dict[str, pd.DataFrame], spine: pd.DataFrame) -> pd.DataFrame:
+    """Build aggregate-only semantic comparisons; never emit keys or row values."""
+    rows: list[dict] = []
+    if "ids__age_at_visit" in spine and "age_baseline" in sources["pros"]:
+        age_visit = pd.to_numeric(_aligned(spine, "ids__age_at_visit", spine), errors="coerce")
+        age_base = pd.to_numeric(_aligned(sources["pros"], "age_baseline", spine), errors="coerce")
+        baseline = spine["is_clinical_baseline"].fillna(False).astype(bool).reset_index(drop=True)
+        rows.append(_comparison(age_visit[baseline].reset_index(drop=True), age_base[baseline].reset_index(drop=True),
+            variable_a="ids__age_at_visit", variable_b="age_baseline", source_a="clinical_spine", source_b="pros",
+            level="clinical_baseline", decision="DISTINCT_TEMPORAL", semantics=False,
+            reason="Episode age and baseline-selected age have distinct temporal references; comparison is diagnostic only."))
+        varying = spine.assign(_age=age_visit.to_numpy()).groupby("patient_id")["_age"].nunique(dropna=True).gt(1).sum()
+        baseline_variation = sources["pros"].assign(_age=age_base.to_numpy()).groupby("patient_id")["_age"].nunique(dropna=True).gt(1).sum()
+        rows[-1]["reason"] += (f" Patients with observed visit-age temporal variation: {int(varying)}; "
+                               f"patients with non-constant baseline age: {int(baseline_variation)}.")
+        if baseline_variation:
+            rows[-1].update(decision="CONFLICT", reason=rows[-1]["reason"] +
+                            " Possible upstream baseline-covariate failure; values were not coalesced.")
+    if "ids__sex" in spine and "sex" in sources["pros"]:
+        a = _normalise_sex(_aligned(spine, "ids__sex", spine))
+        b = _normalise_sex(_aligned(sources["pros"], "sex", spine))
+        probe = _comparison(a, b, variable_a="ids__sex", variable_b="sex", source_a="clinical_spine", source_b="pros",
+                            level="episode", decision="EXACT_ALIAS", semantics=True,
+                            reason="Compared with documented case/label normalization; PRO representation owns demo__sex.")
+        if probe["n_discordant"]:
+            probe.update(decision="CONFLICT", clinical_semantics_equal=None,
+                         reason="Normalized sex values disagree; no cross-source imputation or coalescing was applied.")
+        rows.append(probe)
+    candidates = [
+        ("sgus_theander_final_score_grade", "sgus_theander_sg_us_final_score_grade", "extended_clinical", "DISTINCT_CLINICAL", "Definitions require upstream codebook confirmation."),
+        ("salivary_flow_unstimulated", "salivary_total_unstimulated_flow", "extended_clinical", "DISTINCT_CLINICAL", "Potentially different salivary-flow definitions; retained."),
+        ("igg__value", "igg_total__value", "labs", "INSUFFICIENT_EVIDENCE", "Assay and units may differ; retained."),
+    ]
+    for left, right, source, decision, reason in candidates:
+        frame = sources[source]
+        if left in frame and right in frame:
+            rows.append(_comparison(_aligned(frame, left, spine), _aligned(frame, right, spine),
+                variable_a=left, variable_b=right, source_a=source, source_b=source, level="episode",
+                decision=decision, semantics=False if decision == "DISTINCT_CLINICAL" else None, reason=reason))
+    return pd.DataFrame(rows, columns=AUDIT_COLUMNS)
 
 
 def build_coverage(analytic: pd.DataFrame, context: pd.DataFrame, labs: pd.DataFrame) -> pd.DataFrame:
     coverage = analytic[KEYS + ["is_clinical_baseline", "clinical_visit_number", "visit_type"]].copy()
-    coverage["has_pop_state"] = analytic.get("pop_status", pd.Series(pd.NA, index=analytic.index)).isin(["Pop1", "Pop2", "Pop3"])
-    coverage["has_essdai"] = analytic.get("essdai_total", pd.Series(pd.NA, index=analytic.index)).notna()
-    coverage["has_esspri_observed"] = analytic.get("esspri_total", pd.Series(pd.NA, index=analytic.index)).notna()
+    coverage["has_pop_state"] = analytic.get("pop__status", pd.Series(pd.NA, index=analytic.index)).isin(["Pop1", "Pop2", "Pop3"])
+    coverage["has_essdai"] = analytic.get("essdai__total", pd.Series(pd.NA, index=analytic.index)).notna()
+    coverage["has_esspri_observed"] = analytic.get("esspri__total", pd.Series(pd.NA, index=analytic.index)).notna()
     counts = [c for c in labs if c.endswith("__n_measurements")]
     dates = [c for c in labs if c.endswith("__measurement_date")]
     lab_evidence = (labs[counts].fillna(0).gt(0).any(axis=1) if counts
@@ -600,24 +742,25 @@ def build_coverage(analytic: pd.DataFrame, context: pd.DataFrame, labs: pd.DataF
     coverage = coverage.merge(lab_coverage, on=KEYS, how="left", validate="one_to_one")
     context_evidence = context[KEYS].copy()
     context_evidence["has_overlap_data"] = context.get(
-        "overlap_evaluable", pd.Series(False, index=context.index)
+        "ovl__evaluable", pd.Series(False, index=context.index)
     ).eq(True).to_numpy()
     evaluability = [c for c in context if c.endswith("_evaluable")]
     context_evidence["has_evaluable_clinical_phenotype"] = (
         context[evaluability].eq(True).any(axis=1).to_numpy() if evaluability else False
     )
     coverage = coverage.merge(context_evidence, on=KEYS, how="left", validate="one_to_one")
-    pro = [c for c in ["esspri_total", "sf36_pcs", "sf36_mcs", "profad_total", "mdafs_global"] if c in analytic]
+    pro = [c for c in ["esspri__total", "pro__sf36_pcs", "pro__sf36_mcs", "pro__profad_total", "pro__mdafs_global"] if c in analytic]
     coverage["has_pro_data"] = analytic[pro].notna().any(axis=1) if pro else False
     extended_evidence = analytic[KEYS].copy()
     evidence_columns = []
     for column in EXTENDED_CLINICAL_PRIMARY_FEATURES:
-        holder = context if column in context else analytic
-        if column in holder:
+        public_column = f"ext__{column}"
+        holder = context if public_column in context else analytic
+        if public_column in holder:
             evidence_column = f"_evidence_{len(evidence_columns)}"
             keyed = holder[KEYS].copy()
             keyed[evidence_column] = (
-                holder[column].eq(True) if column == "sgus_available" else holder[column].notna()
+                holder[public_column].eq(True) if column == "sgus_available" else holder[public_column].notna()
             ).to_numpy()
             extended_evidence = extended_evidence.merge(keyed, on=KEYS, how="left", validate="one_to_one")
             evidence_columns.append(evidence_column)
@@ -708,6 +851,7 @@ def build_curated(clinical_spine: pd.DataFrame, pop: pd.DataFrame, labs: pd.Data
         details = unclassified[["source", "variable", "dtype", "n_nonmissing"]].to_dict("records")
         raise CurationContractError(f"unclassified upstream variables: {details[:20]}")
     verify_aliases(validated, spine, registry)
+    redundancy_audit = build_redundancy_audit(validated, spine)
 
     # Only the explicit structural contract seeds the master -- never spine.copy().
     analytic = spine[STRUCTURAL_COLUMNS].copy()
@@ -730,7 +874,7 @@ def build_curated(clinical_spine: pd.DataFrame, pop: pd.DataFrame, labs: pd.Data
     forbidden = [c for c in analytic if c in KNOWN_ALIASES or c.startswith(("previous_", "delta_")) or _legacy(c)]
     if forbidden:
         raise AssertionError(f"analytic master contains excluded variables: {forbidden}")
-    return CuratedBuild(analytic, context, coverage, registry, summaries, mismatches, discrepancies)
+    return CuratedBuild(analytic, context, coverage, registry, summaries, mismatches, discrepancies, redundancy_audit)
 
 
 def build_integrated(clinical_spine: pd.DataFrame, pop: pd.DataFrame, labs: pd.DataFrame,
@@ -772,8 +916,8 @@ def zero_block_distribution(zero_block: pd.DataFrame, column: str) -> pd.DataFra
 def overlap_tristate_qc(analytic: pd.DataFrame, context: pd.DataFrame) -> pd.DataFrame:
     """Aggregate, non-identifying True/False/NA and evaluability metrics."""
     joined = analytic.merge(context, on=KEYS, how="left", validate="one_to_one", suffixes=("", "_context"))
-    flags = [c for c in joined if c in {"glandular_active", "extraglandular_active", "overlap_active"}
-             or (c.startswith("eg_") and c.endswith("_active"))]
+    flags = [c for c in joined if c in {"ovl__glandular_active", "ovl__extraglandular_active", "ovl__active"}
+             or (c.startswith("essdai__") and c.endswith("_active"))]
     rows = []
     for flag in flags:
         values = joined[flag].astype("boolean")
@@ -795,6 +939,10 @@ def _write_audits(build: CuratedBuild, output: Path, qc_dir: Path) -> dict:
     build.analytic.to_csv(output.with_suffix(".csv"), index=False)
     build.context.to_parquet(context_path, index=False)
     build.registry.to_csv(registry_path, index=False)
+    build.registry[["source", "producer_script", "original_variable", "public_variable",
+                    "clinical_domain", "role", "destination", "alias_of"]].to_csv(
+        output.with_name("10_variable_name_mapping.csv"), index=False)
+    build.redundancy_audit.to_csv(qc_dir / "10_semantic_redundancy_audit.csv", index=False)
     pd.DataFrame(build.source_summaries).to_csv(qc_dir / "10_integrated_source_summary.csv", index=False)
     pd.DataFrame(build.key_mismatches, columns=["source", *KEYS, "mismatch"]).to_csv(qc_dir / "10_integrated_key_mismatch_qc.csv", index=False)
     pd.DataFrame(build.structural_discrepancies, columns=["source", *KEYS, "variable", "spine_value", "source_value"]).to_csv(qc_dir / "10_integrated_structural_discrepancy_qc.csv", index=False)

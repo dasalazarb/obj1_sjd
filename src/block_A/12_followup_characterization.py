@@ -10,6 +10,7 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path: sys.path.insert(0, str(PROJECT_ROOT))
 import common  # noqa: E402
+from src.integrated_schema import add_legacy_aliases  # noqa: E402
 CANONICAL_PATIENT_ID_COL = "patient_id"
 CLINICAL_EPISODE_COL = "clinical_episode_id"
 CLINICAL_ANCHOR_DATE_COL = "clinical_anchor_date"
@@ -318,7 +319,7 @@ def parse_args():
     return parser.parse_args()
 def main():
     args=parse_args()
-    data=pd.read_parquet(args.input)
+    data=add_legacy_aliases(pd.read_parquet(args.input))
     required={"patient_id","clinical_episode_id","clinical_anchor_date","clinical_baseline_date","clinical_visit"}
     missing=sorted(required-set(data))
     if missing: raise ValueError(f"Integrated dataset is missing required columns: {missing}")
