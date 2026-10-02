@@ -9,6 +9,8 @@ from typing import Iterable, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
+from src.integrated_schema import add_legacy_aliases
+
 STUDY_CONTRACT_VERSION = "clinical_episode_v1"
 MASTER_REQUIRED = {
     "patient_id", "clinical_episode_id", "clinical_anchor_date",
@@ -23,8 +25,8 @@ POP_LEVELS = {"Pop1", "Pop2", "Pop3", "Unclassifiable"}
 
 
 def load_parquet(path: str | Path) -> pd.DataFrame:
-    """Read a Parquet input without altering its columns."""
-    return pd.read_parquet(Path(path))
+    """Read Parquet and add versioned legacy aliases in memory when needed."""
+    return add_legacy_aliases(pd.read_parquet(Path(path)))
 
 
 def _require(frame: pd.DataFrame, columns: set[str], label: str) -> None:
