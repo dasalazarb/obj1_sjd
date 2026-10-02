@@ -1,9 +1,10 @@
 """Shared glandular/extraglandular overlap derivation logic.
 
-Extracted from 06_overlap_glandular_followup.py and
-06_overlap_glandular_followup_base_1st_Visit.py, which previously carried this
-exact logic (constants + functions) as two byte-identical copies. Both scripts
-now import from here; behavior is unchanged.
+Clinical flags in this module use three states: observed active, observed
+inactive, and not evaluated.  A negative group requires every applicable
+source in that group to be explicitly negative; a positive source is
+sufficient for a positive group.  Consequently aggregate counts are totals
+only when every component is decided.
 """
 from __future__ import annotations
 
@@ -121,19 +122,49 @@ def derive_domain_active(series: pd.Series) -> tuple[pd.Series, pd.Series, pd.Se
     str_active = series.map(essdai_string_to_active)
     num_active = series.map(essdai_numeric_to_active)
     active = str_active.where(str_active.notna(), num_active)
-    evaluable = active.notna()
-    return active.fillna(False).astype(bool), evaluable.astype(bool), series.map(essdai_ordinal_score)
+    score = series.map(essdai_ordinal_score).astype("Float64")
+    # Scores outside the producer's four-level scale are not interpretable.
+    valid_score = score.isin([0.0, 1.0, 2.0, 3.0])
+    active = active.where(valid_score).astype("boolean")
+    score = score.where(valid_score)
+    evaluable = active.notna().astype("boolean")
+    return active, evaluable, score
 
 
-def _any_active(row: pd.Series, cols: list[str], essdai: bool = False) -> bool:
-    vals = [(essdai_string_to_active(row[c]) if essdai else is_yes(row[c])) for c in cols if c in row.index and not is_missing_like(row[c])]
-    return any(v is True for v in vals)
+def _tri_or(frame: pd.DataFrame) -> pd.Series:
+    """Kleene OR: true wins; false requires every component to be decided."""
+    values = frame.astype("boolean")
+    result = pd.Series(pd.NA, index=frame.index, dtype="boolean")
+    result.loc[values.eq(True).any(axis=1)] = True  # noqa: E712
+    result.loc[values.notna().all(axis=1) & values.eq(False).all(axis=1)] = False  # noqa: E712
+    return result
+
+
+def _any_active(row: pd.Series, cols: list[str], essdai: bool = False):
+    """Return tri-state activity; all declared sources must decide a negative."""
+    if not cols:
+        return pd.NA
+    vals = []
+    for col in cols:
+        if col not in row.index or is_missing_like(row[col]):
+            vals.append(pd.NA)
+        elif essdai:
+            vals.append(essdai_string_to_active(row[col]))
+        elif is_yes(row[col]):
+            vals.append(True)
+        elif is_no(row[col]):
+            vals.append(False)
+        else:
+            vals.append(pd.NA)
+    if any(value is True for value in vals):
+        return True
+    if all(value is False for value in vals):
+        return False
+    return pd.NA
 
 
 def derive_glandular_flags(df: pd.DataFrame) -> pd.DataFrame:
-    existing = [c for c in GLANDULAR_COLS.values() if c in df.columns]
     out = pd.DataFrame(index=df.index)
-    out["glandular_evaluable"] = df[existing].apply(lambda r: any(not is_missing_like(v) for v in r), axis=1) if existing else False
     groups = {
         "dry_eye_subjective": [GLANDULAR_COLS["symptom_dry_eye_or_mouth"], GLANDULAR_COLS["dry_eye_3month"], GLANDULAR_COLS["sand_gravel_eye"]],
         "dry_mouth_subjective": [GLANDULAR_COLS["symptom_dry_eye_or_mouth"], GLANDULAR_COLS["dry_mouth_3month"], GLANDULAR_COLS["difficulty_swallowing_dry_food"]],
@@ -142,11 +173,15 @@ def derive_glandular_flags(df: pd.DataFrame) -> pd.DataFrame:
         "salivary_gland_swelling": [GLANDULAR_COLS["gland_swell"]],
     }
     for name, cols in groups.items():
-        present = [c for c in cols if c in df.columns]
-        out[f"glandular_{name}_active"] = df.apply(lambda r, p=present, n=name: _any_active(r, p, essdai=(n == "salivary_gland_swelling")), axis=1) if present else False
+        out[f"glandular_{name}_active"] = pd.Series(
+            df.apply(lambda r, p=cols, n=name: _any_active(r, p, essdai=(n == "salivary_gland_swelling")), axis=1),
+            index=df.index, dtype="boolean",
+        )
     active_cols = [c for c in out.columns if c.endswith("_active")]
-    out["n_glandular_manifestations_active"] = out[active_cols].sum(axis=1).astype(int)
-    out["glandular_active"] = out["n_glandular_manifestations_active"] > 0
+    out["glandular_active"] = _tri_or(out[active_cols])
+    out["glandular_evaluable"] = out["glandular_active"].notna().astype("boolean")
+    complete = out[active_cols].notna().all(axis=1)
+    out["n_glandular_manifestations_active"] = out[active_cols].sum(axis=1).astype("Int64").where(complete)
     return out
 
 
@@ -159,9 +194,9 @@ def derive_extraglandular_flags(df: pd.DataFrame) -> pd.DataFrame:
             usable += 1
             active, evaluable, score = derive_domain_active(df[col])
         else:
-            active = pd.Series(False, index=df.index)
-            evaluable = pd.Series(False, index=df.index)
-            score = pd.Series(np.nan, index=df.index)
+            active = pd.Series(pd.NA, index=df.index, dtype="boolean")
+            evaluable = pd.Series(False, index=df.index, dtype="boolean")
+            score = pd.Series(pd.NA, index=df.index, dtype="Float64")
         out[meta["active_col"]] = active
         out[f"eg_{key}_evaluable"] = evaluable
         out[f"eg_{key}_ordinal_score"] = score
@@ -169,20 +204,26 @@ def derive_extraglandular_flags(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("No usable ESSDAI extraglandular domain columns were found.")
     active_cols = [m["active_col"] for m in EXTRAGLANDULAR_DOMAINS.values()]
     eval_cols = [f"eg_{k}_evaluable" for k in EXTRAGLANDULAR_DOMAINS]
-    out["extraglandular_active"] = out[active_cols].any(axis=1)
-    out["extraglandular_evaluable"] = out[eval_cols].any(axis=1)
-    out["n_extraglandular_domains_active"] = out[active_cols].sum(axis=1).astype(int)
-    out["active_extraglandular_domains"] = out.apply(lambda r: ";".join(m["label"] for m in EXTRAGLANDULAR_DOMAINS.values() if r[m["active_col"]]), axis=1)
+    out["extraglandular_active"] = _tri_or(out[active_cols])
+    out["extraglandular_evaluable"] = out["extraglandular_active"].notna().astype("boolean")
+    complete = out[eval_cols].eq(True).all(axis=1)
+    out["n_extraglandular_domains_active"] = out[active_cols].sum(axis=1).astype("Int64").where(complete)
+    def active_names(row):
+        names = [m["label"] for m in EXTRAGLANDULAR_DOMAINS.values() if pd.notna(row[m["active_col"]]) and bool(row[m["active_col"]])]
+        return ";".join(names) if complete.loc[row.name] else pd.NA
+    out["active_extraglandular_domains"] = out.apply(active_names, axis=1)
     return out
 
 
 def derive_overlap_flags(df: pd.DataFrame) -> pd.DataFrame:
-    df["overlap_active"] = df["glandular_active"] & df["extraglandular_active"]
-    df["overlap_evaluable"] = df["glandular_evaluable"] & df["extraglandular_evaluable"]
+    df["overlap_active"] = df["glandular_active"].astype("boolean") & df["extraglandular_active"].astype("boolean")
+    df["overlap_evaluable"] = (df["glandular_active"].notna() & df["extraglandular_active"].notna()).astype("boolean")
     df["overlap_intensity_count"] = df["n_glandular_manifestations_active"] + df["n_extraglandular_domains_active"]
-    df["overlap_status"] = np.select(
-        [df["overlap_active"], df["overlap_evaluable"] & df["glandular_active"] & ~df["extraglandular_active"], df["overlap_evaluable"] & ~df["glandular_active"] & df["extraglandular_active"], df["overlap_evaluable"]],
-        ["overlap", "glandular_only", "extraglandular_only", "neither"],
-        default="insufficient_info",
-    )
+    df["overlap_status"] = "unclassifiable"
+    known = df["overlap_evaluable"].eq(True)
+    g, e = df["glandular_active"], df["extraglandular_active"]
+    df.loc[known & g.eq(True) & e.eq(True), "overlap_status"] = "overlap"
+    df.loc[known & g.eq(True) & e.eq(False), "overlap_status"] = "glandular_only"
+    df.loc[known & g.eq(False) & e.eq(True), "overlap_status"] = "extraglandular_only"
+    df.loc[known & g.eq(False) & e.eq(False), "overlap_status"] = "neither"
     return df

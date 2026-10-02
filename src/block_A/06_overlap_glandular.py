@@ -174,7 +174,7 @@ def visit_summaries(episodes: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]
     ):
         for key, meta in EXTRAGLANDULAR_DOMAINS.items():
             evaluable = group[f"eg_{key}_evaluable"]
-            active = group[meta["active_col"]] & evaluable
+            active = evaluable.eq(True) & group[meta["active_col"]].eq(True)
             domain_rows.append(
                 {
                     "clinical_visit_number": number,
@@ -206,7 +206,7 @@ def baseline_summary(baseline: pd.DataFrame) -> pd.DataFrame:
     ]
     for key, meta in EXTRAGLANDULAR_DOMAINS.items():
         ev = baseline[f"eg_{key}_evaluable"]
-        n = int((baseline[meta["active_col"]] & ev).sum())
+        n = int((baseline[meta["active_col"]].eq(True) & ev.eq(True)).sum())
         rows.append(
             {
                 "measure": f"domain_{key}",
@@ -222,7 +222,8 @@ def domain_incidence(episodes: pd.DataFrame, baseline: pd.DataFrame) -> pd.DataF
     rows = []
     for key, meta in EXTRAGLANDULAR_DOMAINS.items():
         baseline_negative = baseline[
-            baseline[f"eg_{key}_evaluable"] & ~baseline[meta["active_col"]]
+            baseline[f"eg_{key}_evaluable"].eq(True)
+            & baseline[meta["active_col"]].eq(False)
         ]
         durations, event_dates, event_times = [], [], []
         eligible_patients = []
@@ -232,13 +233,13 @@ def domain_incidence(episodes: pd.DataFrame, baseline: pd.DataFrame) -> pd.DataF
             follow = episodes[
                 (episodes["patient_id"] == patient)
                 & (episodes["clinical_anchor_date"] > base_date)
-                & episodes[f"eg_{key}_evaluable"]
+                & episodes[f"eg_{key}_evaluable"].eq(True)
             ].sort_values("clinical_anchor_date")
             if follow.empty:
                 continue
 
             eligible_patients.append(patient)
-            event = follow[follow[meta["active_col"]]]
+            event = follow[follow[meta["active_col"]].eq(True)]
             end = (
                 event.iloc[0]["clinical_anchor_date"]
                 if not event.empty
@@ -283,9 +284,10 @@ def domain_incidence(episodes: pd.DataFrame, baseline: pd.DataFrame) -> pd.DataF
 
 def global_incidence(episodes: pd.DataFrame, baseline: pd.DataFrame) -> pd.DataFrame:
     candidates = baseline[
-        baseline.glandular_active
-        & baseline.extraglandular_evaluable
-        & ~baseline.extraglandular_active
+        baseline.glandular_active.eq(True)
+        & baseline.glandular_evaluable.eq(True)
+        & baseline.extraglandular_evaluable.eq(True)
+        & baseline.extraglandular_active.eq(False)
     ]
     events, times, domains = 0, [], []
     n_at_risk = 0
@@ -293,12 +295,12 @@ def global_incidence(episodes: pd.DataFrame, baseline: pd.DataFrame) -> pd.DataF
         follow = episodes[
             (episodes.patient_id == base.patient_id)
             & (episodes.clinical_anchor_date > base.clinical_anchor_date)
-            & episodes.extraglandular_evaluable
+            & episodes.extraglandular_evaluable.eq(True)
         ].sort_values("clinical_anchor_date")
         if follow.empty:
             continue
         n_at_risk += 1
-        event = follow[follow.extraglandular_active]
+        event = follow[follow.extraglandular_active.eq(True)]
         if event.empty:
             continue
         first = event.iloc[0]
@@ -309,7 +311,7 @@ def global_incidence(episodes: pd.DataFrame, baseline: pd.DataFrame) -> pd.DataF
         domains.extend(
             key
             for key, meta in EXTRAGLANDULAR_DOMAINS.items()
-            if first[meta["active_col"]]
+            if pd.notna(first[meta["active_col"]]) and bool(first[meta["active_col"]])
         )
     common_domain = pd.Series(domains).value_counts().index[0] if domains else pd.NA
     return pd.DataFrame(
@@ -347,10 +349,15 @@ def _ratio_ci(a: int, b: int, c: int, d: int) -> tuple[float, float, float]:
 def associations(baseline: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for key, meta in EXTRAGLANDULAR_DOMAINS.items():
-        complete = baseline.glandular_evaluable & baseline[f"eg_{key}_evaluable"]
+        complete = (
+            baseline.glandular_evaluable.eq(True)
+            & baseline.glandular_active.notna()
+            & baseline[f"eg_{key}_evaluable"].eq(True)
+            & baseline[meta["active_col"]].notna()
+        )
         data = baseline[complete]
-        g = data.glandular_active
-        e = data[meta["active_col"]]
+        g = data.glandular_active.astype(bool)
+        e = data[meta["active_col"]].astype(bool)
         a, b, c, d = (
             int((g & e).sum()),
             int((g & ~e).sum()),

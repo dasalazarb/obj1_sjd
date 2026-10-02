@@ -43,7 +43,11 @@ def frames():
     })
     overlap = metadata.assign(
         overlap_status=["neither", "overlap", "neither"], overlap_evaluable=[True] * 3,
-        extraglandular_active=[False, True, False], eg_pulmonary_active=[False, True, False],
+        glandular_active=[False, True, False], extraglandular_active=[False, True, False],
+        overlap_active=[False, True, False],
+        eg_pulmonary_active=pd.Series([False, True, False], dtype="boolean"),
+        eg_pulmonary_evaluable=pd.Series([True, True, True], dtype="boolean"),
+        eg_pulmonary_ordinal_score=[0.0, 1.0, 0.0],
         pulmonary=[False, True, False],
     )
     pros = metadata.assign(sf36_pcs=[40., 35., 50.], sf36_mcs=[45., 46., 48.],
@@ -169,6 +173,24 @@ def test_temporal_and_coverage_fields_are_not_in_master():
     assert "n_integrated_blocks_available" in result.coverage
     _, summary = builder.build_zero_block_qc(result.coverage)
     assert summary["n_zero_block_episodes"] == 0
+
+
+def test_coverage_alignment_is_key_based_under_independent_permutations():
+    result = builder.build_curated(*frames())
+    expected = result.coverage.sort_values(builder.KEYS).reset_index(drop=True)
+    shuffled = builder.build_coverage(
+        result.analytic.sample(frac=1, random_state=1).reset_index(drop=True),
+        result.context.sample(frac=1, random_state=2).reset_index(drop=True),
+        frames()[2].sample(frac=1, random_state=3).reset_index(drop=True),
+    ).sort_values(builder.KEYS).reset_index(drop=True)
+    pd.testing.assert_frame_equal(expected, shuffled)
+
+
+def test_overlap_semantic_contradiction_fails_closed():
+    inputs = list(frames())
+    inputs[3].loc[0, "eg_pulmonary_evaluable"] = False
+    with pytest.raises(builder.CurationContractError, match="active/evaluable contradiction"):
+        builder.build_curated(*inputs)
 
 
 def test_registry_has_exactly_one_role_for_every_source_column():
