@@ -260,6 +260,8 @@ def classify_lab_column(name: str, frame: pd.DataFrame) -> dict | None:
         return _decision("QC", "hla_consensus", "labs.consensus_conflict", "Consensus conflict flag")
     if name.endswith("__known_through_episode"):
         return _decision("CONTEXT", "hla_consensus", "labs.known_history", "Availability of history at episode")
+    if name.endswith("__asof_value"):
+        return _decision("ANALYTIC", "hla_asof", "labs.asof_value", "Genetic result known at or before the episode anchor")
     suffix_roles = {
         "__unit": ("CONTEXT", "lab_context"),
         "__reference_status": ("CONTEXT", "lab_context"),
@@ -596,18 +598,80 @@ def build_coverage(analytic: pd.DataFrame, context: pd.DataFrame, labs: pd.DataF
     lab_coverage = labs[KEYS].copy()
     lab_coverage["has_lab_measurement"] = lab_evidence.to_numpy()
     coverage = coverage.merge(lab_coverage, on=KEYS, how="left", validate="one_to_one")
-    coverage["has_overlap_data"] = context.get("overlap_evaluable", pd.Series(False, index=context.index)).eq(True)
+    context_evidence = context[KEYS].copy()
+    context_evidence["has_overlap_data"] = context.get(
+        "overlap_evaluable", pd.Series(False, index=context.index)
+    ).eq(True).to_numpy()
+    evaluability = [c for c in context if c.endswith("_evaluable")]
+    context_evidence["has_evaluable_clinical_phenotype"] = (
+        context[evaluability].eq(True).any(axis=1).to_numpy() if evaluability else False
+    )
+    coverage = coverage.merge(context_evidence, on=KEYS, how="left", validate="one_to_one")
     pro = [c for c in ["esspri_total", "sf36_pcs", "sf36_mcs", "profad_total", "mdafs_global"] if c in analytic]
     coverage["has_pro_data"] = analytic[pro].notna().any(axis=1) if pro else False
-    evidence = []
+    extended_evidence = analytic[KEYS].copy()
+    evidence_columns = []
     for column in EXTENDED_CLINICAL_PRIMARY_FEATURES:
         holder = context if column in context else analytic
         if column in holder:
-            evidence.append(holder[column].eq(True) if column == "sgus_available" else holder[column].notna())
-    coverage["has_extended_clinical_data"] = pd.concat(evidence, axis=1).any(axis=1) if evidence else False
+            evidence_column = f"_evidence_{len(evidence_columns)}"
+            keyed = holder[KEYS].copy()
+            keyed[evidence_column] = (
+                holder[column].eq(True) if column == "sgus_available" else holder[column].notna()
+            ).to_numpy()
+            extended_evidence = extended_evidence.merge(keyed, on=KEYS, how="left", validate="one_to_one")
+            evidence_columns.append(evidence_column)
+    extended_evidence["has_extended_clinical_data"] = (
+        extended_evidence[evidence_columns].any(axis=1) if evidence_columns else False
+    )
+    extended_evidence = extended_evidence[KEYS + ["has_extended_clinical_data"]]
+    coverage = coverage.merge(extended_evidence, on=KEYS, how="left", validate="one_to_one")
     blocks = ["has_pop_state", "has_lab_measurement", "has_overlap_data", "has_pro_data", "has_extended_clinical_data"]
     coverage["n_integrated_blocks_available"] = coverage[blocks].sum(axis=1).astype("Int64")
+    coverage["has_any_curated_clinical_evidence"] = coverage[
+        ["has_essdai", "has_esspri_observed", "has_lab_measurement", "has_pro_data",
+         "has_extended_clinical_data", "has_evaluable_clinical_phenotype"]
+    ].any(axis=1)
     return coverage
+
+
+def validate_overlap_contract(overlap: pd.DataFrame) -> None:
+    """Fail closed on upstream tri-state contradictions; never repair phenotypes."""
+    errors: list[str] = []
+    active_cols = [c for c in overlap if c.startswith("eg_") and c.endswith("_active")]
+    for active_col in active_cols:
+        stem = active_col[:-len("_active")]
+        evaluable_col, score_col = f"{stem}_evaluable", f"{stem}_ordinal_score"
+        if evaluable_col not in overlap:
+            errors.append(f"{active_col}: missing paired evaluability")
+            continue
+        active = overlap[active_col].astype("boolean")
+        evaluable = overlap[evaluable_col].astype("boolean")
+        if (evaluable.eq(False) & active.notna()).any() or (evaluable.eq(True) & active.isna()).any():
+            errors.append(f"{stem}: active/evaluable contradiction")
+        if score_col in overlap:
+            score = pd.to_numeric(overlap[score_col], errors="coerce")
+            if (evaluable.eq(False) & score.notna()).any() or (evaluable.eq(True) & ~score.isin([0, 1, 2, 3])).any():
+                errors.append(f"{stem}: ordinal/evaluable contradiction")
+    required = {"glandular_active", "extraglandular_active", "overlap_active", "overlap_evaluable", "overlap_status"}
+    if required <= set(overlap):
+        g = overlap.glandular_active.astype("boolean")
+        e = overlap.extraglandular_active.astype("boolean")
+        expected_eval = g.notna() & e.notna()
+        expected_active = g & e
+        expected_status = pd.Series("unclassifiable", index=overlap.index)
+        expected_status.loc[expected_eval & g.eq(True) & e.eq(True)] = "overlap"
+        expected_status.loc[expected_eval & g.eq(True) & e.eq(False)] = "glandular_only"
+        expected_status.loc[expected_eval & g.eq(False) & e.eq(True)] = "extraglandular_only"
+        expected_status.loc[expected_eval & g.eq(False) & e.eq(False)] = "neither"
+        if _different(overlap.overlap_evaluable.astype("boolean"), expected_eval.astype("boolean")).any():
+            errors.append("overlap_evaluable contradicts axis availability")
+        if _different(overlap.overlap_active.astype("boolean"), expected_active.astype("boolean")).any():
+            errors.append("overlap_active contradicts Kleene AND")
+        if _different(overlap.overlap_status.astype("string"), expected_status.astype("string")).any():
+            errors.append("overlap_status contradicts tri-state matrix")
+    if errors:
+        raise CurationContractError("overlap semantic contract failed: " + "; ".join(errors))
 
 
 def build_curated(clinical_spine: pd.DataFrame, pop: pd.DataFrame, labs: pd.DataFrame,
@@ -629,6 +693,8 @@ def build_curated(clinical_spine: pd.DataFrame, pop: pd.DataFrame, labs: pd.Data
         summaries.append(summary)
         mismatches.extend(key_qc)
         discrepancies.extend(structural_qc)
+
+    validate_overlap_contract(validated["overlap"])
 
     registry = build_variable_registry(validated)
     pop_legacy = registry.loc[(registry.source == "pop") & (registry.role == "LEGACY"), "variable"].tolist()
@@ -685,6 +751,9 @@ def build_zero_block_qc(coverage: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         "n_zero_block_patients": int(zero_block["patient_id"].nunique()),
         "n_zero_block_clinical_baselines": int(baseline.sum()),
         "n_zero_block_nonbaseline_episodes": int((~baseline).sum()),
+        "n_zero_block_with_curated_clinical_evidence": int(
+            zero_block.get("has_any_curated_clinical_evidence", pd.Series(False, index=zero_block.index)).eq(True).sum()
+        ),
         "n_patients_with_all_episodes_zero_block": int(patient_counts.fillna(0).eq(0).sum()),
         "zero_block_baseline_present": bool(baseline.any()),
     }
@@ -698,6 +767,25 @@ def zero_block_distribution(zero_block: pd.DataFrame, column: str) -> pd.DataFra
     output = zero_block.groupby(column, dropna=False).size().rename("n_zero_block_episodes").reset_index()
     output["pct_zero_block_episodes"] = output["n_zero_block_episodes"].div(len(zero_block)).mul(100) if len(zero_block) else 0.0
     return output[output_columns]
+
+
+def overlap_tristate_qc(analytic: pd.DataFrame, context: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate, non-identifying True/False/NA and evaluability metrics."""
+    joined = analytic.merge(context, on=KEYS, how="left", validate="one_to_one", suffixes=("", "_context"))
+    flags = [c for c in joined if c in {"glandular_active", "extraglandular_active", "overlap_active"}
+             or (c.startswith("eg_") and c.endswith("_active"))]
+    rows = []
+    for flag in flags:
+        values = joined[flag].astype("boolean")
+        eval_col = flag.removesuffix("_active") + "_evaluable"
+        evaluable = joined[eval_col].astype("boolean") if eval_col in joined else values.notna().astype("boolean")
+        rows.append({
+            "variable": flag, "n_rows": len(joined),
+            "n_true": int(values.eq(True).sum()), "n_false": int(values.eq(False).sum()),
+            "n_missing": int(values.isna().sum()), "n_evaluable": int(evaluable.eq(True).sum()),
+            "n_not_evaluable": int(evaluable.ne(True).fillna(True).sum()),
+        })
+    return pd.DataFrame(rows)
 
 
 def _write_audits(build: CuratedBuild, output: Path, qc_dir: Path) -> dict:
@@ -714,6 +802,8 @@ def _write_audits(build: CuratedBuild, output: Path, qc_dir: Path) -> dict:
         qc_dir / "10_integrated_longitudinal_coverage.csv", index=False
     )
     build.registry.loc[build.registry.role.eq("UNCLASSIFIED")].to_csv(qc_dir / "10_unclassified_variables.csv", index=False)
+    overlap_qc = overlap_tristate_qc(build.analytic, build.context)
+    overlap_qc.to_csv(qc_dir / "10_overlap_tristate_qc.csv", index=False)
     excluded = build.registry.loc[~build.registry.role.isin(["STRUCTURAL", "ANALYTIC", "CONTEXT"])]
     excluded.to_csv(qc_dir / "10_excluded_variables.csv", index=False)
     summary = build.registry.groupby(["role", "destination"]).size().rename("n_source_variables").reset_index()
@@ -743,6 +833,7 @@ def _write_audits(build: CuratedBuild, output: Path, qc_dir: Path) -> dict:
         "input_column_counts": {row["source"]: row["n_columns"] for row in build.source_summaries},
         "n_unique_observed_columns": int(build.registry.variable.nunique()),
         "sources": build.source_summaries, "zero_block_qc": zero_summary,
+        "overlap_tristate_qc": overlap_qc.to_dict("records"),
     }
     (qc_dir / "10_integrated_longitudinal_qc.json").write_text(json.dumps(qc, indent=2), encoding="utf-8")
     return qc

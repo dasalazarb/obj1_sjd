@@ -352,6 +352,7 @@ def _coerce_wide_output_schema(frame: pd.DataFrame) -> pd.DataFrame:
                 "__selection_status",
                 "__episode_status",
                 "__patient_consensus_value",
+                "__asof_value",
             )
         ):
             return values.astype("string")
@@ -936,6 +937,25 @@ def build_wide(
                 known.append(bool(len(prior)))
             derived_columns[f"{analyte}__known_through_episode"] = pd.Series(
                 pd.array(known, dtype="boolean"), index=wide_index
+            )
+            # Unlike the retrospective patient consensus, this value is built
+            # independently at every anchor. Undated and future observations
+            # cannot enter it; a future conflict therefore cannot rewrite the
+            # past. Same-day episodes intentionally share the same date cutoff.
+            asof_values = []
+            for (pid, _), date in zip(wide_index, anchors):
+                prior = evidence[
+                    evidence.patient_id.eq(pid)
+                    & evidence._date.notna()
+                    & evidence._date.le(date)
+                ]
+                vals = {
+                    (_text(r, "result_text") or _text(r, "result_raw")).casefold()
+                    for _, r in prior.iterrows()
+                } - {""}
+                asof_values.append(next(iter(vals)) if len(vals) == 1 else pd.NA)
+            derived_columns[f"{analyte}__asof_value"] = pd.Series(
+                asof_values, index=wide_index, dtype="string"
             )
     derived_frame = (
         pd.DataFrame(derived_columns, index=wide_index)

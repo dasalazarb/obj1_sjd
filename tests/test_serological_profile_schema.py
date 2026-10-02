@@ -112,6 +112,30 @@ def test_build_wide_does_not_create_mixed_episode_value():
     assert result.loc[0, "anti_ro_ssa__episode_status"] == "positive"
 
 
+def test_fixed_genetic_asof_ignores_future_and_future_conflict():
+    spine = pd.DataFrame({
+        "patient_id": ["synthetic", "synthetic", "synthetic"],
+        "clinical_episode_id": ["before", "known", "after-conflict"],
+        "clinical_anchor_date": pd.to_datetime(["2020-01-01", "2021-01-01", "2022-01-01"]),
+    })
+    selected = pd.DataFrame()
+    usable = pd.DataFrame({
+        "patient_id": ["synthetic", "synthetic", "synthetic"],
+        "lab_id": ["hla_fictional"] * 3,
+        "lab_family": ["fixed_genetic"] * 3,
+        "lab_date": pd.to_datetime(["2020-06-01", "2021-06-01", None]),
+        "result_text": ["marker-a", "marker-b", "marker-undated"],
+        "result_raw": [pd.NA] * 3,
+    })
+    result, _ = serology.build_wide(spine, selected, usable)
+    assert result["hla_fictional__known_through_episode"].tolist() == [False, True, True]
+    asof = result["hla_fictional__asof_value"]
+    assert pd.isna(asof.iloc[0]) and asof.iloc[1] == "marker-a" and pd.isna(asof.iloc[2])
+    # The global retrospective conflict is intentionally separate and does not
+    # erase the value that was unambiguous at the middle episode.
+    assert result["hla_fictional__patient_consensus_conflict"].all()
+
+
 def test_invalid_administrative_tokens_are_not_qualitative_results():
     row = pd.Series(
         {
