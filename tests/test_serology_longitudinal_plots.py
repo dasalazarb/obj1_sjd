@@ -44,8 +44,9 @@ def test_class_histories_are_normalized_and_exclusive():
     assert normalize_class_history("1.0 | 2") == ("1", "2")
     assert assign_exclusive_class_group([1, 1, 1]) == "A"
     assert assign_exclusive_class_group([1, 2]) == "B"
-    assert assign_exclusive_class_group([1, 4]) == "C"
-    assert assign_exclusive_class_group([1, 2, 4]) == "C"
+    assert assign_exclusive_class_group([1, 4]) == "A"
+    assert assign_exclusive_class_group([1, 2, 4]) == "B"
+    assert assign_exclusive_class_group([4]) == "C"
     assert assign_exclusive_class_group([1, 3]) == "unclassified_or_other"
     assert assign_exclusive_class_group("Pop1") == "unclassified_or_other"
 
@@ -54,8 +55,29 @@ def test_classification_uses_full_spine_and_reports_overlap():
     all_spine = pd.DataFrame({"patient_id": ["a", "a", "b", "b"],
                               "visit_summary_form__sjogrens_class": [1, 1, 2, 4]})
     classes, qc = build_classification(all_spine)
-    assert classes.set_index("patient_id").class_group.to_dict() == {"a": "A", "b": "C"}
+    assert classes.set_index("patient_id").class_group.to_dict() == {"a": "A", "b": "B"}
+    assert bool(classes.set_index("patient_id").loc["b", "class_4_trajectory_highlight"])
     assert qc.loc[0, "n_ever_2_and_4"] == 1
+
+
+def test_class_4_is_highlight_not_group_override_when_1_or_2_exists():
+    all_spine = pd.DataFrame(
+        {
+            "patient_id": ["four_to_one", "four_to_one", "one_to_four",
+                           "one_to_four", "two_to_four", "two_to_four", "only_four"],
+            "visit_summary_form__sjogrens_class": [4, 1, 1, 4, 2, 4, 4],
+        }
+    )
+    classes, qc = build_classification(all_spine)
+    indexed = classes.set_index("patient_id")
+    assert indexed.class_group.to_dict() == {
+        "four_to_one": "A", "one_to_four": "A", "two_to_four": "B", "only_four": "C"
+    }
+    assert not bool(indexed.loc["four_to_one", "class_4_trajectory_highlight"])
+    assert indexed.loc[["one_to_four", "two_to_four"],
+                       "class_4_trajectory_highlight"].all()
+    assert not bool(indexed.loc["only_four", "class_4_trajectory_highlight"])
+    assert qc.loc[0, "n_group_A_or_B_later_transition_to_4"] == 2
 
 
 def test_text_between_numeric_values_is_not_imputed():

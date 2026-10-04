@@ -26,16 +26,19 @@ import pandas as pd
 
 GROUPS = ("A", "B", "C")
 GROUP_LABELS = {
-    "A": "Class 1 only",
-    "B": "Ever class 2 (no class 4)",
-    "C": "Ever class 4",
+    "A": "Class 1 history (no class 2)",
+    "B": "Ever class 2",
+    "C": "Class 4 only",
 }
 COLORS = {"A": "#0072B2", "B": "#D55E00", "C": "#009E73"}
+CLASS_4_TRAJECTORY_COLOR = "#CC0000"
 COMPARABLE_UNITS = {"same_as_canonical", "alias_normalized", "converted"}
 EMPTY_CLASS_TOKENS = {"", "na", "nan", "none", "null", "unknown", "<na>"}
 RETROSPECTIVE_NOTE = (
     "Groups use any class documented over complete follow-up (retrospective; "
-    "not baseline, prospective, or causal). X symbols never enter numeric summaries."
+    "class 2 takes precedence over class 1, and class 1/2 takes precedence over "
+    "class 4). Red individual trajectories identify a later class 4 transition; "
+    "X symbols never enter numeric summaries."
 )
 
 
@@ -73,13 +76,20 @@ def normalize_class_history(value: object) -> tuple[str, ...]:
 
 
 def assign_exclusive_class_group(tokens: object) -> str:
+    """Assign class 2 first, then 1, retaining class 4 as an overlay.
+
+    Thus a patient documented as 4 and later/as well as 1 remains in group A;
+    any documented 2 places the patient in B.  Group C is reserved for patients
+    whose only known class is 4.  Unexpected codes are never silently folded
+    into A or C.
+    """
     history = set(normalize_class_history(tokens))
-    if "4" in history:
-        return "C"
     if "2" in history:
         return "B"
-    if history == {"1"}:
+    if "1" in history and history.issubset({"1", "4"}):
         return "A"
+    if history == {"4"}:
+        return "C"
     return "unclassified_or_other"
 
 
@@ -97,9 +107,21 @@ def build_classification(all_spine: pd.DataFrame) -> tuple[pd.DataFrame, pd.Data
             for value in patient[aggregate].dropna():
                 agg_values.update(normalize_class_history(value))
         rebuilt = set()
+        transitioned_to_4 = False
         if raw in patient:
-            for value in patient[raw].dropna():
-                rebuilt.update(normalize_class_history(value))
+            order_columns = [
+                column
+                for column in ("clinical_anchor_date", "episode_start_date", "clinical_visit_number")
+                if column in patient
+            ]
+            ordered_patient = patient.sort_values(order_columns, kind="stable") if order_columns else patient
+            prior_1_or_2 = False
+            for value in ordered_patient[raw].dropna():
+                row_tokens = set(normalize_class_history(value))
+                if "4" in row_tokens and prior_1_or_2:
+                    transitioned_to_4 = True
+                prior_1_or_2 = prior_1_or_2 or bool(row_tokens.intersection({"1", "2"}))
+                rebuilt.update(row_tokens)
         chosen = agg_values if agg_values else rebuilt
         differs = bool(agg_values and rebuilt and agg_values != rebuilt)
         discrepancies += int(differs)
@@ -107,6 +129,10 @@ def build_classification(all_spine: pd.DataFrame) -> tuple[pd.DataFrame, pd.Data
             "patient_id": patient_id,
             "class_history": "|".join(sorted(chosen)),
             "class_group": assign_exclusive_class_group(chosen),
+            "ever_class_4": "4" in chosen,
+            "class_4_trajectory_highlight": (
+                transitioned_to_4 and assign_exclusive_class_group(chosen) in {"A", "B"}
+            ),
             "class_source": aggregate if agg_values else raw if rebuilt else "unavailable",
             "aggregate_reconstruction_discrepancy": differs,
         })
@@ -124,6 +150,9 @@ def build_classification(all_spine: pd.DataFrame) -> tuple[pd.DataFrame, pd.Data
         "n_group_A": int(classes.class_group.eq("A").sum()),
         "n_group_B": int(classes.class_group.eq("B").sum()),
         "n_group_C": int(classes.class_group.eq("C").sum()),
+        "n_group_A_or_B_later_transition_to_4": int(
+            classes.class_4_trajectory_highlight.sum()
+        ),
         "n_source_discrepancies": discrepancies,
         "groups_are_mutually_exclusive": True,
     }
@@ -177,7 +206,14 @@ def build_lab_episode_plot_frame(
     keys = ["patient_id", "clinical_episode_id", "lab_id"]
     if selected_clinical.duplicated(keys).any():
         raise AssertionError("selected_clinical has duplicate patient/episode/lab keys")
-    eligible_classes = classes.loc[classes.class_group.isin(GROUPS), ["patient_id", "class_group"]]
+    class_columns = classes.copy()
+    for column in ("ever_class_4", "class_4_trajectory_highlight"):
+        if column not in class_columns:
+            class_columns[column] = False
+    eligible_classes = class_columns.loc[
+        class_columns.class_group.isin(GROUPS),
+        ["patient_id", "class_group", "ever_class_4", "class_4_trajectory_highlight"],
+    ]
     visits = clinical_spine.merge(eligible_classes, on="patient_id", how="inner", validate="many_to_one")
     frames = []
     lab_ids = set(selected_clinical.lab_id.dropna())
@@ -419,11 +455,16 @@ def render_lab_trajectory_panels(data: pd.DataFrame, summary: pd.DataFrame):
         gd = data.loc[data.class_group.eq(group)]; sd = summary.loc[summary.class_group.eq(group)].sort_values("clinical_visit_number")
         for _, patient in gd.groupby("patient_id"):
             numeric = patient.loc[patient.value_status.eq("valid_numeric")].sort_values("clinical_visit_number")
-            ax.scatter(numeric.clinical_visit_number, numeric.plot_value, s=10, color=COLORS[group], alpha=.20, zorder=2)
+            trajectory_color = (
+                CLASS_4_TRAJECTORY_COLOR
+                if patient.class_4_trajectory_highlight.fillna(False).any()
+                else COLORS[group]
+            )
+            ax.scatter(numeric.clinical_visit_number, numeric.plot_value, s=10, color=trajectory_color, alpha=.20, zorder=2)
             for (_, left), (_, right) in zip(numeric.iloc[:-1].iterrows(), numeric.iloc[1:].iterrows()):
                 gap = int(right.clinical_visit_number-left.clinical_visit_number) > 1
                 ax.plot([left.clinical_visit_number, right.clinical_visit_number], [left.plot_value, right.plot_value],
-                        color=COLORS[group], alpha=.17, lw=.7, ls="--" if gap else "-", zorder=1)
+                        color=trajectory_color, alpha=.17, lw=.7, ls="--" if gap else "-", zorder=1)
         transform = ax.get_xaxis_transform()
         dark = gd.value_status.isin(["documented_nonnumeric", "excluded_raw_nonresult", "noncomparable_or_conflict"])
         ax.scatter(gd.loc[dark, "clinical_visit_number"], [.035]*int(dark.sum()), marker="x", color="#444444", s=28, transform=transform, clip_on=False)
@@ -445,12 +486,13 @@ def render_lab_trajectory_panels(data: pd.DataFrame, summary: pd.DataFrame):
     axes[0].set_ylabel(f"{label} ({unit})")
     fig.suptitle(f"Longitudinal trajectory of {label}\nObserved clinical visits · retrospective Sjögren class history · lab_id: {lab_id}", fontsize=14)
     handles = [Line2D([0],[0], color="#777", lw=.7, marker="o", alpha=.4, label="Individual patient"),
+               Line2D([0],[0], color=CLASS_4_TRAJECTORY_COLOR, lw=.7, marker="o", alpha=.35, label="Patient later transitioned to class 4"),
                Line2D([0],[0], color="#222", lw=2.7, marker="D", label="Observed group mean"),
                Patch(facecolor="#777", alpha=.14, label="95% CI"),
                Line2D([0],[0], marker="x", color="#444", ls="", label="× nonnumeric / unusable"),
                Line2D([0],[0], marker="x", color="#BBB", ls="", label="× missing between observations"),
                Line2D([0],[0], marker="^", markerfacecolor="none", color="#444", ls="", label="△ censored")]
-    fig.legend(handles=handles, loc="lower center", ncol=6, bbox_to_anchor=(.5, .105), frameon=False, fontsize=9)
+    fig.legend(handles=handles, loc="lower center", ncol=4, bbox_to_anchor=(.5, .105), frameon=False, fontsize=9)
     fig.text(.5, .035, RETROSPECTIVE_NOTE + " Dashed patient segments bridge unobserved values.", ha="center", fontsize=8.5)
     fig.subplots_adjust(top=.77, bottom=.25, left=.07, right=.99, wspace=.08)
     return fig
@@ -466,7 +508,12 @@ def render_lab_elapsed_time_panels(data: pd.DataFrame):
         gd = valid.loc[valid.class_group.eq(group)]
         for _, patient in gd.groupby("patient_id"):
             patient = patient.sort_values("time_since_clinical_baseline_years")
-            ax.plot(patient.time_since_clinical_baseline_years, patient.plot_value, "o-", color=COLORS[group], alpha=.18, lw=.7, ms=2.5)
+            trajectory_color = (
+                CLASS_4_TRAJECTORY_COLOR
+                if patient.class_4_trajectory_highlight.fillna(False).any()
+                else COLORS[group]
+            )
+            ax.plot(patient.time_since_clinical_baseline_years, patient.plot_value, "o-", color=trajectory_color, alpha=.18, lw=.7, ms=2.5)
         ax.set_title(f"{panel}. {GROUP_LABELS[group]}"); ax.set_ylim(*limits); ax.grid(axis="y", color="#E5E5E5", lw=.5)
         ax.set_xlabel("Years since official clinical baseline")
     label = str(data.display_label.dropna().iloc[0]); axes[0].set_ylabel(label)
