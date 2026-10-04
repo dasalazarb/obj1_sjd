@@ -23,6 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 import common  # noqa: E402
+from src.block_A._serology_longitudinal_plots import run_longitudinal_pipeline  # noqa: E402
 
 LOG = logging.getLogger(__name__)
 KEY = ["patient_id", "clinical_episode_id"]
@@ -195,6 +196,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         / "01_serological_profile"
         / "01_serology_episode_level.parquet",
     )
+    plots = parser.add_mutually_exclusive_group()
+    plots.add_argument(
+        "--make-longitudinal-plots",
+        dest="make_longitudinal_plots",
+        action="store_true",
+    )
+    plots.add_argument(
+        "--skip-longitudinal-plots",
+        dest="make_longitudinal_plots",
+        action="store_false",
+    )
+    parser.set_defaults(make_longitudinal_plots=True)
+    parser.add_argument("--plot-dpi", type=int, default=400)
+    parser.add_argument("--plot-bootstrap-reps", type=int, default=2000)
+    parser.add_argument("--plot-min-repeats-per-group", type=int, default=10)
+    parser.add_argument("--plot-include-time-facets", action="store_true")
+    parser.add_argument("--plot-max-patients-per-lab", type=int)
+    parser.add_argument(
+        "--plot-labs", help="Comma-separated lab_id values for debugging"
+    )
+    parser.add_argument(
+        "--plot-figures-dir", type=Path,
+        default=common.OUTPUTS_DIR / "figures" / "blockA" / "01_serological_profile",
+    )
+    parser.add_argument("--plot-seed", type=int, default=42)
     return parser.parse_args(argv)
 
 
@@ -1327,6 +1353,43 @@ def main(argv: list[str] | None = None) -> None:
         )
     )
     wide[serology_cols].to_parquet(args.serology_output, index=False)
+
+    if args.make_longitudinal_plots:
+        # Re-select from the schema-coerced artifact so the new reproducibility
+        # layer has the same deterministic dtypes as the published long table.
+        if selected_all.empty:
+            selected_clinical_for_plots = selected_all.copy()
+        else:
+            selected_clinical_for_plots = selected_all.loc[
+                pd.MultiIndex.from_frame(selected_all[KEY]).isin(clinical_keys)
+            ].copy()
+        longitudinal_dir = common.BLOCKA_INTERMEDIATE_DATA_DIR / "01_serological_profile"
+        requested_labs = (
+            {item.strip() for item in args.plot_labs.split(",") if item.strip()}
+            if args.plot_labs else None
+        )
+        labs_for_longitudinal_qc = labs.copy()
+        labs_for_longitudinal_qc["patient_id"] = labs_for_longitudinal_qc[
+            "_patient_id_match"
+        ].map(obj1_by_normalized)
+        run_longitudinal_pipeline(
+            all_spine=all_spine,
+            clinical_spine=clinical_spine,
+            selected_all=selected_all,
+            selected_clinical=selected_clinical_for_plots,
+            raw_records=labs_for_longitudinal_qc,
+            intermediate_path=longitudinal_dir / "01_labs_longitudinal_plot_data.parquet",
+            tables_dir=common.BLOCKA_TABLES_DIR / "01_serological_profile",
+            qc_dir=common.BLOCKA_QC_DIR / "01_serological_profile",
+            figures_dir=args.plot_figures_dir,
+            dpi=args.plot_dpi,
+            bootstrap_reps=args.plot_bootstrap_reps,
+            seed=args.plot_seed,
+            min_repeats_per_group=args.plot_min_repeats_per_group,
+            include_time_facets=args.plot_include_time_facets,
+            plot_labs=requested_labs,
+            max_patients_per_lab=args.plot_max_patients_per_lab,
+        )
 
     unmatched_df, ambiguous_df = labs[~matched], labs[ambiguous]
     conflict_df = usable_all.loc[
