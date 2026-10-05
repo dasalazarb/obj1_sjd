@@ -312,6 +312,68 @@ def test_glandular_completeness_is_independent_of_aggregate_activity():
     assert result.glandular_active.tolist() == [True, True]
 
 
+def _completeness_domain_frame(table):
+    completeness = [True] * sum(table[0]) + [False] * sum(table[1])
+    outcomes = (
+        [True] * table[0][0]
+        + [False] * table[0][1]
+        + [True] * table[1][0]
+        + [False] * table[1][1]
+    )
+    frame = pd.DataFrame({"glandular_phenotype_complete": completeness})
+    for key, meta in EXTRAGLANDULAR_DOMAINS.items():
+        frame[meta["active_col"]] = pd.Series(outcomes, dtype="boolean")
+        frame[f"eg_{key}_evaluable"] = True
+    return frame
+
+
+@pytest.mark.parametrize(
+    ("table", "note"),
+    [
+        (
+            [[0, 10], [0, 12]],
+            "not estimable: no domain-positive patients in either group",
+        ),
+        (
+            [[10, 0], [12, 0]],
+            "not estimable: all evaluable patients are domain-positive",
+        ),
+        (
+            [[0, 0], [4, 10]],
+            "not estimable: no patients in one completeness group",
+        ),
+    ],
+)
+def test_completeness_domain_comparison_rejects_degenerate_tables(table, note):
+    result = step.completeness_domain_comparison(
+        _completeness_domain_frame(table)
+    )
+    row = result.set_index("domain").loc["Constitutional"]
+    assert row.test_used == "not estimable"
+    assert pd.isna(row.p_value)
+    assert row.estimability_note == note
+
+
+def test_completeness_domain_comparison_keeps_zero_event_reference_estimable():
+    result = step.completeness_domain_comparison(
+        _completeness_domain_frame([[4, 6], [0, 10]])
+    )
+    row = result.set_index("domain").loc["Constitutional"]
+    assert row.test_used == "Fisher exact"
+    assert pd.notna(row.p_value)
+    assert row.prevalence_ratio == float("inf")
+    assert row.estimability_note == "estimable"
+
+
+def test_completeness_domain_comparison_uses_chi_square_for_dense_table():
+    result = step.completeness_domain_comparison(
+        _completeness_domain_frame([[20, 30], [15, 35]])
+    )
+    row = result.set_index("domain").loc["Constitutional"]
+    assert row.test_used == "chi-square"
+    assert row.estimability_note == "estimable"
+
+
 def test_leave_one_domain_out_removes_biological_activity():
     frame = _sensitivity_frame({"biological": [True, True, True]})
     frame = step.add_sensitivity_phenotypes(frame)
