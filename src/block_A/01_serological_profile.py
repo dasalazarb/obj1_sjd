@@ -208,8 +208,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_false",
     )
     parser.set_defaults(make_longitudinal_plots=True)
-    parser.add_argument("--plot-dpi", type=int, default=400)
-    parser.add_argument("--plot-bootstrap-reps", type=int, default=2000)
+    parser.add_argument("--plot-dpi", type=int, default=220)
+    parser.add_argument("--plot-bootstrap-reps", type=int, default=500)
     parser.add_argument("--plot-min-repeats-per-group", type=int, default=10)
     parser.add_argument("--plot-include-time-facets", action="store_true")
     parser.add_argument("--plot-max-patients-per-lab", type=int)
