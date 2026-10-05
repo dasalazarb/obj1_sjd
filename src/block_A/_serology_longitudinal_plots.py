@@ -393,6 +393,169 @@ def summarize_observed_by_group_visit(plot_data: pd.DataFrame, reps: int = 2000,
     return pd.DataFrame(rows)
 
 
+def shorten_category_label(value: object, max_chars: int = 5) -> str:
+    """Shorten only the displayed label; the full category remains in outputs."""
+    text = "" if pd.isna(value) else str(value).strip()
+    return text if len(text) <= max_chars else f"{text[:max_chars]}..."
+
+
+def summarize_categorical_by_group_visit(plot_data: pd.DataFrame) -> pd.DataFrame:
+    """Count every observed textual category at each visit and class group.
+
+    No observed category is dropped. Missing visits and source rows rejected by
+    the governed selection rules are not promoted to categorical laboratory
+    values.
+    """
+    if plot_data.empty or "raw_selected_value" not in plot_data:
+        return pd.DataFrame(
+            columns=[
+                "lab_id", "class_group", "clinical_visit_number",
+                "category_full", "category_label", "n_patients", "n_values",
+            ]
+        )
+    categorical = plot_data.loc[
+        plot_data.value_status.eq("documented_nonnumeric")
+        & plot_data.raw_selected_value.notna()
+    ].copy()
+    if categorical.empty:
+        return pd.DataFrame(
+            columns=[
+                "lab_id", "class_group", "clinical_visit_number",
+                "category_full", "category_label", "n_patients", "n_values",
+            ]
+        )
+    categorical["category_full"] = (
+        categorical.raw_selected_value.astype("string").str.strip()
+    )
+    categorical = categorical.loc[
+        categorical.category_full.notna() & categorical.category_full.ne("")
+    ].copy()
+    if categorical.empty:
+        return pd.DataFrame(
+            columns=[
+                "lab_id", "class_group", "clinical_visit_number",
+                "category_full", "category_label", "n_patients", "n_values",
+            ]
+        )
+
+    summary = (
+        categorical.groupby(
+            ["lab_id", "class_group", "clinical_visit_number", "category_full"],
+            dropna=False,
+            sort=True,
+        )
+        .agg(
+            n_patients=("patient_id", "nunique"),
+            n_values=("patient_id", "size"),
+        )
+        .reset_index()
+    )
+    summary["category_label"] = summary.category_full.map(shorten_category_label)
+    return summary
+
+
+def render_lab_categorical_panels(data: pd.DataFrame, summary: pd.DataFrame):
+    """Render all observed categorical levels as stacked bars by visit."""
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
+
+    categories = sorted(summary.category_full.dropna().astype(str).unique())
+    if not categories:
+        raise ValueError("No categorical levels available for rendering")
+    visits = sorted(data.clinical_visit_number.dropna().unique())
+    n_categories = len(categories)
+    legend_rows = max(1, math.ceil(n_categories / 4))
+    fig_height = 5.0 + 0.28 * legend_rows
+    fig, axes = plt.subplots(
+        1, 3, figsize=(13.2, fig_height), sharex=True, sharey=True
+    )
+    lab_id = str(data.lab_id.iloc[0])
+    label = str(data.display_label.dropna().iloc[0])
+    cmap_name = "tab20" if n_categories <= 20 else "hsv"
+    cmap = plt.get_cmap(cmap_name, max(n_categories, 2))
+    colors = {category: cmap(i) for i, category in enumerate(categories)}
+
+    for ax, group, panel in zip(axes, GROUPS, "ABC"):
+        gd = data.loc[data.class_group.eq(group)]
+        sd = summary.loc[summary.class_group.eq(group)]
+        bottom = np.zeros(len(visits), dtype=float)
+
+        for category in categories:
+            cat = sd.loc[sd.category_full.astype(str).eq(category)]
+            counts = (
+                cat.set_index("clinical_visit_number")["n_patients"]
+                .reindex(visits, fill_value=0)
+                .to_numpy(dtype=float)
+            )
+            ax.bar(
+                visits,
+                counts,
+                bottom=bottom,
+                width=.72,
+                color=colors[category],
+                edgecolor="white",
+                linewidth=.35,
+            )
+            bottom += counts
+
+        n_with_category = (
+            gd.loc[
+                gd.value_status.eq("documented_nonnumeric")
+                & gd.raw_selected_value.notna(),
+                "patient_id",
+            ]
+            .nunique()
+        )
+        ax.set_title(
+            f"{panel}. {GROUP_LABELS[group]}\n"
+            f"N={gd.patient_id.nunique()} | categorical={n_with_category}",
+            fontsize=10,
+        )
+        ax.set_xticks(visits, [str(int(v)) for v in visits])
+        ax.set_xlabel("Clinical visit")
+        ax.grid(axis="y", color="#E5E5E5", lw=.5)
+        ax.set_axisbelow(True)
+
+    axes[0].set_ylabel("Patients, n")
+    fig.suptitle(
+        f"{label}: categorical laboratory profile\n"
+        f"All observed categories retained · stacked counts by clinical visit · lab_id: {lab_id}",
+        fontsize=13,
+    )
+    handles = [
+        Patch(
+            facecolor=colors[category],
+            label=shorten_category_label(category),
+        )
+        for category in categories
+    ]
+    fig.legend(
+        handles=handles,
+        loc="lower center",
+        ncol=min(4, max(1, n_categories)),
+        bbox_to_anchor=(.5, .055),
+        frameon=False,
+        fontsize=8.2,
+        title="Category (display labels shortened to 5 characters)",
+        title_fontsize=8.5,
+    )
+    fig.text(
+        .5,
+        .012,
+        "Full category text is preserved in 01_labs_categorical_summary_by_visit.csv.",
+        ha="center",
+        fontsize=8,
+    )
+    fig.subplots_adjust(
+        top=.76,
+        bottom=min(.42, .17 + .045 * legend_rows),
+        left=.075,
+        right=.99,
+        wspace=.08,
+    )
+    return fig
+
+
 def compute_shared_axes(values: Iterable[float], ci_values: Iterable[float] = ()) -> tuple[float, float]:
     array = np.asarray(list(values) + list(ci_values), dtype=float)
     array = array[np.isfinite(array)]
@@ -672,6 +835,10 @@ def run_longitudinal_pipeline(*, all_spine: pd.DataFrame, clinical_spine: pd.Dat
     plot_data.to_parquet(intermediate_path, index=False)
     summary = summarize_observed_by_group_visit(plot_data, bootstrap_reps, seed)
     summary.to_csv(tables_dir / "01_labs_longitudinal_summary_by_visit.csv", index=False)
+    categorical_summary = summarize_categorical_by_group_visit(plot_data)
+    categorical_summary.to_csv(
+        tables_dir / "01_labs_categorical_summary_by_visit.csv", index=False
+    )
     model_rows, pair_rows = [], []
     for lab_id, data in plot_data.groupby("lab_id", sort=True):
         model, pairs = fit_lab_time_group_mixed_model(data, min_repeats_per_group)
@@ -711,28 +878,86 @@ def run_longitudinal_pipeline(*, all_spine: pd.DataFrame, clinical_spine: pd.Dat
                "n_numeric_total": int(data.value_status.eq("valid_numeric").sum()) if len(data) else 0,
                "n_invalid_total": int((~data.value_status.isin(["valid_numeric","not_measured"])).sum()) if len(data) else 0,
                "model_status": model["statistical_status"], "p_raw": model.get("p_raw"), "q_BH": model.get("q_BH"),
-               "pdf_path": "", "png_path": "", "temporal_pdf_path": "", "temporal_png_path": "",
+               "pdf_path": "", "png_path": "",
+               "categorical_pdf_path": "", "categorical_png_path": "",
+               "temporal_pdf_path": "", "temporal_png_path": "",
+               "plot_types": "",
                "render_status": "skipped", "skip_reason": "nonclinical_only_or_no_classified_patient" if lab_id not in clinical_ids else "",
                "git_commit": git_commit, "created_utc": datetime.now(timezone.utc).isoformat()}
         if len(data):
-            pdf = figures_dir / f"01_lab_trajectory__{slug}.pdf"; png = figures_dir / f"01_lab_trajectory__{slug}.png"
-            fig = None
-            try:
-                fig = render_lab_trajectory_panels(data, summary.loc[summary.lab_id.eq(lab_id)])
-                export_figure_pair(fig, pdf, png, dpi); row.update(pdf_path=str(pdf), png_path=str(png), render_status="ok")
-            except Exception:
-                row.update(render_status="error", skip_reason=traceback.format_exc())
-            finally:
-                if fig is not None: plt.close(fig)
-            if include_time_facets and data.included_in_model.any():
-                tpdf = figures_dir / f"01_lab_trajectory_time__{slug}.pdf"; tpng = figures_dir / f"01_lab_trajectory_time__{slug}.png"; fig = None
+            rendered_types = []
+            errors = []
+
+            numeric_data = data.loc[data.value_status.eq("valid_numeric")]
+            numeric_summary = summary.loc[summary.lab_id.eq(lab_id)]
+            if len(numeric_data):
+                pdf = figures_dir / f"01_lab_trajectory__{slug}.pdf"
+                png = figures_dir / f"01_lab_trajectory__{slug}.png"
+                fig = None
                 try:
-                    fig = render_lab_elapsed_time_panels(data); export_figure_pair(fig, tpdf, tpng, dpi); row.update(temporal_pdf_path=str(tpdf), temporal_png_path=str(tpng))
+                    fig = render_lab_trajectory_panels(data, numeric_summary)
+                    export_figure_pair(fig, pdf, png, dpi)
+                    row.update(pdf_path=str(pdf), png_path=str(png))
+                    rendered_types.append("numeric")
+                except Exception:
+                    errors.append(traceback.format_exc())
                 finally:
-                    if fig is not None: plt.close(fig)
+                    if fig is not None:
+                        plt.close(fig)
+
+            lab_categorical_summary = categorical_summary.loc[
+                categorical_summary.lab_id.eq(lab_id)
+            ]
+            if len(lab_categorical_summary):
+                cpdf = figures_dir / f"01_lab_categorical__{slug}.pdf"
+                cpng = figures_dir / f"01_lab_categorical__{slug}.png"
+                fig = None
+                try:
+                    fig = render_lab_categorical_panels(
+                        data, lab_categorical_summary
+                    )
+                    export_figure_pair(fig, cpdf, cpng, dpi)
+                    row.update(
+                        categorical_pdf_path=str(cpdf),
+                        categorical_png_path=str(cpng),
+                    )
+                    rendered_types.append("categorical")
+                except Exception:
+                    errors.append(traceback.format_exc())
+                finally:
+                    if fig is not None:
+                        plt.close(fig)
+
+            if include_time_facets and data.included_in_model.any():
+                tpdf = figures_dir / f"01_lab_trajectory_time__{slug}.pdf"
+                tpng = figures_dir / f"01_lab_trajectory_time__{slug}.png"
+                fig = None
+                try:
+                    fig = render_lab_elapsed_time_panels(data)
+                    export_figure_pair(fig, tpdf, tpng, dpi)
+                    row.update(
+                        temporal_pdf_path=str(tpdf),
+                        temporal_png_path=str(tpng),
+                    )
+                except Exception:
+                    errors.append(traceback.format_exc())
+                finally:
+                    if fig is not None:
+                        plt.close(fig)
+
+            row["plot_types"] = "|".join(rendered_types)
+            if rendered_types:
+                row["render_status"] = "ok" if not errors else "partial_error"
+                row["skip_reason"] = "\n".join(errors)
+            elif errors:
+                row["render_status"] = "error"
+                row["skip_reason"] = "\n".join(errors)
+            elif lab_id in clinical_ids:
+                row["skip_reason"] = "no numeric or textual categorical values"
         manifest.append(row)
     manifest_df = pd.DataFrame(manifest); manifest_df.to_csv(tables_dir / "01_labs_longitudinal_figure_manifest.csv", index=False)
     qc = {"n_lab_ids": len(manifest_df), "n_clinical_lab_ids": len(clinical_ids), "n_numeric_lab_ids": int(sum(plot_data.groupby('lab_id').value_status.apply(lambda x: x.eq('valid_numeric').any()))) if len(plot_data) else 0,
+          "n_categorical_lab_ids": int(categorical_summary.lab_id.nunique()) if len(categorical_summary) else 0,
           "n_all_nonnumeric_lab_ids": int(sum(plot_data.groupby('lab_id').value_status.apply(lambda x: not x.eq('valid_numeric').any()))) if len(plot_data) else 0,
           "n_complete_figure_pairs": int(manifest_df.render_status.eq('ok').sum()) if len(manifest_df) else 0,
           "n_models_ok": int(models.statistical_status.eq('ok').sum()) if len(models) else 0,
