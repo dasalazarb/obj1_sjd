@@ -32,6 +32,7 @@ GLANDULAR_COLS = {
     "symptom_dry_eye_or_mouth": "visit_summary_-_2016_classification_criteria__ic_symptom_dry_eye_or_dry_mouth",
     "dry_eye_3month": "visit_summary_-_2016_classification_criteria__ic_dry_eye_3month",
     "sand_gravel_eye": "visit_summary_-_2016_classification_criteria__ic_sand_gravel_eye",
+    "tear_subsit": "visit_summary_-_2016_classification_criteria__ic_tear_subsit",
     "dry_mouth_3month": "visit_summary_-_2016_classification_criteria__ic_dry_mouth_3month",
     "difficulty_swallowing_dry_food": "visit_summary_-_2016_classification_criteria__ic_difficulty_swallowing_dry_food",
     "ocular_stain": "visit_summary_-_2016_classification_criteria__ocular_stain",
@@ -203,24 +204,18 @@ def derive_glandular_flags(df: pd.DataFrame) -> pd.DataFrame:
         if aggregate_col in df
         else pd.Series(pd.NA, index=df.index, dtype="boolean")
     )
-    detailed_sicca_cols = [
-        GLANDULAR_COLS["dry_eye_3month"],
-        GLANDULAR_COLS["sand_gravel_eye"],
-        GLANDULAR_COLS["dry_mouth_3month"],
-        GLANDULAR_COLS["difficulty_swallowing_dry_food"],
-    ]
-    detailed = df.apply(lambda row: _any_active(row, detailed_sicca_cols), axis=1)
-    # The aggregate clinical assessment takes precedence. Detailed symptoms
-    # are only a fallback when that assessment is genuinely unavailable.
-    out["sicca_active"] = pd.Series(aggregate, index=df.index, dtype="boolean").where(
-        pd.Series(aggregate, index=df.index).notna(), detailed
-    ).astype("boolean")
-    out["sicca_evaluable"] = out["sicca_active"].notna().astype("boolean")
     groups = {
-        "dry_eye_subjective": [GLANDULAR_COLS["symptom_dry_eye_or_mouth"], GLANDULAR_COLS["dry_eye_3month"], GLANDULAR_COLS["sand_gravel_eye"]],
-        "dry_mouth_subjective": [GLANDULAR_COLS["symptom_dry_eye_or_mouth"], GLANDULAR_COLS["dry_mouth_3month"], GLANDULAR_COLS["difficulty_swallowing_dry_food"]],
+        "eye_dryness": [
+            GLANDULAR_COLS["dry_eye_3month"],
+            GLANDULAR_COLS["sand_gravel_eye"],
+            GLANDULAR_COLS["tear_subsit"],
+        ],
+        "mouth_dryness": [
+            GLANDULAR_COLS["dry_mouth_3month"],
+            GLANDULAR_COLS["difficulty_swallowing_dry_food"],
+        ],
         "objective_eye": [GLANDULAR_COLS["ocular_stain"], GLANDULAR_COLS["lacrimal_dysfunction"]],
-        "objective_mouth_salivary": [GLANDULAR_COLS["salivary_gland_movement"], GLANDULAR_COLS["ic_glandular_domain"]],
+        "objective_mouth": [GLANDULAR_COLS["salivary_gland_movement"]],
         "salivary_gland_swelling": [GLANDULAR_COLS["gland_swell"]],
     }
     for name, cols in groups.items():
@@ -228,10 +223,29 @@ def derive_glandular_flags(df: pd.DataFrame) -> pd.DataFrame:
             df.apply(lambda r, p=cols, n=name: _any_active(r, p, essdai=(n == "salivary_gland_swelling")), axis=1),
             index=df.index, dtype="boolean",
         )
-    # Sicca is an exposure distinct from the broader glandular phenotype and
-    # must not silently become a sixth glandular-manifestation component.
-    active_cols = [c for c in out.columns if c.startswith("glandular_") and c.endswith("_active")]
-    out["glandular_active"] = _tri_or(out[active_cols])
+    detailed_sicca = _tri_or(
+        out[
+            [
+                "glandular_eye_dryness_active",
+                "glandular_mouth_dryness_active",
+            ]
+        ]
+    )
+    # The aggregate assessment is authoritative when recorded, but never
+    # assigns its non-localized result to either detailed dryness dimension.
+    aggregate = pd.Series(aggregate, index=df.index, dtype="boolean")
+    out["sicca_active"] = aggregate.where(
+        aggregate.notna(), detailed_sicca
+    ).astype("boolean")
+    out["sicca_evaluable"] = out["sicca_active"].notna().astype("boolean")
+    active_cols = [f"glandular_{name}_active" for name in groups]
+    glandular_sources = pd.DataFrame({
+        "sicca": out["sicca_active"],
+        "objective_eye": out["glandular_objective_eye_active"],
+        "objective_mouth": out["glandular_objective_mouth_active"],
+        "gland_swelling": out["glandular_salivary_gland_swelling_active"],
+    })
+    out["glandular_active"] = _tri_or(glandular_sources)
     out["glandular_evaluable"] = out["glandular_active"].notna().astype("boolean")
     complete = out[active_cols].notna().all(axis=1)
     out["n_glandular_manifestations_active"] = out[active_cols].sum(axis=1).astype("Int64").where(complete)

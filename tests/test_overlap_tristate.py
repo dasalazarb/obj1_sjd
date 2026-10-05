@@ -13,6 +13,7 @@ spec.loader.exec_module(step)
 
 from src.derivations.overlap_flags import (  # noqa: E402
     EXTRAGLANDULAR_DOMAINS,
+    GLANDULAR_COLS,
     derive_domain_active,
     derive_extraglandular_flags,
     derive_glandular_flags,
@@ -98,70 +99,118 @@ def test_overlap_truth_matrix(g, e, status, overlap):
 def test_partial_glandular_group_is_unknown_not_negative():
     col = "visit_summary_-_2016_classification_criteria__ic_dry_eye_3month"
     result = derive_glandular_flags(pd.DataFrame({col: ["no"]}))
-    assert pd.isna(result.glandular_dry_eye_subjective_active.iloc[0])
+    assert pd.isna(result.glandular_eye_dryness_active.iloc[0])
     assert pd.isna(result.glandular_active.iloc[0])
     assert pd.isna(result.n_glandular_manifestations_active.iloc[0])
 
 
-def test_consumers_exclude_unknown_from_domain_denominators():
+def _association_frame(glandular, domain):
+    size = len(glandular)
     meta = EXTRAGLANDULAR_DOMAINS["constitutional"]
     baseline = pd.DataFrame({
-        "patient_id": ["synthetic-a", "synthetic-b", "synthetic-c"],
-        "sicca_active": pd.Series([True, False, pd.NA], dtype="boolean"),
-        "sicca_evaluable": [True, True, False],
-        meta["active_col"]: pd.Series([True, False, pd.NA], dtype="boolean"),
-        "eg_constitutional_evaluable": [True, True, False],
+        "patient_id": [f"synthetic-{i}" for i in range(size)],
+        "glandular_active": pd.Series(glandular, dtype="boolean"),
+        "glandular_evaluable": pd.Series(glandular, dtype="boolean").notna(),
+        meta["active_col"]: pd.Series(domain, dtype="boolean"),
+        "eg_constitutional_evaluable": pd.Series(domain, dtype="boolean").notna(),
     })
-    # Add other dynamic domains so the existing table contract remains intact.
-    for key, domain in EXTRAGLANDULAR_DOMAINS.items():
-        if domain["active_col"] not in baseline:
-            baseline[domain["active_col"]] = pd.Series([pd.NA] * 3, dtype="boolean")
+    for key, item in EXTRAGLANDULAR_DOMAINS.items():
+        if item["active_col"] not in baseline:
+            baseline[item["active_col"]] = pd.Series([pd.NA] * size, dtype="boolean")
             baseline[f"eg_{key}_evaluable"] = False
+    return baseline
+
+
+def test_consumers_exclude_unknown_from_domain_denominators():
+    meta = EXTRAGLANDULAR_DOMAINS["constitutional"]
+    baseline = _association_frame([True, False, pd.NA], [True, False, True])
     row = step.associations(baseline).set_index("domain").loc[meta["label"]]
     assert row.n_complete == 2
     assert row.n_missing_or_not_evaluable == 1
 
 
-def test_sicca_absent_is_pr_reference_not_missing():
+def test_glandular_absent_is_pr_reference_not_missing():
     meta = EXTRAGLANDULAR_DOMAINS["constitutional"]
-    baseline = pd.DataFrame({
-        "patient_id": list("ABCDE"),
-        "sicca_active": pd.Series([True, True, False, False, pd.NA], dtype="boolean"),
-        "sicca_evaluable": [True, True, True, True, False],
-        meta["active_col"]: pd.Series([True, False, True, False, True], dtype="boolean"),
-        "eg_constitutional_evaluable": [True] * 5,
-    })
-    for key, domain in EXTRAGLANDULAR_DOMAINS.items():
-        if domain["active_col"] not in baseline:
-            baseline[domain["active_col"]] = pd.Series([pd.NA] * 5, dtype="boolean")
-            baseline[f"eg_{key}_evaluable"] = False
+    baseline = _association_frame(
+        [True, True, False, False, pd.NA], [True, False, True, False, True]
+    )
     row = step.associations(baseline).set_index("domain").loc[meta["label"]]
-    assert (row.sicca_pos_domain_pos, row.sicca_pos_domain_neg) == (1, 1)
-    assert (row.sicca_neg_domain_pos, row.sicca_neg_domain_neg) == (1, 1)
+    assert (row.glandular_pos_domain_pos, row.glandular_pos_domain_neg) == (1, 1)
+    assert (row.glandular_neg_domain_pos, row.glandular_neg_domain_neg) == (1, 1)
     assert row.n_complete == 4
     assert row.n_missing_or_not_evaluable == 1
     assert row.prevalence_ratio == pytest.approx(1.0)
 
 
-def test_raw_sicca_absent_flows_into_pr_reference_group():
-    aggregate = "visit_summary_-_2016_classification_criteria__ic_symptom_dry_eye_or_dry_mouth"
-    raw = pd.DataFrame({aggregate: ["sicca present", "sicca absent", None]})
-    sicca = derive_glandular_flags(raw)[["sicca_active", "sicca_evaluable"]]
+def test_pairwise_uses_glandular_not_sicca():
     meta = EXTRAGLANDULAR_DOMAINS["constitutional"]
-    baseline = pd.concat([pd.DataFrame({
-        "patient_id": list("ABC"),
-        meta["active_col"]: pd.Series([True, True, True], dtype="boolean"),
-        "eg_constitutional_evaluable": [True] * 3,
-    }), sicca], axis=1)
-    for key, domain in EXTRAGLANDULAR_DOMAINS.items():
-        if domain["active_col"] not in baseline:
-            baseline[domain["active_col"]] = pd.Series([pd.NA] * 3, dtype="boolean")
-            baseline[f"eg_{key}_evaluable"] = False
-
+    baseline = _association_frame([True, False], [True, False])
+    baseline["sicca_active"] = pd.Series([False, False], dtype="boolean")
+    baseline["sicca_evaluable"] = True
     row = step.associations(baseline).set_index("domain").loc[meta["label"]]
-    assert row.sicca_neg_domain_pos == 1
+    assert row.glandular_pos_domain_pos == 1
+    assert row.glandular_neg_domain_neg == 1
     assert row.n_complete == 2
-    assert row.n_missing_or_not_evaluable == 1
+
+
+def _glandular_row(**values):
+    raw = {column: [pd.NA] for column in GLANDULAR_COLS.values()}
+    for key, value in values.items():
+        raw[GLANDULAR_COLS[key]] = [value]
+    return derive_glandular_flags(pd.DataFrame(raw)).iloc[0]
+
+
+def test_eye_dryness_tri_state_and_positive_fallback_sicca():
+    positive = _glandular_row(dry_eye_3month="yes")
+    negative = _glandular_row(dry_eye_3month="no", sand_gravel_eye="no", tear_subsit="no")
+    incomplete = _glandular_row(dry_eye_3month="no", sand_gravel_eye="no")
+    assert positive.glandular_eye_dryness_active == True  # noqa: E712
+    assert positive.sicca_active == True and positive.glandular_active == True  # noqa: E712
+    assert negative.glandular_eye_dryness_active == False  # noqa: E712
+    assert pd.isna(incomplete.glandular_eye_dryness_active)
+
+
+def test_mouth_dryness_tri_state():
+    negative = _glandular_row(dry_mouth_3month="no", difficulty_swallowing_dry_food="no")
+    positive = _glandular_row(difficulty_swallowing_dry_food="yes")
+    assert negative.glandular_mouth_dryness_active == False  # noqa: E712
+    assert positive.glandular_mouth_dryness_active == True  # noqa: E712
+
+
+def test_aggregate_sicca_positive_does_not_localize_or_inflate_count():
+    result = _glandular_row(symptom_dry_eye_or_mouth="sicca present")
+    assert result.sicca_active == True and result.glandular_active == True  # noqa: E712
+    assert pd.isna(result.glandular_eye_dryness_active)
+    assert pd.isna(result.glandular_mouth_dryness_active)
+    assert pd.isna(result.n_glandular_manifestations_active)
+
+
+@pytest.mark.parametrize(
+    ("source", "derived"),
+    [
+        ("ocular_stain", "glandular_objective_eye_active"),
+        ("salivary_gland_movement", "glandular_objective_mouth_active"),
+        ("gland_swell", "glandular_salivary_gland_swelling_active"),
+    ],
+)
+def test_objective_or_swelling_positive_activates_glandular(source, derived):
+    result = _glandular_row(**{source: "low activity" if source == "gland_swell" else "positive"})
+    assert result[derived] == True  # noqa: E712
+    assert result.glandular_active == True  # noqa: E712
+
+
+def test_glandular_negative_requires_all_sources_negative():
+    negative = _glandular_row(
+        symptom_dry_eye_or_mouth="sicca absent", ocular_stain="negative",
+        lacrimal_dysfunction="negative", salivary_gland_movement="negative",
+        gland_swell="no activity",
+    )
+    unknown = _glandular_row(
+        ocular_stain="negative", lacrimal_dysfunction="negative",
+        salivary_gland_movement="negative", gland_swell="no activity",
+    )
+    assert negative.glandular_active == False and negative.glandular_evaluable == True  # noqa: E712
+    assert pd.isna(unknown.glandular_active)
 
 
 def test_zero_observed_reference_prevalence_is_infinite_not_missing():

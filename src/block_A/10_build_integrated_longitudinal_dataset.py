@@ -436,8 +436,8 @@ def classify_pop_column(name: str) -> dict | None:
 
 def classify_overlap_column(name: str) -> dict | None:
     analytic = {
-        "glandular_dry_eye_subjective_active", "glandular_dry_mouth_subjective_active",
-        "glandular_objective_eye_active", "glandular_objective_mouth_salivary_active",
+        "glandular_eye_dryness_active", "glandular_mouth_dryness_active",
+        "glandular_objective_eye_active", "glandular_objective_mouth_active",
         "glandular_salivary_gland_swelling_active", "n_glandular_manifestations_active",
         "glandular_active", "extraglandular_active", "n_extraglandular_domains_active",
         "overlap_active", "overlap_intensity_count", "overlap_status",
