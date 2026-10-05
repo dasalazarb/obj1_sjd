@@ -2,8 +2,8 @@
 import pandas as pd
 import pytest
 
-from src.studies._shared import (enrich_transition_intervals, validate_integrated_dataset,
-    validate_predictors, validate_transition_intervals)
+from src.studies._shared import (enrich_transition_intervals, resolve_concept,
+    validate_integrated_dataset, validate_predictors, validate_transition_intervals)
 
 
 def master():
@@ -18,6 +18,34 @@ def intervals():
     return pd.DataFrame({"patient_id":["A","A"],"from_clinical_episode_id":["A1","A2"],
       "to_clinical_episode_id":["A2","A3"],"from_pop":["Pop1","Pop2"],"to_pop":["Pop2","Pop3"],
       "interval_days":[366,365],"interval_years":[366/365.25,365/365.25]})
+
+
+def public_master():
+    result = master().drop(columns=["pop_status", "essdai_total",
+                                    "esspri_total_observed", "integration_version"])
+    result["pop__status"] = ["Pop1", "Pop2", "Pop3"]
+    result["essdai__total"] = [6, 3, 2]
+    result["esspri__total"] = [3., 6., 3.]
+    return result
+
+
+def test_pharma_accepts_public_v2_schema_and_prefers_public_names():
+    both = public_master().assign(pop_status="Pop3", essdai_total=999,
+                                  esspri_total_observed=999)
+    result = validate_integrated_dataset(both)
+    assert result["contract_version"] == "clinical_episode_curated_v2"
+    assert resolve_concept(both, "pop") == "pop__status"
+
+
+def test_pharma_legacy_aliases_are_secondary_only():
+    assert resolve_concept(master(), "pop") == "pop_status"
+    with pytest.raises(ValueError, match="Missing required concept"):
+        validate_integrated_dataset(master(), allow_legacy_aliases=False)
+
+
+def test_pharma_rejects_missing_required_public_concepts():
+    with pytest.raises(ValueError, match="esspri_total"):
+        validate_integrated_dataset(public_master().drop(columns="esspri__total"))
 
 
 def test_master_hard_failures():

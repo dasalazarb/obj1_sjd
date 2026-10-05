@@ -9,13 +9,23 @@ from typing import Iterable, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
-from src.integrated_schema import add_legacy_aliases
-
-STUDY_CONTRACT_VERSION = "clinical_episode_v1"
-MASTER_REQUIRED = {
+STUDY_CONTRACT_VERSION = "clinical_episode_curated_v2"
+PUBLIC_REQUIRED = {
     "patient_id", "clinical_episode_id", "clinical_anchor_date",
     "clinical_visit_number", "clinical_visit", "is_clinical_baseline",
-    "pop_status", "essdai_total", "esspri_total_observed", "integration_version",
+    "pop__status", "essdai__total", "esspri__total",
+}
+CONCEPTS: dict[str, tuple[str, ...]] = {
+    "pop": ("pop__status", "pop_status"),
+    "age_at_visit": ("demo__age_at_visit", "ids__age_at_visit", "age_at_visit", "age"),
+    "age_at_baseline": ("demo__age_at_baseline", "ids__age_at_baseline", "age_at_baseline"),
+    "sex": ("demo__sex", "ids__sex", "sex", "gender"),
+    "essdai_total": ("essdai__total", "essdai_total"),
+    "esspri_total": ("esspri__total", "esspri_total_observed", "esspri_total"),
+    "esspri_dryness": ("esspri__dryness", "esspri_dryness", "dryness"),
+    "esspri_fatigue": ("esspri__fatigue", "esspri_fatigue", "fatigue"),
+    "esspri_pain": ("esspri__pain", "esspri_pain", "pain"),
+    "protocol": ("demo__protocol", "protocol", "ids__protocol", "ids__protocol_number", "parent_protocol"),
 }
 INTERVAL_REQUIRED = {
     "patient_id", "from_clinical_episode_id", "to_clinical_episode_id",
@@ -25,8 +35,23 @@ POP_LEVELS = {"Pop1", "Pop2", "Pop3", "Unclassifiable"}
 
 
 def load_parquet(path: str | Path) -> pd.DataFrame:
-    """Read Parquet and add versioned legacy aliases in memory when needed."""
-    return add_legacy_aliases(pd.read_parquet(Path(path)))
+    """Read a dataset without mutating the public Step-10 schema."""
+    return pd.read_parquet(Path(path))
+
+
+def resolve_concept(frame: pd.DataFrame, concept: str, *, allow_legacy_aliases: bool = True) -> str:
+    """Resolve a public concept, always preferring the v2 spelling.
+
+    An empty result is never guessed.  Legacy aliases are an explicit, optional
+    compatibility path so callers can enforce a public-only contract.
+    """
+    if concept not in CONCEPTS:
+        raise KeyError(f"Unknown dataset concept: {concept}")
+    candidates = CONCEPTS[concept] if allow_legacy_aliases else CONCEPTS[concept][:1]
+    found = next((column for column in candidates if column in frame.columns), None)
+    if found is None:
+        raise ValueError(f"Missing required concept {concept!r}; expected one of {list(candidates)}")
+    return found
 
 
 def _require(frame: pd.DataFrame, columns: set[str], label: str) -> None:
@@ -35,9 +60,13 @@ def _require(frame: pd.DataFrame, columns: set[str], label: str) -> None:
         raise ValueError(f"{label} missing required columns: {missing}")
 
 
-def validate_integrated_dataset(frame: pd.DataFrame) -> dict:
+def validate_integrated_dataset(frame: pd.DataFrame, *, allow_legacy_aliases: bool = True) -> dict:
     """Validate and summarize the immutable integrated episode master."""
-    _require(frame, MASTER_REQUIRED, "Integrated dataset")
+    structural = PUBLIC_REQUIRED - {"pop__status", "essdai__total", "esspri__total"}
+    _require(frame, structural, "Integrated dataset")
+    pop_col = resolve_concept(frame, "pop", allow_legacy_aliases=allow_legacy_aliases)
+    essdai_col = resolve_concept(frame, "essdai_total", allow_legacy_aliases=allow_legacy_aliases)
+    esspri_col = resolve_concept(frame, "esspri_total", allow_legacy_aliases=allow_legacy_aliases)
     if frame.duplicated(["patient_id", "clinical_episode_id"]).any():
         raise ValueError("Duplicate patient_id + clinical_episode_id keys")
     dates = pd.to_datetime(frame["clinical_anchor_date"], errors="coerce")
@@ -64,16 +93,15 @@ def validate_integrated_dataset(frame: pd.DataFrame) -> dict:
             value = expected.get(row.patient_id)
             if pd.notna(value) and value != row.clinical_episode_id:
                 raise ValueError("Baseline inconsistent with clinical_baseline_episode_id")
-    unexpected = set(frame["pop_status"].dropna().unique()) - POP_LEVELS
+    unexpected = set(frame[pop_col].dropna().unique()) - POP_LEVELS
     if unexpected:
         raise ValueError(f"Unexpected pop_status values: {sorted(unexpected)}")
-    for col, low, high in (("essdai_total", 0, 123), ("esspri_total_observed", 0, 10)):
+    # The current registry does not guarantee a universal ESSDAI maximum.
+    for col, low, high in ((essdai_col, 0, None), (esspri_col, 0, 10)):
         numeric = pd.to_numeric(frame[col], errors="coerce")
-        if numeric[frame[col].notna()].isna().any() or numeric.dropna().lt(low).any() or numeric.dropna().gt(high).any():
-            raise ValueError(f"{col} outside [{low}, {high}]")
-    versions = set(frame["integration_version"].dropna().unique())
-    if versions - {"v2_clinical_episode"}:
-        raise ValueError(f"Unexpected integration_version: {sorted(versions)}")
+        invalid_high = high is not None and numeric.dropna().gt(high).any()
+        if numeric[frame[col].notna()].isna().any() or numeric.dropna().lt(low).any() or invalid_high:
+            raise ValueError(f"{col} outside [{low}, {high if high is not None else 'unbounded'}]")
     forbidden = [c for c in frame if c.startswith("next_")]
     if forbidden:
         raise ValueError(f"Integrated dataset contains future columns: {forbidden}")
@@ -82,6 +110,7 @@ def validate_integrated_dataset(frame: pd.DataFrame) -> dict:
         "n_rows": len(frame), "n_patients": int(frame.patient_id.nunique()),
         "n_patients_with_baseline": int((counts == 1).sum()),
         "n_patients_without_baseline": int((counts == 0).sum()),
+        "resolved_columns": {"pop": pop_col, "essdai_total": essdai_col, "esspri_total": esspri_col},
     }
 
 
@@ -98,7 +127,8 @@ def validate_transition_intervals(intervals: pd.DataFrame, master: pd.DataFrame)
     years = pd.to_numeric(intervals.interval_years, errors="coerce")
     if days.isna().any() or years.isna().any() or (days <= 0).any() or (years <= 0).any():
         raise ValueError("Transition intervals must be positive")
-    lookup = master.set_index(["patient_id", "clinical_episode_id"])["pop_status"]
+    pop_col = resolve_concept(master, "pop")
+    lookup = master.set_index(["patient_id", "clinical_episode_id"])[pop_col]
     order = master.assign(_date=pd.to_datetime(master.clinical_anchor_date)).sort_values(
         ["patient_id", "_date", "clinical_visit_number", "clinical_episode_id"]
     )

@@ -1,5 +1,8 @@
 study_name: pharma
-contract_version: clinical_episode_v1
+contract_version: clinical_episode_curated_v2
+dataset_contract:
+  expected: clinical_episode_curated_v2
+  allow_legacy_aliases: true
 random_seed: 20260831
 pop_levels:
   classifiable: [Pop1, Pop2, Pop3]
@@ -17,8 +20,9 @@ pairwise_transition_contrasts:
   - [Pop3, Pop2, Pop3]
 sustained_transition:
   required_consecutive_destination_episodes: 2
+  implementation: sensitivity_when_evaluable
 strict_systemic_worsening:
-  minimum_delta_essdai: 3
+  minimum_delta_essdai: 5
 interval_sensitivity_years: {minimum: 0.5, maximum: 3.5}
 minimum_counts:
   cell_for_modeling: 5
@@ -27,5 +31,12 @@ minimum_counts:
   nonevents_for_prediction: 25
   patients_for_prediction: 80
 coverage: {minimum_feature_coverage: 0.70}
-bootstrap: {association_replicates: 1000, prediction_replicates: 1000}
-prediction: {policy: auto, outer_folds: 5, inner_folds: 3}
+bootstrap:
+  status: reserved_for_future
+  association_replicates: 1000
+  prediction_replicates: 1000
+prediction:
+  status: reserved_for_future
+  policy: auto
+  outer_folds: 5
+  inner_folds: 3

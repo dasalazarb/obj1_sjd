@@ -29,7 +29,8 @@ DEFAULT_ANALYTIC = (common.STUDIES_ANALYTIC_DIR / "pharma" / "01_run_pharma_main
                     "01_pharma_transition_intervals.parquet")
 DEFAULT_SUPPORT = STEP_03_TABLES / "03_pharma_multistate_support.csv"
 DEFAULT_MODELS = STEP_03_TABLES / "03_pharma_multistate_models.csv"
-AGE_COLUMN = "from_ids__age_at_visit"
+AGE_COLUMNS = ("from_demo__age_at_visit", "from_ids__age_at_visit",
+               "from_age_at_visit", "from_age")
 YEAR_DAYS = 365.25
 OBSERVED_POPS = ("Pop1", "Pop2", "Pop3")
 
@@ -150,8 +151,9 @@ def profile_combination(data: pd.DataFrame, item: pd.Series, minimum_events: int
     # available to the age-adjusted step-03 analysis.
     mask = (data.from_pop.eq(item.from_pop) & data.to_pop.isin(OBSERVED_POPS) &
             np.isfinite(lab))
-    if AGE_COLUMN in data:
-        mask &= np.isfinite(pd.to_numeric(data[AGE_COLUMN], errors="coerce"))
+    age_column = next((column for column in AGE_COLUMNS if column in data), None)
+    if age_column is not None:
+        mask &= np.isfinite(pd.to_numeric(data[age_column], errors="coerce"))
     risk = data.loc[mask].copy()
     risk["event"] = risk.to_pop.eq(item.to_pop)
     previous = risk.loc[risk.previous_pop_observed]
@@ -261,7 +263,7 @@ def run(args: argparse.Namespace) -> None:
         column for column in ["patient_id", "from_clinical_episode_id",
                               "to_clinical_episode_id", "from_clinical_anchor_date",
                               "to_clinical_anchor_date", "from_pop", "to_pop", "interval_years",
-                              AGE_COLUMN, *[f"from_lab__{value}" for value in biomarkers],
+                              *AGE_COLUMNS, *[f"from_lab__{value}" for value in biomarkers],
                               "previous_pop", "previous_pop_observed", "state_entry_observed",
                               "observed_time_in_current_state"] if column in enriched
     ]

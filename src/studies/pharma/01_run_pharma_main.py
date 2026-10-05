@@ -26,27 +26,28 @@ from statsmodels.tools.sm_exceptions import PerfectSeparationWarning
 import common
 from src.studies._shared import (create_study_dirs, enrich_transition_intervals,
                                  load_parquet, validate_integrated_dataset,
-                                 validate_predictors, validate_transition_intervals)
+                                 resolve_concept, validate_predictors,
+                                 validate_transition_intervals)
 
 POPS = ("Pop1", "Pop2", "Pop3")
 CORE = ["patient_id", "from_clinical_episode_id", "to_clinical_episode_id",
-        "from_clinical_anchor_date", "to_clinical_anchor_date", "interval_years",
+        "from_clinical_anchor_date", "to_clinical_anchor_date", "interval_days", "interval_years",
         "from_pop", "to_pop", "transition_pair"]
 FEATURES = {
-    "age": ("clinical", ["ids__age_at_visit", "age_at_visit", "age"]),
-    "sex": ("clinical", ["ids__sex", "ids__gender", "sex", "gender"]),
+    "age": ("clinical", ["demo__age_at_visit", "ids__age_at_visit", "age_at_visit", "age"]),
+    "sex": ("clinical", ["demo__sex", "ids__sex", "ids__gender", "sex", "gender"]),
     "disease_duration": ("clinical", ["time_since_diagnosis_years", "disease_duration_years"]),
     "protocol": ("clinical", ["protocol", "ids__protocol", "ids__protocol_number", "parent_protocol"]),
-    "ssa": ("serology", ["anti_ro_ssa_status", "ssa_status", "baseline_anti_ro_ssa"]),
-    "ssb": ("serology", ["anti_la_ssb_status", "ssb_status", "baseline_anti_la_ssb"]),
-    "ana": ("serology", ["ana_status", "baseline_ana"]),
-    "rf": ("serology", ["rf_status", "baseline_rf"]),
-    "cryoglobulinemia": ("serology", ["cryoglobulinemia_status", "baseline_cryoglobulinemia"]),
-    "essdai_total": ("essdai", ["essdai_total"]),
-    "esspri_total": ("esspri", ["esspri_total_observed"]),
-    "dryness": ("esspri", ["esspri_dryness", "dryness"]),
-    "fatigue": ("esspri", ["esspri_fatigue", "fatigue"]),
-    "pain": ("esspri", ["esspri_pain", "pain"]),
+    "ssa": ("serology", ["sero__anti_ro_ssa__asof_value", "sero__anti_ro_ssa__known_through_episode", "sero__anti_ro_ssa__ever_positive_through_episode", "baseline_anti_ro_ssa", "anti_ro_ssa_status", "ssa_status"]),
+    "ssb": ("serology", ["sero__anti_la_ssb__asof_value", "sero__anti_la_ssb__known_through_episode", "sero__anti_la_ssb__ever_positive_through_episode", "baseline_anti_la_ssb", "anti_la_ssb_status", "ssb_status"]),
+    "ana": ("serology", ["sero__ana__asof_value", "sero__ana__known_through_episode", "sero__ana__ever_positive_through_episode", "baseline_ana", "ana_status"]),
+    "rf": ("serology", ["sero__rf__asof_value", "sero__rf__known_through_episode", "sero__rf__ever_positive_through_episode", "baseline_rf", "rf_status"]),
+    "cryoglobulinemia": ("serology", ["sero__cryoglobulinemia__asof_value", "sero__cryoglobulinemia__known_through_episode", "sero__cryoglobulinemia__ever_positive_through_episode", "baseline_cryoglobulinemia", "cryoglobulinemia_status"]),
+    "essdai_total": ("essdai", ["essdai__total", "essdai_total"]),
+    "esspri_total": ("esspri", ["esspri__total", "esspri_total_observed", "esspri_total"]),
+    "dryness": ("esspri", ["esspri__dryness", "esspri_dryness", "dryness"]),
+    "fatigue": ("esspri", ["esspri__fatigue", "esspri_fatigue", "fatigue"]),
+    "pain": ("esspri", ["esspri__pain", "esspri_pain", "pain"]),
 }
 DEFAULT_LAB_PROFILE = (common.STUDIES_TABLES_DIR / "pharma" /
                        "00_profile_labs" / "00_pharma_lab_profile.csv")
@@ -111,7 +112,7 @@ def _resolve(master: pd.DataFrame) -> tuple[dict[str, tuple[str, str]], list[str
             resolved[feature] = (family, found[0])
     domains = []
     for domain in DOMAIN_NAMES:
-        score = [f"eg_{domain}_ordinal_score", f"essdai_{domain}_score",
+        score = [f"essdai__{domain}_ordinal_score", f"eg_{domain}_ordinal_score", f"essdai_{domain}_score",
                  f"{domain}_domain_score"]
         flag = [f"essdai_{domain}_active", f"eg_{domain}_active", f"{domain}_active"]
         found = next((x for x in score if x in master.columns), None)
@@ -186,6 +187,15 @@ def build_analytic(intervals: pd.DataFrame, master: pd.DataFrame, resolved: dict
             fcol = "from_esspri_total" if feature == "esspri_total" else f"from_{source}"
             tcol = "to_esspri_total" if feature == "esspri_total" else f"to_{source}"
             canonical = "essdai" if feature == "essdai_total" else feature
+            raw_from, raw_to = f"from_{source}", f"to_{source}"
+            if feature == "essdai_total" and raw_from in enriched:
+                enriched["from_essdai_total"] = enriched[raw_from]
+                enriched["to_essdai_total"] = enriched[raw_to]
+                fcol, tcol = "from_essdai_total", "to_essdai_total"
+            elif feature == "esspri_total" and raw_from in enriched:
+                enriched["from_esspri_total"] = enriched[raw_from]
+                enriched["to_esspri_total"] = enriched[raw_to]
+                fcol, tcol = "from_esspri_total", "to_esspri_total"
             if fcol in enriched and tcol in enriched:
                 both = enriched[fcol].notna() & enriched[tcol].notna()
                 enriched[f"delta_{canonical}"] = (_numeric(enriched[tcol]) - _numeric(enriched[fcol])).where(both)
@@ -224,6 +234,35 @@ def build_analytic(intervals: pd.DataFrame, master: pd.DataFrame, resolved: dict
             both = from_value.notna() & to_value.notna()
             enriched[f"delta_{source}"] = (to_value - from_value).where(both)
     return enriched[CORE + [c for c in enriched.columns if c not in CORE]]
+
+
+def add_transition_outcomes(frame: pd.DataFrame, minimum_delta_essdai: float = 5) -> pd.DataFrame:
+    """Add separate phenotypic and clinically meaningful ESSDAI outcomes."""
+    out = frame.copy()
+    out["phenotypic_transition"] = out.from_pop.ne(out.to_pop).astype("Int64")
+    delta = pd.to_numeric(out.get("delta_essdai"), errors="coerce")
+    out["clinically_meaningful_essdai_worsening"] = delta.ge(minimum_delta_essdai).where(delta.notna()).astype("boolean")
+    # Persistence is knowable only when the immediately following interval is observed.
+    ordered = out.sort_values(["patient_id", "from_clinical_anchor_date", "to_clinical_anchor_date"])
+    next_from = ordered.groupby("patient_id").from_pop.shift(-1)
+    next_to = ordered.groupby("patient_id").to_pop.shift(-1)
+    contiguous = ordered.to_pop.eq(next_from)
+    changed = ordered.from_pop.ne(ordered.to_pop)
+    status = pd.Series("not_evaluable", index=ordered.index, dtype="string")
+    status.loc[changed & contiguous & next_to.eq(ordered.to_pop)] = "sustained"
+    status.loc[changed & contiguous & next_to.ne(ordered.to_pop)] = "reverted"
+    status.loc[~changed] = "not_applicable"
+    out["sustained_status"] = status.reindex(out.index)
+    return out
+
+
+def transition_counts(frame: pd.DataFrame) -> pd.DataFrame:
+    rows = frame.groupby(["from_pop", "to_pop"], observed=False).agg(
+        n_intervals=("patient_id", "size"), n_patients=("patient_id", "nunique")).reset_index()
+    rows["transition_pair"] = rows.from_pop.astype(str) + " -> " + rows.to_pop.astype(str)
+    rows["transition_type"] = np.where(rows.from_pop.eq(rows.to_pop), "stability", "directional_transition")
+    rows["pct_within_origin"] = rows.n_intervals / rows.groupby("from_pop").n_intervals.transform("sum")
+    return rows
 
 
 def _change_table(frame: pd.DataFrame, variables: dict[str, str]) -> pd.DataFrame:
@@ -400,7 +439,7 @@ def lab_transition_associations(frame: pd.DataFrame, labs: list[dict], config: d
                                 sm.add_constant(fitdata.x.astype(float)),
                                 family=sm.families.Poisson(),
                                 offset=np.log(fitdata.interval_years.astype(float)),
-                            ).fit(cov_type="HC0")
+                            ).fit(cov_type="cluster", cov_kwds={"groups": fitdata.patient_id.to_numpy()})
                             perfect_separation = any(
                                 issubclass(warning.category, PerfectSeparationWarning)
                                 for warning in caught
@@ -425,14 +464,21 @@ def lab_transition_associations(frame: pd.DataFrame, labs: list[dict], config: d
                     else:
                         interpretation, reason = "interpretable", ""
                 rows.append({"from_pop": origin, "to_pop": destination, "lab": lab,
+                             "transition_pair": f"{origin} -> {destination}",
+                             "exposure": lab, "exposure_family": "laboratory",
+                             "predictor_type": "continuous", "effect_scale": "per_1_unit_increase",
                              "n_intervals": len(fitdata), "n_patients": int(fitdata.patient_id.nunique()),
+                             "n_clusters": int(fitdata.patient_id.nunique()),
+                             "se_type": "cluster_patient", "cluster_variable": "patient_id",
                              "events": events, "nonevents": nonevents, "estimate": estimate,
                              "ci95_low": low, "ci95_high": high, "p_value": pvalue,
                              "q_value": np.nan, "model_status": status,
                              "interpretability_status": interpretation,
                              "interpretability_reason": reason})
     output = pd.DataFrame(rows, columns=[
-        "from_pop", "to_pop", "lab", "n_intervals", "n_patients", "events",
+        "from_pop", "to_pop", "transition_pair", "lab", "exposure", "exposure_family",
+        "predictor_type", "effect_scale", "n_intervals", "n_patients", "n_clusters",
+        "se_type", "cluster_variable", "events",
         "nonevents", "estimate", "ci95_low", "ci95_high", "p_value", "q_value",
         "model_status", "interpretability_status", "interpretability_reason",
     ])
@@ -538,7 +584,7 @@ def transition_associations(frame: pd.DataFrame, availability: pd.DataFrame, res
                                 sm.add_constant(fitdata.x),
                                 family=sm.families.Poisson(),
                                 offset=np.log(fitdata.time),
-                            ).fit(cov_type="HC0")
+                            ).fit(cov_type="cluster", cov_kwds={"groups": fitdata.patient_id.to_numpy()})
                             perfect_separation = any(
                                 issubclass(warning.category, PerfectSeparationWarning)
                                 for warning in caught
@@ -569,9 +615,13 @@ def transition_associations(frame: pd.DataFrame, availability: pd.DataFrame, res
                     else:
                         interpretability_status = "interpretable"
                         interpretability_reason = ""
-                rows.append({"from_pop": origin, "to_pop": destination, "exposure": feature,
+                rows.append({"from_pop": origin, "to_pop": destination,
+                             "transition_pair": f"{origin} -> {destination}",
+                             "exposure": feature, "exposure_family": resolved[feature][0],
                              "predictor_type": predictor_type, "effect_scale": effect_scale,
                              "n_intervals": len(fitdata), "n_patients": int(fitdata.patient_id.nunique()),
+                             "n_clusters": int(fitdata.patient_id.nunique()),
+                             "se_type": "cluster_patient", "cluster_variable": "patient_id",
                              "events": int(fitdata.event.sum()),
                              "nonevents": int((1-fitdata.event).sum()), **cell_counts,
                              "estimate": estimate, "ci95_low": low, "ci95_high": high,
@@ -609,12 +659,16 @@ def longitudinal_models(master: pd.DataFrame, resolved: dict) -> pd.DataFrame:
     for feature, (family, source) in resolved.items():
         if feature not in ("essdai_total", "esspri_total") and family != "essdai_domain":
             continue
-        work = master[["patient_id", "clinical_anchor_date", source]].copy()
+        baseline = master.loc[master.is_clinical_baseline.fillna(False).astype(bool),
+                              ["patient_id", "clinical_anchor_date"]].rename(
+                                  columns={"clinical_anchor_date": "baseline_date"})
+        work = master[["patient_id", "clinical_anchor_date", source]].merge(
+            baseline, on="patient_id", how="left", validate="many_to_one")
         binary_domain = family == "essdai_domain" and source.endswith("_active")
         work["value"] = _binary(work[source]) if binary_domain else _numeric(work[source])
-        work.dropna(subset=["value", "clinical_anchor_date"], inplace=True)
+        work.dropna(subset=["value", "clinical_anchor_date", "baseline_date"], inplace=True)
         work["time_years"] = (pd.to_datetime(work.clinical_anchor_date) -
-                              pd.to_datetime(work.groupby("patient_id").clinical_anchor_date.transform("min"))).dt.days / 365.25
+                              pd.to_datetime(work.baseline_date)).dt.days / 365.25
         repeated = work.groupby("patient_id").size().ge(2).sum()
         status, estimate, low, high, pvalue = "insufficient_repeated_measures", *([np.nan] * 4)
         if len(work) >= 10 and repeated >= 3 and work.time_years.nunique() > 1:
@@ -663,15 +717,19 @@ def _plot_heatmap(table: pd.DataFrame, row: str, value: str, path: Path, title: 
 
 def _plot_longitudinal_trajectory(master: pd.DataFrame, source: str, path: Path,
                                   title: str, ylabel: str) -> bool:
-    """Plot observations relative to each patient's first available assessment."""
-    work = master[["patient_id", "clinical_anchor_date", source]].copy()
+    """Plot observations relative to each patient's canonical clinical baseline."""
+    baseline = master.loc[master.is_clinical_baseline.fillna(False).astype(bool),
+                          ["patient_id", "clinical_anchor_date"]].rename(
+                              columns={"clinical_anchor_date": "baseline_date"})
+    work = master[["patient_id", "clinical_anchor_date", source]].merge(
+        baseline, on="patient_id", how="left", validate="many_to_one")
     work["value"] = _numeric(work[source])
-    work.dropna(subset=["value", "clinical_anchor_date"], inplace=True)
+    work.dropna(subset=["value", "clinical_anchor_date", "baseline_date"], inplace=True)
     if work.empty:
         return False
     work["clinical_anchor_date"] = pd.to_datetime(work.clinical_anchor_date)
-    first_assessment = work.groupby("patient_id").clinical_anchor_date.transform("min")
-    work["time_years"] = (work.clinical_anchor_date - first_assessment).dt.days / 365.25
+    work["time_years"] = (work.clinical_anchor_date -
+                          pd.to_datetime(work.baseline_date)).dt.days / 365.25
 
     import matplotlib.pyplot as plt
     fig, ax = plt.subplots(figsize=(9, 5))
@@ -689,7 +747,7 @@ def _plot_longitudinal_trajectory(master: pd.DataFrame, source: str, path: Path,
             time_years=("time_years", "median"), value=("value", "median")).dropna()
     ax.plot(aggregate.time_years, aggregate.value, color="black", linewidth=2.2,
             marker="o", markersize=4, label="Median trajectory")
-    ax.set_xlabel("Years since first available assessment")
+    ax.set_xlabel("Years since canonical clinical baseline")
     ax.set_ylabel(ylabel)
     ax.set_title(f"{title}\n{work.patient_id.nunique()} patients; {len(work)} observations")
     ax.legend(); fig.tight_layout(); fig.savefig(path); plt.close(fig)
@@ -766,6 +824,8 @@ def run(args: argparse.Namespace) -> None:
     resolved, domain_sources = _resolve(master)
     availability = _availability(master, resolved, coverage)
     analytic = build_analytic(intervals, master, resolved, numeric_labs, categorical_labs)
+    analytic = add_transition_outcomes(
+        analytic, float(config["strict_systemic_worsening"]["minimum_delta_essdai"]))
     analytic.to_parquet(dirs["analytic"] / "01_pharma_transition_intervals.parquet", index=False)
     diagnostics = transition_associations(analytic, availability, resolved, config)
     associations = diagnostics.drop(columns=["n_exposed_events", "n_unexposed_events",
@@ -789,6 +849,7 @@ def run(args: argparse.Namespace) -> None:
     feasibility = ml_feasibility(analytic, availability, config)
     longitudinal = longitudinal_models(master, resolved)
     tables = {"01_pharma_feature_availability.csv": availability,
+              "01_pharma_transition_counts.csv": transition_counts(analytic),
               "01_pharma_transition_associations.csv": associations,
               "01_pharma_transition_model_diagnostics.csv": diagnostics,
               "01_pharma_essdai_change_by_transition.csv": essdai.drop(columns="variable", errors="ignore"),
