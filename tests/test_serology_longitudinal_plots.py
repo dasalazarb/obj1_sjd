@@ -11,8 +11,11 @@ from src.block_A._serology_longitudinal_plots import (
     compute_shared_axes,
     export_figure_pair,
     normalize_class_history,
+    render_lab_categorical_panels,
     render_lab_trajectory_panels,
     safe_lab_slugs,
+    shorten_category_label,
+    summarize_categorical_by_group_visit,
     summarize_observed_by_group_visit,
 )
 
@@ -133,3 +136,54 @@ def test_renderer_exports_vector_pdf_and_high_resolution_png(tmp_path: Path):
     assert pdf.read_bytes().startswith(b"%PDF")
     with Image.open(png) as image:
         assert image.width >= 3000 and image.height >= 1000
+
+
+def test_categorical_summary_keeps_all_classes_and_shortens_only_display_label():
+    selected = _selected(
+        types=("qualitative", "qualitative", "qualitative"),
+        values=(np.nan, np.nan, np.nan),
+    )
+    selected["selected_value_text"] = ["Positive", "Negative", "Indeterminate"]
+    frame = build_lab_episode_plot_frame(
+        _spine(),
+        selected,
+        pd.DataFrame({"patient_id": ["p1"], "class_group": ["A"]}),
+    )
+    summary = summarize_categorical_by_group_visit(frame)
+    assert set(summary.category_full) == {"Positive", "Negative", "Indeterminate"}
+    assert shorten_category_label("Positive") == "Posit..."
+    assert shorten_category_label("Neg") == "Neg"
+    assert set(summary.category_label) == {"Posit...", "Negat...", "Indet..."}
+
+
+def test_categorical_renderer_exports_all_observed_categories(tmp_path: Path):
+    import matplotlib.pyplot as plt
+
+    frames = []
+    for patient, group, labels in [
+        ("p1", "A", ("Positive", "Negative", "Positive")),
+        ("p2", "B", ("Negative", "Indeterminate", "Negative")),
+        ("p3", "C", ("Borderline long text", "Positive", "Borderline long text")),
+    ]:
+        selected = _selected(
+            types=("qualitative", "qualitative", "qualitative"),
+            values=(np.nan, np.nan, np.nan),
+        )
+        selected["patient_id"] = patient
+        selected["selected_value_text"] = list(labels)
+        frames.append(
+            build_lab_episode_plot_frame(
+                _spine(patient),
+                selected,
+                pd.DataFrame({"patient_id": [patient], "class_group": [group]}),
+            )
+        )
+    data = pd.concat(frames, ignore_index=True)
+    summary = summarize_categorical_by_group_visit(data)
+    assert summary.category_full.nunique() == 4
+    fig = render_lab_categorical_panels(data, summary)
+    pdf, png = tmp_path / "categorical.pdf", tmp_path / "categorical.png"
+    export_figure_pair(fig, pdf, png, dpi=150)
+    plt.close(fig)
+    assert pdf.exists()
+    assert png.exists()
