@@ -708,7 +708,26 @@ def completeness_domain_comparison(baseline: pd.DataFrame) -> pd.DataFrame:
         c = int((known & ~complete_group & outcome.eq(True)).sum())
         d = int((known & ~complete_group & outcome.eq(False)).sum())
         table = np.array([[a, b], [c, d]])
-        if (a + b) and (c + d):
+        row_totals = table.sum(axis=1)
+        col_totals = table.sum(axis=0)
+        if row_totals.min() == 0:
+            p_value = np.nan
+            test = "not estimable"
+            estimability_note = (
+                "not estimable: no patients in one completeness group"
+            )
+        elif col_totals.min() == 0:
+            p_value = np.nan
+            test = "not estimable"
+            if col_totals[0] == 0:
+                estimability_note = (
+                    "not estimable: no domain-positive patients in either group"
+                )
+            else:
+                estimability_note = (
+                    "not estimable: all evaluable patients are domain-positive"
+                )
+        else:
             _, _, _, expected = chi2_contingency(table, correction=False)
             if (table < 5).any() or (expected < 5).any():
                 _, p_value = fisher_exact(table)
@@ -716,8 +735,7 @@ def completeness_domain_comparison(baseline: pd.DataFrame) -> pd.DataFrame:
             else:
                 _, p_value, _, _ = chi2_contingency(table, correction=False)
                 test = "chi-square"
-        else:
-            p_value, test = np.nan, "not estimable"
+            estimability_note = "estimable"
         pr, lower, upper = _ratio_ci(a, b, c, d)
         rows.append({
             "domain": meta["label"],
@@ -734,6 +752,7 @@ def completeness_domain_comparison(baseline: pd.DataFrame) -> pd.DataFrame:
             "PR_95_CI_upper": upper,
             "risk_difference": a / (a + b) - c / (c + d) if (a + b) and (c + d) else np.nan,
             "test_used": test,
+            "estimability_note": estimability_note,
             "p_value": p_value,
         })
     return _bh_fdr(pd.DataFrame(rows))
