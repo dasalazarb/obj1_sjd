@@ -247,6 +247,26 @@ def derive_glandular_flags(df: pd.DataFrame) -> pd.DataFrame:
     })
     out["glandular_active"] = _tri_or(glandular_sources)
     out["glandular_evaluable"] = out["glandular_active"].notna().astype("boolean")
+    objective = out[
+        ["glandular_objective_eye_active", "glandular_objective_mouth_active"]
+    ]
+    out["objective_glandular_dysfunction_active"] = _tri_or(objective)
+    out["objective_glandular_dysfunction_evaluable"] = out[
+        "objective_glandular_dysfunction_active"
+    ].notna().astype("boolean")
+    objective_or_swelling = pd.DataFrame(
+        {
+            "objective": out["objective_glandular_dysfunction_active"],
+            "swelling": out["glandular_salivary_gland_swelling_active"],
+        },
+        index=out.index,
+    )
+    out["objective_or_swelling_glandular_active"] = _tri_or(
+        objective_or_swelling
+    )
+    out["objective_or_swelling_glandular_evaluable"] = out[
+        "objective_or_swelling_glandular_active"
+    ].notna().astype("boolean")
     complete = out[active_cols].notna().all(axis=1)
     out["n_glandular_manifestations_active"] = out[active_cols].sum(axis=1).astype("Int64").where(complete)
     return out
