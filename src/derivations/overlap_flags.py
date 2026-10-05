@@ -92,10 +92,20 @@ def parse_sicca(x: Any) -> bool | pd._libs.missing.NAType:
     if is_missing_like(x):
         return pd.NA
     text = normalize_text(x)
-    if text in {"sicca present", "sicca positive"}:
-        return True
-    if text in {"sicca absent", "sicca negative"}:
+    # Exported categorical labels may carry prefixes/suffixes (for example,
+    # ``0 - Sicca absent``).  Parse their clinical meaning rather than relying
+    # on one exact serialization of the label.
+    sicca_negative = (
+        "sicca" in text
+        and any(marker in text for marker in ("absent", "negative", "not present"))
+    ) or text.startswith("no sicca") or text.startswith("absence of sicca")
+    sicca_positive = "sicca" in text and any(
+        marker in text for marker in ("present", "positive")
+    )
+    if sicca_negative:
         return False
+    if sicca_positive:
+        return True
     if is_yes(x):
         return True
     if is_no(x):
@@ -218,7 +228,9 @@ def derive_glandular_flags(df: pd.DataFrame) -> pd.DataFrame:
             df.apply(lambda r, p=cols, n=name: _any_active(r, p, essdai=(n == "salivary_gland_swelling")), axis=1),
             index=df.index, dtype="boolean",
         )
-    active_cols = [c for c in out.columns if c.endswith("_active")]
+    # Sicca is an exposure distinct from the broader glandular phenotype and
+    # must not silently become a sixth glandular-manifestation component.
+    active_cols = [c for c in out.columns if c.startswith("glandular_") and c.endswith("_active")]
     out["glandular_active"] = _tri_or(out[active_cols])
     out["glandular_evaluable"] = out["glandular_active"].notna().astype("boolean")
     complete = out[active_cols].notna().all(axis=1)

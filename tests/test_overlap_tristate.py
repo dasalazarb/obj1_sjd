@@ -23,7 +23,13 @@ from src.derivations.overlap_flags import (  # noqa: E402
 
 @pytest.mark.parametrize(
     ("raw", "expected"),
-    [("sicca absent", False), ("sicca present", True)],
+    [
+        ("sicca absent", False),
+        ("0 - Sicca absent", False),
+        ("absence of sicca", False),
+        ("sicca present", True),
+        ("1 - Sicca present", True),
+    ],
 )
 def test_parse_sicca_observed_states(raw, expected):
     assert parse_sicca(raw) is expected
@@ -135,3 +141,31 @@ def test_sicca_absent_is_pr_reference_not_missing():
     assert row.n_complete == 4
     assert row.n_missing_or_not_evaluable == 1
     assert row.prevalence_ratio == pytest.approx(1.0)
+
+
+def test_raw_sicca_absent_flows_into_pr_reference_group():
+    aggregate = "visit_summary_-_2016_classification_criteria__ic_symptom_dry_eye_or_dry_mouth"
+    raw = pd.DataFrame({aggregate: ["sicca present", "sicca absent", None]})
+    sicca = derive_glandular_flags(raw)[["sicca_active", "sicca_evaluable"]]
+    meta = EXTRAGLANDULAR_DOMAINS["constitutional"]
+    baseline = pd.concat([pd.DataFrame({
+        "patient_id": list("ABC"),
+        meta["active_col"]: pd.Series([True, True, True], dtype="boolean"),
+        "eg_constitutional_evaluable": [True] * 3,
+    }), sicca], axis=1)
+    for key, domain in EXTRAGLANDULAR_DOMAINS.items():
+        if domain["active_col"] not in baseline:
+            baseline[domain["active_col"]] = pd.Series([pd.NA] * 3, dtype="boolean")
+            baseline[f"eg_{key}_evaluable"] = False
+
+    row = step.associations(baseline).set_index("domain").loc[meta["label"]]
+    assert row.sicca_neg_domain_pos == 1
+    assert row.n_complete == 2
+    assert row.n_missing_or_not_evaluable == 1
+
+
+def test_zero_observed_reference_prevalence_is_infinite_not_missing():
+    pr, lower, upper = step._ratio_ci(a=1, b=1, c=0, d=2)
+    assert pr == float("inf")
+    assert pd.isna(lower)
+    assert pd.isna(upper)

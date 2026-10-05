@@ -391,6 +391,16 @@ def associations(baseline: pd.DataFrame) -> pd.DataFrame:
         else:
             odds, p, test = np.nan, np.nan, "not estimable"
         pr, pr_l, pr_u = _ratio_ci(a, b, c, d)
+        if (a + b) == 0:
+            pr_note = "not estimable: no sicca-positive patients"
+        elif (c + d) == 0:
+            pr_note = "not estimable: no sicca-negative patients"
+        elif c == 0 and a > 0:
+            pr_note = "infinite: observed prevalence in sicca-negative group is zero"
+        elif a == 0 and c == 0:
+            pr_note = "not estimable: both observed prevalences are zero"
+        else:
+            pr_note = "observed (uncorrected)"
         if all(x > 0 for x in (a, b, c, d)):
             se = np.sqrt(sum(1 / x for x in (a, b, c, d)))
             or_l, or_u = np.exp(np.log(odds) + np.array([-1, 1]) * 1.96 * se)
@@ -410,6 +420,7 @@ def associations(baseline: pd.DataFrame) -> pd.DataFrame:
                 "prevalence_ratio": pr,
                 "PR_95_CI_lower": pr_l,
                 "PR_95_CI_upper": pr_u,
+                "prevalence_ratio_note": pr_note,
                 "risk_difference": (a / (a + b) - c / (c + d))
                 if (a + b) * (c + d)
                 else np.nan,
