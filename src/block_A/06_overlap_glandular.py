@@ -16,7 +16,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.stats import chi2_contingency, fisher_exact
+from scipy.stats import chi2_contingency, fisher_exact, spearmanr
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -350,102 +350,249 @@ def _ratio_ci(a: int, b: int, c: int, d: int) -> tuple[float, float, float]:
     )
 
 
-def associations(baseline: pd.DataFrame) -> pd.DataFrame:
-    """Associate extraglandular domain activity with the broader
-    exocrine/glandular phenotype at clinical baseline.
+def _bh_fdr(frame: pd.DataFrame) -> pd.DataFrame:
+    """Apply Benjamini-Hochberg once to the non-missing p-values."""
+    out = frame.copy()
+    out["q_value_BH_FDR"] = np.nan
+    pvals = out.loc[out.p_value.notna(), "p_value"].sort_values()
+    if not pvals.empty:
+        adjusted = (
+            (pvals * len(pvals) / np.arange(1, len(pvals) + 1))[::-1]
+            .cummin()[::-1]
+            .clip(upper=1)
+        )
+        out.loc[adjusted.index, "q_value_BH_FDR"] = adjusted
+    return out
 
-    The exposure is the tri-state ``glandular_active`` phenotype. Observed
-    glandular absence forms the reference group; non-evaluable patients are
-    excluded from each domain-specific complete-case analysis.
-    """
+
+def _wilson(events: int, total: int) -> tuple[float, float]:
+    if not total:
+        return np.nan, np.nan
+    proportion, z = events / total, 1.959963984540054
+    denominator = 1 + z**2 / total
+    centre = (proportion + z**2 / (2 * total)) / denominator
+    half_width = (
+        z * np.sqrt(proportion * (1 - proportion) / total + z**2 / (4 * total**2))
+        / denominator
+    )
+    return float(centre - half_width), float(centre + half_width)
+
+
+def binary_exposure_domain_associations(
+    baseline: pd.DataFrame,
+    exposure_col: str,
+    exposure_evaluable_col: str,
+    exposure_label: str,
+    analysis_tier: str,
+    apply_fdr: bool = True,
+) -> pd.DataFrame:
+    """Generic complete-case 2x2 analysis preserving tri-state missingness."""
     rows = []
+    exposure_known = baseline[exposure_col].notna()
+    if exposure_evaluable_col != exposure_col:
+        exposure_known &= baseline[exposure_evaluable_col].eq(True)
     for key, meta in EXTRAGLANDULAR_DOMAINS.items():
-        complete = (
-            baseline.glandular_evaluable.eq(True)
-            & baseline.glandular_active.notna()
-            & baseline[f"eg_{key}_evaluable"].eq(True)
-            & baseline[meta["active_col"]].notna()
-        )
-        data = baseline[complete]
-        g = data.glandular_active.astype(bool)
-        e = data[meta["active_col"]].astype(bool)
-        a, b, c, d = (
-            int((g & e).sum()),
-            int((g & ~e).sum()),
-            int((~g & e).sum()),
-            int((~g & ~e).sum()),
-        )
-        assert len(data) == a + b + c + d, (
-            f"Complete-case total does not match the {key} 2x2 table"
-        )
+        outcome_known = baseline[f"eg_{key}_evaluable"].eq(True) & baseline[meta["active_col"]].notna()
+        data = baseline[exposure_known & outcome_known]
+        exposure = data[exposure_col].astype(bool)
+        outcome = data[meta["active_col"]].astype(bool)
+        a = int((exposure & outcome).sum())
+        b = int((exposure & ~outcome).sum())
+        c = int((~exposure & outcome).sum())
+        d = int((~exposure & ~outcome).sum())
+        assert len(data) == a + b + c + d
+        n_pos, n_neg = a + b, c + d
+        estimable = n_pos > 0 and n_neg > 0
         table = np.array([[a, b], [c, d]])
-        estimable = bool(
-            table.sum() and table.sum(axis=0).min() and table.sum(axis=1).min()
-        )
         if estimable:
-            _, _, _, expected = chi2_contingency(table, correction=False)
-            sparse = (table < 5).any() or (expected < 5).any()
-            if sparse:
+            if table.sum(axis=0).min() == 0:
                 odds, p = fisher_exact(table)
                 test = "Fisher exact"
             else:
-                _, p, _, _ = chi2_contingency(table, correction=False)
-                odds = a * d / (b * c) if b * c else np.inf
-                test = "chi-square"
+                _, _, _, expected = chi2_contingency(table, correction=False)
+                if (table < 5).any() or (expected < 5).any():
+                    odds, p = fisher_exact(table)
+                    test = "Fisher exact"
+                else:
+                    _, p, _, _ = chi2_contingency(table, correction=False)
+                    odds = a * d / (b * c) if b * c else np.inf
+                    test = "chi-square"
         else:
             odds, p, test = np.nan, np.nan, "not estimable"
         pr, pr_l, pr_u = _ratio_ci(a, b, c, d)
-        if (a + b) == 0:
-            pr_note = "not estimable: no glandular-positive patients"
-        elif (c + d) == 0:
-            pr_note = "not estimable: no glandular-negative patients"
+        pos_l, pos_u = _wilson(a, n_pos)
+        neg_l, neg_u = _wilson(c, n_neg)
+        if not n_pos:
+            note = f"not estimable: no {exposure_label}-positive patients"
+        elif not n_neg:
+            note = f"not estimable: no {exposure_label}-negative patients"
         elif c == 0 and a > 0:
-            pr_note = "infinite: observed prevalence in glandular-negative group is zero"
+            note = "reference group exists, zero observed prevalence; PR is infinite"
         elif a == 0 and c == 0:
-            pr_note = "not estimable: both observed prevalences are zero"
+            note = "both observed prevalences are zero"
         else:
-            pr_note = "observed (uncorrected)"
+            note = "estimable"
         if all(x > 0 for x in (a, b, c, d)):
             se = np.sqrt(sum(1 / x for x in (a, b, c, d)))
             or_l, or_u = np.exp(np.log(odds) + np.array([-1, 1]) * 1.96 * se)
         else:
             or_l = or_u = np.nan
-        rows.append(
-            {
-                "domain": meta["label"],
-                "n_complete": len(data),
-                "n_missing_or_not_evaluable": len(baseline) - len(data),
-                "glandular_pos_domain_pos": a,
-                "glandular_pos_domain_neg": b,
-                "glandular_neg_domain_pos": c,
-                "glandular_neg_domain_neg": d,
-                "pct_domain_active_if_glandular_pos": pct(a, a + b),
-                "pct_domain_active_if_glandular_neg": pct(c, c + d),
-                "prevalence_ratio": pr,
-                "PR_95_CI_lower": pr_l,
-                "PR_95_CI_upper": pr_u,
-                "prevalence_ratio_note": pr_note,
-                "risk_difference": (a / (a + b) - c / (c + d))
-                if (a + b) * (c + d)
-                else np.nan,
-                "odds_ratio": odds,
-                "OR_95_CI_lower": or_l,
-                "OR_95_CI_upper": or_u,
-                "test_used": test,
-                "p_value": p,
-            }
-        )
-    out = pd.DataFrame(rows)
-    valid = out.p_value.notna()
-    pvals = out.loc[valid, "p_value"].sort_values()
-    adjusted = (
-        (pvals * len(pvals) / np.arange(1, len(pvals) + 1))[::-1]
-        .cummin()[::-1]
-        .clip(upper=1)
+        rows.append({
+            "exposure": exposure_label, "domain": meta["label"],
+            "n_total_baseline": len(baseline),
+            "n_evaluable_exposure": int(exposure_known.sum()),
+            "n_evaluable_outcome": int(outcome_known.sum()),
+            "n_complete": len(data),
+            "n_excluded_exposure_unknown": int((~exposure_known).sum()),
+            "n_excluded_outcome_unknown": int((exposure_known & ~outcome_known).sum()),
+            "n_missing_or_not_evaluable": len(baseline) - len(data),
+            "component_pos_domain_pos": a, "component_pos_domain_neg": b,
+            "component_neg_domain_pos": c, "component_neg_domain_neg": d,
+            "n_component_positive": n_pos, "n_component_negative": n_neg,
+            "pct_domain_active_if_component_pos": pct(a, n_pos),
+            "pct_domain_active_if_component_neg": pct(c, n_neg),
+            "prevalence_positive_group": a / n_pos if n_pos else np.nan,
+            "prevalence_positive_group_95CI_lower": pos_l,
+            "prevalence_positive_group_95CI_upper": pos_u,
+            "prevalence_negative_group": c / n_neg if n_neg else np.nan,
+            "prevalence_negative_group_95CI_lower": neg_l,
+            "prevalence_negative_group_95CI_upper": neg_u,
+            "prevalence_ratio": pr, "PR_95_CI_lower": pr_l,
+            "PR_95_CI_upper": pr_u,
+            "risk_difference": a / n_pos - c / n_neg if estimable else np.nan,
+            "odds_ratio": odds, "OR_95_CI_lower": or_l, "OR_95_CI_upper": or_u,
+            "test_used": test, "p_value": p, "analysis_tier": analysis_tier,
+            "estimability_note": note,
+        })
+    result = pd.DataFrame(rows)
+    return _bh_fdr(result) if apply_fdr else result.assign(q_value_BH_FDR=np.nan)
+
+
+def associations(baseline: pd.DataFrame) -> pd.DataFrame:
+    """Compatibility output for the non-identifiable global comparison."""
+    out = binary_exposure_domain_associations(
+        baseline, "glandular_active", "glandular_evaluable", "glandular", "QC"
     )
-    out["q_value_BH_FDR"] = np.nan
-    out.loc[adjusted.index, "q_value_BH_FDR"] = adjusted
+    # Preserve historical names used by downstream consumers.
+    return out.rename(columns={
+        "component_pos_domain_pos": "glandular_pos_domain_pos",
+        "component_pos_domain_neg": "glandular_pos_domain_neg",
+        "component_neg_domain_pos": "glandular_neg_domain_pos",
+        "component_neg_domain_neg": "glandular_neg_domain_neg",
+        "pct_domain_active_if_component_pos": "pct_domain_active_if_glandular_pos",
+        "pct_domain_active_if_component_neg": "pct_domain_active_if_glandular_neg",
+    }).assign(
+        analysis_status=lambda x: np.where(x.test_used.eq("not estimable"), "not estimable", "estimable"),
+        reason=lambda x: np.where(
+            x.n_component_negative.eq(0),
+            "no observed glandular-negative patients among evaluable baseline patients",
+            x.estimability_note,
+        ),
+    )
+
+
+GLANDULAR_COMPONENTS = [
+    ("Eye dryness", "glandular_eye_dryness_active", "descriptive_only"),
+    ("Mouth dryness", "glandular_mouth_dryness_active", "descriptive_only"),
+    ("Objective eye findings", "glandular_objective_eye_active", "secondary"),
+    ("Objective mouth findings", "glandular_objective_mouth_active", "secondary"),
+    ("Salivary gland swelling", "glandular_salivary_gland_swelling_active", "exploratory"),
+]
+
+
+def glandular_component_prevalence(baseline: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for label, column, _ in GLANDULAR_COMPONENTS:
+        positive = int(baseline[column].eq(True).sum())
+        negative = int(baseline[column].eq(False).sum())
+        unknown = int(baseline[column].isna().sum())
+        evaluable = positive + negative
+        rows.append({
+            "component": label, "n_total": len(baseline), "n_positive": positive,
+            "n_negative": negative, "n_unknown": unknown, "n_evaluable": evaluable,
+            "pct_positive_among_evaluable": pct(positive, evaluable),
+            "pct_negative_among_evaluable": pct(negative, evaluable),
+            "pct_unknown_total": pct(unknown, len(baseline)),
+        })
+    return pd.DataFrame(rows)
+
+
+def glandular_burden_distribution(baseline: pd.DataFrame) -> pd.DataFrame:
+    burden = baseline.n_glandular_manifestations_active.dropna().astype(int)
+    counts = burden.value_counts()
+    return pd.DataFrame({
+        "n_glandular_manifestations_active": range(6),
+        "n_patients": [int(counts.get(i, 0)) for i in range(6)],
+        "pct_complete_glandular_phenotype": [pct(counts.get(i, 0), len(burden)) for i in range(6)],
+    })
+
+
+def component_associations(baseline: pd.DataFrame) -> pd.DataFrame:
+    frames = []
+    for label, column, tier in GLANDULAR_COMPONENTS:
+        frame = binary_exposure_domain_associations(
+            baseline, column, column, label, tier, apply_fdr=False
+        ).rename(columns={"exposure": "component"})
+        frames.append(frame)
+    out = pd.concat(frames, ignore_index=True)
+    # Prespecified 33-test family; subjective sicca components remain descriptive.
+    family = out.analysis_tier.isin(["secondary", "exploratory"])
+    adjusted = _bh_fdr(out.loc[family].drop(columns="q_value_BH_FDR"))
+    out.loc[family, "q_value_BH_FDR"] = adjusted.q_value_BH_FDR
     return out
+
+
+def burden_analyses(baseline: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    complete = baseline[
+        baseline.n_glandular_manifestations_active.notna()
+        & baseline.n_extraglandular_domains_active.notna()
+    ].copy()
+    rows = []
+    for burden in range(1, 6):
+        values = complete.loc[
+            complete.n_glandular_manifestations_active.eq(burden),
+            "n_extraglandular_domains_active",
+        ].astype(float)
+        rows.append({
+            "n_glandular_manifestations_active": burden, "n": len(values),
+            "mean": values.mean(), "sd": values.std(), "median": values.median(),
+            "q1": values.quantile(.25), "q3": values.quantile(.75),
+            "min": values.min(), "max": values.max(),
+        })
+    if len(complete) >= 2:
+        rho, p_value = spearmanr(
+            complete.n_glandular_manifestations_active.astype(float),
+            complete.n_extraglandular_domains_active.astype(float),
+        )
+    else:
+        rho = p_value = np.nan
+    correlation = pd.DataFrame([{"n": len(complete), "spearman_rho": rho,
+                                 "p_value": p_value,
+                                 "ci_method": "not implemented"}])
+    y = complete.n_extraglandular_domains_active.astype(float)
+    mean, variance = y.mean(), y.var(ddof=1)
+    zero = float(y.eq(0).mean()) if len(y) else np.nan
+    model_row = {"n": len(complete), "outcome_mean": mean,
+                 "outcome_variance": variance, "proportion_zeros": zero,
+                 "variance_to_mean": variance / mean if mean else np.nan,
+                 "model_family": "not estimable", "effect_per_plus_1": np.nan,
+                 "effect_95_CI_lower": np.nan, "effect_95_CI_upper": np.nan,
+                 "p_value": np.nan}
+    if len(complete) >= 3 and y.nunique() > 1:
+        import statsmodels.api as sm
+        x = sm.add_constant(complete.n_glandular_manifestations_active.astype(float))
+        family = sm.families.NegativeBinomial(alpha=1.0) if variance > 1.5 * mean else sm.families.Poisson()
+        fit = sm.GLM(y, x, family=family).fit()
+        coefficient = fit.params["n_glandular_manifestations_active"]
+        ci = fit.conf_int().loc["n_glandular_manifestations_active"]
+        model_row.update({
+            "model_family": "negative binomial" if variance > 1.5 * mean else "Poisson",
+            "effect_per_plus_1": np.exp(coefficient),
+            "effect_95_CI_lower": np.exp(ci.iloc[0]),
+            "effect_95_CI_upper": np.exp(ci.iloc[1]),
+            "p_value": fit.pvalues["n_glandular_manifestations_active"],
+        })
+    return pd.DataFrame(rows), correlation, pd.DataFrame([model_row])
 
 
 def qc_summary(
@@ -459,6 +606,16 @@ def qc_summary(
     n_sicca_negative = int(baseline.sicca_active.eq(False).sum())
     n_sicca_evaluable = int(baseline.sicca_evaluable.eq(True).sum())
     assert n_sicca_positive + n_sicca_negative == n_sicca_evaluable
+    for active_col, evaluable_col in [
+        ("objective_glandular_dysfunction_active", "objective_glandular_dysfunction_evaluable"),
+        ("objective_or_swelling_glandular_active", "objective_or_swelling_glandular_evaluable"),
+    ]:
+        positive = int(baseline[active_col].eq(True).sum())
+        negative = int(baseline[active_col].eq(False).sum())
+        unknown = int(baseline[active_col].isna().sum())
+        evaluable = int(baseline[evaluable_col].sum())
+        assert positive + negative == evaluable
+        assert evaluable + unknown == len(baseline)
     raw_sicca = baseline.get(
         GLANDULAR_COLS["symptom_dry_eye_or_mouth"],
         pd.Series(pd.NA, index=baseline.index),
@@ -482,6 +639,16 @@ def qc_summary(
         "n_glandular_negative_baseline": int(baseline.glandular_active.eq(False).sum()),
         "n_glandular_missing_baseline": int(baseline.glandular_active.isna().sum()),
         "n_glandular_evaluable_baseline": int(baseline.glandular_evaluable.sum()),
+        "n_objective_glandular_positive_baseline": int(baseline.objective_glandular_dysfunction_active.eq(True).sum()),
+        "n_objective_glandular_negative_baseline": int(baseline.objective_glandular_dysfunction_active.eq(False).sum()),
+        "n_objective_glandular_unknown_baseline": int(baseline.objective_glandular_dysfunction_active.isna().sum()),
+        "n_objective_glandular_evaluable_baseline": int(baseline.objective_glandular_dysfunction_evaluable.sum()),
+        "n_objective_or_swelling_positive_baseline": int(baseline.objective_or_swelling_glandular_active.eq(True).sum()),
+        "n_objective_or_swelling_negative_baseline": int(baseline.objective_or_swelling_glandular_active.eq(False).sum()),
+        "n_objective_or_swelling_unknown_baseline": int(baseline.objective_or_swelling_glandular_active.isna().sum()),
+        "n_objective_or_swelling_evaluable_baseline": int(baseline.objective_or_swelling_glandular_evaluable.sum()),
+        "n_complete_glandular_burden_baseline": int(baseline.n_glandular_manifestations_active.notna().sum()),
+        "n_complete_glandular_and_extraglandular_burden_baseline": int((baseline.n_glandular_manifestations_active.notna() & baseline.n_extraglandular_domains_active.notna()).sum()),
         "n_sicca_positive_baseline": n_sicca_positive,
         "n_sicca_negative_baseline": n_sicca_negative,
         "n_sicca_missing_baseline": len(baseline) - n_sicca_evaluable,
@@ -536,12 +703,74 @@ def make_figures(visits: pd.DataFrame, domains: pd.DataFrame, figure_dir: Path) 
     plt.close(fig)
 
 
+def make_glandular_figures(
+    baseline: pd.DataFrame, prevalence: pd.DataFrame, burden: pd.DataFrame,
+    objective: pd.DataFrame, components: pd.DataFrame, figure_dir: Path,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    figure_dir.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    left = np.zeros(len(prevalence))
+    for column, label, color in [
+        ("n_positive", "Positive", "#2878B5"), ("n_negative", "Negative", "#9DC3E6"),
+        ("n_unknown", "Unknown", "#D9D9D9")]:
+        ax.barh(prevalence.component, prevalence[column], left=left, label=label, color=color)
+        left += prevalence[column].to_numpy()
+    ax.invert_yaxis(); ax.set_xlabel("Patients"); ax.legend(frameon=False)
+    fig.tight_layout(); fig.savefig(figure_dir / "06_glandular_components_status_baseline.pdf"); plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.bar(burden.n_glandular_manifestations_active, burden.n_patients, color="#2878B5")
+    ax.set(xlabel="Active glandular manifestations", ylabel="Patients", xticks=range(6))
+    fig.tight_layout(); fig.savefig(figure_dir / "06_glandular_burden_distribution_baseline.pdf"); plt.close(fig)
+
+    forest = objective.replace([np.inf, -np.inf], np.nan)
+    fig, ax = plt.subplots(figsize=(7, 5))
+    y = np.arange(len(forest))
+    finite = forest.prevalence_ratio.notna() & forest.PR_95_CI_lower.notna()
+    ax.errorbar(forest.loc[finite, "prevalence_ratio"], y[finite],
+                xerr=[forest.loc[finite, "prevalence_ratio"] - forest.loc[finite, "PR_95_CI_lower"],
+                      forest.loc[finite, "PR_95_CI_upper"] - forest.loc[finite, "prevalence_ratio"]],
+                fmt="o", color="#2878B5")
+    ax.axvline(1, color="grey", linestyle="--"); ax.set_yticks(y, objective.domain)
+    ax.set_xlabel("Prevalence ratio (95% CI)"); ax.invert_yaxis()
+    for i, row in objective.iterrows():
+        if np.isinf(row.prevalence_ratio): ax.text(ax.get_xlim()[1], i, "∞", ha="right")
+    fig.tight_layout(); fig.savefig(figure_dir / "06_objective_glandular_domain_PR_forest.pdf"); plt.close(fig)
+
+    matrix = components.pivot(index="component", columns="domain", values="prevalence_ratio")
+    values = np.log(matrix.replace([np.inf, -np.inf], np.nan))
+    fig, ax = plt.subplots(figsize=(11, 4.5)); image = ax.imshow(values, cmap="coolwarm", aspect="auto")
+    ax.set(yticks=range(len(values.index)), yticklabels=values.index,
+           xticks=range(len(values.columns)), xticklabels=values.columns)
+    ax.tick_params(axis="x", rotation=45); fig.colorbar(image, ax=ax, label="log(PR)")
+    fig.tight_layout(); fig.savefig(figure_dir / "06_glandular_component_extraglandular_heatmap.pdf"); plt.close(fig)
+
+    complete = baseline.dropna(subset=["n_glandular_manifestations_active", "n_extraglandular_domains_active"])
+    fig, ax = plt.subplots(figsize=(7, 4.5)); rng = np.random.default_rng(20261005)
+    ax.scatter(complete.n_glandular_manifestations_active.astype(float) + rng.uniform(-.12, .12, len(complete)),
+               complete.n_extraglandular_domains_active.astype(float) + rng.uniform(-.12, .12, len(complete)),
+               alpha=.5, s=20)
+    medians = complete.groupby("n_glandular_manifestations_active")["n_extraglandular_domains_active"].median()
+    ax.plot(medians.index, medians.values, "o-", color="#C43C39", label="Median")
+    ax.set(xlabel="Active glandular manifestations", ylabel="Active extraglandular domains")
+    ax.legend(frameon=False); fig.tight_layout(); fig.savefig(figure_dir / "06_glandular_vs_extraglandular_burden.pdf"); plt.close(fig)
+
+
 def run(
     input_path: Path, intermediate_dir: Path, table_dir: Path, figure_dir: Path
 ) -> None:
     source = read_table(input_path)
     episodes = derive_episode_level(source)
     baseline = episodes[episodes.is_clinical_baseline.eq(True)].copy()  # noqa: E712
+    strict_known = baseline.glandular_objective_eye_active.notna() & baseline.glandular_objective_mouth_active.notna()
+    baseline["objective_glandular_complete_case"] = pd.Series(pd.NA, index=baseline.index, dtype="boolean")
+    baseline.loc[strict_known, "objective_glandular_complete_case"] = (
+        baseline.loc[strict_known, "glandular_objective_eye_active"].astype(bool)
+        | baseline.loc[strict_known, "glandular_objective_mouth_active"].astype(bool)
+    )
+    baseline["objective_glandular_complete_case_evaluable"] = strict_known.astype("boolean")
     intermediate_dir.mkdir(parents=True, exist_ok=True)
     table_dir.mkdir(parents=True, exist_ok=True)
     episodes.to_parquet(
@@ -558,6 +787,12 @@ def run(
         "glandular_salivary_gland_swelling_active",
         "glandular_active",
         "glandular_evaluable",
+        "objective_glandular_dysfunction_active",
+        "objective_glandular_dysfunction_evaluable",
+        "objective_or_swelling_glandular_active",
+        "objective_or_swelling_glandular_evaluable",
+        "objective_glandular_complete_case",
+        "objective_glandular_complete_case_evaluable",
         "n_glandular_manifestations_active",
         "extraglandular_active",
         "extraglandular_evaluable",
@@ -598,7 +833,33 @@ def run(
     associations(baseline).to_csv(
         table_dir / "06_pairwise_domain_associations_clinical_baseline.csv", index=False
     )
+    prevalence = glandular_component_prevalence(baseline)
+    burden_distribution = glandular_burden_distribution(baseline)
+    objective = binary_exposure_domain_associations(
+        baseline, "objective_glandular_dysfunction_active",
+        "objective_glandular_dysfunction_evaluable", "objective glandular dysfunction", "primary"
+    )
+    components = component_associations(baseline)
+    objective_or_swelling = binary_exposure_domain_associations(
+        baseline, "objective_or_swelling_glandular_active",
+        "objective_or_swelling_glandular_evaluable", "objective dysfunction or swelling", "sensitivity"
+    )
+    strict = binary_exposure_domain_associations(
+        baseline, "objective_glandular_complete_case",
+        "objective_glandular_complete_case_evaluable", "objective complete case", "sensitivity"
+    )
+    burden_summary, burden_correlation, burden_model = burden_analyses(baseline)
+    prevalence.to_csv(table_dir / "06_glandular_component_prevalence_baseline.csv", index=False)
+    burden_distribution.to_csv(table_dir / "06_glandular_burden_distribution_baseline.csv", index=False)
+    objective.to_csv(table_dir / "06_objective_glandular_domain_associations_baseline.csv", index=False)
+    components.to_csv(table_dir / "06_glandular_component_domain_associations_baseline.csv", index=False)
+    objective_or_swelling.to_csv(table_dir / "06_objective_or_swelling_domain_associations_sensitivity.csv", index=False)
+    strict.to_csv(table_dir / "06_objective_complete_case_domain_associations_sensitivity.csv", index=False)
+    burden_summary.to_csv(table_dir / "06_glandular_vs_extraglandular_burden_summary.csv", index=False)
+    burden_correlation.to_csv(table_dir / "06_glandular_extraglandular_burden_correlation.csv", index=False)
+    burden_model.to_csv(table_dir / "06_glandular_extraglandular_burden_model.csv", index=False)
     make_figures(visits, domains, figure_dir)
+    make_glandular_figures(baseline, prevalence, burden_distribution, objective, components, figure_dir)
 
 
 def main() -> None:

@@ -218,3 +218,45 @@ def test_zero_observed_reference_prevalence_is_infinite_not_missing():
     assert pr == float("inf")
     assert pd.isna(lower)
     assert pd.isna(upper)
+
+
+@pytest.mark.parametrize(
+    ("eye", "mouth", "expected"),
+    [(True, pd.NA, True), (False, False, False), (False, pd.NA, pd.NA)],
+)
+def test_objective_composite_has_kleene_or_semantics(eye, mouth, expected):
+    result = _glandular_row(
+        ocular_stain="positive" if eye is True else "negative",
+        lacrimal_dysfunction="positive" if eye is True else "negative",
+        salivary_gland_movement=(
+            "positive" if mouth is True else "negative" if mouth is False else pd.NA
+        ),
+    )
+    observed = result.objective_glandular_dysfunction_active
+    assert (pd.isna(observed) and pd.isna(expected)) or observed == expected
+
+
+def test_objective_or_swelling_can_resolve_unknown_objective():
+    positive = _glandular_row(gland_swell="low activity")
+    negative = _glandular_row(
+        ocular_stain="negative", lacrimal_dysfunction="negative",
+        salivary_gland_movement="negative", gland_swell="no activity",
+    )
+    assert positive.objective_or_swelling_glandular_active == True  # noqa: E712
+    assert negative.objective_or_swelling_glandular_active == False  # noqa: E712
+
+
+def test_generic_association_excludes_unknown_and_keeps_zero_event_reference():
+    baseline = _association_frame([True, True, False, False, pd.NA], [True, False, False, False, True])
+    result = step.binary_exposure_domain_associations(
+        baseline, "glandular_active", "glandular_evaluable", "synthetic", "test"
+    )
+    row = result.set_index("domain").loc["Constitutional"]
+    assert row.n_complete == 4
+    assert row.n_complete == sum([
+        row.component_pos_domain_pos, row.component_pos_domain_neg,
+        row.component_neg_domain_pos, row.component_neg_domain_neg,
+    ])
+    assert row.n_component_negative == 2
+    assert row.prevalence_ratio == float("inf")
+    assert "reference group exists" in row.estimability_note
