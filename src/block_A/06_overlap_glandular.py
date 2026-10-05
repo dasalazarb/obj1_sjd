@@ -499,6 +499,26 @@ GLANDULAR_COMPONENTS = [
     ("Salivary gland swelling", "glandular_salivary_gland_swelling_active", "exploratory"),
 ]
 
+GLANDULAR_COMPONENT_COLS = [column for _, column, _ in GLANDULAR_COMPONENTS]
+NO_BIO_HEME_DOMAINS = [
+    key for key in EXTRAGLANDULAR_DOMAINS if key not in {"biological", "hematologic"}
+]
+
+
+def add_sensitivity_phenotypes(frame: pd.DataFrame) -> pd.DataFrame:
+    """Add analysis-only completeness and burden fields without redefining flags."""
+    out = frame.copy()
+    out["glandular_phenotype_complete"] = out[
+        GLANDULAR_COMPONENT_COLS
+    ].notna().all(axis=1)
+    active_cols = [EXTRAGLANDULAR_DOMAINS[key]["active_col"] for key in NO_BIO_HEME_DOMAINS]
+    evaluable_cols = [f"eg_{key}_evaluable" for key in NO_BIO_HEME_DOMAINS]
+    complete = out[evaluable_cols].eq(True).all(axis=1)
+    out["n_extraglandular_domains_active_no_bio_heme"] = (
+        out[active_cols].sum(axis=1).astype("Int64").where(complete)
+    )
+    return out
+
 
 def glandular_component_prevalence(baseline: pd.DataFrame) -> pd.DataFrame:
     rows = []
@@ -595,6 +615,232 @@ def burden_analyses(baseline: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame,
     return pd.DataFrame(rows), correlation, pd.DataFrame([model_row])
 
 
+def _poisson_burden_result(
+    baseline: pd.DataFrame, outcome: str, definition: str
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return the prespecified complete-case correlation and Poisson model."""
+    exposure = "n_glandular_manifestations_active"
+    complete = baseline.dropna(subset=[exposure, outcome]).copy()
+    rho = p_spearman = np.nan
+    if len(complete) >= 2:
+        rho, p_spearman = spearmanr(
+            complete[exposure].astype(float), complete[outcome].astype(float)
+        )
+    correlation = pd.DataFrame([{
+        "outcome_definition": definition,
+        "n_complete": len(complete),
+        "spearman_rho": rho,
+        "p_value": p_spearman,
+    }])
+    y = complete[outcome].astype(float)
+    mean = y.mean()
+    variance = y.var(ddof=1)
+    model = {
+        "model_family": "Poisson",
+        "outcome_definition": definition,
+        "n_complete": len(complete),
+        "mean_outcome": mean,
+        "variance_outcome": variance,
+        "variance_to_mean": variance / mean if pd.notna(mean) and mean != 0 else np.nan,
+        "beta": np.nan,
+        "exp_beta": np.nan,
+        "CI_95_lower": np.nan,
+        "CI_95_upper": np.nan,
+        "p_value": np.nan,
+    }
+    if len(complete) >= 3 and y.nunique() > 1:
+        import statsmodels.api as sm
+
+        x = sm.add_constant(complete[exposure].astype(float))
+        fit = sm.GLM(y, x, family=sm.families.Poisson()).fit()
+        beta = fit.params[exposure]
+        ci = fit.conf_int().loc[exposure]
+        model.update({
+            "beta": beta,
+            "exp_beta": np.exp(beta),
+            "CI_95_lower": np.exp(ci.iloc[0]),
+            "CI_95_upper": np.exp(ci.iloc[1]),
+            "p_value": fit.pvalues[exposure],
+        })
+    return correlation, pd.DataFrame([model])
+
+
+def leave_one_domain_out(baseline: pd.DataFrame) -> pd.DataFrame:
+    """Re-estimate burden associations after omitting each systemic domain."""
+    rows = []
+    exclusions: list[tuple[str, str | None]] = [("NONE", None)] + [
+        (meta["label"], key) for key, meta in EXTRAGLANDULAR_DOMAINS.items()
+    ]
+    for label, excluded in exclusions:
+        keys = [key for key in EXTRAGLANDULAR_DOMAINS if key != excluded]
+        active = [EXTRAGLANDULAR_DOMAINS[key]["active_col"] for key in keys]
+        evaluable = [f"eg_{key}_evaluable" for key in keys]
+        outcome = baseline[active].sum(axis=1).astype("Int64").where(
+            baseline[evaluable].eq(True).all(axis=1)
+        )
+        work = baseline.assign(_leave_one_outcome=outcome)
+        corr, model = _poisson_burden_result(
+            work, "_leave_one_outcome", f"Excludes {label}" if excluded else "All 11 domains"
+        )
+        rows.append({
+            "excluded_domain": label,
+            "n_complete": int(corr.loc[0, "n_complete"]),
+            "spearman_rho": corr.loc[0, "spearman_rho"],
+            "spearman_p": corr.loc[0, "p_value"],
+            "model_family": model.loc[0, "model_family"],
+            "exp_beta": model.loc[0, "exp_beta"],
+            "CI_95_lower": model.loc[0, "CI_95_lower"],
+            "CI_95_upper": model.loc[0, "CI_95_upper"],
+            "model_p": model.loc[0, "p_value"],
+        })
+    return pd.DataFrame(rows)
+
+
+def completeness_domain_comparison(baseline: pd.DataFrame) -> pd.DataFrame:
+    """Compare each evaluable domain by glandular phenotype completeness."""
+    rows = []
+    complete_group = baseline.glandular_phenotype_complete.astype(bool)
+    for key, meta in EXTRAGLANDULAR_DOMAINS.items():
+        known = baseline[f"eg_{key}_evaluable"].eq(True) & baseline[meta["active_col"]].notna()
+        outcome = baseline[meta["active_col"]].astype("boolean")
+        a = int((known & complete_group & outcome.eq(True)).sum())
+        b = int((known & complete_group & outcome.eq(False)).sum())
+        c = int((known & ~complete_group & outcome.eq(True)).sum())
+        d = int((known & ~complete_group & outcome.eq(False)).sum())
+        table = np.array([[a, b], [c, d]])
+        if (a + b) and (c + d):
+            _, _, _, expected = chi2_contingency(table, correction=False)
+            if (table < 5).any() or (expected < 5).any():
+                _, p_value = fisher_exact(table)
+                test = "Fisher exact"
+            else:
+                _, p_value, _, _ = chi2_contingency(table, correction=False)
+                test = "chi-square"
+        else:
+            p_value, test = np.nan, "not estimable"
+        pr, lower, upper = _ratio_ci(a, b, c, d)
+        rows.append({
+            "domain": meta["label"],
+            "n_complete_group_evaluable": a + b,
+            "n_incomplete_group_evaluable": c + d,
+            "complete_group_domain_positive": a,
+            "complete_group_domain_negative": b,
+            "incomplete_group_domain_positive": c,
+            "incomplete_group_domain_negative": d,
+            "pct_domain_active_complete": pct(a, a + b),
+            "pct_domain_active_incomplete": pct(c, c + d),
+            "prevalence_ratio": pr,
+            "PR_95_CI_lower": lower,
+            "PR_95_CI_upper": upper,
+            "risk_difference": a / (a + b) - c / (c + d) if (a + b) and (c + d) else np.nan,
+            "test_used": test,
+            "p_value": p_value,
+        })
+    return _bh_fdr(pd.DataFrame(rows))
+
+
+def _continuous_summary(values: pd.Series) -> str:
+    values = pd.to_numeric(values, errors="coerce").dropna()
+    if values.empty:
+        return "N=0"
+    return (
+        f"N={len(values)}; mean={values.mean():.3g}; SD={values.std():.3g}; "
+        f"median={values.median():.3g}; IQR={values.quantile(.25):.3g}-{values.quantile(.75):.3g}"
+    )
+
+
+def completeness_baseline_comparison(baseline: pd.DataFrame) -> pd.DataFrame:
+    """Describe available demographics and systemic burden by completeness."""
+    from scipy.stats import mannwhitneyu
+
+    group = baseline.glandular_phenotype_complete.astype(bool)
+    rows = []
+    continuous = [("n_extraglandular_domains_active", "Extraglandular burden")]
+    for candidate in ("age", "age_at_baseline", "demographics__age"):
+        if candidate in baseline:
+            continuous.append((candidate, "Age"))
+            break
+    for column, label in continuous:
+        complete = pd.to_numeric(baseline.loc[group, column], errors="coerce").dropna()
+        incomplete = pd.to_numeric(baseline.loc[~group, column], errors="coerce").dropna()
+        p_value = mannwhitneyu(complete, incomplete, alternative="two-sided").pvalue if len(complete) and len(incomplete) else np.nan
+        rows.append({
+            "variable": label,
+            "group_complete_n": len(complete),
+            "group_incomplete_n": len(incomplete),
+            "complete_summary": _continuous_summary(complete),
+            "incomplete_summary": _continuous_summary(incomplete),
+            "effect_measure": "mean difference; median difference",
+            "effect_value": f"{complete.mean() - incomplete.mean():.6g}; {complete.median() - incomplete.median():.6g}" if len(complete) and len(incomplete) else pd.NA,
+            "CI_95_lower": np.nan,
+            "CI_95_upper": np.nan,
+            "test_used": "Mann-Whitney U",
+            "p_value": p_value,
+            "q_value_BH_FDR": np.nan,
+        })
+    # Categorical demographics are included only when already on the spine.
+    for candidates, label in [
+        (("sex", "gender", "demographics__sex"), "Sex"),
+        (("race_ethnicity", "race/ethnicity", "race", "demographics__race"), "Race/ethnicity"),
+    ]:
+        column = next((item for item in candidates if item in baseline), None)
+        if column is None:
+            continue
+        known = baseline[column].notna()
+        contingency = pd.crosstab(group[known], baseline.loc[known, column])
+        p_value, test = np.nan, "not estimable"
+        if contingency.shape[0] == 2 and contingency.shape[1] >= 2:
+            if contingency.shape == (2, 2) and (contingency.to_numpy() < 5).any():
+                _, p_value = fisher_exact(contingency)
+                test = "Fisher exact"
+            else:
+                _, p_value, _, _ = chi2_contingency(contingency, correction=False)
+                test = "chi-square"
+        for category in sorted(baseline.loc[known, column].astype(str).unique()):
+            c_n = int((known & group & baseline[column].astype(str).eq(category)).sum())
+            i_n = int((known & ~group & baseline[column].astype(str).eq(category)).sum())
+            c_d = int((known & group).sum()); i_d = int((known & ~group).sum())
+            rows.append({
+                "variable": f"{label}: {category}", "group_complete_n": c_d,
+                "group_incomplete_n": i_d,
+                "complete_summary": f"{c_n} ({pct(c_n, c_d):.1f}%)",
+                "incomplete_summary": f"{i_n} ({pct(i_n, i_d):.1f}%)",
+                "effect_measure": "risk difference", "effect_value": c_n / c_d - i_n / i_d,
+                "CI_95_lower": np.nan, "CI_95_upper": np.nan,
+                "test_used": test, "p_value": p_value, "q_value_BH_FDR": np.nan,
+            })
+    return pd.DataFrame(rows)
+
+
+def completeness_followup(episodes: pd.DataFrame, baseline: pd.DataFrame) -> pd.DataFrame:
+    """Summarize observed clinical follow-up from the unchanged episode spine."""
+    patient = episodes[episodes.patient_id.isin(baseline.patient_id)].groupby("patient_id").agg(
+        n_visits=("clinical_episode_id", "size"),
+        last_date=("clinical_anchor_date", "max"),
+    )
+    base = baseline.set_index("patient_id")
+    patient["followup_years"] = (
+        patient.last_date - base.loc[patient.index, "clinical_anchor_date"]
+    ).dt.days / DAY_PER_YEAR
+    patient["complete"] = base.loc[patient.index, "glandular_phenotype_complete"].astype(bool)
+    rows = []
+    for complete, label in [(True, "COMPLETE"), (False, "INCOMPLETE")]:
+        data = patient[patient.complete.eq(complete)]
+        duration = data.followup_years.dropna()
+        visits = data.n_visits
+        has_followup = visits.gt(1)
+        rows.append({
+            "group": label, "n_patients": len(data),
+            "median_clinical_visits": visits.median(),
+            "IQR_clinical_visits": f"{visits.quantile(.25):.3g}-{visits.quantile(.75):.3g}",
+            "n_with_followup": int(has_followup.sum()),
+            "pct_with_followup": pct(has_followup.sum(), len(data)),
+            "median_followup_years": duration.median(),
+            "IQR_followup_years": f"{duration.quantile(.25):.3g}-{duration.quantile(.75):.3g}" if len(duration) else pd.NA,
+        })
+    return pd.DataFrame(rows)
+
+
 def qc_summary(
     source: pd.DataFrame, episodes: pd.DataFrame, baseline: pd.DataFrame
 ) -> pd.DataFrame:
@@ -649,6 +895,7 @@ def qc_summary(
         "n_objective_or_swelling_evaluable_baseline": int(baseline.objective_or_swelling_glandular_evaluable.sum()),
         "n_complete_glandular_burden_baseline": int(baseline.n_glandular_manifestations_active.notna().sum()),
         "n_complete_glandular_and_extraglandular_burden_baseline": int((baseline.n_glandular_manifestations_active.notna() & baseline.n_extraglandular_domains_active.notna()).sum()),
+        "n_complete_for_burden_analysis": int((baseline.glandular_phenotype_complete & baseline.n_extraglandular_domains_active.notna()).sum()),
         "n_sicca_positive_baseline": n_sicca_positive,
         "n_sicca_negative_baseline": n_sicca_negative,
         "n_sicca_missing_baseline": len(baseline) - n_sicca_evaluable,
@@ -758,11 +1005,63 @@ def make_glandular_figures(
     ax.legend(frameon=False); fig.tight_layout(); fig.savefig(figure_dir / "06_glandular_vs_extraglandular_burden.pdf"); plt.close(fig)
 
 
+def make_sensitivity_figures(
+    baseline: pd.DataFrame, leave_one_out: pd.DataFrame, figure_dir: Path
+) -> None:
+    """Plot sensitivity results using the primary burden figure's styling."""
+    import matplotlib.pyplot as plt
+
+    figure_dir.mkdir(parents=True, exist_ok=True)
+    outcome = "n_extraglandular_domains_active_no_bio_heme"
+    complete = baseline.dropna(
+        subset=["n_glandular_manifestations_active", outcome]
+    )
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    rng = np.random.default_rng(20261005)
+    ax.scatter(
+        complete.n_glandular_manifestations_active.astype(float)
+        + rng.uniform(-0.12, 0.12, len(complete)),
+        complete[outcome].astype(float) + rng.uniform(-0.12, 0.12, len(complete)),
+        alpha=0.5,
+        s=20,
+    )
+    medians = complete.groupby("n_glandular_manifestations_active")[outcome].median()
+    ax.plot(medians.index, medians.values, "o-", color="#C43C39", label="Median")
+    ax.set(
+        xlabel="Active glandular manifestations",
+        ylabel="Active extraglandular domains\n(excluding Biological/Hematologic)",
+    )
+    ax.legend(frameon=False)
+    fig.tight_layout()
+    fig.savefig(figure_dir / "06_glandular_vs_extraglandular_burden_no_bio_heme.pdf")
+    plt.close(fig)
+
+    forest = leave_one_out.replace([np.inf, -np.inf], np.nan)
+    fig, ax = plt.subplots(figsize=(7, 6))
+    y = np.arange(len(forest))
+    finite = forest[["exp_beta", "CI_95_lower", "CI_95_upper"]].notna().all(axis=1)
+    ax.errorbar(
+        forest.loc[finite, "exp_beta"], y[finite],
+        xerr=[
+            forest.loc[finite, "exp_beta"] - forest.loc[finite, "CI_95_lower"],
+            forest.loc[finite, "CI_95_upper"] - forest.loc[finite, "exp_beta"],
+        ],
+        fmt="o", color="#2878B5",
+    )
+    labels = ["Primary: exclude none" if x == "NONE" else f"Exclude {x}" for x in forest.excluded_domain]
+    ax.axvline(1, color="grey", linestyle="--")
+    ax.set(yticks=y, yticklabels=labels, xlabel="Poisson ratio per +1 glandular manifestation (95% CI)")
+    ax.invert_yaxis()
+    fig.tight_layout()
+    fig.savefig(figure_dir / "06_glandular_burden_leave_one_eg_domain_out_forest.pdf")
+    plt.close(fig)
+
+
 def run(
     input_path: Path, intermediate_dir: Path, table_dir: Path, figure_dir: Path
 ) -> None:
     source = read_table(input_path)
-    episodes = derive_episode_level(source)
+    episodes = add_sensitivity_phenotypes(derive_episode_level(source))
     baseline = episodes[episodes.is_clinical_baseline.eq(True)].copy()  # noqa: E712
     strict_known = baseline.glandular_objective_eye_active.notna() & baseline.glandular_objective_mouth_active.notna()
     baseline["objective_glandular_complete_case"] = pd.Series(pd.NA, index=baseline.index, dtype="boolean")
@@ -801,6 +1100,8 @@ def run(
         "overlap_status",
         "active_extraglandular_domains",
         "n_extraglandular_domains_active",
+        "n_extraglandular_domains_active_no_bio_heme",
+        "glandular_phenotype_complete",
     ]
     source_audit_cols = [col for col in GLANDULAR_COLS.values() if col in baseline]
     audit_cols = (
@@ -849,6 +1150,15 @@ def run(
         "objective_glandular_complete_case_evaluable", "objective complete case", "sensitivity"
     )
     burden_summary, burden_correlation, burden_model = burden_analyses(baseline)
+    no_bio_heme_correlation, no_bio_heme_model = _poisson_burden_result(
+        baseline,
+        "n_extraglandular_domains_active_no_bio_heme",
+        "9 domains excluding Biological and Hematologic",
+    )
+    completeness_baseline = completeness_baseline_comparison(baseline)
+    completeness_domains = completeness_domain_comparison(baseline)
+    completeness_followup_table = completeness_followup(episodes, baseline)
+    leave_one_out = leave_one_domain_out(baseline)
     prevalence.to_csv(table_dir / "06_glandular_component_prevalence_baseline.csv", index=False)
     burden_distribution.to_csv(table_dir / "06_glandular_burden_distribution_baseline.csv", index=False)
     objective.to_csv(table_dir / "06_objective_glandular_domain_associations_baseline.csv", index=False)
@@ -858,8 +1168,34 @@ def run(
     burden_summary.to_csv(table_dir / "06_glandular_vs_extraglandular_burden_summary.csv", index=False)
     burden_correlation.to_csv(table_dir / "06_glandular_extraglandular_burden_correlation.csv", index=False)
     burden_model.to_csv(table_dir / "06_glandular_extraglandular_burden_model.csv", index=False)
+    no_bio_heme_correlation.to_csv(
+        table_dir / "06_glandular_extraglandular_burden_no_bio_heme_correlation.csv", index=False
+    )
+    no_bio_heme_model.to_csv(
+        table_dir / "06_glandular_extraglandular_burden_no_bio_heme_model.csv", index=False
+    )
+    completeness_baseline.to_csv(
+        table_dir / "06_glandular_completeness_comparison_baseline.csv", index=False
+    )
+    completeness_domains.to_csv(
+        table_dir / "06_glandular_completeness_extraglandular_domains.csv", index=False
+    )
+    completeness_followup_table.to_csv(
+        table_dir / "06_glandular_completeness_followup.csv", index=False
+    )
+    leave_one_out.to_csv(
+        table_dir / "06_glandular_burden_leave_one_eg_domain_out.csv", index=False
+    )
+    leave_one_out.rename(columns={"excluded_domain": "analysis"}).assign(
+        analysis=lambda x: x.analysis.map(
+            lambda value: "Primary all EG domains" if value == "NONE" else f"Exclude {value}"
+        )
+    )[["analysis", "n_complete", "spearman_rho", "spearman_p", "exp_beta", "CI_95_lower", "CI_95_upper", "model_p"]].to_csv(
+        table_dir / "06_glandular_burden_robustness_summary.csv", index=False
+    )
     make_figures(visits, domains, figure_dir)
     make_glandular_figures(baseline, prevalence, burden_distribution, objective, components, figure_dir)
+    make_sensitivity_figures(baseline, leave_one_out, figure_dir)
 
 
 def main() -> None:

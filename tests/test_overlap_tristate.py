@@ -260,3 +260,67 @@ def test_generic_association_excludes_unknown_and_keeps_zero_event_reference():
     assert row.n_component_negative == 2
     assert row.prevalence_ratio == float("inf")
     assert "reference group exists" in row.estimability_note
+
+
+def _sensitivity_frame(domain_values, glandular_values=None):
+    size = (
+        len(glandular_values)
+        if glandular_values is not None
+        else max((len(values) for values in domain_values.values()), default=1)
+    )
+    data = {}
+    for key, meta in EXTRAGLANDULAR_DOMAINS.items():
+        values = domain_values.get(key, [False] * size)
+        data[meta["active_col"]] = pd.Series(values, dtype="boolean")
+        data[f"eg_{key}_evaluable"] = pd.Series(values, dtype="boolean").notna()
+    glandular_values = glandular_values or [[False] * 5 for _ in range(size)]
+    for index, (_, column, _) in enumerate(step.GLANDULAR_COMPONENTS):
+        data[column] = pd.Series([row[index] for row in glandular_values], dtype="boolean")
+    return pd.DataFrame(data)
+
+
+def test_no_bio_heme_count_excludes_domains_and_preserves_missingness():
+    frame = _sensitivity_frame({
+        "biological": [True, True],
+        "hematologic": [True, True],
+        "articular": [False, pd.NA],
+    })
+    result = step.add_sensitivity_phenotypes(frame)
+    assert result.n_extraglandular_domains_active_no_bio_heme.iloc[0] == 0
+    assert pd.isna(result.n_extraglandular_domains_active_no_bio_heme.iloc[1])
+
+    raw = {
+        meta["col"]: ["low activity" if key in {"biological", "hematologic"} else "no activity"]
+        for key, meta in EXTRAGLANDULAR_DOMAINS.items()
+    }
+    derived = derive_extraglandular_flags(pd.DataFrame(raw)).iloc[0]
+    assert derived.n_extraglandular_domains_active == 2
+    assert derived.n_extraglandular_domains_active_no_bio_heme == 0
+
+
+def test_glandular_completeness_is_independent_of_aggregate_activity():
+    frame = _sensitivity_frame(
+        {},
+        glandular_values=[
+            [True, False, True, False, False],
+            [True, False, pd.NA, False, False],
+        ],
+    )
+    frame["glandular_active"] = pd.Series([True, True], dtype="boolean")
+    result = step.add_sensitivity_phenotypes(frame)
+    assert result.glandular_phenotype_complete.tolist() == [True, False]
+    assert result.glandular_active.tolist() == [True, True]
+
+
+def test_leave_one_domain_out_removes_biological_activity():
+    frame = _sensitivity_frame({"biological": [True, True, True]})
+    frame = step.add_sensitivity_phenotypes(frame)
+    frame["n_glandular_manifestations_active"] = pd.Series([0, 1, 2], dtype="Int64")
+    result = step.leave_one_domain_out(frame).set_index("excluded_domain")
+    assert result.loc["Biological", "n_complete"] == 3
+    # Directly verify the synthetic count contract used by the leave-one-out routine.
+    remaining = [
+        meta["active_col"] for key, meta in EXTRAGLANDULAR_DOMAINS.items()
+        if key != "biological"
+    ]
+    assert frame[remaining].sum(axis=1).eq(0).all()

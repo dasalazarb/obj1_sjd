@@ -269,6 +269,9 @@ def derive_glandular_flags(df: pd.DataFrame) -> pd.DataFrame:
     ].notna().astype("boolean")
     complete = out[active_cols].notna().all(axis=1)
     out["n_glandular_manifestations_active"] = out[active_cols].sum(axis=1).astype("Int64").where(complete)
+    # Completeness is deliberately component-based: aggregate positivity can
+    # coexist with unknown individual dimensions.
+    out["glandular_phenotype_complete"] = complete
     return out
 
 
@@ -295,6 +298,19 @@ def derive_extraglandular_flags(df: pd.DataFrame) -> pd.DataFrame:
     out["extraglandular_evaluable"] = out["extraglandular_active"].notna().astype("boolean")
     complete = out[eval_cols].eq(True).all(axis=1)
     out["n_extraglandular_domains_active"] = out[active_cols].sum(axis=1).astype("Int64").where(complete)
+    no_bio_heme_keys = [
+        key for key in EXTRAGLANDULAR_DOMAINS
+        if key not in {"biological", "hematologic"}
+    ]
+    no_bio_heme_active = [
+        EXTRAGLANDULAR_DOMAINS[key]["active_col"] for key in no_bio_heme_keys
+    ]
+    no_bio_heme_complete = out[
+        [f"eg_{key}_evaluable" for key in no_bio_heme_keys]
+    ].eq(True).all(axis=1)
+    out["n_extraglandular_domains_active_no_bio_heme"] = (
+        out[no_bio_heme_active].sum(axis=1).astype("Int64").where(no_bio_heme_complete)
+    )
     def active_names(row):
         names = [m["label"] for m in EXTRAGLANDULAR_DOMAINS.values() if pd.notna(row[m["active_col"]]) and bool(row[m["active_col"]])]
         return ";".join(names) if complete.loc[row.name] else pd.NA
