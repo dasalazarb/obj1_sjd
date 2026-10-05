@@ -351,28 +351,32 @@ def _ratio_ci(a: int, b: int, c: int, d: int) -> tuple[float, float, float]:
 
 
 def associations(baseline: pd.DataFrame) -> pd.DataFrame:
-    """Associate EG domains with sicca presence at clinical baseline.
+    """Associate extraglandular domain activity with the broader
+    exocrine/glandular phenotype at clinical baseline.
 
-    The exposure is specifically the tri-state sicca assessment, rather than
-    the broader glandular phenotype. Observed sicca absence therefore forms
-    the PR reference group; only genuine non-evaluation is excluded.
+    The exposure is the tri-state ``glandular_active`` phenotype. Observed
+    glandular absence forms the reference group; non-evaluable patients are
+    excluded from each domain-specific complete-case analysis.
     """
     rows = []
     for key, meta in EXTRAGLANDULAR_DOMAINS.items():
         complete = (
-            baseline.sicca_evaluable.eq(True)
-            & baseline.sicca_active.notna()
+            baseline.glandular_evaluable.eq(True)
+            & baseline.glandular_active.notna()
             & baseline[f"eg_{key}_evaluable"].eq(True)
             & baseline[meta["active_col"]].notna()
         )
         data = baseline[complete]
-        g = data.sicca_active.astype(bool)
+        g = data.glandular_active.astype(bool)
         e = data[meta["active_col"]].astype(bool)
         a, b, c, d = (
             int((g & e).sum()),
             int((g & ~e).sum()),
             int((~g & e).sum()),
             int((~g & ~e).sum()),
+        )
+        assert len(data) == a + b + c + d, (
+            f"Complete-case total does not match the {key} 2x2 table"
         )
         table = np.array([[a, b], [c, d]])
         estimable = bool(
@@ -392,11 +396,11 @@ def associations(baseline: pd.DataFrame) -> pd.DataFrame:
             odds, p, test = np.nan, np.nan, "not estimable"
         pr, pr_l, pr_u = _ratio_ci(a, b, c, d)
         if (a + b) == 0:
-            pr_note = "not estimable: no sicca-positive patients"
+            pr_note = "not estimable: no glandular-positive patients"
         elif (c + d) == 0:
-            pr_note = "not estimable: no sicca-negative patients"
+            pr_note = "not estimable: no glandular-negative patients"
         elif c == 0 and a > 0:
-            pr_note = "infinite: observed prevalence in sicca-negative group is zero"
+            pr_note = "infinite: observed prevalence in glandular-negative group is zero"
         elif a == 0 and c == 0:
             pr_note = "not estimable: both observed prevalences are zero"
         else:
@@ -411,12 +415,12 @@ def associations(baseline: pd.DataFrame) -> pd.DataFrame:
                 "domain": meta["label"],
                 "n_complete": len(data),
                 "n_missing_or_not_evaluable": len(baseline) - len(data),
-                "sicca_pos_domain_pos": a,
-                "sicca_pos_domain_neg": b,
-                "sicca_neg_domain_pos": c,
-                "sicca_neg_domain_neg": d,
-                "pct_domain_active_if_sicca_pos": pct(a, a + b),
-                "pct_domain_active_if_sicca_neg": pct(c, c + d),
+                "glandular_pos_domain_pos": a,
+                "glandular_pos_domain_neg": b,
+                "glandular_neg_domain_pos": c,
+                "glandular_neg_domain_neg": d,
+                "pct_domain_active_if_glandular_pos": pct(a, a + b),
+                "pct_domain_active_if_glandular_neg": pct(c, c + d),
                 "prevalence_ratio": pr,
                 "PR_95_CI_lower": pr_l,
                 "PR_95_CI_upper": pr_u,
@@ -474,17 +478,33 @@ def qc_summary(
         "n_patients_with_multiple_clinical_baselines": (
             baseline.groupby("patient_id").size() > 1
         ).sum(),
-        "n_glandular_evaluable_baseline": baseline.glandular_evaluable.sum(),
+        "n_glandular_positive_baseline": int(baseline.glandular_active.eq(True).sum()),
+        "n_glandular_negative_baseline": int(baseline.glandular_active.eq(False).sum()),
+        "n_glandular_missing_baseline": int(baseline.glandular_active.isna().sum()),
+        "n_glandular_evaluable_baseline": int(baseline.glandular_evaluable.sum()),
         "n_sicca_positive_baseline": n_sicca_positive,
         "n_sicca_negative_baseline": n_sicca_negative,
         "n_sicca_missing_baseline": len(baseline) - n_sicca_evaluable,
         "n_sicca_evaluable_baseline": n_sicca_evaluable,
-        "n_raw_sicca_absent": raw_sicca.eq("sicca absent").sum(),
-        "n_raw_sicca_present": raw_sicca.eq("sicca present").sum(),
+        "n_raw_sicca_nonmissing_serializations": int(raw_sicca.ne("").sum()),
+        "n_raw_sicca_unparsed_nonmissing": int(
+            (raw_sicca.ne("") & baseline.sicca_active.isna()).sum()
+        ),
         "n_extraglandular_evaluable_baseline": baseline.extraglandular_evaluable.sum(),
         "n_overlap_evaluable_baseline": baseline.overlap_evaluable.sum(),
         **{f"n_baseline_{s}": baseline_counts.get(s, 0) for s in STATUS_ORDER},
     }
+    components = {
+        "eye_dryness": "glandular_eye_dryness_active",
+        "mouth_dryness": "glandular_mouth_dryness_active",
+        "objective_eye": "glandular_objective_eye_active",
+        "objective_mouth": "glandular_objective_mouth_active",
+        "gland_swelling": "glandular_salivary_gland_swelling_active",
+    }
+    for label, column in components.items():
+        values[f"n_{label}_positive_baseline"] = int(baseline[column].eq(True).sum())
+        values[f"n_{label}_negative_baseline"] = int(baseline[column].eq(False).sum())
+        values[f"n_{label}_missing_baseline"] = int(baseline[column].isna().sum())
     return pd.DataFrame({"metric": values.keys(), "value": values.values()})
 
 
@@ -528,22 +548,31 @@ def run(
         intermediate_dir / "06_overlap_episode_level.parquet", index=False
     )
     episodes.to_csv(intermediate_dir / "06_overlap_episode_level.csv", index=False)
+    phenotype_audit_cols = [
+        "sicca_active",
+        "sicca_evaluable",
+        "glandular_eye_dryness_active",
+        "glandular_mouth_dryness_active",
+        "glandular_objective_eye_active",
+        "glandular_objective_mouth_active",
+        "glandular_salivary_gland_swelling_active",
+        "glandular_active",
+        "glandular_evaluable",
+        "n_glandular_manifestations_active",
+        "extraglandular_active",
+        "extraglandular_evaluable",
+        "overlap_active",
+        "overlap_evaluable",
+        "overlap_status",
+        "active_extraglandular_domains",
+        "n_extraglandular_domains_active",
+    ]
+    source_audit_cols = [col for col in GLANDULAR_COLS.values() if col in baseline]
     audit_cols = (
         SPINE_COLUMNS[:5]
         + SPINE_COLUMNS[5:8]
-        + [
-            "sicca_active",
-            "sicca_evaluable",
-            "glandular_active",
-            "glandular_evaluable",
-            "extraglandular_active",
-            "extraglandular_evaluable",
-            "overlap_active",
-            "overlap_evaluable",
-            "overlap_status",
-            "active_extraglandular_domains",
-            "n_extraglandular_domains_active",
-        ]
+        + source_audit_cols
+        + phenotype_audit_cols
     )
     baseline[audit_cols].to_csv(
         intermediate_dir / "06_overlap_baseline_patient_audit.csv", index=False
