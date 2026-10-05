@@ -826,8 +826,16 @@ def run_longitudinal_pipeline(*, all_spine: pd.DataFrame, clinical_spine: pd.Dat
     classes, class_qc = build_classification(all_spine)
     class_qc.to_csv(qc_dir / "01_labs_longitudinal_class_group_qc.csv", index=False)
     clinical = selected_clinical
-    if plot_labs: clinical = clinical.loc[clinical.lab_id.astype(str).isin(plot_labs)]
-    plot_data = build_lab_episode_plot_frame(clinical_spine, clinical, classes, raw_records)
+    raw_for_plots = raw_records
+    if plot_labs:
+        clinical = clinical.loc[clinical.lab_id.astype(str).isin(plot_labs)].copy()
+        if raw_records is not None and not raw_records.empty:
+            raw_for_plots = raw_records.loc[
+                raw_records.lab_id.astype(str).isin(plot_labs)
+            ].copy()
+    plot_data = build_lab_episode_plot_frame(
+        clinical_spine, clinical, classes, raw_for_plots
+    )
     if max_patients_per_lab:
         # Explicit debugging-only deterministic cap; default is no subsampling.
         keep = plot_data.groupby("lab_id").patient_id.transform(lambda x: x.isin(sorted(x.dropna().unique(), key=str)[:max_patients_per_lab]))
@@ -851,16 +859,16 @@ def run_longitudinal_pipeline(*, all_spine: pd.DataFrame, clinical_spine: pd.Dat
     invalid.to_csv(qc_dir / "01_labs_longitudinal_invalid_values_qc.csv", index=False)
     plot_data.groupby(["lab_id", "plot_unit", "value_status"], dropna=False).size().rename("n").reset_index().to_csv(qc_dir / "01_labs_longitudinal_unit_comparability_qc.csv", index=False)
     catalog = [selected_all.lab_id, clinical.lab_id]
-    if raw_records is not None and "lab_id" in raw_records:
-        episode_col = "matched_clinical_episode_id" if "matched_clinical_episode_id" in raw_records else "clinical_episode_id"
+    if raw_for_plots is not None and "lab_id" in raw_for_plots:
+        episode_col = "matched_clinical_episode_id" if "matched_clinical_episode_id" in raw_for_plots else "clinical_episode_id"
         all_keys = set(map(tuple, all_spine[["patient_id", "clinical_episode_id"]].to_numpy()))
         safely_matched = pd.Series(
-            [(p, e) in all_keys for p, e in raw_records[["patient_id", episode_col]].to_numpy()],
-            index=raw_records.index,
+            [(p, e) in all_keys for p, e in raw_for_plots[["patient_id", episode_col]].to_numpy()],
+            index=raw_for_plots.index,
         )
-        if "episode_match_ambiguous" in raw_records:
-            safely_matched &= ~_truthy(raw_records.episode_match_ambiguous)
-        catalog.append(raw_records.loc[safely_matched, "lab_id"])
+        if "episode_match_ambiguous" in raw_for_plots:
+            safely_matched &= ~_truthy(raw_for_plots.episode_match_ambiguous)
+        catalog.append(raw_for_plots.loc[safely_matched, "lab_id"])
     slugs = safe_lab_slugs(pd.concat(catalog).dropna())
     manifest = []
     clinical_ids = set(plot_data.lab_id.unique()) if len(plot_data) else set()

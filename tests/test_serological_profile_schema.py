@@ -69,6 +69,47 @@ def test_wide_schema_keeps_numeric_and_text_values_separate():
     assert serology._object_dtype_columns(result) == []
 
 
+def test_slide_priority_export_copies_all_available_variants_and_builds_qc(tmp_path):
+    figures = tmp_path / "figures"
+    figures.mkdir()
+    numeric_pdf = figures / "wbc.pdf"
+    categorical_png = figures / "ana.png"
+    ignored_png = figures / "other.png"
+    for path in (numeric_pdf, categorical_png, ignored_png):
+        path.write_text(path.stem, encoding="utf-8")
+    manifest = pd.DataFrame(
+        [
+            {
+                "lab_id": "wbc", "display_label": "WBC", "render_status": "ok",
+                "pdf_path": str(numeric_pdf), "png_path": "",
+            },
+            {
+                "lab_id": "ana_status", "display_label": "ANA",
+                "render_status": "ok", "categorical_png_path": str(categorical_png),
+            },
+            {
+                "lab_id": "not_requested", "display_label": "Other",
+                "render_status": "ok", "png_path": str(ignored_png),
+            },
+        ]
+    )
+
+    exported = serology.export_slide_priority_figures(
+        manifest, {"wbc", "ana_status", "missing"}, tmp_path / "slides"
+    )
+    qc = serology.build_slide_selection_qc(
+        manifest, {"wbc", "ana_status", "missing"}
+    ).set_index("lab_id")
+
+    assert set(exported["lab_id"]) == {"wbc", "ana_status"}
+    assert {path.name for path in (tmp_path / "slides").iterdir()} == {
+        "wbc.pdf", "ana.png"
+    }
+    assert qc.loc["wbc", "has_numeric_figure"]
+    assert qc.loc["ana_status", "has_categorical_figure"]
+    assert not qc.loc["missing", "present_in_manifest"]
+
+
 def test_build_wide_does_not_create_mixed_episode_value():
     spine = pd.DataFrame(
         {

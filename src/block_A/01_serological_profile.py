@@ -12,6 +12,7 @@ import argparse
 import json
 import logging
 import re
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -167,6 +168,102 @@ METHOD_DEPENDENT_ANALYTES = {
     "urine_wbc",
     "urobilinogen",
 }
+
+# Clinical priorities for presentation figures.  These are canonical ``lab_id``
+# values (not columns from the integrated wide dataset); keep the group headings
+# so that changes to the curated set remain easy to review.
+SLIDE_LAB_IDS = {
+    # Hematologic
+    "wbc", "hemoglobin", "platelet_count", "anc", "lymphocyte_count",
+    # Inflammation / renal
+    "esr", "crp_high_sensitivity", "creatinine",
+    # Humoral / biological activity
+    "igg", "iga", "igm", "complement_c3", "complement_c4",
+    # Core Sjögren autoimmunity
+    "ana_status", "anti_ro_ssa", "anti_la_ssb", "anti_ro52", "anti_ro60",
+    "rheumatoid_factor",
+    # Dysproteinemia / systemic immune activation
+    "immunofixation_serum_interpretation", "cryoglobulins",
+    # Urinalysis
+    "urine_protein_qualitative", "urine_rbc", "urine_hemoglobin", "urine_ph",
+    # Autoimmune overlap / differential diagnosis
+    "anti_dsdna", "anti_sm", "anti_rnp", "anti_ccp",
+}
+
+FIGURE_PATH_COLUMNS = [
+    "pdf_path", "png_path", "categorical_pdf_path", "categorical_png_path",
+    "temporal_pdf_path", "temporal_png_path",
+]
+
+
+def export_slide_priority_figures(
+    manifest_df: pd.DataFrame,
+    slide_lab_ids: set[str],
+    destination: Path,
+) -> pd.DataFrame:
+    """Copy available figure variants selected by canonical lab ID."""
+    destination.mkdir(parents=True, exist_ok=True)
+    selected = manifest_df.loc[
+        manifest_df["lab_id"].astype(str).isin(slide_lab_ids)
+    ].copy()
+    copied: list[dict[str, Any]] = []
+    for _, row in selected.iterrows():
+        for column in FIGURE_PATH_COLUMNS:
+            value = row.get(column)
+            if pd.isna(value) or not str(value).strip():
+                continue
+            source = Path(str(value))
+            if not source.is_file():
+                continue
+            target = destination / source.name
+            shutil.copy2(source, target)
+            copied.append({
+                "lab_id": row["lab_id"],
+                "display_label": row.get("display_label"),
+                "figure_type": column,
+                "source_path": str(source),
+                "slide_path": str(target),
+            })
+    return pd.DataFrame(copied, columns=[
+        "lab_id", "display_label", "figure_type", "source_path", "slide_path"
+    ])
+
+
+def build_slide_selection_qc(
+    manifest_df: pd.DataFrame, slide_lab_ids: set[str]
+) -> pd.DataFrame:
+    """Describe availability and rendered variants for every requested lab."""
+    by_id = manifest_df.assign(lab_id=manifest_df["lab_id"].astype(str)).set_index(
+        "lab_id", drop=False
+    )
+
+    def has_path(row: pd.Series | None, columns: list[str]) -> bool:
+        if row is None:
+            return False
+        return any(
+            not pd.isna(row.get(column)) and bool(str(row.get(column)).strip())
+            for column in columns
+        )
+
+    rows = []
+    for lab_id in sorted(slide_lab_ids):
+        row = by_id.loc[lab_id] if lab_id in by_id.index else None
+        if isinstance(row, pd.DataFrame):
+            row = row.iloc[0]
+        rows.append({
+            "lab_id": lab_id,
+            "requested_for_slides": True,
+            "present_in_manifest": row is not None,
+            "render_status": row.get("render_status") if row is not None else pd.NA,
+            "has_numeric_figure": has_path(row, ["pdf_path", "png_path"]),
+            "has_categorical_figure": has_path(
+                row, ["categorical_pdf_path", "categorical_png_path"]
+            ),
+            "has_temporal_figure": has_path(
+                row, ["temporal_pdf_path", "temporal_png_path"]
+            ),
+        })
+    return pd.DataFrame(rows)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -1390,6 +1487,38 @@ def main(argv: list[str] | None = None) -> None:
             plot_labs=requested_labs,
             max_patients_per_lab=args.plot_max_patients_per_lab,
         )
+        manifest_path = (
+            common.BLOCKA_TABLES_DIR
+            / "01_serological_profile"
+            / "01_labs_longitudinal_figure_manifest.csv"
+        )
+        manifest_df = pd.read_csv(manifest_path)
+        slide_manifest = export_slide_priority_figures(
+            manifest_df,
+            SLIDE_LAB_IDS,
+            args.plot_figures_dir / "slides_priority",
+        )
+        slide_manifest.to_csv(
+            common.BLOCKA_TABLES_DIR
+            / "01_serological_profile"
+            / "01_slide_lab_figure_manifest.csv",
+            index=False,
+        )
+        slide_qc = build_slide_selection_qc(manifest_df, SLIDE_LAB_IDS)
+        slide_qc.to_csv(
+            common.BLOCKA_QC_DIR
+            / "01_serological_profile"
+            / "01_slide_lab_selection_qc.csv",
+            index=False,
+        )
+        missing_slide_ids = set(
+            slide_qc.loc[~slide_qc["present_in_manifest"], "lab_id"]
+        )
+        if missing_slide_ids:
+            LOG.warning(
+                "SLIDE_LAB_IDS not present in figure manifest: %s",
+                ", ".join(sorted(missing_slide_ids)),
+            )
 
     unmatched_df, ambiguous_df = labs[~matched], labs[ambiguous]
     conflict_df = usable_all.loc[
