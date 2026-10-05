@@ -3,8 +3,9 @@
 Clinical flags in this module use three states: observed active, observed
 inactive, and not evaluated.  A negative group requires every applicable
 source in that group to be explicitly negative; a positive source is
-sufficient for a positive group.  Consequently aggregate counts are totals
-only when every component is decided.
+sufficient for a positive group.  The aggregate sicca assessment is the one
+exception: its explicit presence or absence is an authoritative observation.
+Absence is data; missingness is lack of data.
 """
 from __future__ import annotations
 
@@ -79,6 +80,27 @@ def is_yes(x: Any) -> bool:
         return text in ESSDAI_ACTIVE
     num = pd.to_numeric(pd.Series([x]), errors="coerce").iloc[0]
     return bool(pd.notna(num) and num > 0)
+
+
+def parse_sicca(x: Any) -> bool | pd._libs.missing.NAType:
+    """Parse an aggregate sicca assessment without collapsing missingness.
+
+    In particular, ``sicca absent`` is an observed negative, not a missing
+    value.  Generic documented yes/no values are accepted because the source
+    column itself supplies the sicca context.
+    """
+    if is_missing_like(x):
+        return pd.NA
+    text = normalize_text(x)
+    if text in {"sicca present", "sicca positive"}:
+        return True
+    if text in {"sicca absent", "sicca negative"}:
+        return False
+    if is_yes(x):
+        return True
+    if is_no(x):
+        return False
+    return pd.NA
 
 
 def essdai_string_to_active(x: Any) -> bool | pd._libs.missing.NAType:
@@ -165,6 +187,25 @@ def _any_active(row: pd.Series, cols: list[str], essdai: bool = False):
 
 def derive_glandular_flags(df: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame(index=df.index)
+    aggregate_col = GLANDULAR_COLS["symptom_dry_eye_or_mouth"]
+    aggregate = (
+        df[aggregate_col].map(parse_sicca)
+        if aggregate_col in df
+        else pd.Series(pd.NA, index=df.index, dtype="boolean")
+    )
+    detailed_sicca_cols = [
+        GLANDULAR_COLS["dry_eye_3month"],
+        GLANDULAR_COLS["sand_gravel_eye"],
+        GLANDULAR_COLS["dry_mouth_3month"],
+        GLANDULAR_COLS["difficulty_swallowing_dry_food"],
+    ]
+    detailed = df.apply(lambda row: _any_active(row, detailed_sicca_cols), axis=1)
+    # The aggregate clinical assessment takes precedence. Detailed symptoms
+    # are only a fallback when that assessment is genuinely unavailable.
+    out["sicca_active"] = pd.Series(aggregate, index=df.index, dtype="boolean").where(
+        pd.Series(aggregate, index=df.index).notna(), detailed
+    ).astype("boolean")
+    out["sicca_evaluable"] = out["sicca_active"].notna().astype("boolean")
     groups = {
         "dry_eye_subjective": [GLANDULAR_COLS["symptom_dry_eye_or_mouth"], GLANDULAR_COLS["dry_eye_3month"], GLANDULAR_COLS["sand_gravel_eye"]],
         "dry_mouth_subjective": [GLANDULAR_COLS["symptom_dry_eye_or_mouth"], GLANDULAR_COLS["dry_mouth_3month"], GLANDULAR_COLS["difficulty_swallowing_dry_food"]],

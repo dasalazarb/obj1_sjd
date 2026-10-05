@@ -17,7 +17,41 @@ from src.derivations.overlap_flags import (  # noqa: E402
     derive_extraglandular_flags,
     derive_glandular_flags,
     derive_overlap_flags,
+    parse_sicca,
 )
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("sicca absent", False), ("sicca present", True)],
+)
+def test_parse_sicca_observed_states(raw, expected):
+    assert parse_sicca(raw) is expected
+    result = derive_glandular_flags(pd.DataFrame({
+        "visit_summary_-_2016_classification_criteria__ic_symptom_dry_eye_or_dry_mouth": [raw]
+    }))
+    assert result.sicca_active.iloc[0] == expected
+    assert result.sicca_evaluable.iloc[0] == True  # noqa: E712
+
+
+@pytest.mark.parametrize("raw", [None, "unknown"])
+def test_parse_sicca_missing_remains_not_evaluable(raw):
+    assert pd.isna(parse_sicca(raw))
+    result = derive_glandular_flags(pd.DataFrame({
+        "visit_summary_-_2016_classification_criteria__ic_symptom_dry_eye_or_dry_mouth": [raw]
+    }))
+    assert pd.isna(result.sicca_active.iloc[0])
+    assert result.sicca_evaluable.iloc[0] == False  # noqa: E712
+
+
+def test_aggregate_sicca_absent_overrides_missing_components():
+    result = derive_glandular_flags(pd.DataFrame({
+        "visit_summary_-_2016_classification_criteria__ic_symptom_dry_eye_or_dry_mouth": ["sicca absent"],
+        "visit_summary_-_2016_classification_criteria__ic_dry_eye_3month": [pd.NA],
+        "visit_summary_-_2016_classification_criteria__ic_dry_mouth_3month": [pd.NA],
+    }))
+    assert result.sicca_active.iloc[0] == False  # noqa: E712
+    assert result.sicca_evaluable.iloc[0] == True  # noqa: E712
 
 
 def test_domain_source_states_and_absent_columns():
@@ -67,8 +101,8 @@ def test_consumers_exclude_unknown_from_domain_denominators():
     meta = EXTRAGLANDULAR_DOMAINS["constitutional"]
     baseline = pd.DataFrame({
         "patient_id": ["synthetic-a", "synthetic-b", "synthetic-c"],
-        "glandular_active": pd.Series([True, False, pd.NA], dtype="boolean"),
-        "glandular_evaluable": [True, True, False],
+        "sicca_active": pd.Series([True, False, pd.NA], dtype="boolean"),
+        "sicca_evaluable": [True, True, False],
         meta["active_col"]: pd.Series([True, False, pd.NA], dtype="boolean"),
         "eg_constitutional_evaluable": [True, True, False],
     })
@@ -80,3 +114,24 @@ def test_consumers_exclude_unknown_from_domain_denominators():
     row = step.associations(baseline).set_index("domain").loc[meta["label"]]
     assert row.n_complete == 2
     assert row.n_missing_or_not_evaluable == 1
+
+
+def test_sicca_absent_is_pr_reference_not_missing():
+    meta = EXTRAGLANDULAR_DOMAINS["constitutional"]
+    baseline = pd.DataFrame({
+        "patient_id": list("ABCDE"),
+        "sicca_active": pd.Series([True, True, False, False, pd.NA], dtype="boolean"),
+        "sicca_evaluable": [True, True, True, True, False],
+        meta["active_col"]: pd.Series([True, False, True, False, True], dtype="boolean"),
+        "eg_constitutional_evaluable": [True] * 5,
+    })
+    for key, domain in EXTRAGLANDULAR_DOMAINS.items():
+        if domain["active_col"] not in baseline:
+            baseline[domain["active_col"]] = pd.Series([pd.NA] * 5, dtype="boolean")
+            baseline[f"eg_{key}_evaluable"] = False
+    row = step.associations(baseline).set_index("domain").loc[meta["label"]]
+    assert (row.sicca_pos_domain_pos, row.sicca_pos_domain_neg) == (1, 1)
+    assert (row.sicca_neg_domain_pos, row.sicca_neg_domain_neg) == (1, 1)
+    assert row.n_complete == 4
+    assert row.n_missing_or_not_evaluable == 1
+    assert row.prevalence_ratio == pytest.approx(1.0)
