@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import numpy as np
 import pandas as pd
 
 import common
@@ -220,9 +221,20 @@ def profile_labs(frame: pd.DataFrame) -> pd.DataFrame:
         if discordant:
             reasons.append("discordant_value_vs_reference_status")
         numeric_values = numeric.dropna()
+        numeric_frame = pd.DataFrame({"patient_id": frame.patient_id, "value": numeric}).dropna()
+        patient_means = numeric_frame.groupby("patient_id").value.mean() if len(numeric_frame) else pd.Series(dtype=float)
+        within_variation = (numeric_frame.groupby("patient_id").value.var().mean()
+                            if len(numeric_frame) else np.nan)
+        between_variation = patient_means.var() if len(patient_means) else np.nan
         baseline_any = any_mask & baseline_mask
+        result_key = {"value_numeric": "value_column", "value_categorical": "value_column",
+                      "reference_status_categorical": "reference_status_column",
+                      "text_categorical": "text_column", "mixed_review": "value_column"}.get(primary)
+        source_column = cols.get(result_key, "") if result_key else ""
         row = {
             "lab": lab, **cols,
+            "source_column": source_column,
+            "public_column": source_column if str(source_column).startswith("lab__") else "",
             "n_value_nonmissing": n_value, "pct_value_nonmissing": n_value / denominator if denominator else 0.0,
             "n_value_unique": len(value_values), "numeric_parse_pct": parse_pct,
             "numeric_min": numeric_values.min() if len(numeric_values) else pd.NA,
@@ -253,6 +265,9 @@ def profile_labs(frame: pd.DataFrame) -> pd.DataFrame:
             "n_patients_with_ge1_result": int((patient_counts >= 1).sum()),
             "n_patients_with_ge2_results": int((patient_counts >= 2).sum()),
             "n_patients_with_ge3_results": int((patient_counts >= 3).sum()),
+            "within_patient_variation": within_variation,
+            "between_patient_variation": between_variation,
+            "exclusion_reason": ";".join(dict.fromkeys(reasons)) if recommended in {"exclude", "descriptive_only"} else "",
             "review_reason": ";".join(dict.fromkeys(reasons)),
             # Compatibility aliases retained for downstream readers during migration.
             "n_nonmissing": n_value, "pct_nonmissing": n_value / denominator if denominator else 0.0,

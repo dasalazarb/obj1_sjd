@@ -40,7 +40,8 @@ DEFAULT_ANALYTIC = (common.STUDIES_ANALYTIC_DIR / "pharma" / "01_run_pharma_main
                     "01_pharma_transition_intervals.parquet")
 DEFAULT_SENSITIVITY = (common.STUDIES_TABLES_DIR / "pharma" / "02_pharma_sensitivity" /
                        "02_pharma_sensitivity_summary.csv")
-AGE_COLUMN = "from_ids__age_at_visit"
+AGE_COLUMNS = ("from_demo__age_at_visit", "from_ids__age_at_visit",
+               "from_age_at_visit", "from_age")
 POPS = ("Pop1", "Pop2", "Pop3")
 TRANSITIONS = tuple((origin, destination) for origin in POPS for destination in POPS
                     if origin != destination)
@@ -168,18 +169,19 @@ def _prepare_intervals(analytic: pd.DataFrame, biomarker: str) -> tuple[pd.DataF
     column = f"from_lab__{biomarker}"
     if column not in analytic:
         return pd.DataFrame(), np.nan, np.nan, "missing_from_biomarker_column"
-    if AGE_COLUMN not in analytic:
+    age_column = next((candidate for candidate in AGE_COLUMNS if candidate in analytic), None)
+    if age_column is None:
         # Preserve a usable unadjusted analysis; age-adjusted rows explicitly
         # report why they cannot be estimated.
         age = pd.Series(np.nan, index=analytic.index, dtype=float)
     else:
-        age = pd.to_numeric(analytic[AGE_COLUMN], errors="coerce")
+        age = pd.to_numeric(analytic[age_column], errors="coerce")
     data = analytic.copy()
     data["biomarker_value"] = pd.to_numeric(data[column], errors="coerce")
     data["age"] = age
     valid = (data.from_pop.isin(POPS) & data.to_pop.isin(POPS) &
              np.isfinite(data.biomarker_value) & np.isfinite(data.interval_years))
-    if AGE_COLUMN in analytic:
+    if age_column is not None:
         valid &= np.isfinite(data.age)
     data = data.loc[valid].copy()
     mean = float(data.biomarker_value.mean()) if len(data) else np.nan
@@ -304,7 +306,7 @@ def fit_biomarker(biomarker: str, stacked: pd.DataFrame, support: pd.DataFrame,
         if preparation_reason:
             failures[version] = preparation_reason
         elif adjusted and not age_available:
-            failures[version] = f"missing_required_age_column:{AGE_COLUMN}"
+            failures[version] = f"missing_required_age_column:{'|'.join(AGE_COLUMNS)}"
         elif not supported:
             failures[version] = "insufficient_transition_support"
         else:
@@ -455,7 +457,7 @@ def run(args: argparse.Namespace) -> None:
         stacked = stack_intervals(intervals, str(biomarker))
         support = transition_support(intervals, stacked, str(biomarker), minimum)
         models = fit_biomarker(str(biomarker), stacked, support, mean, sd,
-                               eligible_source, AGE_COLUMN in analytic, reason)
+                               eligible_source, any(c in analytic for c in AGE_COLUMNS), reason)
         all_long.append(stacked)
         all_support.append(support)
         all_models.extend(models)

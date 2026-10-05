@@ -29,7 +29,8 @@ from src.studies._shared import create_study_dirs, load_parquet
 MAIN_TABLES = common.STUDIES_TABLES_DIR / "pharma" / "01_run_pharma_main"
 MAIN_ANALYTIC = (common.STUDIES_ANALYTIC_DIR / "pharma" / "01_run_pharma_main" /
                  "01_pharma_transition_intervals.parquet")
-AGE_COLUMN = "from_ids__age_at_visit"
+AGE_COLUMNS = ("from_demo__age_at_visit", "from_ids__age_at_visit",
+               "from_age_at_visit", "from_age")
 PROTOCOL_NAMES = {"protocol", "ids__protocol", "ids__protocol_number", "parent_protocol"}
 CANDIDATE_COLUMNS = [
     "from_pop", "to_pop", "transition_pair", "exposure", "exposure_family",
@@ -47,6 +48,12 @@ MODEL_COLUMNS = [
     "adjusted_ci95_low", "adjusted_ci95_high", "adjusted_p_value", "age_estimate",
     "age_ci95_low", "age_ci95_high", "age_p_value", "age_ir_per_10_years",
     "model_status", "interpretability_status", "interpretability_reason",
+    "se_type", "cluster_variable", "n_clusters",
+    "interval_minimum_years", "interval_maximum_years",
+    "interval_restricted_n_intervals", "interval_restricted_events",
+    "interval_restricted_estimate", "interval_restricted_ci95_low",
+    "interval_restricted_ci95_high", "interval_restricted_p_value",
+    "interval_restricted_status",
 ]
 SUMMARY_EXTRA = [
     "direction_main", "direction_same_sample", "direction_adjusted",
@@ -185,7 +192,9 @@ def _fit_poisson(data: pd.DataFrame, adjusted: bool) -> tuple[dict, bool]:
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         fit = sm.GLM(endog, exog, family=sm.families.Poisson(),
-                     offset=offset).fit(cov_type="HC0")
+                     offset=offset).fit(
+                         cov_type="cluster",
+                         cov_kwds={"groups": data.patient_id.to_numpy()})
     perfect = any(issubclass(item.category, PerfectSeparationWarning) for item in caught)
     values = {}
     for name in columns:
@@ -207,21 +216,24 @@ def fit_selected(row: pd.Series, analytic: pd.DataFrame, config: dict) -> dict:
     if exposure_column is None:
         output["interpretability_reason"] = "exposure_column_not_found_or_ambiguous"
         return output
-    if AGE_COLUMN not in analytic:
-        output["interpretability_reason"] = f"missing_required_age_column:{AGE_COLUMN}"
+    age_column = next((column for column in AGE_COLUMNS if column in analytic), None)
+    if age_column is None:
+        output["interpretability_reason"] = f"missing_required_age_column:{'|'.join(AGE_COLUMNS)}"
         return output
     origin = analytic.loc[analytic.from_pop.eq(row.from_pop)]
     data = pd.DataFrame({"patient_id": origin.patient_id,
                          "event": origin.to_pop.eq(row.to_pop).astype(float),
                          "time": pd.to_numeric(origin.interval_years, errors="coerce"),
                          "x": _numeric_exposure(origin[exposure_column]),
-                         "age": pd.to_numeric(origin[AGE_COLUMN], errors="coerce")})
+                         "age": pd.to_numeric(origin[age_column], errors="coerce")})
     data = data.dropna()
     data = data.loc[np.isfinite(data[["time", "x", "age"]]).all(axis=1) & data.time.gt(0)]
     events, nonevents = int(data.event.sum()), int((1 - data.event).sum())
     output.update(same_sample_n_intervals=len(data),
                   same_sample_n_patients=int(data.patient_id.nunique()),
-                  same_sample_events=events, same_sample_nonevents=nonevents)
+                  same_sample_events=events, same_sample_nonevents=nonevents,
+                  se_type="cluster_patient", cluster_variable="patient_id",
+                  n_clusters=int(data.patient_id.nunique()))
     minimum = int(config["minimum_counts"]["events_for_multivariable_model"])
     reason = None
     if events < minimum: reason = "insufficient_events"
@@ -261,6 +273,27 @@ def fit_selected(row: pd.Series, analytic: pd.DataFrame, config: dict) -> dict:
     else:
         status, reason = "interpretable", ""
     output.update(interpretability_status=status, interpretability_reason=reason)
+    bounds = config["interval_sensitivity_years"]
+    lower, upper = float(bounds["minimum"]), float(bounds["maximum"])
+    restricted = data.loc[data.time.between(lower, upper)].copy()
+    output.update(interval_minimum_years=lower, interval_maximum_years=upper,
+                  interval_restricted_n_intervals=len(restricted),
+                  interval_restricted_events=int(restricted.event.sum()),
+                  interval_restricted_status="not_estimable")
+    restricted_events = int(restricted.event.sum())
+    restricted_nonevents = len(restricted) - restricted_events
+    if (restricted_events >= minimum and restricted_nonevents >= minimum and
+            restricted.x.nunique() > 1 and restricted.age.nunique() > 1):
+        try:
+            restricted_fit, _ = _fit_poisson(restricted, True)
+            effect = restricted_fit["x"]
+            output.update(interval_restricted_estimate=effect[0],
+                          interval_restricted_ci95_low=effect[1],
+                          interval_restricted_ci95_high=effect[2],
+                          interval_restricted_p_value=effect[3],
+                          interval_restricted_status="success")
+        except Exception as exc:
+            output["interval_restricted_status"] = f"model_failed:{type(exc).__name__}"
     return output
 
 
