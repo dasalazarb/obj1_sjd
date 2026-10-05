@@ -37,8 +37,9 @@ EMPTY_CLASS_TOKENS = {"", "na", "nan", "none", "null", "unknown", "<na>"}
 RETROSPECTIVE_NOTE = (
     "Groups use any class documented over complete follow-up (retrospective; "
     "class 2 takes precedence over class 1, and class 1/2 takes precedence over "
-    "class 4). Red individual trajectories identify a later class 4 transition; "
-    "X symbols never enter numeric summaries."
+    "class 4). Red observations identify patients with a later class 4 transition. "
+    "Individual trajectory segments are intentionally omitted from the default "
+    "figure for speed and readability; unusable values never enter numeric summaries."
 )
 
 
@@ -293,28 +294,74 @@ def build_lab_episode_plot_frame(
 
 
 def patient_cluster_bootstrap_ci(data: pd.DataFrame, reps: int = 2000, seed: int = 42) -> pd.DataFrame:
-    """Bootstrap whole patients and return percentile CIs at each official visit."""
-    valid = data.loc[data.value_status.eq("valid_numeric")].copy()
-    visits = sorted(valid.clinical_visit_number.dropna().unique())
-    if valid.patient_id.nunique() < 2 or not visits:
-        return pd.DataFrame({"clinical_visit_number": visits, "ci95_low": np.nan, "ci95_high": np.nan})
-    patients = valid.patient_id.drop_duplicates().to_numpy()
-    rng = np.random.default_rng(seed)
-    draws = {visit: [] for visit in visits}
-    grouped = {p: valid.loc[valid.patient_id.eq(p)] for p in patients}
-    for _ in range(reps):
-        sampled = rng.choice(patients, size=len(patients), replace=True)
-        sample = pd.concat([grouped[p].assign(_boot=i) for i, p in enumerate(sampled)], ignore_index=True)
-        for visit in visits:
-            values = sample.loc[sample.clinical_visit_number.eq(visit), "plot_value"]
-            draws[visit].append(values.mean() if len(values) else np.nan)
-    return pd.DataFrame([
-        {"clinical_visit_number": visit,
-         "ci95_low": np.nanpercentile(values, 2.5) if np.isfinite(values).sum() else np.nan,
-         "ci95_high": np.nanpercentile(values, 97.5) if np.isfinite(values).sum() else np.nan}
-        for visit, values in draws.items()
-    ])
+    """Bootstrap whole patients and return percentile CIs at each official visit.
 
+    This keeps the original patient-cluster bootstrap semantics but avoids
+    rebuilding a pandas DataFrame on every replicate. Patient-by-visit sums and
+    counts are pre-aggregated once and resampled with NumPy in small chunks.
+    """
+    valid = data.loc[data.value_status.eq("valid_numeric")].copy()
+    valid["plot_value"] = pd.to_numeric(valid["plot_value"], errors="coerce")
+    valid = valid.dropna(subset=["patient_id", "clinical_visit_number", "plot_value"])
+    visits = sorted(valid.clinical_visit_number.unique())
+    patients = valid.patient_id.drop_duplicates().to_numpy()
+
+    if len(patients) < 2 or not visits:
+        return pd.DataFrame({
+            "clinical_visit_number": visits,
+            "ci95_low": np.nan,
+            "ci95_high": np.nan,
+        })
+
+    patient_visit = (
+        valid.groupby(["patient_id", "clinical_visit_number"], sort=False)["plot_value"]
+        .agg(["sum", "count"])
+        .reset_index()
+    )
+    patient_index = pd.Index(patients, name="patient_id")
+    visit_index = pd.Index(visits, name="clinical_visit_number")
+    sums = (
+        patient_visit.pivot(index="patient_id", columns="clinical_visit_number", values="sum")
+        .reindex(index=patient_index, columns=visit_index)
+        .fillna(0.0)
+        .to_numpy(dtype=float)
+    )
+    counts = (
+        patient_visit.pivot(index="patient_id", columns="clinical_visit_number", values="count")
+        .reindex(index=patient_index, columns=visit_index)
+        .fillna(0.0)
+        .to_numpy(dtype=float)
+    )
+
+    rng = np.random.default_rng(seed)
+    draws = np.full((reps, len(visits)), np.nan, dtype=float)
+    chunk_size = min(500, max(1, reps))
+    for start in range(0, reps, chunk_size):
+        stop = min(start + chunk_size, reps)
+        sampled_idx = rng.integers(
+            0, len(patients), size=(stop - start, len(patients))
+        )
+        sampled_sums = sums[sampled_idx].sum(axis=1)
+        sampled_counts = counts[sampled_idx].sum(axis=1)
+        np.divide(
+            sampled_sums,
+            sampled_counts,
+            out=draws[start:stop],
+            where=sampled_counts > 0,
+        )
+
+    return pd.DataFrame([
+        {
+            "clinical_visit_number": visit,
+            "ci95_low": np.nanpercentile(draws[:, j], 2.5)
+            if np.isfinite(draws[:, j]).any()
+            else np.nan,
+            "ci95_high": np.nanpercentile(draws[:, j], 97.5)
+            if np.isfinite(draws[:, j]).any()
+            else np.nan,
+        }
+        for j, visit in enumerate(visits)
+    ])
 
 def summarize_observed_by_group_visit(plot_data: pd.DataFrame, reps: int = 2000, seed: int = 42) -> pd.DataFrame:
     rows = []
@@ -441,62 +488,129 @@ def build_lab_plot_manifest(lab_ids: Iterable[object]) -> pd.DataFrame:
 
 
 def render_lab_trajectory_panels(data: pd.DataFrame, summary: pd.DataFrame):
+    """Render a compact visit-level trajectory figure.
+
+    The default figure avoids creating one line artist per patient and segment.
+    Raw numeric observations are drawn in at most two scatter collections per
+    panel, while the visit-level mean and bootstrap CI remain the visual focus.
+    """
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
-    plt.rcParams.update({"font.family": "sans-serif", "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"], "pdf.fonttype": 42, "ps.fonttype": 42})
-    fig, axes = plt.subplots(1, 3, figsize=(15.5, 6.2), sharex=True, sharey=True)
-    lab_id = str(data.lab_id.iloc[0]); label = str(data.display_label.dropna().iloc[0])
+
+    plt.rcParams.update({
+        "font.family": "sans-serif",
+        "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
+    })
+    fig, axes = plt.subplots(1, 3, figsize=(13.2, 5.2), sharex=True, sharey=True)
+    lab_id = str(data.lab_id.iloc[0])
+    label = str(data.display_label.dropna().iloc[0])
     visits = sorted(data.clinical_visit_number.dropna().unique())
     ci_values = summary[["ci95_low", "ci95_high"]].to_numpy().ravel() if len(summary) else []
     limits = compute_shared_axes(data.plot_value, ci_values)
-    unit_values = data.plot_unit.dropna().astype(str).unique(); unit = unit_values[0] if len(unit_values)==1 else "unit unavailable/noncomparable"
+    unit_values = data.plot_unit.dropna().astype(str).unique()
+    unit = unit_values[0] if len(unit_values) == 1 else "unit unavailable/noncomparable"
+
     for ax, group, panel in zip(axes, GROUPS, "ABC"):
-        gd = data.loc[data.class_group.eq(group)]; sd = summary.loc[summary.class_group.eq(group)].sort_values("clinical_visit_number")
-        for _, patient in gd.groupby("patient_id"):
-            numeric = patient.loc[patient.value_status.eq("valid_numeric")].sort_values("clinical_visit_number")
-            trajectory_color = (
-                CLASS_4_TRAJECTORY_COLOR
-                if patient.class_4_trajectory_highlight.fillna(False).any()
-                else COLORS[group]
+        gd = data.loc[data.class_group.eq(group)]
+        sd = summary.loc[summary.class_group.eq(group)].sort_values("clinical_visit_number")
+        numeric = gd.loc[gd.value_status.eq("valid_numeric")].copy()
+        highlight = numeric.class_4_trajectory_highlight.fillna(False)
+
+        if (~highlight).any():
+            ax.scatter(
+                numeric.loc[~highlight, "clinical_visit_number"],
+                numeric.loc[~highlight, "plot_value"],
+                s=11,
+                color=COLORS[group],
+                alpha=.16,
+                linewidths=0,
+                zorder=2,
             )
-            ax.scatter(numeric.clinical_visit_number, numeric.plot_value, s=10, color=trajectory_color, alpha=.20, zorder=2)
-            for (_, left), (_, right) in zip(numeric.iloc[:-1].iterrows(), numeric.iloc[1:].iterrows()):
-                gap = int(right.clinical_visit_number-left.clinical_visit_number) > 1
-                ax.plot([left.clinical_visit_number, right.clinical_visit_number], [left.plot_value, right.plot_value],
-                        color=trajectory_color, alpha=.17, lw=.7, ls="--" if gap else "-", zorder=1)
-        transform = ax.get_xaxis_transform()
-        dark = gd.value_status.isin(["documented_nonnumeric", "excluded_raw_nonresult", "noncomparable_or_conflict"])
-        ax.scatter(gd.loc[dark, "clinical_visit_number"], [.035]*int(dark.sum()), marker="x", color="#444444", s=28, transform=transform, clip_on=False)
-        missing = gd.draw_missing_marker.fillna(False)
-        ax.scatter(gd.loc[missing, "clinical_visit_number"], [.035]*int(missing.sum()), marker="x", color="#BBBBBB", s=20, transform=transform, clip_on=False)
-        censored = gd.value_status.eq("censored_numeric")
-        ax.scatter(gd.loc[censored, "clinical_visit_number"], [.035]*int(censored.sum()), marker="^", facecolors="none", edgecolors="#444444", s=32, transform=transform, clip_on=False)
+        if highlight.any():
+            ax.scatter(
+                numeric.loc[highlight, "clinical_visit_number"],
+                numeric.loc[highlight, "plot_value"],
+                s=13,
+                color=CLASS_4_TRAJECTORY_COLOR,
+                alpha=.28,
+                linewidths=0,
+                zorder=3,
+            )
+
         finite_ci = sd.ci95_low.notna() & sd.ci95_high.notna()
         if finite_ci.any():
-            ax.fill_between(sd.loc[finite_ci, "clinical_visit_number"].astype(float), sd.loc[finite_ci, "ci95_low"].astype(float), sd.loc[finite_ci, "ci95_high"].astype(float), color=COLORS[group], alpha=.14)
-        if len(sd): ax.plot(sd.clinical_visit_number, sd["mean"], color=COLORS[group], lw=2.7, marker="D", ms=6, zorder=5)
-        repeated = gd.loc[gd.value_status.eq("valid_numeric")].groupby("patient_id").size().ge(2).sum()
-        ax.set_title(f"{panel}. {GROUP_LABELS[group]}\nN total = {gd.patient_id.nunique()} | N numeric ≥1 = {gd.loc[gd.value_status.eq('valid_numeric'),'patient_id'].nunique()} | N ≥2 = {repeated}", fontsize=10.5)
-        ax.set_ylim(*limits); ax.set_xticks(visits, [f"Visit {int(v)}" for v in visits], rotation=30, ha="right")
+            ax.fill_between(
+                sd.loc[finite_ci, "clinical_visit_number"].astype(float),
+                sd.loc[finite_ci, "ci95_low"].astype(float),
+                sd.loc[finite_ci, "ci95_high"].astype(float),
+                color=COLORS[group],
+                alpha=.14,
+                linewidth=0,
+            )
+        if len(sd):
+            ax.plot(
+                sd.clinical_visit_number,
+                sd["mean"],
+                color=COLORS[group],
+                lw=2.4,
+                marker="o",
+                ms=5,
+                zorder=5,
+            )
+
+        repeated = numeric.groupby("patient_id").size().ge(2).sum()
+        ax.set_title(
+            f"{panel}. {GROUP_LABELS[group]}\n"
+            f"N={gd.patient_id.nunique()} | numeric={numeric.patient_id.nunique()} | repeated={repeated}",
+            fontsize=10,
+        )
+        ax.set_ylim(*limits)
+        ax.set_xticks(visits, [str(int(v)) for v in visits])
+        ax.set_xlabel("Clinical visit")
+        ax.grid(axis="y", color="#E5E5E5", lw=.5)
+        ax.set_axisbelow(True)
+
         for visit in visits:
             n = sd.loc[sd.clinical_visit_number.eq(visit), "n_patients_numeric"]
-            if len(n): ax.text(visit, -.09, f"n={int(n.iloc[0])}", ha="center", va="top", transform=transform, fontsize=8)
-        ax.grid(axis="y", color="#E5E5E5", lw=.5); ax.set_axisbelow(True)
-    axes[0].set_ylabel(f"{label} ({unit})")
-    fig.suptitle(f"Longitudinal trajectory of {label}\nObserved clinical visits · retrospective Sjögren class history · lab_id: {lab_id}", fontsize=14)
-    handles = [Line2D([0],[0], color="#777", lw=.7, marker="o", alpha=.4, label="Individual patient"),
-               Line2D([0],[0], color=CLASS_4_TRAJECTORY_COLOR, lw=.7, marker="o", alpha=.35, label="Patient later transitioned to class 4"),
-               Line2D([0],[0], color="#222", lw=2.7, marker="D", label="Observed group mean"),
-               Patch(facecolor="#777", alpha=.14, label="95% CI"),
-               Line2D([0],[0], marker="x", color="#444", ls="", label="× nonnumeric / unusable"),
-               Line2D([0],[0], marker="x", color="#BBB", ls="", label="× missing between observations"),
-               Line2D([0],[0], marker="^", markerfacecolor="none", color="#444", ls="", label="△ censored")]
-    fig.legend(handles=handles, loc="lower center", ncol=4, bbox_to_anchor=(.5, .105), frameon=False, fontsize=9)
-    fig.text(.5, .035, RETROSPECTIVE_NOTE + " Dashed patient segments bridge unobserved values.", ha="center", fontsize=8.5)
-    fig.subplots_adjust(top=.77, bottom=.25, left=.07, right=.99, wspace=.08)
-    return fig
+            if len(n):
+                ax.text(
+                    visit,
+                    -.09,
+                    f"n={int(n.iloc[0])}",
+                    ha="center",
+                    va="top",
+                    transform=ax.get_xaxis_transform(),
+                    fontsize=8,
+                )
 
+    axes[0].set_ylabel(f"{label} ({unit})")
+    fig.suptitle(
+        f"{label}: longitudinal laboratory profile\n"
+        f"Observed values with group mean and 95% patient-cluster bootstrap CI · lab_id: {lab_id}",
+        fontsize=13,
+    )
+    handles = [
+        Line2D([0], [0], marker="o", color="none", markerfacecolor="#777777",
+               markeredgewidth=0, alpha=.35, label="Observed numeric value"),
+        Line2D([0], [0], marker="o", color="none", markerfacecolor=CLASS_4_TRAJECTORY_COLOR,
+               markeredgewidth=0, alpha=.45, label="Patient later transitioned to class 4"),
+        Line2D([0], [0], color="#222222", lw=2.4, marker="o", label="Observed group mean"),
+        Patch(facecolor="#777777", alpha=.14, label="95% bootstrap CI"),
+    ]
+    fig.legend(
+        handles=handles,
+        loc="lower center",
+        ncol=4,
+        bbox_to_anchor=(.5, .09),
+        frameon=False,
+        fontsize=8.5,
+    )
+    fig.text(.5, .025, RETROSPECTIVE_NOTE, ha="center", fontsize=8)
+    fig.subplots_adjust(top=.76, bottom=.23, left=.075, right=.99, wspace=.08)
+    return fig
 
 def render_lab_elapsed_time_panels(data: pd.DataFrame):
     """Supplementary real-time spaghetti plot; it never labels raw means as model estimates."""
@@ -583,9 +697,14 @@ def run_longitudinal_pipeline(*, all_spine: pd.DataFrame, clinical_spine: pd.Dat
     slugs = safe_lab_slugs(pd.concat(catalog).dropna())
     manifest = []
     clinical_ids = set(plot_data.lab_id.unique()) if len(plot_data) else set()
+    git_commit = _git_commit()
+    model_lookup = models.set_index("lab_id").to_dict("index") if len(models) else {}
     for lab_id in sorted(slugs, key=str):
         slug = slugs[lab_id]; data = plot_data.loc[plot_data.lab_id.eq(lab_id)]
-        model = models.loc[models.lab_id.eq(lab_id)].iloc[0].to_dict() if len(models.loc[models.lab_id.eq(lab_id)]) else {"statistical_status": "descriptive_only", "p_raw": np.nan, "q_BH": np.nan}
+        model = model_lookup.get(
+            lab_id,
+            {"statistical_status": "descriptive_only", "p_raw": np.nan, "q_BH": np.nan},
+        )
         row = {"lab_id": lab_id, "display_label": data.display_label.dropna().iloc[0] if len(data) and data.display_label.notna().any() else lab_id,
                "unit": "|".join(sorted(data.plot_unit.dropna().astype(str).unique())) if len(data) else "",
                "group_sizes": json.dumps({g: int(data.loc[data.class_group.eq(g), 'patient_id'].nunique()) for g in GROUPS}),
@@ -594,7 +713,7 @@ def run_longitudinal_pipeline(*, all_spine: pd.DataFrame, clinical_spine: pd.Dat
                "model_status": model["statistical_status"], "p_raw": model.get("p_raw"), "q_BH": model.get("q_BH"),
                "pdf_path": "", "png_path": "", "temporal_pdf_path": "", "temporal_png_path": "",
                "render_status": "skipped", "skip_reason": "nonclinical_only_or_no_classified_patient" if lab_id not in clinical_ids else "",
-               "git_commit": _git_commit(), "created_utc": datetime.now(timezone.utc).isoformat()}
+               "git_commit": git_commit, "created_utc": datetime.now(timezone.utc).isoformat()}
         if len(data):
             pdf = figures_dir / f"01_lab_trajectory__{slug}.pdf"; png = figures_dir / f"01_lab_trajectory__{slug}.png"
             fig = None
