@@ -36,6 +36,30 @@ must not rebuild clinical episodes, baseline, ESSDAI, ESSPRI, or Pop states.
 
 Do not edit the original raw data. Keep all changes reproducible through scripts.
 
+## Longitudinal Graph / Model A
+
+Model A asks how observed patients move through a visit-level clinical landscape.
+It consumes the canonical Step 10 `patient_id × clinical_episode_id` integrated
+longitudinal dataset and the canonical consecutive-episode interval spine. Unlike
+the baseline `studies/graph` analysis (one baseline observation per patient), it
+first builds a time-blind reference Mapper from eligible clinical visits and only
+then overlays actual consecutive visits. Mapper proximity is never treated as a
+temporal transition.
+
+Run the four stages in order:
+
+```bash
+python src/studies/longitudinal_graph/01_prepare_longitudinal_data.py
+python src/studies/longitudinal_graph/02_run_longitudinal_mapper.py
+python src/studies/longitudinal_graph/03_analyze_temporal_flow.py
+python src/studies/longitudinal_graph/04_characterize_transitions.py
+```
+
+Study datasets, tables, figures, QC, and logs are written under the standard
+`studies/longitudinal_graph/` roots in `data/analytic/` and `outputs/`. Each
+command also supports `--config`, `--integrated`, and `--dry-run`; dependent
+stages expose arguments for their preceding-stage inputs.
+
 
 ## Section 5 comorbidity analysis
 
