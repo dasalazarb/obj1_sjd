@@ -22,6 +22,10 @@ baseline, Table 1, availability, and baseline QC; Step 12 independently
 describes longitudinal follow-up from the same Step 10 product. Downstream
 analyses must consume the Step 11 baseline rather than reconstructing one.
 
+Step 13 consumes the frozen integrated longitudinal clinical-episode dataset
+and produces the canonical Block A disease-activity progression analyses. It
+must not rebuild clinical episodes, baseline, ESSDAI, ESSPRI, or Pop states.
+
 ## Key folders
 
 - `data/`: project data files
