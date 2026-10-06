@@ -14,9 +14,18 @@ clinical episode spine + validated domain products
 characterization.py           retention / gaps / episodes
 patient x official baseline
 Table 1 / availability / QC
+          |                         |
+          +------------+------------+
+                       v
+          13_disease_activity_progression.py
+          ESSDAI/ESSPRI trajectories, activity states,
+          state transitions, and time to first observed worsening
 ```
 
 Step 10 is the longitudinal source of truth. Step 11 consumes every available
 column on the row explicitly marked `is_clinical_baseline`; it does not derive
 scores, classifications, or select laboratory measurements. Step 12 uses the
 same integrated input but never defines a replacement baseline.
+Step 13 is the canonical longitudinal disease-activity analysis and replaces
+historical story-map references to the nonexistent `04_essdai_trajectories.py`
+and `05_domain_heatmap.py`; it consumes, rather than reconstructs, Steps 10–12.

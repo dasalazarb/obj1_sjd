@@ -14,7 +14,8 @@ NOTAS:
   Usar SIEMPRE ids__visit_date cuando esté disponible.
   Los valores None indican que el tiempo nominal es desconocido para esa fase
   — fuerzan un error explícito si se intenta usar sin verificar.
-- ESSDAI_SEVERE = 5 es el umbral del protocolo (uno.docx §7.1).
+- ESSDAI_SEVERE se conserva sólo como alias legacy; los análisis nuevos usan
+  nombres de actividad clínicamente precisos para los cortes 5 y 14.
 - No modificar ESSDAI_DOMAIN_WEIGHTS ni DOMAIN_LEVEL_LABELS sin
   validación clínica del investigador.
 """
@@ -174,8 +175,26 @@ ESSDAI_DOMAIN_WEIGHTS: dict[str, int] = {
 
 # ── Umbrales clínicos ESSDAI ───────────────────────────────────────────────────
 
-ESSDAI_SEVERE = 5    # ≥5 → moderate-to-severe / Pop 1 (protocolo uno.docx §7.1)
-ESSDAI_HIGH   = 14   # ≥14 → high activity (referencia de literatura)
+ESSDAI_SEVERE = 5    # Legacy name retained for backwards compatibility only.
+ESSDAI_MODERATE_OR_HIGH_CUTOFF = 5
+ESSDAI_HIGH_CUTOFF = 14
+ESSDAI_LOW_MAX = 4
+ESSDAI_MODERATE_MIN = 5
+ESSDAI_MODERATE_MAX = 13
+ESSDAI_HIGH_MIN = 14
+ESSDAI_HIGH = ESSDAI_HIGH_CUTOFF
+
+# Sensitivity thresholds; progression itself is not defined by a single delta.
+ESSDAI_IMPROVEMENT_MCID = -3
+ESSDAI_LEGACY_WORSENING_DELTA = 5
+ESSPRI_IMPROVEMENT_ABSOLUTE = -1
+ESSPRI_IMPROVEMENT_RELATIVE = -0.15
+CHANGE_THRESHOLDS = {
+    "essdai_improvement": ESSDAI_IMPROVEMENT_MCID,
+    "essdai_legacy_worsening": ESSDAI_LEGACY_WORSENING_DELTA,
+    "esspri_absolute_improvement": ESSPRI_IMPROVEMENT_ABSOLUTE,
+    "esspri_relative_improvement": ESSPRI_IMPROVEMENT_RELATIVE,
+}
 # ESSDAI_INACTIVE es simplemente < ESSDAI_SEVERE; no se define por separado
 
 # ── Variables ESSPRI ──────────────────────────────────────────────────────────

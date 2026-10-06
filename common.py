@@ -86,6 +86,8 @@ SEROLOGY_EPISODE_PARQUET = BLOCKA_INTERMEDIATE_DATA_DIR / "01_serological_profil
 INTEGRATED_LONGITUDINAL_PARQUET = ANALYTIC_DATA_DIR / "10_build_integrated_longitudinal_dataset" / "10_integrated_longitudinal_clinical_episode.parquet"
 INTEGRATED_BASELINE_PARQUET = ANALYTIC_DATA_DIR / "blockA" / "11_integrated_baseline_characterization" / "11_integrated_baseline_patient_level.parquet"
 INTEGRATED_BASELINE_CSV = INTEGRATED_BASELINE_PARQUET.with_suffix(".csv")
+DISEASE_ACTIVITY_PROGRESSION_DIR = ANALYTIC_DATA_DIR / "blockA" / "13_disease_activity_progression"
+DISEASE_ACTIVITY_PROGRESSION_PARQUET = DISEASE_ACTIVITY_PROGRESSION_DIR / "13_progression_episode_level.parquet"
 TRANSITION_EPISODE_PARQUET = INTERMEDIATE_DATA_DIR / "23_build_transition_episode_dataset" / "23_transition_episode_dataset.parquet"
 TRANSITION_EPISODE_CSV = INTERMEDIATE_DATA_DIR / "23_build_transition_episode_dataset" / "23_transition_episode_dataset.csv"
 
