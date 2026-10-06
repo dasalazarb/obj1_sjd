@@ -1,0 +1,28 @@
+study_name: longitudinal_graph
+contract_version: clinical_episode_curated_v2
+random_seed: 20260831
+feature_selection:
+  minimum_visit_coverage: 0.60
+  minimum_patient_coverage: 0.50
+  require_longitudinally_resolved: true
+  external_characterizers: [essdai_total, esspri_total, pop]
+  forbidden_name_patterns: [next_, previous_, delta_, future, time_to_, patient_consensus]
+representation: {imputation: median, scaling: robust}
+pca: {variance_target: 0.80, max_components: 10, lens_components: 2}
+mapper:
+  n_cubes: 8
+  perc_overlap: 0.40
+  min_samples: 3
+  eps_k_neighbors: 4
+  eps_percentile: 65
+  minimum_node_patients: 3
+  minimum_macrostate_patients: 8
+  soft_membership_tau: 1.0
+temporal:
+  minimum_edge_patients_display: 5
+  keep_self_transitions: true
+  maximum_interval_years: null
+bootstrap: {replicates: 1000}
+null_models: {replicates: 1000, temporal_reversal: true, next_visit_permutation: true}
+characterization: {minimum_transition_patients: 5, bootstrap_replicates: 1000, fdr_alpha: 0.05}
+figures: {dpi: 160}
