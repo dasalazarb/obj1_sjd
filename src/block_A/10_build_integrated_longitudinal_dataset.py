@@ -441,8 +441,16 @@ def classify_overlap_column(name: str) -> dict | None:
         "glandular_salivary_gland_swelling_active", "n_glandular_manifestations_active",
         "glandular_active", "extraglandular_active", "n_extraglandular_domains_active",
         "overlap_active", "overlap_intensity_count", "overlap_status",
+        # The aggregate recorded sicca assessment can be positive even when
+        # eye/mouth details are unknown, so it is not reconstructible from them.
+        "sicca_active",
     }
-    context = {"glandular_evaluable", "extraglandular_evaluable", "active_extraglandular_domains", "overlap_evaluable"}
+    context = {"glandular_evaluable", "extraglandular_evaluable", "active_extraglandular_domains",
+               "overlap_evaluable", "glandular_phenotype_complete"}
+    if name in {"objective_glandular_dysfunction_active", "objective_or_swelling_glandular_active",
+                "n_extraglandular_domains_active_no_bio_heme"}:
+        return _decision("DOWNSTREAM_DERIVED", "overlap", "overlap.derived_composite",
+                         "Reconstructible from curated glandular components or ESSDAI domains")
     if name in analytic or (name.startswith("eg_") and name.endswith(("_active", "_ordinal_score"))):
         return _decision("ANALYTIC", "overlap", "overlap.clinical", "Curated glandular or extraglandular phenotype")
     if name in context or (name.startswith("eg_") and name.endswith("_evaluable")):
@@ -801,6 +809,10 @@ def build_coverage(analytic: pd.DataFrame, context: pd.DataFrame, labs: pd.DataF
         ["has_essdai", "has_esspri_observed", "has_lab_measurement", "has_pro_data",
          "has_extended_clinical_data", "has_evaluable_clinical_phenotype"]
     ].any(axis=1)
+    # Raw producer keys may be object dtype while curated keys are string.
+    # Merges must not change the public identifier dtype under row permutation.
+    for key in KEYS:
+        coverage[key] = coverage[key].astype("string")
     return coverage
 
 
@@ -810,7 +822,10 @@ def validate_overlap_contract(overlap: pd.DataFrame) -> None:
     active_cols = [c for c in overlap if c.startswith("eg_") and c.endswith("_active")]
     for active_col in active_cols:
         stem = active_col[:-len("_active")]
-        evaluable_col, score_col = f"{stem}_evaluable", f"{stem}_ordinal_score"
+        evaluable_col = f"{stem}_evaluable"
+        # The ESSDAI glandular score is not the aggregate glandular phenotype.
+        score_col = ("eg_glandular_ordinal_score" if stem == "eg_glandular_domain"
+                     else f"{stem}_ordinal_score")
         if evaluable_col not in overlap:
             errors.append(f"{active_col}: missing paired evaluability")
             continue
@@ -822,6 +837,8 @@ def validate_overlap_contract(overlap: pd.DataFrame) -> None:
             score = pd.to_numeric(overlap[score_col], errors="coerce")
             if (evaluable.eq(False) & score.notna()).any() or (evaluable.eq(True) & ~score.isin([0, 1, 2, 3])).any():
                 errors.append(f"{stem}: ordinal/evaluable contradiction")
+            if (evaluable.eq(True) & active.ne(score.gt(0))).any():
+                errors.append(f"{stem}: ordinal/active contradiction")
     required = {"glandular_active", "extraglandular_active", "overlap_active", "overlap_evaluable", "overlap_status"}
     if required <= set(overlap):
         g = overlap.glandular_active.astype("boolean")

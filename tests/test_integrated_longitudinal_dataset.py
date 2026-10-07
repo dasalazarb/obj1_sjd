@@ -50,6 +50,9 @@ def frames():
         eg_pulmonary_active=pd.Series([False, True, False], dtype="boolean"),
         eg_pulmonary_evaluable=pd.Series([True, True, True], dtype="boolean"),
         eg_pulmonary_ordinal_score=[0.0, 1.0, 0.0],
+        eg_glandular_ordinal_score=[0.0, 2.0, 0.0],
+        eg_glandular_domain_active=pd.Series([False, True, False], dtype="boolean"),
+        eg_glandular_domain_evaluable=pd.Series([True, True, True], dtype="boolean"),
         pulmonary=[False, True, False],
     )
     pros = metadata.assign(age_baseline=[50., 50., pd.NA], sex=["Female", "Female", "Male"], sf36_pcs=[40., 35., 50.], sf36_mcs=[45., 46., 48.],
@@ -89,6 +92,72 @@ def test_curated_outputs_preserve_spine_and_partition_roles():
     interval = result.registry.query("source == 'clinical_spine' and original_variable == 'ids__interval_name'").iloc[0]
     assert interval.public_variable == "spine__interval_name" and interval.producer_script == "00_build_visit_spine.py"
     assert set(builder.AUDIT_COLUMNS) == set(result.redundancy_audit.columns)
+
+
+def test_glandular_domain_publication_and_evaluability_partition():
+    result = builder.build_curated(*frames())
+    assert result.analytic["essdai__glandular_ordinal_score"].tolist() == [0, 2, 0]
+    assert "essdai__glandular_domain_active" in result.analytic
+    assert "essdai__glandular_domain_evaluable" in result.context
+    assert "eg_glandular_ordinal_score" not in result.analytic
+    registry = result.registry.set_index("original_variable")
+    assert registry.loc["eg_glandular_ordinal_score", "role"] == "ANALYTIC"
+
+
+def test_glandular_domain_score_contradictions_fail_closed():
+    inputs = list(frames())
+    inputs[3].loc[1, "eg_glandular_domain_evaluable"] = False
+    with pytest.raises(builder.CurationContractError, match="ordinal/evaluable|active/evaluable"):
+        builder.build_curated(*inputs)
+    inputs = list(frames())
+    inputs[3].loc[1, "eg_glandular_ordinal_score"] = 0
+    with pytest.raises(builder.CurationContractError, match="ordinal/active"):
+        builder.build_curated(*inputs)
+
+
+def test_all_twelve_domains_from_upstream_derivations_are_published():
+    from src.derivations.overlap_flags import (
+        GLANDULAR_COLS, EXTRAGLANDULAR_DOMAINS,
+        derive_glandular_flags, derive_extraglandular_flags,
+    )
+    inputs = list(frames())
+    raw = inputs[0].copy()
+    for meta in EXTRAGLANDULAR_DOMAINS.values():
+        raw[meta["col"]] = ["no activity", "low activity", "no activity"]
+    raw[GLANDULAR_COLS["gland_swell"]] = ["no activity", "moderate activity", "no activity"]
+    flags = derive_glandular_flags(raw).join(derive_extraglandular_flags(raw))
+    for column in flags:
+        if column.startswith("eg_"):
+            inputs[3][column] = flags[column]
+    result = builder.build_curated(*inputs)
+    domains = {"glandular", *EXTRAGLANDULAR_DOMAINS}
+    assert len(domains) == 12
+    assert {f"essdai__{domain}_ordinal_score" for domain in domains} <= set(result.analytic)
+    assert result.analytic["essdai__glandular_ordinal_score"].tolist() == [0, 2, 0]
+
+
+def test_full_step06_product_is_accepted_by_step10():
+    from src.derivations.overlap_flags import GLANDULAR_COLS, EXTRAGLANDULAR_DOMAINS
+    path = MODULE_PATH.parent / "06_overlap_glandular.py"
+    spec = importlib.util.spec_from_file_location("overlap_producer06", path)
+    producer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(producer)
+    inputs = list(frames())
+    raw = inputs[0].copy()
+    for meta in EXTRAGLANDULAR_DOMAINS.values():
+        raw[meta["col"]] = ["no activity", "low activity", "no activity"]
+    raw[GLANDULAR_COLS["gland_swell"]] = ["no activity", "moderate activity", "no activity"]
+    raw[GLANDULAR_COLS["symptom_dry_eye_or_mouth"]] = ["sicca present", None, None]
+    inputs[0] = raw
+    inputs[3] = producer.add_sensitivity_phenotypes(producer.derive_episode_level(raw))
+    result = builder.build_curated(*inputs)
+    assert not result.registry.role.eq("UNCLASSIFIED").any()
+    assert result.analytic["essdai__glandular_ordinal_score"].tolist() == [0, 2, 0]
+    assert result.analytic["ovl__sicca_active"].iloc[0]
+    assert "ovl__glandular_phenotype_complete" in result.context
+    derived = result.registry.query("source == 'overlap' and role == 'DOWNSTREAM_DERIVED'")
+    assert {"objective_glandular_dysfunction_active", "objective_or_swelling_glandular_active",
+            "n_extraglandular_domains_active_no_bio_heme"} <= set(derived.original_variable)
 
 
 @pytest.mark.parametrize("source_index", [1, 2, 3, 4, 5])

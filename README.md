@@ -26,6 +26,32 @@ Step 13 consumes the frozen integrated longitudinal clinical-episode dataset
 and produces the canonical Block A disease-activity progression analyses. It
 must not rebuild clinical episodes, baseline, ESSDAI, ESSPRI, or Pop states.
 
+Step 13 requires all 12 ESSDAI ordinal domain columns, including
+`essdai__glandular_ordinal_score`. Step 06 derives that score exclusively from
+`essdai__gland_swell`, independently of the aggregate glandular phenotype;
+Step 10 publishes it. Existing inputs without it must be regenerated in order:
+Step 06, Step 10, then Step 13. Refresh Step 11 if its baseline schema must
+include the new fields; Step 12 does not use the new glandular score.
+
+Continuous ESSDAI and ESSPRI models select a valid random-intercept MixedLM or
+fall back to patient-clustered Gaussian GEE when convergence, covariance,
+boundary or Hessian checks fail. Both attempts are preserved in QC, and
+ESSDAI sensitivities attempt random slopes and quadratic time when supported.
+Domain inference uses patient-clustered OrdinalGEE, then active/inactive
+binomial GEE if estimable; BH-FDR includes only valid domain models. Trajectory
+figures show the selected model's marginal prediction and covariance-based
+95% CI.
+
+Descriptive windows use the official baseline and one episode per patient per
+follow-up window, selected nearest its center (first eligible after five years).
+ESSPRI uses all repeated patients as primary; a span of at least six months is
+reported as sensitivity. KM describes first-observed events, reports event
+proportions separately from person-time rates, and suppresses the median if
+there are fewer than five events or fewer than five patients at risk when the
+curve first crosses 0.5. These are explicit descriptive support rules.
+Use `--overwrite` to replace existing Step 13 outputs; `--dry-run` validates
+inputs and reports the domain contract without fitting the final analyses.
+
 ## Key folders
 
 - `data/`: project data files
