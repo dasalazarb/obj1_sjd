@@ -84,11 +84,73 @@ first builds a time-blind reference Mapper from eligible clinical visits and onl
 then overlays actual consecutive visits. Mapper proximity is never treated as a
 temporal transition.
 
-Run the four stages in order:
+Run preparation and the reference Mapper first:
 
 ```bash
 python src/studies/longitudinal_graph/01_prepare_longitudinal_data.py
 python src/studies/longitudinal_graph/02_run_longitudinal_mapper.py
+```
+
+Script 02 runs the complete S3 primary and S2 unbalanced Mappers, plus S3
+sensitivities with enough PCs to reach the configured variance target, without
+urine squamous cells, and with hsCRP transformed by `log1p` when the original
+observed values are nonnegative. All share the fixed post-redundancy feature set
+(except the specified exclusion) and fixed Mapper hyperparameters. Full80 removes
+only the PCA component cap; the primary retains its configured cap. Every scenario
+uses PC1/PC2 as its lens and all retained PCs for local clustering. Family weights
+are applied after RobustScaler, preserving the primary representation.
+
+Before running temporal flow, review these tables and JSON under
+`outputs/tables/studies/longitudinal_graph/`:
+
+- `02_mapper_sensitivity_summary.csv`: five scenarios, PCA variance, support,
+  coverage, and ARI with comparable visit and patient counts.
+- `02_s2_s3_macrostate_stability.csv` and `02_s2_s3_stability_summary.json`:
+  visit/patient overlap and ARI. Each primary macrostate matches independently by
+  maximal patient Jaccard, then visit Jaccard; many-to-one matches expose mergers.
+  Numeric macrostate IDs are not used as evidence of correspondence. Sets include
+  all visits in macrostate nodes, including ties. Scalar Jaccard summaries are
+  unweighted means over supported primary macrostates; review each macrostate,
+  including the core, rather than relying on the mean.
+- `02_full80_macrostate_stability.csv`,
+  `02_no_urine_squamous_macrostate_stability.csv`, and
+  `02_hscrp_log1p_macrostate_stability.csv`: per-macrostate sensitivity matches.
+- `02_feature_distribution_diagnostics.csv`: original finite observations on the
+  Script-01 cohort, before imputation; extremes are strictly below Q1 minus three
+  IQRs or above Q3 plus three IQRs. Missing raw data or negative hsCRP observations
+  are documented; ineligible sensitivities have `status: not_applicable` and no
+  invented metrics.
+- `02_mapper_pc_feature_diagnostics.csv`: hsCRP and urine squamous loadings, squared
+  loading fractions, and loading ranks on PC1--PC4 in the fitted scenarios.
+- `02_longitudinal_mapper_summary.json`: coverage reconciliation, administrative
+  association flag, interval endpoint coverage, and representation-stability gate.
+
+ARI excludes ambiguous or missing supported hard assignments. Its interpretation
+requires enough common visits/patients and represented labels; high ARI on a small
+subset or a single macrostate does not establish stability. No ARI cutoff or
+automatic parameter tuning is used. Administrative associations below the flag
+threshold do not establish absence of confounding.
+
+The summary's Mapper coverage counts any graph node. In membership files,
+`mapper_graph_covered` exposes that measure, while the existing `mapper_covered`
+continues to mean membership in at least one supported macrostate for Script 03.
+Graph-covered visits partition into hard assignments, ties, and covered visits
+with neither a supported hard assignment nor a tie. Percentages use all input
+visits or unique patients as denominators, on a 0--100 scale. Visits/patients in
+unsupported macrostates can also belong to supported macrostates. Unsupported
+macrostates remain descriptive and contribute no primary temporal weights.
+The endpoint counts use only the original consecutive intervals, with positive
+time and the configured maximum interval; missing endpoints never create skips.
+
+The gate reports objective blockers and otherwise remains `requires_review`.
+Proceed only after reviewing useful supported endpoint coverage, at least two
+supported primary macrostates, recognition of the core across representations,
+per-macrostate overlap, hsCRP/urine diagnostics, and administrative QC. Clinical
+macrostate labels remain deferred to held-out characterization in Script 04.
+Script 02 does not execute Script 03 or approve the scientific gate automatically.
+After that review, run:
+
+```bash
 python src/studies/longitudinal_graph/03_analyze_temporal_flow.py
 python src/studies/longitudinal_graph/04_characterize_transitions.py
 ```
