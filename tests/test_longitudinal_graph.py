@@ -25,9 +25,34 @@ def test_consecutive_contract_has_no_skips():
 
 def test_future_and_time_leakage_are_explicitly_excluded():
     external={"essdai__total","esspri__total","pop__status"}; patterns=["next_","previous_","delta_","future","time_to_","patient_consensus"]
-    for value in ("next_x","previous_x","delta_x","future_x"): assert PREP.forbidden_reason(value,external,patterns)=="future_leakage"
+    for value in ("next_x","delta_x","future_x"): assert PREP.forbidden_reason(value,external,patterns)=="future_leakage"
+    assert PREP.forbidden_reason("previous_x",external,patterns)=="historical_accumulator"
     for value in ("clinical_anchor_date","clinical_visit_number","interval_days","interval_years","time_since_x","age_at_visit"): assert PREP.forbidden_reason(value,external,patterns)=="administrative"
     for value in external: assert PREP.forbidden_reason(value,external,patterns)=="external_characterizer"
+
+def test_state_semantic_exclusions_and_scope_fail_closed():
+    patterns=["next_","previous_","delta_","future","time_to_"]
+    assert PREP.forbidden_reason("essdai__articular_active",set(),patterns)=="external_characterizer"
+    assert PREP.forbidden_reason("esspri__fatigue",set(),patterns)=="external_characterizer"
+    assert PREP.forbidden_reason("sero__anti_ro_ssa__ever_positive_through_episode",set(),patterns)=="historical_accumulator"
+    assert PREP.forbidden_reason("sero__baseline_rf",set(),patterns)=="baseline_static_copy"
+    assert PREP.temporal_scope("mystery_measure")[0]=="unknown"
+    registry=pd.DataFrame({"public_variable":["sero__baseline_rf"],"temporal_scope":["clinical_baseline"]})
+    assert PREP.temporal_scope("sero__baseline_rf",registry)[0]=="baseline_static"
+
+def test_preimputation_and_visit_type_coverage():
+    raw=pd.DataFrame({"a":[1.,np.nan],"b":[np.nan,np.nan]})
+    qc=PREP.preimputation_coverage(raw)
+    assert qc.state_coverage_fraction.tolist()==[.5,0.]
+    visits=pd.DataFrame({"patient_id":["A","B"],"visit_type":["A","B"],"feature":[1.,np.nan]})
+    detail,_=PREP.visit_type_coverage(visits,["feature"],"visit_type")
+    assert detail.set_index("visit_type").pct_observed.to_dict()=={"A":1.,"B":0.}
+
+def test_mapper_administrative_qc_is_populated():
+    membership=pd.DataFrame({"patient_id":["A","B","C","D"],"clinical_episode_id":["1","2","3","4"],"hard_macrostate":[0,0,1,1]})
+    metadata=pd.DataFrame({"patient_id":["A","B","C","D"],"clinical_episode_id":["1","2","3","4"],"visit_type":["X","X","Y","Y"]})
+    assoc,detail=MAP.administrative_qc(membership,metadata)
+    assert not assoc.empty and not detail.empty and assoc.iloc[0].n_patients==4
 
 def test_unique_patient_node_support_not_visit_support():
     visits=pd.DataFrame({"patient_id":["A"]*10}); graph={"nodes":{"n":set(range(10))},"links":{"n":[]}}

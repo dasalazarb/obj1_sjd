@@ -7,7 +7,8 @@ feature_selection:
   require_longitudinally_resolved: true
   external_characterizers: [essdai_total, esspri_total, pop]
   forbidden_name_patterns: [next_, previous_, delta_, future, time_to_, patient_consensus]
-representation: {imputation: median, scaling: robust}
+representation: {imputation: median, scaling: robust, redundancy_spearman_abs_threshold: 0.95}
+administrative_qc: {cramers_v_flag_threshold: 0.50}
 pca: {variance_target: 0.80, max_components: 10, lens_components: 2}
 mapper:
   n_cubes: 8
