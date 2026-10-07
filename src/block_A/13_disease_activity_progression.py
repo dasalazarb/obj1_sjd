@@ -870,8 +870,15 @@ def plot_domain_forest(models, path):
     plt.close(fig)
 
 
-def parse_args():
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument("--integrated",type=Path,default=common.INTEGRATED_LONGITUDINAL_PARQUET);p.add_argument("--baseline",type=Path,default=common.INTEGRATED_BASELINE_PARQUET);p.add_argument("--output-root",type=Path,default=common.PROJECT_ROOT);p.add_argument("--overwrite",action=argparse.BooleanOptionalAction,default=False);p.add_argument("--dry-run",action="store_true");return p.parse_args()
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--integrated", type=Path, default=common.INTEGRATED_LONGITUDINAL_PARQUET)
+    p.add_argument("--baseline", type=Path, default=common.INTEGRATED_BASELINE_PARQUET)
+    p.add_argument("--output-root", type=Path, default=common.PROJECT_ROOT)
+    p.add_argument("--overwrite", action=argparse.BooleanOptionalAction, default=True,
+                   help="Regenerate existing Step 13 outputs (default); --no-overwrite protects them")
+    p.add_argument("--dry-run", action="store_true")
+    return p.parse_args(argv)
 
 
 def main(args=None):

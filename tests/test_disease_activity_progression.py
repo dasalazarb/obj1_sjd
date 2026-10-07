@@ -319,9 +319,26 @@ def test_step13_generates_all_outputs_and_qc(tmp_path):
     assert not (attempts.singular & attempts.model_status.eq("ok")).any()
     for name in ("low_to_ge5", "moderate_to_high"):
         assert "event_rate" not in pd.read_csv(tables/f"13_tte_{name}.csv")
+    # CLI defaults must regenerate a completed run, replacing stale results.
+    primary_path = tables/"13_essdai_longitudinal_model.csv"
+    primary_path.write_text("stale_output\n", encoding="utf-8")
+    rerun_args = mod.parse_args(["--integrated", str(source), "--baseline", str(basefile),
+                                "--output-root", str(tmp_path)])
+    mod.main(rerun_args)
+    regenerated = pd.read_csv(primary_path)
+    assert regenerated.outcome.tolist() == ["ESSDAI total"]
+    assert regenerated.n_patients.tolist() == [24]
+    contents = primary_path.read_text()
     with pytest.raises(FileExistsError, match="overwrite"):
-        mod.main(SimpleNamespace(integrated=source, baseline=basefile, output_root=tmp_path,
-                                 overwrite=False, dry_run=False))
+        mod.main(mod.parse_args(["--integrated", str(source), "--baseline", str(basefile),
+                                 "--output-root", str(tmp_path), "--no-overwrite"]))
+    assert primary_path.read_text() == contents
+
+
+def test_overwrite_cli_defaults_and_opt_out():
+    assert mod.parse_args([]).overwrite is True
+    assert mod.parse_args(["--overwrite"]).overwrite is True
+    assert mod.parse_args(["--no-overwrite"]).overwrite is False
 
 
 def test_missing_domain_hard_fails_with_actionable_qc(tmp_path):
