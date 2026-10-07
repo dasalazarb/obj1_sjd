@@ -1,0 +1,53 @@
+studies:
+- id: objective_01
+  title: "Objective 01 \xB7 Natural History / Baseline"
+  path: objectives/objective_01
+  status: live
+- id: objective_02
+  title: "Objective 02 \xB7 Disease Progression"
+  path: objectives/objective_02
+  status: planned
+- id: objective_03
+  title: "Objective 03 \xB7 Planned"
+  path: objectives/objective_03
+  status: planned
+- id: objective_04
+  title: "Objective 04 \xB7 Planned"
+  path: objectives/objective_04
+  status: planned
+- id: secondary_01
+  title: Secondary objective 01
+  path: objectives/secondary_01
+  status: planned
+- id: secondary_02
+  title: Secondary objective 02
+  path: objectives/secondary_02
+  status: planned
+- id: secondary_03
+  title: Secondary objective 03
+  path: objectives/secondary_03
+  status: planned
+- id: secondary_04
+  title: Secondary objective 04
+  path: objectives/secondary_04
+  status: planned
+- id: secondary_05
+  title: Secondary objective 05
+  path: objectives/secondary_05
+  status: planned
+- id: exploratory_01
+  title: Exploratory objectives
+  path: objectives/exploratory_01
+  status: planned
+- id: graph
+  title: Graph / TDA
+  path: studies/graph
+  status: planned
+- id: pharma
+  title: Pharma
+  path: studies/pharma
+  status: planned
+- id: economic
+  title: Economic
+  path: studies/economic
+  status: planned

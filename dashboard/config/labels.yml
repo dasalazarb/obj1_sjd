@@ -1,0 +1,87 @@
+labels:
+  essdai_total:
+    ui: ESSDAI total
+    decimals: 1
+  esspri_total:
+    ui: ESSPRI total
+    decimals: 1
+  esspri_dryness:
+    ui: ESSPRI dryness
+    decimals: 1
+  esspri_fatigue:
+    ui: ESSPRI fatigue
+    decimals: 1
+  esspri_pain:
+    ui: ESSPRI pain
+    decimals: 1
+  mdafs_global:
+    ui: Fatigue, MDAFS global
+    decimals: 1
+  profad_total:
+    ui: Fatigue, PROFAD total
+    decimals: 1
+  sf36_pcs:
+    ui: SF-36 physical component (PCS)
+    decimals: 1
+  sf36_mcs:
+    ui: SF-36 mental component (MCS)
+    decimals: 1
+  n_extraglandular_domains_active:
+    ui: Active extraglandular domains
+    decimals: 1
+  biopsy_focus_score:
+    ui: Biopsy focus score
+    decimals: 1
+  ocular_schirmer_min:
+    ui: Minimum Schirmer
+    decimals: 1
+  salivary_flow_unstimulated:
+    ui: Unstimulated salivary flow
+    decimals: 1
+  igg__value:
+    ui: IgG
+    decimals: 0
+  complement_c3__value:
+    ui: Complement C3
+    decimals: 1
+  complement_c4__value:
+    ui: Complement C4
+    decimals: 1
+  esr__value:
+    ui: ESR
+    decimals: 1
+  sex:
+    ui: Sex
+    decimals: 1
+  race:
+    ui: Race
+    decimals: 1
+  ethnicity:
+    ui: Ethnicity
+    decimals: 1
+  pop_status:
+    ui: Population (Pop)
+    decimals: 1
+  sicca_any_symptom:
+    ui: Sicca symptoms
+    decimals: 1
+  ocular_staining_positive:
+    ui: Ocular staining positive
+    decimals: 1
+  anti_ro_ssa__ever_positive_through_episode:
+    ui: Anti-Ro / SSA
+    decimals: 1
+  anti_la_ssb__ever_positive_through_episode:
+    ui: Anti-La / SSB
+    decimals: 1
+groups:
+  Overall:
+    ui: Overall
+  Pop1:
+    ui: Pop1
+  Pop2:
+    ui: Pop2
+  Pop3:
+    ui: Pop3
+  Unclassifiable:
+    ui: Unclassifiable

@@ -1,0 +1,567 @@
+id: objective_01
+order: 1
+eyebrow: DESCRIPTIVE / NATURAL HISTORY ANALYSIS
+title: Primary Objective 1
+subtitle: Baseline Characteristics
+study_family: natural_history
+outputs_registry_ids:
+- t11_overall
+- t11_by_pop
+- t11_avail
+- t11_dict
+- t12_long
+- t12_ret
+- prov11
+- fig_swimmer
+sections:
+- id: study_design
+  file: sections/01_study_design.py
+  slides:
+  - 2
+  - 3
+  - 4
+  eyebrow: UNIT OF ANALYSIS
+  title: A diagnosis-anchored view of overlap
+  illustrative: true
+- id: cohort
+  file: sections/02_cohort.py
+  slides:
+  - 5
+  eyebrow: STARTING POINT
+  title: What data we start with
+- id: baseline
+  file: sections/03_baseline.py
+  slides:
+  - 6
+  - 7
+  eyebrow: BASELINE
+  title: Who is in the cohort
+- id: phenotype
+  file: sections/04_phenotype.py
+  slides:
+  - 8
+  - 9
+  eyebrow: BASELINE PHENOTYPE
+  title: Disease activity, full cohort
+- id: glandular_serology
+  file: sections/05_glandular_serology.py
+  slides:
+  - 10
+  - 11
+  eyebrow: BASELINE PHENOTYPE
+  title: Glandular phenotype and serology
+- id: organ_involvement
+  file: sections/06_organ_involvement.py
+  slides:
+  - 12
+  eyebrow: ORGAN INVOLVEMENT
+  title: Glandular and extraglandular overlap
+- id: followup
+  file: sections/07_followup.py
+  slides:
+  - 13
+  - 14
+  eyebrow: LONGITUDINAL FOLLOW-UP
+  title: How much follow-up we have
+- id: variable_explorer
+  file: sections/08_variable_explorer.py
+  slides:
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  eyebrow: LONGITUDINAL VARIABLE EXPLORER
+  title: Variable Explorer
+presentation:
+  default_mode: read
+bar_thresholds:
+- 90
+- 60
+timeline_nodes:
+- Day zero
+- Baseline = clinical episode
+- Visit
+- Visit
+- Clinical episode
+- Follow-up
+episode_nodes:
+- Day 1 · ESSDAI / physician
+- Day 6 · Research component
+- Day 7 · ESSPRI
+- Day 9 · Eye exam
+steps:
+- Published clinical episodes
+- 'Canonical baseline: {{ref:t11_overall:Cohort / demographics|N patients@Summary#raw}} rows, one per patient'
+- Tables, availability and follow-up
+cohort_cards:
+- label: Patients in the cohort
+  value_ref: t11_overall:Cohort / demographics|N patients@Summary#raw
+  kind: raw
+  decimals: 0
+- label: Clinical episodes in total
+  value_ref: t12_long:Clinical episodes|Overall@Value#raw
+  kind: raw
+  decimals: 0
+demographic_cards:
+- label: Enrolled patients
+  value_ref: t11_overall:Cohort / demographics|N patients@Summary#raw
+  kind: raw
+  decimals: 0
+- label: Female
+  value_ref: 't11_overall:Cohort / demographics|sex: FEMALE@Summary#pct'
+  detail_refs:
+  - 't11_overall:Cohort / demographics|sex: FEMALE@Summary#k'
+  - 't11_overall:Cohort / demographics|sex: FEMALE@Summary#N'
+  kind: fraction
+  decimals: 1
+- label: Male
+  value_ref: 't11_overall:Cohort / demographics|sex: MALE@Summary#k'
+  kind: raw
+  decimals: 0
+race_rows:
+- label: White
+  pct_ref: 't11_overall:Cohort / demographics|race: WHITE@Summary#pct'
+  n_ref: 't11_overall:Cohort / demographics|race: WHITE@Summary#k'
+  tone: normal
+- label: Black or African American
+  pct_ref: 't11_overall:Cohort / demographics|race: BLACK OR AFRICAN AMERICAN@Summary#pct'
+  n_ref: 't11_overall:Cohort / demographics|race: BLACK OR AFRICAN AMERICAN@Summary#k'
+  tone: steel
+- label: Asian
+  pct_ref: 't11_overall:Cohort / demographics|race: ASIAN@Summary#pct'
+  n_ref: 't11_overall:Cohort / demographics|race: ASIAN@Summary#k'
+  tone: steel
+- label: Multiple races
+  pct_ref: 't11_overall:Cohort / demographics|race: MULTIPLE RACES@Summary#pct'
+  n_ref: 't11_overall:Cohort / demographics|race: MULTIPLE RACES@Summary#k'
+  tone: steel
+- label: Other
+  pct_ref: 't11_overall:Cohort / demographics|race: OTHER@Summary#pct'
+  n_ref: 't11_overall:Cohort / demographics|race: OTHER@Summary#k'
+  tone: steel
+- label: Unknown
+  pct_ref: 't11_overall:Cohort / demographics|race: UNKNOWN@Summary#pct'
+  n_ref: 't11_overall:Cohort / demographics|race: UNKNOWN@Summary#k'
+  tone: unknown
+ethnicity_rows:
+- label: Latino or Hispanic
+  pct_ref: 't11_overall:Cohort / demographics|ethnicity: LATINO OR HISPANIC@Summary#pct'
+  n_ref: 't11_overall:Cohort / demographics|ethnicity: LATINO OR HISPANIC@Summary#k'
+- label: Not Latino or Hispanic
+  pct_ref: 't11_overall:Cohort / demographics|ethnicity: NOT LATINO OR HISPANIC@Summary#pct'
+  n_ref: 't11_overall:Cohort / demographics|ethnicity: NOT LATINO OR HISPANIC@Summary#k'
+- label: Unknown
+  pct_ref: 't11_overall:Cohort / demographics|ethnicity: UNKNOWN@Summary#pct'
+  n_ref: 't11_overall:Cohort / demographics|ethnicity: UNKNOWN@Summary#k'
+availability_rows:
+- label: Demographics
+  members:
+  - label: Sex
+    pct_ref: t11_avail:sex@pct_available_for_analysis#raw
+    n_ref: t11_avail:sex@n_available_for_analysis#raw
+    total_ref: t11_avail:sex@n_baseline_total#raw
+    nonmissing_ref: t11_avail:sex@n_nonmissing#raw
+  - label: Race
+    pct_ref: t11_avail:race@pct_available_for_analysis#raw
+    n_ref: t11_avail:race@n_available_for_analysis#raw
+    total_ref: t11_avail:race@n_baseline_total#raw
+    nonmissing_ref: t11_avail:race@n_nonmissing#raw
+  - label: Ethnicity
+    pct_ref: t11_avail:ethnicity@pct_available_for_analysis#raw
+    n_ref: t11_avail:ethnicity@n_available_for_analysis#raw
+    total_ref: t11_avail:ethnicity@n_baseline_total#raw
+    nonmissing_ref: t11_avail:ethnicity@n_nonmissing#raw
+- label: Population (Pop)
+  members:
+  - label: Population (Pop)
+    pct_ref: t11_avail:pop_status@pct_available_for_analysis#raw
+    n_ref: t11_avail:pop_status@n_available_for_analysis#raw
+    total_ref: t11_avail:pop_status@n_baseline_total#raw
+    nonmissing_ref: t11_avail:pop_status@n_nonmissing#raw
+- label: ESSDAI total
+  members:
+  - label: ESSDAI total
+    pct_ref: t11_avail:essdai_total@pct_available_for_analysis#raw
+    n_ref: t11_avail:essdai_total@n_available_for_analysis#raw
+    total_ref: t11_avail:essdai_total@n_baseline_total#raw
+    nonmissing_ref: t11_avail:essdai_total@n_nonmissing#raw
+- label: Extraglandular
+  members:
+  - label: Active extraglandular domains
+    pct_ref: t11_avail:n_extraglandular_domains_active@pct_available_for_analysis#raw
+    n_ref: t11_avail:n_extraglandular_domains_active@n_available_for_analysis#raw
+    total_ref: t11_avail:n_extraglandular_domains_active@n_baseline_total#raw
+    nonmissing_ref: t11_avail:n_extraglandular_domains_active@n_nonmissing#raw
+- label: PROFAD total
+  members:
+  - label: Fatigue, PROFAD total
+    pct_ref: t11_avail:profad_total@pct_available_for_analysis#raw
+    n_ref: t11_avail:profad_total@n_available_for_analysis#raw
+    total_ref: t11_avail:profad_total@n_baseline_total#raw
+    nonmissing_ref: t11_avail:profad_total@n_nonmissing#raw
+- label: ESSPRI total
+  members:
+  - label: ESSPRI total
+    pct_ref: t11_avail:esspri_total@pct_available_for_analysis#raw
+    n_ref: t11_avail:esspri_total@n_available_for_analysis#raw
+    total_ref: t11_avail:esspri_total@n_baseline_total#raw
+    nonmissing_ref: t11_avail:esspri_total@n_nonmissing#raw
+- label: SF-36 (PCS, MCS)
+  members:
+  - label: SF-36 physical component (PCS)
+    pct_ref: t11_avail:sf36_pcs@pct_available_for_analysis#raw
+    n_ref: t11_avail:sf36_pcs@n_available_for_analysis#raw
+    total_ref: t11_avail:sf36_pcs@n_baseline_total#raw
+    nonmissing_ref: t11_avail:sf36_pcs@n_nonmissing#raw
+  - label: SF-36 mental component (MCS)
+    pct_ref: t11_avail:sf36_mcs@pct_available_for_analysis#raw
+    n_ref: t11_avail:sf36_mcs@n_available_for_analysis#raw
+    total_ref: t11_avail:sf36_mcs@n_baseline_total#raw
+    nonmissing_ref: t11_avail:sf36_mcs@n_nonmissing#raw
+- label: MDAFS global
+  members:
+  - label: Fatigue, MDAFS global
+    pct_ref: t11_avail:mdafs_global@pct_available_for_analysis#raw
+    n_ref: t11_avail:mdafs_global@n_available_for_analysis#raw
+    total_ref: t11_avail:mdafs_global@n_baseline_total#raw
+    nonmissing_ref: t11_avail:mdafs_global@n_nonmissing#raw
+- label: Salivary flow
+  members:
+  - label: Unstimulated salivary flow
+    pct_ref: t11_avail:salivary_flow_unstimulated@pct_available_for_analysis#raw
+    n_ref: t11_avail:salivary_flow_unstimulated@n_available_for_analysis#raw
+    total_ref: t11_avail:salivary_flow_unstimulated@n_baseline_total#raw
+    nonmissing_ref: t11_avail:salivary_flow_unstimulated@n_nonmissing#raw
+- label: C3, IgG, ESR
+  members:
+  - label: Complement C3
+    pct_ref: t11_avail:complement_c3__value@pct_available_for_analysis#raw
+    n_ref: t11_avail:complement_c3__value@n_available_for_analysis#raw
+    total_ref: t11_avail:complement_c3__value@n_baseline_total#raw
+    nonmissing_ref: t11_avail:complement_c3__value@n_nonmissing#raw
+  - label: IgG
+    pct_ref: t11_avail:igg__value@pct_available_for_analysis#raw
+    n_ref: t11_avail:igg__value@n_available_for_analysis#raw
+    total_ref: t11_avail:igg__value@n_baseline_total#raw
+    nonmissing_ref: t11_avail:igg__value@n_nonmissing#raw
+  - label: ESR
+    pct_ref: t11_avail:esr__value@pct_available_for_analysis#raw
+    n_ref: t11_avail:esr__value@n_available_for_analysis#raw
+    total_ref: t11_avail:esr__value@n_baseline_total#raw
+    nonmissing_ref: t11_avail:esr__value@n_nonmissing#raw
+- label: C4
+  members:
+  - label: Complement C4
+    pct_ref: t11_avail:complement_c4__value@pct_available_for_analysis#raw
+    n_ref: t11_avail:complement_c4__value@n_available_for_analysis#raw
+    total_ref: t11_avail:complement_c4__value@n_baseline_total#raw
+    nonmissing_ref: t11_avail:complement_c4__value@n_nonmissing#raw
+- label: Minimum Schirmer
+  members:
+  - label: Minimum Schirmer
+    pct_ref: t11_avail:ocular_schirmer_min@pct_available_for_analysis#raw
+    n_ref: t11_avail:ocular_schirmer_min@n_available_for_analysis#raw
+    total_ref: t11_avail:ocular_schirmer_min@n_baseline_total#raw
+    nonmissing_ref: t11_avail:ocular_schirmer_min@n_nonmissing#raw
+- label: Sicca symptoms
+  members:
+  - label: Sicca symptoms
+    pct_ref: t11_avail:sicca_any_symptom@pct_available_for_analysis#raw
+    n_ref: t11_avail:sicca_any_symptom@n_available_for_analysis#raw
+    total_ref: t11_avail:sicca_any_symptom@n_baseline_total#raw
+    nonmissing_ref: t11_avail:sicca_any_symptom@n_nonmissing#raw
+- label: Ocular staining
+  members:
+  - label: Ocular staining positive
+    pct_ref: t11_avail:ocular_staining_positive@pct_available_for_analysis#raw
+    n_ref: t11_avail:ocular_staining_positive@n_available_for_analysis#raw
+    total_ref: t11_avail:ocular_staining_positive@n_baseline_total#raw
+    nonmissing_ref: t11_avail:ocular_staining_positive@n_nonmissing#raw
+- label: Focus score
+  members:
+  - label: Biopsy focus score
+    pct_ref: t11_avail:biopsy_focus_score@pct_available_for_analysis#raw
+    n_ref: t11_avail:biopsy_focus_score@n_available_for_analysis#raw
+    total_ref: t11_avail:biopsy_focus_score@n_baseline_total#raw
+    nonmissing_ref: t11_avail:biopsy_focus_score@n_nonmissing#raw
+- label: Anti-Ro / Anti-La
+  members:
+  - label: Anti-Ro / SSA
+    pct_ref: t11_avail:anti_ro_ssa__ever_positive_through_episode@pct_available_for_analysis#raw
+    n_ref: t11_avail:anti_ro_ssa__ever_positive_through_episode@n_available_for_analysis#raw
+    total_ref: t11_avail:anti_ro_ssa__ever_positive_through_episode@n_baseline_total#raw
+    nonmissing_ref: t11_avail:anti_ro_ssa__ever_positive_through_episode@n_nonmissing#raw
+  - label: Anti-La / SSB
+    pct_ref: t11_avail:anti_la_ssb__ever_positive_through_episode@pct_available_for_analysis#raw
+    n_ref: t11_avail:anti_la_ssb__ever_positive_through_episode@n_available_for_analysis#raw
+    total_ref: t11_avail:anti_la_ssb__ever_positive_through_episode@n_baseline_total#raw
+    nonmissing_ref: t11_avail:anti_la_ssb__ever_positive_through_episode@n_nonmissing#raw
+phenotype_cards:
+- label: ESSDAI total
+  value_ref: t11_overall:Disease activity|essdai_total@Summary#median
+  detail_refs:
+  - t11_overall:Disease activity|essdai_total@Summary#q1
+  - t11_overall:Disease activity|essdai_total@Summary#q3
+  - t11_overall:Disease activity|essdai_total@Summary#n
+  kind: median
+  decimals: 1
+- label: ESSPRI total
+  value_ref: t11_overall:Disease activity|esspri_total@Summary#median
+  detail_refs:
+  - t11_overall:Disease activity|esspri_total@Summary#q1
+  - t11_overall:Disease activity|esspri_total@Summary#q3
+  - t11_overall:Disease activity|esspri_total@Summary#n
+  kind: median
+  decimals: 1
+- label: ESSPRI dryness
+  value_ref: t11_overall:Disease activity|esspri_dryness@Summary#median
+  detail_refs:
+  - t11_overall:Disease activity|esspri_dryness@Summary#q1
+  - t11_overall:Disease activity|esspri_dryness@Summary#q3
+  - t11_overall:Disease activity|esspri_dryness@Summary#n
+  kind: median
+  decimals: 1
+- label: ESSPRI fatigue
+  value_ref: t11_overall:Disease activity|esspri_fatigue@Summary#median
+  detail_refs:
+  - t11_overall:Disease activity|esspri_fatigue@Summary#q1
+  - t11_overall:Disease activity|esspri_fatigue@Summary#q3
+  - t11_overall:Disease activity|esspri_fatigue@Summary#n
+  kind: median
+  decimals: 1
+- label: ESSPRI pain
+  value_ref: t11_overall:Disease activity|esspri_pain@Summary#median
+  detail_refs:
+  - t11_overall:Disease activity|esspri_pain@Summary#q1
+  - t11_overall:Disease activity|esspri_pain@Summary#q3
+  - t11_overall:Disease activity|esspri_pain@Summary#n
+  kind: median
+  decimals: 1
+- label: Active extraglandular domains
+  value_ref: t11_overall:Organ involvement|n_extraglandular_domains_active@Summary#median
+  detail_refs:
+  - t11_overall:Organ involvement|n_extraglandular_domains_active@Summary#q1
+  - t11_overall:Organ involvement|n_extraglandular_domains_active@Summary#q3
+  - t11_overall:Organ involvement|n_extraglandular_domains_active@Summary#n
+  kind: median
+  decimals: 1
+pop_columns:
+- Overall
+- Pop1
+- Pop2
+- Pop3
+- Unclassifiable
+pro_rows:
+- label: N patients
+  row_key: Cohort / demographics|N patients
+  field: raw
+  decimals: 0
+- label: ESSDAI total
+  row_key: Disease activity|essdai_total
+  field: summary
+  decimals: 1
+- label: ESSPRI total
+  row_key: Disease activity|esspri_total
+  field: summary
+  decimals: 1
+- label: Fatigue, MDAFS global
+  row_key: PROs|mdafs_global
+  field: summary
+  decimals: 1
+- label: Fatigue, PROFAD total
+  row_key: PROs|profad_total
+  field: summary
+  decimals: 1
+- label: SF-36 physical component (PCS)
+  row_key: PROs|sf36_pcs
+  field: summary
+  decimals: 1
+- label: SF-36 mental component (MCS)
+  row_key: PROs|sf36_mcs
+  field: summary
+  decimals: 1
+glandular_cards:
+- label: Unstimulated salivary flow
+  value_ref: t11_overall:Glandular / extended phenotype|salivary_flow_unstimulated@Summary#median
+  detail_refs:
+  - t11_overall:Glandular / extended phenotype|salivary_flow_unstimulated@Summary#q1
+  - t11_overall:Glandular / extended phenotype|salivary_flow_unstimulated@Summary#q3
+  - t11_overall:Glandular / extended phenotype|salivary_flow_unstimulated@Summary#n
+  kind: median
+  decimals: 1
+- label: Minimum Schirmer
+  value_ref: t11_overall:Glandular / extended phenotype|ocular_schirmer_min@Summary#median
+  detail_refs:
+  - t11_overall:Glandular / extended phenotype|ocular_schirmer_min@Summary#q1
+  - t11_overall:Glandular / extended phenotype|ocular_schirmer_min@Summary#q3
+  - t11_overall:Glandular / extended phenotype|ocular_schirmer_min@Summary#n
+  kind: median
+  decimals: 1
+- label: Biopsy focus score
+  value_ref: t11_overall:Glandular / extended phenotype|biopsy_focus_score@Summary#median
+  detail_refs:
+  - t11_overall:Glandular / extended phenotype|biopsy_focus_score@Summary#q1
+  - t11_overall:Glandular / extended phenotype|biopsy_focus_score@Summary#q3
+  - t11_overall:Glandular / extended phenotype|biopsy_focus_score@Summary#n
+  kind: median
+  decimals: 1
+- label: Ocular staining positive
+  value_ref: t11_overall:Glandular / extended phenotype|Ocular staining positive,
+    n/N (%)@Summary#pct
+  detail_refs:
+  - t11_overall:Glandular / extended phenotype|Ocular staining positive, n/N (%)@Summary#k
+  - t11_overall:Glandular / extended phenotype|Ocular staining positive, n/N (%)@Summary#N
+  kind: fraction
+  decimals: 1
+- label: Anti-Ro/SSA positive
+  value_ref: t11_overall:Serology|Anti-Ro/SSA positive, n/N (%)@Summary#pct
+  detail_refs:
+  - t11_overall:Serology|Anti-Ro/SSA positive, n/N (%)@Summary#k
+  - t11_overall:Serology|Anti-Ro/SSA positive, n/N (%)@Summary#N
+  kind: fraction
+  decimals: 1
+- label: Anti-La/SSB positive
+  value_ref: t11_overall:Serology|Anti-La/SSB positive, n/N (%)@Summary#pct
+  detail_refs:
+  - t11_overall:Serology|Anti-La/SSB positive, n/N (%)@Summary#k
+  - t11_overall:Serology|Anti-La/SSB positive, n/N (%)@Summary#N
+  kind: fraction
+  decimals: 1
+lab_rows:
+- label: Biopsy focus score
+  row_key: Glandular / extended phenotype|biopsy_focus_score
+  field: summary
+  decimals: 1
+- label: Ocular staining positive
+  row_key: Glandular / extended phenotype|Ocular staining positive, n/N (%)
+  field: fraction
+  decimals: 1
+- label: Anti-Ro/SSA positive
+  row_key: Serology|Anti-Ro/SSA positive, n/N (%)
+  field: fraction
+  decimals: 1
+- label: Anti-La/SSB positive
+  row_key: Serology|Anti-La/SSB positive, n/N (%)
+  field: fraction
+  decimals: 1
+- label: Complement C3
+  row_key: Laboratories|complement_c3__value
+  field: summary
+  decimals: 1
+- label: Complement C4
+  row_key: Laboratories|complement_c4__value
+  field: summary
+  decimals: 1
+- label: IgG
+  row_key: Laboratories|igg__value
+  field: summary
+  decimals: 0
+- label: ESR
+  row_key: Laboratories|esr__value
+  field: summary
+  decimals: 1
+overlap_segments:
+- label: Glandular only
+  row_key: 'Organ involvement|overlap_status: glandular_only'
+  color: '#9DB4D6'
+- label: Overlap
+  row_key: 'Organ involvement|overlap_status: overlap'
+  color: '#1B2A4A'
+- label: Unclassifiable
+  row_key: 'Organ involvement|overlap_status: unclassifiable'
+  color: '#E3E8EF'
+- label: Extraglandular only
+  row_key: 'Organ involvement|overlap_status: extraglandular_only'
+  color: '#4A6FA5'
+- label: Neither
+  row_key: 'Organ involvement|overlap_status: neither'
+  color: '#C9D6EA'
+followup_cards:
+- label: Clinical episodes
+  value_ref: t12_long:Clinical episodes|{cohort}@Value#raw
+  detail_refs: []
+  kind: raw
+  decimals: 0
+- label: Patients
+  value_ref: t12_long:Unique patients|{cohort}@Value#raw
+  detail_refs: []
+  kind: raw
+  decimals: 0
+- label: Follow-up, years
+  value_ref: t12_long:Follow-up, median (IQR), years|{cohort}@Value#median
+  detail_refs:
+  - t12_long:Follow-up, median (IQR), years|{cohort}@Value#q1
+  - t12_long:Follow-up, median (IQR), years|{cohort}@Value#q3
+  kind: median
+  decimals: 1
+- label: Episodes per patient
+  value_ref: t12_long:Clinical episodes per patient, median (IQR)|{cohort}@Value#median
+  detail_refs:
+  - t12_long:Clinical episodes per patient, median (IQR)|{cohort}@Value#q1
+  - t12_long:Clinical episodes per patient, median (IQR)|{cohort}@Value#q3
+  kind: median
+  decimals: 1
+- label: Inter-visit gap, days
+  value_ref: t12_long:Median inter-visit gap, days|{cohort}@Value#raw
+  detail_refs: []
+  kind: raw
+  decimals: 0
+- label: Episodes per follow-up year
+  value_ref: t12_long:Clinical episodes per follow-up year, median (IQR)|{cohort}@Value#median
+  detail_refs:
+  - t12_long:Clinical episodes per follow-up year, median (IQR)|{cohort}@Value#q1
+  - t12_long:Clinical episodes per follow-up year, median (IQR)|{cohort}@Value#q3
+  kind: median
+  decimals: 1
+followup_details:
+- label: Maximum follow-up, years
+  value_ref: t12_long:Maximum follow-up, years|{cohort}@Value#raw
+  kind: raw
+  decimals: 1
+- label: Mean episodes per patient
+  value_ref: t12_long:Clinical episodes per patient, mean|{cohort}@Value#raw
+  kind: raw
+  decimals: 1
+- label: Maximum episodes per patient
+  value_ref: t12_long:Maximum clinical episodes per patient|{cohort}@Value#raw
+  kind: raw
+  decimals: 0
+- label: IQR inter-visit gap, days
+  value_ref: t12_long:IQR inter-visit gap, days|{cohort}@Value#raw
+  kind: raw
+  decimals: null
+- label: P90 inter-visit gap, days
+  value_ref: t12_long:P90 inter-visit gap, days|{cohort}@Value#raw
+  kind: raw
+  decimals: 1
+episode_bars:
+- label: ≥ 2 clinical episodes
+  pct_ref: t12_long:Patients with >=2 clinical episodes|{cohort}@Value#pct
+  n_ref: t12_long:Patients with >=2 clinical episodes|{cohort}@Value#k
+- label: ≥ 3 clinical episodes
+  pct_ref: t12_long:Patients with >=3 clinical episodes|{cohort}@Value#pct
+  n_ref: t12_long:Patients with >=3 clinical episodes|{cohort}@Value#k
+- label: ≥ 5 clinical episodes
+  pct_ref: t12_long:Patients with >=5 clinical episodes|{cohort}@Value#pct
+  n_ref: t12_long:Patients with >=5 clinical episodes|{cohort}@Value#k
+- label: ≥ 10 clinical episodes
+  pct_ref: t12_long:Patients with >=10 clinical episodes|{cohort}@Value#pct
+  n_ref: t12_long:Patients with >=10 clinical episodes|{cohort}@Value#k
+gap_bars:
+- label: '> 180 days'
+  pct_ref: t12_long:Patients with at least one gap >180 days|{cohort}@Value#pct
+  n_ref: t12_long:Patients with at least one gap >180 days|{cohort}@Value#k
+- label: '> 365 days'
+  pct_ref: t12_long:Patients with at least one gap >365 days|{cohort}@Value#pct
+  n_ref: t12_long:Patients with at least one gap >365 days|{cohort}@Value#k
+- label: '> 730 days'
+  pct_ref: t12_long:Patients with at least one gap >730 days|{cohort}@Value#pct
+  n_ref: t12_long:Patients with at least one gap >730 days|{cohort}@Value#k
+retention_times:
+- 6 months
+- 1 year
+- 2 years
+- 3 years
+- 5 years
+- 10 years
