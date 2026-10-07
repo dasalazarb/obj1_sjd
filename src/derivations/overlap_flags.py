@@ -198,6 +198,16 @@ def _any_active(row: pd.Series, cols: list[str], essdai: bool = False):
 
 def derive_glandular_flags(df: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame(index=df.index)
+    # ESSDAI glandular activity is exclusively the gland-swelling domain.
+    # It is distinct from the aggregate sicca/objective/swelling phenotype.
+    source = df.get(
+        GLANDULAR_COLS["gland_swell"],
+        pd.Series(pd.NA, index=df.index, dtype="object"),
+    )
+    active, evaluable, score = derive_domain_active(source)
+    out["eg_glandular_domain_active"] = active
+    out["eg_glandular_domain_evaluable"] = evaluable
+    out["eg_glandular_ordinal_score"] = score
     aggregate_col = GLANDULAR_COLS["symptom_dry_eye_or_mouth"]
     aggregate = (
         df[aggregate_col].map(parse_sicca)

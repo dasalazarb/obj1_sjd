@@ -73,6 +73,61 @@ def test_domain_source_states_and_absent_columns():
     assert pd.isna(flags.n_extraglandular_domains_active.iloc[0])
 
 
+@pytest.mark.parametrize(("source", "score"), [
+    ("no activity", 0), ("low activity", 1), ("moderate activity", 2),
+    ("high activity", 3), (None, None), ("unknown", None), (4, None),
+])
+def test_essdai_glandular_score_uses_swelling_only(source, score):
+    result = derive_glandular_flags(pd.DataFrame({
+        GLANDULAR_COLS["gland_swell"]: [source],
+        GLANDULAR_COLS["symptom_dry_eye_or_mouth"]: ["sicca present"],
+    })).iloc[0]
+    assert result.glandular_active == True  # aggregate remains positive from sicca
+    if score is None:
+        assert pd.isna(result.eg_glandular_ordinal_score)
+        assert pd.isna(result.eg_glandular_domain_active)
+        assert not result.eg_glandular_domain_evaluable
+    else:
+        assert result.eg_glandular_ordinal_score == score
+        assert result.eg_glandular_domain_active == (score > 0)
+        assert result.eg_glandular_domain_evaluable
+
+
+def test_unavailable_swelling_does_not_inherit_sicca_score():
+    raw = pd.DataFrame({GLANDULAR_COLS["symptom_dry_eye_or_mouth"]: ["sicca present"]})
+    flags = derive_glandular_flags(raw)
+    assert flags.eg_glandular_ordinal_score.isna().all()
+    assert not flags.eg_glandular_domain_evaluable.any()
+    assert flags.glandular_active.all()
+
+
+def test_new_ordinal_contract_preserves_legacy_glandular_phenotype():
+    # A qualitative positive supports the aggregate phenotype, but cannot be
+    # invented into an ESSDAI four-level severity score.
+    result = derive_glandular_flags(pd.DataFrame({
+        GLANDULAR_COLS["gland_swell"]: ["positive"]})).iloc[0]
+    assert result.glandular_active and result.glandular_evaluable
+    assert pd.isna(result.eg_glandular_ordinal_score)
+    assert not result.eg_glandular_domain_evaluable
+
+
+def test_glandular_score_survives_episode_producer():
+    source = pd.DataFrame({
+        "patient_id": ["p"], "clinical_episode_id": ["e"],
+        "clinical_anchor_date": pd.to_datetime(["2020-01-01"]),
+        "clinical_visit_number": [1], "clinical_visit": [True],
+        "is_clinical_baseline": [True],
+        "clinical_baseline_episode_id": ["e"],
+        "clinical_baseline_date": pd.to_datetime(["2020-01-01"]),
+        "time_since_clinical_baseline_days": [0],
+        "time_since_clinical_baseline_years": [0.],
+        EXTRAGLANDULAR_DOMAINS["constitutional"]["col"]: ["no activity"],
+        GLANDULAR_COLS["gland_swell"]: ["moderate activity"],
+    })
+    result = step.derive_episode_level(source)
+    assert result.eg_glandular_ordinal_score.tolist() == [2.0]
+
+
 @pytest.mark.parametrize(
     ("g", "e", "status", "overlap"),
     [
