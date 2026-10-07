@@ -20,8 +20,9 @@ import common
 from src.studies._shared import STUDY_CONTRACT_VERSION, create_study_dirs, sha256_file, write_json
 
 def load_config(path): return yaml.safe_load(Path(path).read_text())
-def fit_visit_embedding(matrix, config):
+def fit_visit_embedding(matrix, config, weights=None):
     scaled=RobustScaler().fit_transform(matrix)
+    if weights is not None: scaled=scaled*np.asarray(weights,dtype=float)
     limit=min(int(config["pca"]["max_components"]),*scaled.shape)
     if limit<2: raise ValueError("PCA requires at least two visits and two features")
     probe=PCA(n_components=limit,random_state=config["random_seed"]).fit(scaled)
@@ -61,6 +62,61 @@ def node_support_table(graph, visits, minimum_patients):
           "supported":bool(patients.nunique()>=minimum_patients)})
     return pd.DataFrame(rows)
 
+def feature_family(feature):
+    low=feature.lower()
+    if low.startswith("lab__"): return "LAB"
+    if low.startswith("pro__"): return "PRO"
+    if low.startswith("sero__"): return "SEROLOGY_CURRENT"
+    if low.startswith("ovl__"): return "OVERLAP"
+    if low.startswith("ext__"): return "CLINICAL"
+    return "OTHER"
+
+def reduce_redundancy(matrix, threshold=.95):
+    """Deterministic high-correlation pruning, preferring coverage then simple names."""
+    remaining=list(matrix.columns); rows=[]
+    coverage=matrix.notna().mean()
+    priority=lambda x:(-coverage[x], int(any(t in x.lower() for t in ("percent","estimated"))),x)
+    for left in sorted(remaining,key=priority):
+        if left not in remaining: continue
+        for right in sorted(remaining,key=priority):
+            if right==left or right not in remaining or priority(right)<=priority(left): continue
+            pair=matrix[[left,right]].dropna()
+            if len(pair)<2: continue
+            rho=float(pair.corr(method="spearman").iloc[0,1])
+            if np.isfinite(rho) and abs(rho)>=threshold:
+                kept,removed=sorted((left,right),key=priority)
+                remaining.remove(removed)
+                rows.append({"feature_a":left,"feature_b":right,"relationship_type":"high_spearman",
+                  "correlation":rho,"action":"remove_redundant","retained_feature":kept,
+                  "removed_feature":removed,"reason":f"abs_spearman>={threshold:.2f}; coverage_then_clinical_primacy"})
+                if removed==left: break
+    columns=["feature_a","feature_b","relationship_type","correlation","action","retained_feature","removed_feature","reason"]
+    return remaining,pd.DataFrame(rows,columns=columns)
+
+def administrative_qc(membership, metadata, variables=("spine__interval_name","visit_type","protocol","demo__protocol","interval_name"), flag_threshold=.5):
+    merged=membership.merge(metadata,on=["patient_id","clinical_episode_id"],how="left")
+    assoc=[]; detail=[]
+    valid=merged.loc[merged.hard_macrostate.notna()]
+    for col in variables:
+        if col not in valid: continue
+        observed=valid.loc[valid[col].notna()]
+        tab=pd.crosstab(observed[col],observed.hard_macrostate); v=np.nan
+        if min(tab.shape)>=2 and tab.to_numpy().sum():
+            stat=chi2_contingency(tab)[0]; v=math.sqrt(stat/(tab.to_numpy().sum()*(min(tab.shape)-1)))
+        assoc.append({"administrative_variable":col,"cramers_v":v,"n_visits":len(observed),
+                      "n_patients":observed.patient_id.nunique(),
+                      "administrative_confounding_flag":bool(np.isfinite(v) and v>=flag_threshold),
+                      "flag_threshold":flag_threshold})
+        if col in {"spine__interval_name","visit_type","interval_name"}:
+            for (kind,macro),group in observed.groupby([col,"hard_macrostate"]):
+                detail.append({"administrative_variable":col,"visit_type":kind,"macrostate_id":macro,
+                  "n_visits":len(group),"pct_within_visit_type":len(group)/(observed[col].eq(kind).sum()),
+                  "pct_within_macrostate":len(group)/(observed.hard_macrostate.eq(macro).sum()),
+                  "n_unique_patients":group.patient_id.nunique()})
+    acols=["administrative_variable","cramers_v","n_visits","n_patients","administrative_confounding_flag","flag_threshold"]
+    dcols=["administrative_variable","visit_type","macrostate_id","n_visits","pct_within_visit_type","pct_within_macrostate","n_unique_patients"]
+    return pd.DataFrame(assoc,columns=acols),pd.DataFrame(detail,columns=dcols)
+
 def build_macrostates(graph, visits, supported_nodes, minimum_macrostate_patients):
     retained={n:graph["nodes"][n] for n in supported_nodes}; nerve=nx.Graph(); nerve.add_nodes_from(retained); edge_rows=[]
     for left in sorted(retained):
@@ -99,8 +155,13 @@ def parse_args(argv=None):
 
 def run(args):
     dirs=create_study_dirs("longitudinal_graph"); logging.basicConfig(filename=dirs["logs"]/"02_mapper.log",level=logging.INFO,force=True); cfg=load_config(args.config)
-    state=pd.read_parquet(args.state); metadata=pd.read_parquet(args.metadata); features=[c for c in state if c not in {"patient_id","clinical_episode_id"}]
-    embedded,pca=fit_visit_embedding(state[features],cfg); eps=eps_kdist(embedded,cfg["mapper"]["eps_k_neighbors"],cfg["mapper"]["eps_percentile"]); graph=run_mapper(embedded[:,:2],embedded,cfg,eps)
+    state=pd.read_parquet(args.state); metadata=pd.read_parquet(args.metadata); eligible=[c for c in state if c not in {"patient_id","clinical_episode_id"}]
+    features,audit=reduce_redundancy(state[eligible],float(cfg["representation"].get("redundancy_spearman_abs_threshold",.95)))
+    families={f:feature_family(f) for f in features}; counts=pd.Series(families).value_counts()
+    weights=[1/math.sqrt(counts[families[f]]) for f in features]
+    # S2 is retained as a sensitivity representation; S3 is the pre-specified primary.
+    s2_embedding,_=fit_visit_embedding(state[features],cfg)
+    embedded,pca=fit_visit_embedding(state[features],cfg,weights); eps=eps_kdist(embedded,cfg["mapper"]["eps_k_neighbors"],cfg["mapper"]["eps_percentile"]); graph=run_mapper(embedded[:,:2],embedded,cfg,eps)
     nodes=node_support_table(graph,state,int(cfg["mapper"]["minimum_node_patients"])); supported=nodes.loc[nodes.supported,"node_id"].tolist()
     if not supported: raise ValueError("Mapper has no patient-supported nodes")
     mapping,macros,edges,nerve=build_macrostates(graph,state,supported,int(cfg["mapper"]["minimum_macrostate_patients"])); membership=normalized_memberships(graph,state,mapping,macros)
@@ -112,16 +173,18 @@ def run(args):
     variance=pd.DataFrame({"component":np.arange(1,pca.n_components_+1),"explained_variance_ratio":pca.explained_variance_ratio_,"cumulative_variance":np.cumsum(pca.explained_variance_ratio_)})
     variance.to_csv(dirs["tables"]/"02_longitudinal_pca_variance.csv",index=False); pd.DataFrame(pca.components_.T,index=features,columns=[f"PC{i+1}" for i in range(pca.n_components_)]).rename_axis("feature").reset_index().to_csv(dirs["tables"]/"02_longitudinal_pca_loadings.csv",index=False)
     nodes.to_csv(dirs["tables"]/"02_mapper_nodes.csv",index=False); edges.to_csv(dirs["tables"]/"02_mapper_topological_edges.csv",index=False); macros.to_csv(dirs["tables"]/"02_mapper_macrostate_summary.csv",index=False); membership.to_csv(dirs["tables"]/"02_mapper_visit_membership.csv",index=False)
-    admin=[]
-    merged=membership.merge(metadata,on=["patient_id","clinical_episode_id"],how="left")
-    for col in ("demo__protocol","protocol","spine__interval_name","interval_name","visit_type"):
-      if col not in merged: continue
-      tab=pd.crosstab(merged.hard_macrostate,merged[col]); v=np.nan
-      if min(tab.shape)>=2:
-        stat=chi2_contingency(tab)[0]; v=math.sqrt(stat/(tab.to_numpy().sum()*(min(tab.shape)-1)))
-      admin.append({"administrative_variable":col,"cramers_v":v,"n_visits":int(tab.to_numpy().sum())})
-    pd.DataFrame(admin).to_csv(dirs["tables"]/"02_mapper_administrative_qc.csv",index=False); pd.DataFrame().to_csv(dirs["tables"]/"02_mapper_visit_type_qc.csv",index=False)
-    summary={"status":"completed","contract_version":STUDY_CONTRACT_VERSION,"input_files":[args.state,args.metadata],"config_file":args.config,"config_sha256":sha256_file(args.config),"random_seed":cfg["random_seed"],"n_visits":len(state),"n_patients":state.patient_id.nunique(),"n_features":len(features),"mapper_parameters":cfg["mapper"],"eps":eps,"n_nodes":len(nodes),"n_supported_nodes":len(supported),"n_macrostates":len(macros),"n_supported_macrostates":int(macros.macrostate_supported.sum())}
+    admin,visit_qc=administrative_qc(membership,metadata,flag_threshold=float(cfg["administrative_qc"]["cramers_v_flag_threshold"]))
+    admin.to_csv(dirs["tables"]/"02_mapper_administrative_qc.csv",index=False); visit_qc.to_csv(dirs["tables"]/"02_mapper_visit_type_qc.csv",index=False)
+    audit.to_csv(dirs["tables"]/"02_longitudinal_redundancy_audit.csv",index=False)
+    removed=set(eligible)-set(features); rep=[]
+    for scenario,balanced in (("S2-like",False),("S3-like",True)):
+      for feature in eligible:
+        retained=feature in features
+        rep.append({"feature":feature,"family":feature_family(feature),"eligible_from_script01":True,
+          "retained_after_redundancy":retained,"used_in_primary_mapper":bool(balanced and retained),
+          "scenario":scenario,"balance_weight":(1/math.sqrt(counts[families[feature]]) if balanced and retained else (1.0 if retained else np.nan))})
+    pd.DataFrame(rep).to_csv(dirs["tables"]/"02_mapper_representation_manifest.csv",index=False)
+    summary={"status":"completed","contract_version":STUDY_CONTRACT_VERSION,"input_files":[args.state,args.metadata],"config_file":args.config,"config_sha256":sha256_file(args.config),"random_seed":cfg["random_seed"],"primary_scenario":"S3-like","sensitivity_scenario":"S2-like","n_visits":len(state),"n_patients":state.patient_id.nunique(),"n_features":len(features),"mapper_parameters":cfg["mapper"],"eps":eps,"n_nodes":len(nodes),"n_supported_nodes":len(supported),"n_macrostates":len(macros),"n_supported_macrostates":int(macros.macrostate_supported.sum())}
     write_json(dirs["tables"]/"02_longitudinal_mapper_summary.json",summary)
     pos={n:np.mean(embedded[list(graph["nodes"][n]),:2],axis=0) for n in supported}; fig,ax=plt.subplots(figsize=(8,6))
     for a,b in nerve.edges: ax.plot([pos[a][0],pos[b][0]],[pos[a][1],pos[b][1]],color=".75",zorder=1)
