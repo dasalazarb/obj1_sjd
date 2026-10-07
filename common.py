@@ -88,6 +88,8 @@ INTEGRATED_BASELINE_PARQUET = ANALYTIC_DATA_DIR / "blockA" / "11_integrated_base
 INTEGRATED_BASELINE_CSV = INTEGRATED_BASELINE_PARQUET.with_suffix(".csv")
 DISEASE_ACTIVITY_PROGRESSION_DIR = ANALYTIC_DATA_DIR / "blockA" / "13_disease_activity_progression"
 DISEASE_ACTIVITY_PROGRESSION_PARQUET = DISEASE_ACTIVITY_PROGRESSION_DIR / "13_progression_episode_level.parquet"
+RISK_FACTORS_PROGRESSION_DIR = ANALYTIC_DATA_DIR / "blockA" / "14_risk_factors_progression"
+RISK_FACTORS_PROGRESSION_PARQUET = RISK_FACTORS_PROGRESSION_DIR / "14_lagged_interval_dataset.parquet"
 TRANSITION_EPISODE_PARQUET = INTERMEDIATE_DATA_DIR / "23_build_transition_episode_dataset" / "23_transition_episode_dataset.parquet"
 TRANSITION_EPISODE_CSV = INTERMEDIATE_DATA_DIR / "23_build_transition_episode_dataset" / "23_transition_episode_dataset.csv"
 

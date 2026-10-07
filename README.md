@@ -54,6 +54,16 @@ rerun after updating upstream inputs. Use `--no-overwrite` to protect existing
 outputs; `--dry-run` validates inputs and reports the domain contract without
 fitting the final analyses.
 
+Step 14 evaluates associations between earlier clinical, serological, glandular,
+laboratory and ESSDAI-domain characteristics and subsequent progression. It uses
+the official Step 11 baseline, adjacent Step 10 clinical intervals and Step 13
+progression definitions. Baseline Cox/trajectory, lagged Gaussian GEE, incident
+domain risk sets and support-gated secondary cross-domain models have separate
+outputs, temporal QC and FDR families. See
+[Step 14 implementation and review guide](docs/14_risk_factors_progression.md).
+Run `python src/block_A/14_risk_factors_progression.py --dry-run` to validate
+contracts and inspect feasibility before fitting the associations.
+
 ## Key folders
 
 - `data/`: project data files
