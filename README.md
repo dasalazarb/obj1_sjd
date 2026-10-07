@@ -49,8 +49,10 @@ reported as sensitivity. KM describes first-observed events, reports event
 proportions separately from person-time rates, and suppresses the median if
 there are fewer than five events or fewer than five patients at risk when the
 curve first crosses 0.5. These are explicit descriptive support rules.
-Use `--overwrite` to replace existing Step 13 outputs; `--dry-run` validates
-inputs and reports the domain contract without fitting the final analyses.
+Step 13 regenerates its outputs by default, so the standard command can be
+rerun after updating upstream inputs. Use `--no-overwrite` to protect existing
+outputs; `--dry-run` validates inputs and reports the domain contract without
+fitting the final analyses.
 
 ## Key folders
 
