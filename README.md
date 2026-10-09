@@ -69,6 +69,7 @@ contracts and inspect feasibility before fitting the associations.
 - `data/`: project data files
 - `src/`: analysis and processing scripts
 - `outputs/`: generated results
+- `dashboard/`: local Streamlit explorer for published aggregate results
 
 ## Important note
 
@@ -169,3 +170,22 @@ Section 5 now treats the project Codebook as the source of truth for variable se
 `past_medical_history__` fields and `sjogren's_syndrome_history__` fields are summarized separately as documented historical information. They are not used as baseline rheumatological prevalence inputs, longitudinal comorbidity events, risk-set definitions, event dates, cumulative histories, or progression-model exposures.
 
 The required Section 5 outputs are grouped by producing script under `outputs/tables/blockA/<script>`, `outputs/figures/blockA/<script>`, `outputs/qc/blockA/<script>`, and `outputs/logs/<script>`. Generated intermediate and analytic data follow the same `<script>` subdirectory convention under `data/`. Scripts whose names begin with `00_` retain their shared bootstrap paths. The legacy comorbidity event-rate outputs are intentionally not produced.
+
+
+## Local research dashboard
+
+The Streamlit app lives in [dashboard/](dashboard/README.md). Install its separate
+Python environment and run it on your PC using the Windows or macOS/Linux commands
+in that README. With the dashboard environment active, run from the repository
+root:
+
+```bash
+python dashboard/run_dashboard.py
+```
+
+Open http://localhost:8501. The app reads this checkout's registered aggregate
+outputs and curated figures without executing analysis scripts. Generated results
+are not included in GitHub; missing files are reported explicitly.
+
+Repository-root `pytest` remains scoped to the analysis tests in `tests/`.
+Run the dashboard's separate software suite from `dashboard/` using its environment.

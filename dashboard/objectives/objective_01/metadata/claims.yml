@@ -1,0 +1,37 @@
+- id: c.pop_pro.pop2_burden
+  section: phenotype
+  text: "Among Pop1\u20133, Pop2 shows the highest fatigue and the lowest SF-36."
+  evidence_refs:
+  - t11_by_pop:PROs|mdafs_global@Pop1#median
+  - t11_by_pop:PROs|mdafs_global@Pop2#median
+  - t11_by_pop:PROs|mdafs_global@Pop3#median
+  - t11_by_pop:PROs|profad_total@Pop1#median
+  - t11_by_pop:PROs|profad_total@Pop2#median
+  - t11_by_pop:PROs|profad_total@Pop3#median
+  - t11_by_pop:PROs|sf36_pcs@Pop1#median
+  - t11_by_pop:PROs|sf36_pcs@Pop2#median
+  - t11_by_pop:PROs|sf36_pcs@Pop3#median
+  - t11_by_pop:PROs|sf36_mcs@Pop1#median
+  - t11_by_pop:PROs|sf36_mcs@Pop2#median
+  - t11_by_pop:PROs|sf36_mcs@Pop3#median
+  reviewed_by: ''
+  reviewed_hash: ''
+  status: draft
+  manuscript_target: Results / Baseline phenotype
+- id: c.pop_lab.pop1_igg_esr
+  section: glandular_serology
+  text: Pop1 shows the highest IgG and ESR, and more positive ocular staining.
+  evidence_refs:
+  - t11_by_pop:Laboratories|igg__value@Pop1#median
+  - t11_by_pop:Laboratories|igg__value@Pop2#median
+  - t11_by_pop:Laboratories|igg__value@Pop3#median
+  - t11_by_pop:Laboratories|esr__value@Pop1#median
+  - t11_by_pop:Laboratories|esr__value@Pop2#median
+  - t11_by_pop:Laboratories|esr__value@Pop3#median
+  - t11_by_pop:Glandular / extended phenotype|Ocular staining positive, n/N (%)@Pop1#pct
+  - t11_by_pop:Glandular / extended phenotype|Ocular staining positive, n/N (%)@Pop2#pct
+  - t11_by_pop:Glandular / extended phenotype|Ocular staining positive, n/N (%)@Pop3#pct
+  reviewed_by: ''
+  reviewed_hash: ''
+  status: draft
+  manuscript_target: Results / Baseline phenotype

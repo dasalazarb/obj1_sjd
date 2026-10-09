@@ -1,0 +1,117 @@
+version: 1
+outputs:
+  t11_overall:
+    path: tables/blockA/11_integrated_baseline_characterization/11_table1_overall.csv
+    kind: csv
+    key:
+    - Section
+    - Variable
+    columns:
+    - Section
+    - Variable
+    - N available
+    - N missing
+    - Summary
+    producer: src/block_A/11_integrated_baseline_characterization.py
+  t11_by_pop:
+    path: tables/blockA/11_integrated_baseline_characterization/11_table1_by_pop.csv
+    kind: csv
+    key:
+    - Section
+    - Variable
+    columns:
+    - Section
+    - Variable
+    - Overall
+    - Pop1
+    - Pop2
+    - Pop3
+    - Unclassifiable
+    producer: src/block_A/11_integrated_baseline_characterization.py
+  t11_avail:
+    path: tables/blockA/11_integrated_baseline_characterization/11_baseline_variable_availability.csv
+    kind: csv
+    key:
+    - variable
+    columns:
+    - variable
+    - clinical_block
+    - n_baseline_total
+    - n_nonmissing
+    - pct_nonmissing
+    - n_valid
+    - pct_valid
+    - n_available_for_analysis
+    - pct_available_for_analysis
+    producer: src/block_A/11_integrated_baseline_characterization.py
+  t11_dict:
+    path: tables/blockA/11_integrated_baseline_characterization/11_variable_dictionary.csv
+    kind: csv
+    key:
+    - variable
+    columns:
+    - variable
+    - clinical_block
+    - role
+    - is_canonical
+    - include_in_table1
+    - description
+    - source_script
+    - dtype
+    producer: src/block_A/11_integrated_baseline_characterization.py
+  t12_long:
+    path: tables/blockA/12_followup_characterization/12_followup_summary_long.csv
+    kind: csv
+    key:
+    - Indicator
+    - Cohort
+    columns:
+    - Indicator
+    - Cohort
+    - Value
+    producer: src/block_A/12_followup_characterization.py
+  t12_ret:
+    path: tables/blockA/12_followup_characterization/12_retention.csv
+    kind: csv
+    key:
+    - cohort
+    - time
+    columns:
+    - cohort
+    - time
+    - days
+    - n_retained
+    - denominator
+    - pct_retained
+    producer: src/block_A/12_followup_characterization.py
+  prov11:
+    path_root: repo
+    path: data/analytic/blockA/11_integrated_baseline_characterization/11_integrated_baseline_patient_level.provenance.json
+    kind: json
+    fields:
+    - input_file
+    - input_integration_version
+    - run_date
+    - git_commit
+    - baseline_definition
+    - unit_of_analysis
+    - n_patients
+    - script
+    note: "Solo se lee el .provenance.json. El .parquet/.csv vecino es de pacientes\
+      \ individuales y est\xE1 prohibido (\xA75.7)."
+  fig_swimmer:
+    path: figures/blockA/01_pop_distribution/02_pop_distribution_plot.pdf
+    kind: figure
+    format: pdf
+    panels_glob: figures/blockA/01_pop_distribution/02_pop_distribution_plot_*.pdf
+    producer: src/block_A/01_pop_distribution.py
+  run_manifest:
+    path: run_manifest.json
+    kind: json
+    fields:
+    - run_id
+    - status
+    - assets
+redundant:
+  t12_wide: tables/blockA/12_followup_characterization/12_followup_summary.csv
+  t11_inventory: tables/blockA/11_integrated_baseline_characterization/11_baseline_full_variable_inventory.csv

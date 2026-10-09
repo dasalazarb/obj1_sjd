@@ -1,0 +1,7 @@
+variable_id,display_name,domain,data_type,default_view,active,table1_variable,abbreviation,decimals,unit_label,sort_order
+anti_ro_ssa,Anti-Ro / SSA,Serology,categorical,categorical_longitudinal,true,anti_ro_ssa__ever_positive_through_episode,,,,10
+complement_c3,Complement C3,Complement,numeric,longitudinal,true,complement_c3__value,C3,1,,20
+complement_c4,Complement C4,Complement,numeric,longitudinal,true,complement_c4__value,C4,1,,21
+igg,IgG,Immunoglobulins,numeric,longitudinal,true,igg__value,IgG,0,,30
+wbc,WBC,Hematology,numeric,longitudinal,true,,WBC,1,,40
+rheumatoid_factor,Rheumatoid Factor,Serology,numeric,longitudinal,true,,RF,1,,11
