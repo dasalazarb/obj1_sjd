@@ -6,6 +6,18 @@
 > protecting analytical code and upstream data/results. The original specification
 > below is retained as the scientific and editorial contract.
 
+> Interactive exploration revision (user clarification, 2026-10-08): retain the
+> slide-section order while making the app behave like an interactive notebook or
+> Shiny dashboard. The default opens a focused Baseline view; the section selector,
+> Previous/Next and continuous-reading option expose the original slide sequence.
+> Plotly displays published aggregate cells with hover, selection, zoom and
+> population/measure controls. Published median/Q1/Q3 are direct plot coordinates,
+> never recalculated distributions or confidence intervals. Source details and full
+> tables are expandable. Original figure colors and download bytes stay unchanged;
+> PNG/PDF image zoom does not imply data-point inspection. This clarification
+> supersedes the original static component/typography and default reading-layout
+> choices, while preserving all scientific-source and patient-data boundaries.
+
 **Destinatario:** Codex (agente de implementación)
 **Versión:** 1.0 · **Fecha:** 2026-10-07
 **Fuente editorial:** `pres_po1.pptx` (19 slides, versión editada por el investigador) + deck "Objective 1" generado en esta sesión

@@ -17,6 +17,7 @@ Unresolved scientific definitions and source assets are never filled by the dash
 | Q9 | ¿Se reincorporan las slides retiradas (definiciones de Pop, limitaciones) como `MethodsDetails`? | investigador | §1.17 |
 | Q10 | Step 12 sin `provenance.json` ni `run_manifest.json`: ¿se añadirá? | upstream | `RunBadge` |
 | Q11 | Seguimiento por protocolo (11D/15D): el deck anterior lo mostraba y las exportaciones nuevas son solo `Overall`. ¿Se re-exportará con `Cohort` = `11D`/`15D`? | upstream | slides 13–14 |
+| Q12 | Para inspeccionar puntos individuales en figuras longitudinales, ¿existe una exportación interactiva revisada y registrada, con su procedencia y clasificación de datos? Actualmente solo se pueden ampliar/desplazar los PNG/PDF originales; no se extraen puntos de imágenes ni se leen archivos de pacientes. | investigador / upstream | explorer interactivo, slides 15–19 |
 
 ## Audit findings — 2026-10-07
 

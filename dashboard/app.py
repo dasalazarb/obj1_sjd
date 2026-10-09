@@ -22,4 +22,17 @@ for group in nav['groups']:
     def page_callable(item):
         return importlib.import_module(item['path'].replace('/','.')+'.page').render if item['status']=='live' else planned(item['title'])
     pages[group['title']]=[st.Page(page_callable(item),title=item['title'],url_path=item['id'],default=item['id']=='objective_01') for item in group['items']]
-st.navigation(pages,position='hidden' if st.query_params.get('mode')=='present' else 'sidebar').run()
+navigation = st.navigation(pages, position='hidden')
+if st.query_params.get('mode') != 'present':
+    with st.sidebar:
+        st.markdown('**SjD Research Explorer**')
+        for group, items in zip(nav['groups'], pages.values()):
+            for item, page in zip(group['items'], items):
+                if item['status'] == 'live':
+                    st.page_link(page)
+        with st.expander('Other objectives and studies'):
+            for group, items in zip(nav['groups'], pages.values()):
+                st.caption(group['title'])
+                for item, page in zip(group['items'], items):
+                    if item['status'] != 'live': st.page_link(page)
+navigation.run()

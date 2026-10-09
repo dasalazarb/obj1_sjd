@@ -3,6 +3,7 @@ import base64
 import csv
 import hashlib
 import io
+import json
 import re
 from PIL import Image
 from streamlit.testing.v1 import AppTest
@@ -35,9 +36,9 @@ def test_deep_links_and_original_png_hash(mock_run,monkeypatch):
     app.run(timeout=20)
     assert not app.exception
     assert app.selectbox(key='sjd_variable_Complement').value=='complement_c4'
-    images=[element.proto.body for element in app.get('html') if 'data:image/png;base64,' in element.proto.body]
+    images=[trace['source'] for element in app.get('plotly_chart') for trace in json.loads(element.proto.spec)['data'] if trace['type']=='image']
     assert len(images)==1
-    encoded=re.search(r'data:image/png;base64,([^\"]+)',images[0]).group(1)
+    encoded=images[0].split(',',1)[1]
     assert hashlib.sha256(base64.b64decode(encoded)).digest()==hashlib.sha256(original).digest()
 
 
@@ -93,7 +94,7 @@ def test_unavailable_deep_view_is_not_substituted(mock_run,monkeypatch):
     app.query_params['view']='categorical_longitudinal'
     app.run(timeout=20)
     assert not app.exception
-    assert not [element for element in app.get('html') if 'data:image/png;base64,' in element.proto.body]
+    assert not app.get('plotly_chart')
     assert app.query_params['view']=='categorical_longitudinal'
 
 
