@@ -1,5 +1,6 @@
 """Temporal and inferential contracts for Primary Objective 3 associations."""
 import importlib.util
+import json
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -332,7 +333,8 @@ def test_feasibility_prevents_sparse_fit_and_reduced_model_is_prespecified(monke
     task.data["y"] = 0
     task.data.loc[:11, "y"] = 1
     data, meta = mod.prepare_model(task, 40)
-    assert meta["adjustment_status"] == "prespecified_reduced"
+    assert meta["adjustment_status"] == "minimal"
+    assert meta["adjustment_status_legacy"] == "prespecified_reduced"
     assert meta["adjustment_covariates"] == "baseline_essdai"
     assert meta["supported_for_model"]
     task.data.loc[:11, "y"] = 0
@@ -421,3 +423,210 @@ def test_cli_event_safeguard_cannot_be_lowered():
     assert not mod.parse_args(["--no-overwrite"]).overwrite
     with pytest.raises(SystemExit):
         mod.parse_args(["--minimum-events", "1"])
+
+
+@pytest.mark.parametrize("kind", ["trajectory", "lagged", "cox", "poisson"])
+def test_missing_duration_preserves_age_and_sex_and_full_when_observed(kind):
+    task = event_task(kind) if kind in {"cox", "poisson"} else task_for(kind)
+    n = task.data.patient_id.nunique()
+    data, full = mod.prepare_model(task, n)
+    assert full["selected_adjustment_level"] == "full"
+    task.data["duration"] = np.nan
+    data, reduced = mod.prepare_model(task, n)
+    assert reduced["selected_adjustment_level"] == "reduced_A"
+    assert "age" in reduced["adjustment_covariates"] and "sex" in reduced["adjustment_covariates"]
+    assert "C(sex)" in reduced["formula"] and "duration" not in reduced["formula"]
+    assert reduced["n_complete_cases"] == len(data)
+    levels = json.loads(reduced["candidate_adjustment_qc"])
+    assert [level["level"] for level in levels] == list(mod.ADJUSTMENT_LEVELS)
+    assert levels[0]["unavailable"] == ["duration"]
+    if kind in {"cox", "poisson"}:
+        assert reduced["n_events"] == int(data.y.eq(1).sum())
+    if kind == "lagged":
+        assert "from_essdai" in reduced["formula"] and "interval_years" in reduced["formula"]
+
+
+def test_outcome_values_do_not_select_adjustment_level():
+    task = task_for("lagged")
+    task.data["duration"] = np.nan
+    _, before = mod.prepare_model(task, 40)
+    task.data["y"] = np.random.default_rng(4).normal(70, 12, len(task.data))
+    _, after = mod.prepare_model(task, 40)
+    assert before["selected_adjustment_level"] == after["selected_adjustment_level"] == "reduced_A"
+    assert before["candidate_adjustment_qc"] == after["candidate_adjustment_qc"]
+
+
+@pytest.mark.parametrize("events,level", [(30, "full"), (20, "reduced_A"), (15, "reduced_B"), (10, "minimal")])
+def test_event_per_parameter_selects_prespecified_supported_level(events, level):
+    task = event_task()
+    task.data["y"] = 0
+    task.data.loc[:events-1, "y"] = 1
+    data, meta = mod.prepare_model(task, 120)
+    assert meta["selected_adjustment_level"] == level
+    assert meta["n_events"] == events and meta["n_complete_cases"] == len(data)
+    assert meta["events_per_candidate_parameter"] >= 5
+
+
+@pytest.mark.parametrize("kind", ["cox", "poisson"])
+@pytest.mark.parametrize("events", [0, 1, 2])
+def test_zero_one_two_events_remain_not_estimable(kind, events):
+    task = event_task(kind)
+    task.data["y"] = 0
+    task.data.iloc[:events, task.data.columns.get_loc("y")] = 1
+    data, meta = mod.prepare_model(task, 120)
+    row = mod.fit_task(task, data, meta, [])
+    assert meta["selected_adjustment_level"] == "none"
+    assert meta["n_events"] == events
+    assert row["claim_status"] == "unsupported" and not row["valid_for_inference"]
+    assert pd.isna(row["estimate"])
+
+
+def test_sex_missing_is_excluded_and_constant_sex_uses_reduced_b():
+    task = task_for("lagged")
+    task.data.loc[task.data.patient_id.eq("0"), "sex"] = pd.NA
+    data, meta = mod.prepare_model(task, 40)
+    assert "0" not in data.patient_id.tolist()
+    assert meta["n_patients"] == 39 and set(data.sex) == {"M", "F"}
+    task.data["sex"] = "F"
+    _, meta = mod.prepare_model(task, 40)
+    assert meta["selected_adjustment_level"] == "reduced_B"
+    assert "C(sex)" not in meta["formula"]
+
+
+def test_interval_demographics_come_from_official_baseline_not_later_episodes():
+    source = episodes(n=3)
+    later = ~source.is_clinical_baseline
+    source.loc[later, "demo__age_at_baseline"] = 999
+    source.loc[later, "demo__sex"] = "Future"
+    source.loc[later, "disease_duration"] = 999
+    _, base, intervals, _, _ = datasets(source)
+    expected = base.set_index("patient_id")
+    for name in ("age", "sex", "duration"):
+        assert intervals[name].eq(intervals.patient_id.map(expected["pred__"+name])).all()
+
+
+def test_duration_does_not_resolve_unverified_aliases_or_clip_impossible_values():
+    source = episodes(n=3)
+    registry = mod.resolve_predictors(mod.build_predictor_registry(), source, source)
+    duration = get_spec(registry, "duration")
+    source.loc[0, "disease_duration"] = -2
+    source.loc[4, "disease_duration"] = 100
+    values = mod.predictor_values(source, duration, True)
+    assert pd.isna(values.loc[0]) and pd.isna(values.loc[4])
+    source.loc[8, "dx_date"] = pd.Timestamp("2021-01-01")
+    assert pd.isna(mod.predictor_values(source, duration, True).loc[8])
+    source = source.drop(columns="disease_duration")
+    for name in ("time_since_diagnosis_years", "disease_duration_years", "disease_duration_yrs_model", "demo__disease_duration"):
+        source[name] = 2
+    registry = mod.resolve_predictors(mod.build_predictor_registry(), source, source)
+    assert get_spec(registry, "duration").baseline_column is None
+
+
+def test_weighted_other_domain_adjustments_aliases_missing_and_inconsistent_panels():
+    source = episodes(scores=(12, 12, 12, 12), domains=(np.nan,)*4)
+    source["essdai__articular_ordinal_score"] = 2
+    source["essdai__biological_ordinal_score"] = 2
+    _, _, intervals, _, _ = datasets(source)
+    assert intervals.from_domain_contribution_articular.eq(8).all()
+    assert intervals.from_essdai_other_domains_articular.eq(4).all()
+    assert intervals.from_domain_contribution_biological.eq(2).all()
+    assert intervals.from_essdai_other_domains_biological.eq(10).all()
+    assert intervals.from_essdai_other_domains_glandular.isna().all()
+    assert mod.canonical_domain_weights()["glandular"] == 2
+    assert mod.canonical_domain_weights()["pns"] == mod.ESSDAI_DOMAIN_WEIGHTS["neuro_periph"] == 5
+    source[mod.ESSDAI] = 3
+    _, _, intervals, _, _ = datasets(source)
+    assert intervals.from_essdai_other_domains_articular.isna().all()
+    qc = pd.DataFrame(intervals.attrs["domain_composition_qc"])
+    assert qc.loc[qc.domain.eq("articular"), "n_invalid_subtraction"].iloc[0] == 3
+    for domain in mod.DOMAINS:
+        source[mod.step13.DOMAIN_ALIASES[domain][0]] = 0
+    _, _, intervals, _, _ = datasets(source)
+    assert intervals.from_essdai_other_domains_biological.isna().all()
+    assert all(row["n_complete_panel_total_mismatch"] == 3 for row in intervals.attrs["domain_composition_qc"])
+
+
+def test_lagged_domain_sensitivity_uses_other_domains_and_no_false_baseline_omission():
+    rng = np.random.default_rng(222)
+    source = episodes(n=40)
+    source["essdai__glandular_ordinal_score"] = rng.integers(0, 3, len(source))
+    source[mod.ESSDAI] = 2*source.essdai__glandular_ordinal_score + rng.uniform(1, 4, len(source))
+    df, base, intervals, risks, registry = datasets(source)
+    tasks = mod.build_analysis_tasks(df, base, intervals, risks, registry)
+    lagged = [t for t in tasks if t.kind == "lagged"]
+    assert not any(t.sensitivity in {"without_baseline_essdai", "without_baseline_total"} for t in lagged)
+    target = [t for t in lagged if t.spec.name == "domain_glandular"]
+    primary = next(t for t in target if t.sensitivity == "none")
+    sensitivity = next(t for t in target if t.sensitivity == "domain_from_other_domains_adjusted")
+    data, meta = mod.prepare_model(sensitivity, 40)
+    _, main = mod.prepare_model(primary, 40)
+    assert meta["supported_for_model"] and main["supported_for_model"]
+    assert meta["formula"] != main["formula"]
+    assert "from_essdai_other_domains_glandular" in meta["formula"]
+    assert meta["domain_weight"] == 2 and not meta["sensitivity_numerically_identical_state"]
+    assert np.allclose(data.from_essdai_other_domains_glandular, data.from_essdai - 2*data.pred__domain_glandular)
+    row = mod.fit_task(sensitivity, data, meta, [])
+    assert row["claim_status"] == "sensitivity" and row["valid_for_inference"]
+
+
+def test_outcome_wide_bh_is_independent_and_excludes_alternatives_sensitivities_failures():
+    rows = []
+    for predictor, p in (("a", .01), ("b", .03), ("c", .2), ("alt", .001), ("sens", .001), ("failed", .001)):
+        rows.append({"predictor": predictor, "hypothesis_group_id": "a" if predictor == "alt" else predictor,
+            "p_value": p, "fdr_family": predictor, "analysis_type": "baseline", "outcome": "slope",
+            "effect_measure": "beta", "sensitivity": "check" if predictor == "sens" else "none",
+            "primary_canonical": predictor != "alt", "fdr_eligibility": predictor != "alt",
+            "valid_for_inference": predictor != "failed"})
+    frame, _ = mod.apply_fdr_by_family(pd.DataFrame(rows))
+    before = frame.q_value.copy()
+    out, qc = mod.apply_outcome_wide_fdr(frame)
+    assert out.q_value.equals(before) and out.q_value_family.equals(before)
+    assert out.q_value_outcome_wide.iloc[:3].tolist() == pytest.approx([.03, .045, .2])
+    assert out.q_value_outcome_wide.iloc[3:].isna().all()
+    assert qc.n_tests_bh.iloc[0] == 3 and qc.n_duplicate_excluded.iloc[0] == 1
+    assert json.loads(qc.included_predictor_ids.iloc[0]) == ["a", "b", "c"]
+    duplicate = pd.concat([frame, frame.iloc[[0]]], ignore_index=True)
+    out, qc = mod.apply_outcome_wide_fdr(duplicate)
+    assert pd.isna(out.q_value_outcome_wide.iloc[-1]) and qc.n_duplicate_excluded.iloc[0] == 2
+    for analysis, measure in (("baseline", "HR"), ("timevarying", "IRR"), ("cross_domain", "IRR")):
+        extra = frame.iloc[[0]].assign(analysis_type=analysis, effect_measure=measure)
+        out, qc = mod.apply_outcome_wide_fdr(pd.concat([frame, extra], ignore_index=True))
+        assert out.q_value_outcome_wide.iloc[-1] == .01 and len(qc) == 2
+
+
+def test_redundancy_small_pairs_are_not_evidence_and_glandular_policy_is_explicit():
+    registry = mod.build_predictor_registry()
+    focus, crp = get_spec(registry, "biopsy_focus_score"), get_spec(registry, "lab_crp_high_sensitivity")
+    data = pd.DataFrame({"pred__biopsy_focus_score": [1., 2., 3.], "pred__lab_crp_high_sensitivity": [1., 2., 3.]})
+    qc = mod.predictor_redundancy_qc(data, [focus, crp])
+    assert qc.correlation.iloc[0] == 1 and not qc.redundancy_flag.iloc[0]
+    assert qc.support_reason.iloc[0] == "insufficient_pair_support"
+    gland, alt = get_spec(registry, "domain_glandular"), get_spec(registry, "glandular_salivary_gland_swelling_active")
+    data = pd.DataFrame({"pred__domain_glandular": [0, 1]*30, "pred__glandular_salivary_gland_swelling_active": [0, 1]*30})
+    qc = mod.predictor_redundancy_qc(data, [gland, alt])
+    assert qc.redundancy_flag.iloc[0] and qc.concordance.iloc[0] == 1
+    assert qc.construct_duplicate_prespecified.iloc[0] and qc.canonical_predictor.iloc[0] == gland.name
+    assert gland.primary_canonical and gland.fdr_eligibility
+    assert not alt.primary_canonical and not alt.fdr_eligibility and alt.alternative_to == gland.name
+    assert alt.analysis_role == "alternate_representation"
+
+
+def test_existing_outputs_are_backed_up_and_metadata_records_rules(tmp_path):
+    df = episodes(n=2)
+    source, baseline = tmp_path/"integrated.parquet", tmp_path/"baseline.parquet"
+    df.to_parquet(source, index=False)
+    df.loc[df.is_clinical_baseline].to_parquet(baseline, index=False)
+    args = mod.parse_args(["--integrated", str(source), "--baseline", str(baseline),
+        "--progression", str(tmp_path/"absent.parquet"), "--output-root", str(tmp_path/"run"), "--dry-run"])
+    dirs = mod.output_directories(args.output_root)
+    dirs["qc"].mkdir(parents=True)
+    previous = dirs["qc"]/"14_structural_qc.csv"
+    previous.write_text("previous run\n")
+    mod.main(args)
+    metadata = json.loads((dirs["qc"]/"14_analysis_metadata.json").read_text())
+    backups = list(Path(metadata["output_backup_path"]).rglob("14_structural_qc.csv"))
+    assert len(backups) == 1 and backups[0].read_text() == "previous run\n"
+    assert metadata["dry_run"] and metadata["git_commit"]
+    assert metadata["rule_versions"]["composition"] == mod.COMPOSITION_RULE_VERSION
+    assert len(metadata["input_sha256"]["integrated"]) == 64
+    assert "statsmodels" in metadata["versions"] and metadata["treatment_adjustment"]
