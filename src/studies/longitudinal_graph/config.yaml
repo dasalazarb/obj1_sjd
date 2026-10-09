@@ -36,7 +36,7 @@ mapper_validation:
   parameter_grid:
     - {name: S3-cover6, n_cubes: 6, perc_overlap: 0.40, min_samples: 3}
     - {name: S3-cover10, n_cubes: 10, perc_overlap: 0.40, min_samples: 3}
-  bootstrap_replicates: 1000
+  bootstrap_replicates: 200
   bootstrap_match_jaccard: 0.50
   bootstrap_stability_frequency: 0.80
   admin_permutations: 199
