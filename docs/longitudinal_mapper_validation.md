@@ -145,6 +145,14 @@ la base; un fallo adicional del checkout archivado de comparación desapareció 
 restaurar su metadata de Git, y el test correspondiente pasó al repetirlo.
 Los warnings son principalmente de dependencias y fixtures anteriores.
 
+Corrección posterior del bootstrap: las features originales anulables `boolean`,
+`Int64` y `Float64` se convierten a `float64` antes de calcular e imputar medianas.
+Así se conserva una mediana fraccionaria (por ejemplo, 0.5) sin intentar escribirla
+en un array booleano o entero. Las keys y los datos raw quedan intactos. Una prueba
+adicional reproduce este caso con faltantes y valores no finitos; la suite
+longitudinal pasa ahora 35 tests. El aviso de versión de `numexpr` es independiente
+de este error de dtype.
+
 ## Respuestas científicas de la cohorte real
 
 | Pregunta solicitada | Estado y evidencia disponible |
