@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Build the time-blind reference Mapper and patient-supported macrostates."""
 from __future__ import annotations
-import argparse, copy, logging, math, sys
+import argparse, copy, json, logging, math, sys
+from types import SimpleNamespace
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path: sys.path.insert(0,str(ROOT))
@@ -19,6 +20,7 @@ from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import RobustScaler
 import common
 from src.studies._shared import STUDY_CONTRACT_VERSION, create_study_dirs, sha256_file, write_json
+from src.studies.longitudinal_graph import validation as qc
 
 def load_config(path): return yaml.safe_load(Path(path).read_text())
 KEYS = ["patient_id", "clinical_episode_id"]
@@ -42,23 +44,7 @@ def eps_kdist(data,k=4,percentile=65):
     eps=float(np.percentile(distances,percentile)); return eps if eps>0 else float(np.nextafter(0,1))
 
 def run_mapper(lens, space, config, eps):
-    m=config["mapper"]; cubes=int(m["n_cubes"]); overlap=float(m["perc_overlap"]); nodes={}
-    axes=[]
-    for dim in range(lens.shape[1]):
-        lo,hi=float(lens[:,dim].min()),float(lens[:,dim].max()); width=(hi-lo)/(cubes-(cubes-1)*overlap) if hi>lo else 1.0
-        step=width*(1-overlap); axes.append([(lo+i*step,lo+i*step+width) for i in range(cubes)])
-    for ix,xrange in enumerate(axes[0]):
-      for iy,yrange in enumerate(axes[1]):
-        mask=(lens[:,0]>=xrange[0])&(lens[:,0]<=xrange[1])&(lens[:,1]>=yrange[0])&(lens[:,1]<=yrange[1]); idx=np.flatnonzero(mask)
-        if not len(idx): continue
-        labels=DBSCAN(eps=eps,min_samples=int(m["min_samples"])).fit_predict(space[idx])
-        for label in sorted(set(labels)-{-1}): nodes[f"cube{ix}_{iy}_cluster{label}"]=set(idx[labels==label])
-    links={n:[] for n in nodes}; names=sorted(nodes)
-    for i,left in enumerate(names):
-      for right in names[i+1:]:
-        if nodes[left]&nodes[right]: links[left].append(right); links[right].append(left)
-    if not nodes: raise ValueError("Mapper produced no nodes")
-    return {"nodes":nodes,"links":links}
+    return qc.audited_mapper(lens, space, config, eps, eps_kdist)[0]
 
 def node_support_table(graph, visits, minimum_patients):
     rows=[]
@@ -194,12 +180,15 @@ def sensitivity_features(features, excluded_feature):
     """Drop only the nominated feature from the fixed post-pruning feature set."""
     return [f for f in features if f != excluded_feature]
 
-def run_mapper_scenario(state, features, config, *, family_balance, scenario_name):
+def run_mapper_scenario(state, features, config, *, family_balance, scenario_name, patient_weighted=False):
     """Run the complete time-blind pipeline; lens is always (PC1, PC2)."""
-    if state[KEYS].duplicated().any(): raise ValueError("Visit keys must be unique")
+    qc.validate_keys(state, "visit state")
     counts=pd.Series([feature_family(f) for f in features]).value_counts()
     weights=[1/math.sqrt(counts[feature_family(f)]) for f in features] if family_balance else None
-    embedding,pca=fit_visit_embedding(state[features],config,weights)
+    if patient_weighted:
+        embedding,pca=qc.weighted_embedding(state[features],config,weights,state.patient_id)
+    else:
+        embedding,pca=fit_visit_embedding(state[features],config,weights)
     eps=eps_kdist(embedding,config["mapper"]["eps_k_neighbors"],config["mapper"]["eps_percentile"])
     try:
         graph=run_mapper(embedding[:,:2],embedding,config,eps)
@@ -219,9 +208,19 @@ def run_mapper_scenario(state, features, config, *, family_balance, scenario_nam
              "eps":eps,"n_nodes":len(nodes),"n_supported_nodes":len(supported),
              "n_macrostates":len(macros),"n_supported_macrostates":int(macros.macrostate_supported.sum()),
              **coverage_summary(membership)}
-    return {"features":list(features),"embedding":embedding,"pca":pca,"eps":eps,"graph":graph,
+    summary["execution_status"]="completed"
+    summary["weight_rule"]="equal_patient_mass" if patient_weighted else "equal_visit_mass"
+    summary["weight_method"]="equal_weight_per_supported_node"
+    _,cover,noise=qc.audited_mapper(embedding[:,:2],embedding,config,eps,eps_kdist,state.patient_id)
+    # Use the actual returned graph for support counts (including test-injected zero-node runs).
+    for row in cover.index:
+        prefix=f"cube{cover.loc[row,'cube_x']}_{cover.loc[row,'cube_y']}_cluster"
+        cover.loc[row,"n_supported_nodes"]=sum(n.startswith(prefix) for n in supported)
+    result={"features":list(features),"embedding":embedding,"pca":pca,"eps":eps,"graph":graph,
             "node_table":nodes,"macrostate_table":macros,"visit_membership":membership,
-            "topological_edges":edges,"node_to_macrostate":mapping,"nerve":nerve,"summary":summary}
+            "topological_edges":edges,"node_to_macrostate":mapping,"nerve":nerve,"summary":summary,
+            "cover_qc":cover,"noise_qc":pd.concat([state[KEYS].reset_index(drop=True),noise],axis=1)}
+    return qc.topology_identity(result)
 
 def macrostate_sets(scenario):
     """Use all visits in the macrostate's nodes, including ambiguous memberships."""
@@ -277,6 +276,23 @@ def compare_mapper_scenarios(primary, sensitivity):
                                          "n_supported_primary_macrostates":len(supported_matches)},
              "patient_jaccard_vs_primary":float(supported_matches.patient_jaccard.mean()) if len(supported_matches) else None,
              "visit_jaccard_vs_primary":float(supported_matches.visit_jaccard.mean()) if len(supported_matches) else None}
+    if enough and min(summary["n_primary_labels_compared"],summary["n_sensitivity_labels_compared"])<2:
+        summary["ari_status"]="degenerate_single_label_not_stability_evidence"
+    summary["n_common_visits"]=len(common_visits)
+    summary["n_common_patients"]=int(common_visits.patient_id.nunique())
+    for metric in ("patient_jaccard","visit_jaccard"):
+        values=supported_matches[metric]
+        summary[metric+"_distribution"]={name:float(getattr(values,name)()) if len(values) else None for name in ("min","median","max")}
+    positive=matching.loc[matching.patient_jaccard.gt(0)]
+    summary["many_to_one_matches"]=int(positive.matched_s2_macrostate_id.duplicated(keep=False).sum())
+    summary["unmatched_primary_macrostates"]=int(matching.patient_jaccard.eq(0).sum())
+    pair_rows=[]
+    for left,(lv,lp) in left_sets.items():
+        for right,(rv,rp) in right_sets.items():
+            if lp & rp: pair_rows.append({"primary":left,"sensitivity":right,"patient_jaccard":jaccard(lp,rp),"visit_jaccard":jaccard(lv,rv)})
+    summary["all_nonzero_correspondences"]=pair_rows
+    summary["primary_split_candidates"]=int(sum(sum(row["primary"]==left for row in pair_rows)>1 for left in left_sets))
+    summary["sensitivity_merge_candidates"]=int(sum(sum(row["sensitivity"]==right for row in pair_rows)>1 for right in right_sets))
     for prefix,source in (("s3",ps),("s2",ss)):
         for field in ("n_nodes","n_supported_nodes","n_macrostates","n_supported_macrostates"):
             summary[f"{prefix}_{field}"]=source[field]
@@ -301,13 +317,22 @@ def feature_distribution_diagnostics(raw, features=(HSCRP,URINE_SQUAMOUS), *, so
                      "n_extreme_iqr":pd.NA if unavailable else int((observed.lt(lower)|observed.gt(upper)).sum()),
                      "extreme_iqr_rule":"x < Q1 - 3*IQR or x > Q3 + 3*IQR",
                      "extreme_lower_bound":lower,"extreme_upper_bound":upper})
+        rows[-1].update({"unit_validation":"unknown","assay_era_validation":"unknown","detection_limit_coding":"unknown",
+                         "prior_transformation_status":"unknown"})
+        rows[-1]["n_invalid_observed"]=int((raw[feature].notna() & ~np.isfinite(values)).sum()) if not unavailable else pd.NA
+        if "patient_id" in raw and not unavailable:
+            extreme=values.lt(lower)|values.gt(upper)
+            rows[-1]["n_observed_patients"]=raw.loc[values.index.isin(observed.index),"patient_id"].nunique()
+            rows[-1]["n_extreme_patients"]=raw.loc[extreme,"patient_id"].nunique()
     return pd.DataFrame(rows)
 
-def hscrp_log_state(state, features, diagnostics):
+def hscrp_log_state(state, features, diagnostics, prior_transform="identity"):
     """Fail closed when original observations are absent, negative, or unavailable."""
     row=diagnostics.set_index("feature").loc[HSCRP]
     if HSCRP not in features: return None,"feature_not_retained_after_redundancy"
+    if prior_transform!="identity": return None,"prior_transform_not_verified_identity"
     if row.status!="completed": return None,"original_observations_unavailable"
+    if row.get("n_invalid_observed",0): return None,"invalid_original_observations"
     if row.n_negative: return None,"negative_original_values"
     values=state[HSCRP]
     if not np.isfinite(values).all() or values.lt(0).any(): return None,"invalid_state_values"
@@ -346,179 +371,16 @@ def interval_coverage_summary(intervals, membership, maximum_interval_years=None
     return summary
 
 def parse_args(argv=None):
-    p=argparse.ArgumentParser(); dirs=create_study_dirs("longitudinal_graph")
+    p=argparse.ArgumentParser(); dirs=qc.study_paths(common)
     p.add_argument("--integrated",type=Path,default=common.INTEGRATED_LONGITUDINAL_PARQUET); p.add_argument("--state",type=Path,default=dirs["analytic"]/"01_longitudinal_visit_state.parquet")
     p.add_argument("--metadata",type=Path,default=dirs["analytic"]/"01_longitudinal_visit_metadata.parquet")
     p.add_argument("--intervals",type=Path,default=dirs["analytic"]/"01_longitudinal_intervals.parquet")
+    p.add_argument("--feature-manifest",type=Path,default=dirs["tables"]/"01_longitudinal_feature_manifest.csv")
+    p.add_argument("--output-root",type=Path,help="Isolated output bundle root (analytic/tables/figures/qc/logs)")
     p.add_argument("--config",type=Path,default=Path(__file__).with_name("config.yaml")); p.add_argument("--dry-run",action="store_true"); return p.parse_args(argv)
 
 def run(args):
-    dirs=create_study_dirs("longitudinal_graph")
-    logging.basicConfig(filename=dirs["logs"]/"02_mapper.log",level=logging.INFO,force=True)
-    cfg=load_config(args.config)
-    state=pd.read_parquet(args.state); metadata=pd.read_parquet(args.metadata)
-    eligible=[c for c in state if c not in KEYS]
-    features,audit=reduce_redundancy(state[eligible],float(cfg["representation"].get("redundancy_spearman_abs_threshold",.95)))
-
-    # Audit original values on exactly the Script-01 cohort, never imputed coverage.
-    raw_source="source_unavailable"
-    raw=state[KEYS].copy()
-    if args.integrated.exists():
-        source=pd.read_parquet(args.integrated)
-        observed_features=[f for f in (HSCRP,URINE_SQUAMOUS) if f in source]
-        raw=raw.merge(source[KEYS+observed_features],on=KEYS,how="left",validate="one_to_one",indicator=True)
-        if not raw._merge.eq("both").all(): raise ValueError("Integrated source does not contain every state visit")
-        raw=raw.drop(columns="_merge"); raw_source="preimputation_integrated"
-    diagnostics=feature_distribution_diagnostics(raw,source=raw_source)
-    diagnostics.to_csv(dirs["tables"]/"02_feature_distribution_diagnostics.csv",index=False)
-
-    primary=run_mapper_scenario(state,features,cfg,family_balance=True,scenario_name="S3-primary")
-    scenarios={"S3-primary":primary}
-    scenarios["S2-no-family-balance"]=run_mapper_scenario(state,features,cfg,family_balance=False,scenario_name="S2-no-family-balance")
-    full_cfg=copy.deepcopy(cfg); full_cfg["pca"]["max_components"]=None
-    scenarios["S3-full80"]=run_mapper_scenario(state,features,full_cfg,family_balance=True,scenario_name="S3-full80")
-    excluded=sensitivity_features(features,URINE_SQUAMOUS)
-    skipped={}
-    if len(excluded)<len(features):
-        scenarios["S3-without-urine-squamous"]=run_mapper_scenario(state,excluded,cfg,family_balance=True,scenario_name="S3-without-urine-squamous")
-    else:
-        skipped["S3-without-urine-squamous"]="feature_not_retained_after_redundancy"
-    log_state,reason=hscrp_log_state(state,features,diagnostics)
-    if log_state is not None:
-        scenarios["S3-hsCRP-log1p"]=run_mapper_scenario(log_state,features,cfg,family_balance=True,scenario_name="S3-hsCRP-log1p")
-    else:
-        skipped["S3-hsCRP-log1p"]=reason
-    pc_feature_diagnostics(scenarios).to_csv(dirs["tables"]/"02_mapper_pc_feature_diagnostics.csv",index=False)
-
-    comparisons={}; sensitivity_rows=[]
-    for name,scenario in scenarios.items():
-        matching,comparison=compare_mapper_scenarios(primary,scenario)
-        comparisons[name]=comparison
-        sensitivity_rows.append({**scenario["summary"],"n_ties":scenario["summary"]["n_membership_ties"],
-                                 "ari_vs_primary":comparison["ari"],
-                                 "patient_jaccard_vs_primary":comparison["patient_jaccard_vs_primary"],
-                                 "visit_jaccard_vs_primary":comparison["visit_jaccard_vs_primary"],
-                                 "n_visits_compared":comparison["n_visits_compared"],
-                                 "n_patients_compared":comparison["n_patients_compared"],
-                                 "ari_status":comparison["ari_status"]})
-        # Keep per-macrostate overlap inspectable; scalar means alone hide losses.
-        if name=="S2-no-family-balance":
-            matching.to_csv(dirs["tables"]/"02_s2_s3_macrostate_stability.csv",index=False)
-            write_json(dirs["tables"]/"02_s2_s3_stability_summary.json",comparison)
-        elif name!="S3-primary":
-            stem={"S3-full80":"full80","S3-without-urine-squamous":"no_urine_squamous","S3-hsCRP-log1p":"hscrp_log1p"}[name]
-            matching.rename(columns={"s3_macrostate_id":"primary_macrostate_id","matched_s2_macrostate_id":"matched_sensitivity_macrostate_id",
-                                     "s3_n_visits":"primary_n_visits","s2_n_visits":"sensitivity_n_visits",
-                                     "s3_n_patients":"primary_n_patients","s2_n_patients":"sensitivity_n_patients"}).to_csv(
-                                         dirs["tables"]/f"02_{stem}_macrostate_stability.csv",index=False)
-    for name,reason in skipped.items():
-        sensitivity_rows.append({"scenario":name,"status":"not_applicable","reason":reason})
-        comparisons[name]={"status":"not_applicable","reason":reason,"ari":None}
-        stem={"S3-without-urine-squamous":"no_urine_squamous","S3-hsCRP-log1p":"hscrp_log1p"}[name]
-        # Overwrite a previous run's comparison rather than leaving stale evidence.
-        pd.DataFrame(columns=["primary_macrostate_id","matched_sensitivity_macrostate_id","primary_n_visits","sensitivity_n_visits",
-                              "primary_n_patients","sensitivity_n_patients","visit_jaccard","patient_jaccard"]).to_csv(
-                                  dirs["tables"]/f"02_{stem}_macrostate_stability.csv",index=False)
-    order=["S3-primary","S2-no-family-balance","S3-full80","S3-without-urine-squamous","S3-hsCRP-log1p"]
-    sensitivity_table=pd.DataFrame(sensitivity_rows).set_index("scenario").reindex(order).reset_index()
-    sensitivity_table.to_csv(dirs["tables"]/"02_mapper_sensitivity_summary.csv",index=False)
-
-    for prefix,scenario in (("s2",scenarios["S2-no-family-balance"]),("s3",primary)):
-        scenario["node_table"].to_csv(dirs["tables"]/f"02_{prefix}_mapper_nodes.csv",index=False)
-        scenario["macrostate_table"].to_csv(dirs["tables"]/f"02_{prefix}_mapper_macrostate_summary.csv",index=False)
-        scenario["visit_membership"].to_csv(dirs["tables"]/f"02_{prefix}_mapper_visit_membership.csv",index=False)
-
-    # Canonical outputs remain S3-primary, with the same supported weights for flow.
-    graph=primary["graph"]; nodes=primary["node_table"]; macros=primary["macrostate_table"]
-    membership=primary["visit_membership"]; mapping=primary["node_to_macrostate"]; pca=primary["pca"]
-    supported=nodes.loc[nodes.supported,"node_id"].tolist()
-    long_nodes=[]
-    for node,members in graph["nodes"].items():
-        for i in sorted(members):
-            long_nodes.append({"patient_id":state.iloc[i].patient_id,"clinical_episode_id":state.iloc[i].clinical_episode_id,
-                               "node_id":node,"node_supported":node in supported,"macrostate_id":mapping.get(node,pd.NA)})
-    pd.DataFrame(long_nodes,columns=KEYS+["node_id","node_supported","macrostate_id"]).to_parquet(dirs["analytic"]/"02_mapper_node_membership.parquet",index=False)
-    membership.to_parquet(dirs["analytic"]/"02_visit_mapper_membership.parquet",index=False)
-    variance=pd.DataFrame({"component":np.arange(1,pca.n_components_+1),"explained_variance_ratio":pca.explained_variance_ratio_,
-                          "cumulative_variance":np.cumsum(pca.explained_variance_ratio_)})
-    variance.to_csv(dirs["tables"]/"02_longitudinal_pca_variance.csv",index=False)
-    pd.DataFrame(pca.components_.T,index=features,columns=[f"PC{i+1}" for i in range(pca.n_components_)]).rename_axis("feature").reset_index().to_csv(dirs["tables"]/"02_longitudinal_pca_loadings.csv",index=False)
-    nodes.to_csv(dirs["tables"]/"02_mapper_nodes.csv",index=False)
-    primary["topological_edges"].to_csv(dirs["tables"]/"02_mapper_topological_edges.csv",index=False)
-    macros.to_csv(dirs["tables"]/"02_mapper_macrostate_summary.csv",index=False)
-    membership.to_csv(dirs["tables"]/"02_mapper_visit_membership.csv",index=False)
-    admin,visit_qc=administrative_qc(membership,metadata,flag_threshold=float(cfg["administrative_qc"]["cramers_v_flag_threshold"]))
-    admin.to_csv(dirs["tables"]/"02_mapper_administrative_qc.csv",index=False)
-    visit_qc.to_csv(dirs["tables"]/"02_mapper_visit_type_qc.csv",index=False)
-    audit.to_csv(dirs["tables"]/"02_longitudinal_redundancy_audit.csv",index=False)
-    families={f:feature_family(f) for f in features}; counts=pd.Series(families).value_counts(); rep=[]
-    for scenario,balanced in (("S2-like",False),("S3-like",True)):
-        for feature in eligible:
-            retained=feature in features
-            rep.append({"feature":feature,"family":feature_family(feature),"eligible_from_script01":True,
-                        "retained_after_redundancy":retained,"used_in_primary_mapper":bool(balanced and retained),
-                        "scenario":scenario,"balance_weight":(1/math.sqrt(counts[families[feature]]) if balanced and retained else (1.0 if retained else np.nan))})
-    pd.DataFrame(rep).to_csv(dirs["tables"]/"02_mapper_representation_manifest.csv",index=False)
-
-    s2=comparisons["S2-no-family-balance"]; full80=scenarios["S3-full80"]["summary"]
-    interval_path=args.intervals
-    intervals=(interval_coverage_summary(pd.read_parquet(interval_path),membership,cfg["temporal"]["maximum_interval_years"])
-               if interval_path.exists() else {"status":"not_applicable","reason":"script01_intervals_unavailable"})
-    # Qualitative gate requires review of overlap, sample sizes, loading changes and
-    # raw distributions. Do not invent an ARI cutoff or automatically approve flow.
-    blockers=[]
-    if primary["summary"]["n_supported_macrostates"]<2: blockers.append("primary_has_fewer_than_two_supported_macrostates")
-    for name,scenario in scenarios.items():
-        if name!="S3-primary" and scenario["summary"]["n_supported_macrostates"]<2:
-            blockers.append(f"{name}:fewer_than_two_supported_macrostates")
-    if intervals.get("n_intervals_both_endpoints_supported_macrostate_covered")==0: blockers.append("no_supported_mapped_intervals")
-    if not primary["summary"]["n_supported_macrostate_covered_visits"]: blockers.append("no_supported_coverage")
-    if not full80["pca_variance_target_reached"]: blockers.append("full80_variance_target_not_reached")
-    administrative_flag=bool(admin.administrative_confounding_flag.any())
-    if administrative_flag: blockers.append("administrative_association_above_configured_threshold")
-    input_files=[args.state,args.metadata]
-    if args.integrated.exists(): input_files.append(args.integrated)
-    if interval_path.exists(): input_files.append(interval_path)
-    summary={**primary["summary"],"status":"completed","contract_version":STUDY_CONTRACT_VERSION,
-             "input_files":input_files,"input_sha256":{str(path):sha256_file(path) for path in input_files},
-             "config_file":args.config,"config_sha256":sha256_file(args.config),"random_seed":cfg["random_seed"],
-             "primary_scenario":"S3-like","sensitivity_scenario":"S2-like",
-             "n_features_before_redundancy":len(eligible),"n_features_after_redundancy":len(features),
-             "n_pca_components":primary["summary"]["n_pcs"],"pca_cumulative_variance":primary["summary"]["cumulative_variance"],
-             "n_pcs_primary":primary["summary"]["n_pcs"],"variance_primary":primary["summary"]["cumulative_variance"],
-             "n_pcs_full80":full80["n_pcs"],"variance_full80":full80["cumulative_variance"],
-             "mapper_parameters":cfg["mapper"],"s2_s3_ari":s2["ari"],"s2_s3_patient_jaccard_summary":s2["patient_jaccard_summary"],
-             "full80_ari_vs_primary":comparisons["S3-full80"]["ari"],
-             "no_urine_squamous_ari_vs_primary":comparisons["S3-without-urine-squamous"]["ari"],
-             "hscrp_log_ari_vs_primary":comparisons["S3-hsCRP-log1p"]["ari"],
-             "sensitivity_comparisons":comparisons,"interval_coverage":intervals,
-             "administrative_confounding_flag":administrative_flag,
-             "administrative_qc_interpretation":"review_variable_associations; absence_of_flag_does_not_establish_no_confounding",
-             "coverage_definitions":{"mapper_covered_summary":"at_least_one_graph_node",
-                                     "mapper_covered_membership_column":"at_least_one_supported_macrostate; unchanged_for_Script03",
-                                     "covered_without_supported_hard_assignment":"graph_covered_and_neither_hard_nor_tied",
-                                     "unsupported_macrostate_counts":"any_membership; may_overlap_supported_membership",
-                                     "pct_denominators":"all_input_visits_or_unique_patients; percentages_0_to_100"},
-             "representation_stability_gate":{"status":"blocked" if blockers else "requires_review","blockers":blockers,
-                                              "unavailable_checks":skipped,
-                                              "raw_feature_diagnostics_status":raw_source,
-                                              "interval_coverage_status":intervals["status"],
-                                              "temporal_flow_executed":False}}
-    write_json(dirs["tables"]/"02_longitudinal_mapper_summary.json",summary)
-    embedded=primary["embedding"]; nerve=primary["nerve"]
-    pos={n:np.mean(embedded[list(graph["nodes"][n]),:2],axis=0) for n in supported}
-    fig,ax=plt.subplots(figsize=(8,6))
-    for a,b in nerve.edges: ax.plot([pos[a][0],pos[b][0]],[pos[a][1],pos[b][1]],color=".75",zorder=1)
-    if supported:
-        ax.scatter([pos[n][0] for n in supported],[pos[n][1] for n in supported],
-                   s=[30+nodes.set_index("node_id").loc[n,"n_unique_patients"]*8 for n in supported],
-                   c=[mapping[n] for n in supported],cmap="tab10",zorder=2)
-    ax.set(title="Reference visit-level Mapper",xlabel="PC1 lens",ylabel="PC2 lens")
-    fig.tight_layout()
-    for name in ("02_reference_visit_mapper.png","02_reference_visit_mapper_macrostates.png"):
-        fig.savefig(dirs["figures"]/name,dpi=cfg["figures"]["dpi"])
-    plt.close(fig)
-    print("ORDER TO REVIEW LONGITUDINAL GRAPH OUTPUTS\n1. Sensitivity summary\n2. S2/S3 macrostate stability\n3. Feature distribution diagnostics\n4. Mapper summary and coverage\nReview the representation-stability gate before Script 03.")
-    return summary
+    from src.studies.longitudinal_graph.runner import execute
+    return execute(args, SimpleNamespace(**globals()))
 
 if __name__=="__main__": run(parse_args())

@@ -53,6 +53,9 @@ def parse_args(argv=None):
 def run(args):
     d=create_study_dirs("longitudinal_graph"); logging.basicConfig(filename=d["logs"]/"04_characterize.log",level=logging.INFO,force=True); cfg=load_config(args.config); master=load_parquet(args.integrated); contract=validate_integrated_dataset(master); transitions=pd.read_parquet(args.transitions); manifest=pd.read_csv(args.manifest)
     defining=manifest.loc[manifest.included.astype(bool),"feature"].tolist(); external=[]
+    actual_path=args.manifest.with_name("02_mapper_representation_manifest.csv")
+    actual=pd.read_csv(actual_path) if actual_path.exists() else pd.DataFrame()
+    used=set(actual.loc[actual.used_in_primary_mapper.eq(True),"feature"]) if not actual.empty else None
     for concept in ("essdai_total","esspri_total","pop"):
       try: external.append(resolve_concept(master,concept))
       except ValueError: pass
@@ -61,6 +64,10 @@ def run(args):
     frame=attach_clinical_endpoints(transitions,master,columns); frame=frame.loc[frame.flow_eligible].copy(); frame["transition_group"]=transition_label(frame)
     numeric=[c for c in columns if pd.api.types.is_numeric_dtype(master[c])]; categorical=[c for c in columns if c not in numeric]; reps=10 if args.dry_run else int(cfg["characterization"]["bootstrap_replicates"]); threshold=int(cfg["characterization"]["minimum_transition_patients"])
     continuous=characterize_continuous(frame,numeric,roles,reps,cfg["random_seed"],threshold); categorical_changes=characterize_categorical(frame,categorical,roles)
+    for table in (continuous,categorical_changes):
+        if "variable" in table:
+            table["used_in_actual_mapper"]=table.variable.isin(used) if used is not None else pd.NA
+            table["independence_status"]=table.variable.map(lambda c:"not_external_used_in_mapper" if used is not None and c in used else "proxy_dependence_requires_review" if used is not None else "not_tested_missing_actual_mapper_manifest")
     external_table=continuous.loc[continuous.role.eq("external_characterizer")].copy(); pop_col=next((c for c in external if "pop" in c.lower()),None); pop=categorical_changes.loc[categorical_changes.variable.eq(pop_col)].copy() if pop_col else pd.DataFrame()
     continuous.to_csv(d["tables"]/"04_transition_continuous_changes.csv",index=False); categorical_changes.to_csv(d["tables"]/"04_transition_binary_changes.csv",index=False); external_table.to_csv(d["tables"]/"04_transition_external_outcomes.csv",index=False); pop.to_csv(d["tables"]/"04_transition_pop_crosswalk.csv",index=False)
     clinical=continuous.loc[continuous.n_unique_patients.ge(threshold)].sort_values(["transition_group","role","variable"]); clinical.to_csv(d["tables"]/"04_transition_clinical_summary.csv",index=False)
