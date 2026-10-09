@@ -189,7 +189,11 @@ def representation_qc(state, scenario, family, raw=None):
     else: scaled = RobustScaler().fit_transform(state[features])
     counts = pd.Series(list(map(family, features))).value_counts()
     for j, feature in enumerate(features):
-        original = raw[feature].dropna() if raw is not None and feature in raw else pd.Series(dtype=float)
+        # Linear quantiles subtract neighboring values; NumPy cannot subtract bools.
+        # Work on a numeric copy of finite observations, never fill the raw QC source.
+        original = (pd.to_numeric(raw[feature], errors="coerce").astype("float64")
+                    if raw is not None and feature in raw else pd.Series(dtype=float))
+        original = original.loc[np.isfinite(original)]
         x = scaled[:, j]; siqr = np.quantile(x, .75) - np.quantile(x, .25)
         oi = original.quantile(.75) - original.quantile(.25) if len(original) else None
         balance = 1/math.sqrt(counts[family(feature)]) if scenario["summary"]["family_balance"] else 1.

@@ -153,6 +153,18 @@ adicional reproduce este caso con faltantes y valores no finitos; la suite
 longitudinal pasa ahora 35 tests. El aviso de versión de `numexpr` es independiente
 de este error de dtype.
 
+La auditoría de IQR y distribuciones también convierte las observaciones originales
+anulables a una copia `float64` y excluye valores no finitos antes de calcular
+cuantiles, sin imputar esa fuente. Se conserva `not_applicable` para fuentes sin
+observaciones finitas. La prueba end-to-end de 02 ahora contiene booleanos,
+enteros y flotantes anulables en el Parquet original, y comprueba la publicación
+completa del bundle después del bootstrap y del QC. Una prueba adicional verifica
+IQR y distribuciones, incluidos faltantes, infinitos y fuente totalmente ausente.
+El QC de representación se ejecuta antes del bootstrap; si falla, no se inicia el
+remuestreo costoso ni se publica el bundle. Una prueba verifica este orden.
+Con estas correcciones pasan los 37 tests longitudinales; la configuración actual
+de 200 réplicas se conserva.
+
 ## Respuestas científicas de la cohorte real
 
 | Pregunta solicitada | Estado y evidencia disponible |
