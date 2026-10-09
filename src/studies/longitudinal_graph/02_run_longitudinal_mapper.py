@@ -303,7 +303,7 @@ def feature_distribution_diagnostics(raw, features=(HSCRP,URINE_SQUAMOUS), *, so
     rows=[]
     for feature in features:
         unavailable=source=="source_unavailable" or feature not in raw
-        values=pd.to_numeric(raw[feature],errors="coerce") if not unavailable else pd.Series(np.nan,index=raw.index)
+        values=pd.to_numeric(raw[feature],errors="coerce").astype("float64") if not unavailable else pd.Series(np.nan,index=raw.index)
         observed=values.loc[np.isfinite(values)]
         q1,q3=observed.quantile(.25),observed.quantile(.75); iqr=q3-q1
         lower,upper=q1-3*iqr,q3+3*iqr

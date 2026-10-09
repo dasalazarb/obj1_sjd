@@ -151,6 +151,10 @@ def execute(args,api):
     legacy_admin,visit_qc=api.administrative_qc(primary["visit_membership"],metadata,flag_threshold=cfg["administrative_qc"]["cramers_v_flag_threshold"])
     intervals=api.interval_coverage_summary(pd.read_parquet(args.intervals),primary["visit_membership"],cfg["temporal"]["maximum_interval_years"]) if args.intervals.exists() else {"status":"not_applicable","reason":"script01_intervals_unavailable"}
     endpoint=qc.interval_endpoint_qc(pd.read_parquet(args.intervals),primary["visit_membership"]) if args.intervals.exists() else pd.DataFrame(columns=["status","reason"])
+    # Validate representation diagnostics before expensive patient refits.
+    diagnostics_by_name={}
+    for name,scenario in scenarios.items():
+        for stem,table in qc.representation_qc(scenario_states[name],scenario,api.feature_family,raw).items():diagnostics_by_name.setdefault(stem,[]).append(table)
     boot,boot_matching,boot_summary=bootstrap_mapper(raw if raw_source!="source_unavailable" else None,primary,cfg,eligible,
                                                    api.run_mapper_scenario,api.reduce_redundancy,api.jaccard)
     manifest["checks"]["patient_bootstrap"]=boot_summary["status"]
@@ -169,9 +173,6 @@ def execute(args,api):
             "mapper_circularity_audit":qc.circularity_audit(feature_manifest,features,source),
             "mapper_bootstrap_replicates":boot,"mapper_macrostate_stability":boot_matching.loc[boot_matching.structure_kind.eq("macrostate")],
             "mapper_branch_stability":boot_matching.loc[boot_matching.structure_kind.eq("component")].assign(branch_interpretation="connected_component_QC_only_not_defined_branches")}
-    diagnostics_by_name={}
-    for name,scenario in scenarios.items():
-        for stem,table in qc.representation_qc(scenario_states[name],scenario,api.feature_family,raw).items():diagnostics_by_name.setdefault(stem,[]).append(table)
     for stem,frames in diagnostics_by_name.items():tables[stem]=pd.concat(frames,ignore_index=True)
     cover=pd.concat([s["cover_qc"].assign(scenario=n) for n,s in scenarios.items()],ignore_index=True)
     tables["lens_cube_occupancy"]=cover;tables["mapper_cover_qc"]=cover

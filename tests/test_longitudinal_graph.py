@@ -238,6 +238,15 @@ def test_script02_end_to_end_preserves_canonical_outputs_and_all_five_scenarios(
     rng=np.random.default_rng(31)
     state[MAP.HSCRP]=rng.lognormal(size=len(state)); state[MAP.URINE_SQUAMOUS]=rng.poisson(4,size=len(state)).astype(float)
     raw=state.copy(); raw.loc[:9,MAP.HSCRP]=np.nan
+    # Exercise raw Step-10 nullable dtypes through every scenario and final QC output.
+    raw["ext__nullable_binary"]=pd.Series([True,False,pd.NA]*40,dtype="boolean")
+    raw["lab__nullable_integer"]=pd.Series(np.arange(len(raw))%5,dtype="Int64")
+    raw.loc[::7,"lab__nullable_integer"]=pd.NA
+    raw["lab__nullable_float"]=pd.Series(rng.normal(size=len(raw)),dtype="Float64")
+    raw.loc[0,"lab__nullable_float"]=np.inf;raw.loc[1,"lab__nullable_float"]=pd.NA
+    for feature in ("ext__nullable_binary","lab__nullable_integer","lab__nullable_float"):
+        numeric=raw[feature].astype("float64").replace([np.inf,-np.inf],np.nan)
+        state[feature]=numeric.fillna(numeric.median())
     metadata=state[MAP.KEYS].assign(visit_type="routine")
     state_path=tmp_path/"state.parquet"; metadata_path=tmp_path/"metadata.parquet"; raw_path=tmp_path/"raw.parquet"
     intervals_path=tmp_path/"intervals.parquet"
@@ -509,3 +518,42 @@ def test_bootstrap_imputes_nullable_boolean_integer_and_float_measurements(monke
         np.testing.assert_allclose(fitted.loc[raw[feature].isna(),feature],median)
     np.testing.assert_allclose(fitted["lab__nullable_float"],2.)
     pd.testing.assert_frame_equal(raw,original)
+
+
+def test_distribution_QC_handles_boolean_nullable_and_nonfinite_originals():
+    from src.studies.longitudinal_graph.validation import representation_qc
+    state=synthetic_mapper_state(n=60,n_features=4)
+    feature=state.columns[2];features=list(state.columns[2:])
+    scenario=MAP.run_mapper_scenario(state,features,mapper_config(),family_balance=True,scenario_name="S3-primary")
+    cases=[(pd.Series([True,False,pd.NA]*20,dtype="boolean"),1.),
+           (pd.Series([0,1,pd.NA]*20,dtype="Int64"),1.),
+           (pd.Series([0.,1.,np.inf,pd.NA]*15,dtype="Float64"),1.),
+           (pd.Series([pd.NA]*60,dtype="boolean"),None)]
+    for values,expected in cases:
+        raw=state.copy();raw[feature]=values;original=raw.copy(deep=True)
+        qc=representation_qc(state,scenario,MAP.feature_family,raw)["scaling_feature_diagnostics"]
+        row=qc.set_index("feature").loc[feature]
+        if expected is None:
+            assert pd.isna(row.original_iqr) and row.original_status=="not_applicable"
+        else:
+            assert row.original_iqr==expected and row.original_status=="completed"
+            diag=MAP.feature_distribution_diagnostics(raw,features=[feature]).iloc[0]
+            assert diag.iqr==expected and diag.n_observed in {30,40}
+        pd.testing.assert_frame_equal(raw,original)
+
+
+def test_representation_QC_failure_prevents_expensive_bootstrap(tmp_path,monkeypatch):
+    import pytest
+    from types import SimpleNamespace
+    from src.studies.longitudinal_graph import runner
+    raw=synthetic_mapper_state(n=40,n_features=5)
+    state_path=tmp_path/"state.parquet";metadata_path=tmp_path/"metadata.parquet"
+    raw.to_parquet(state_path);raw[MAP.KEYS].to_parquet(metadata_path)
+    def fail_qc(*args,**kwargs):raise RuntimeError("representation_QC_failed")
+    def unexpected_bootstrap(*args,**kwargs):raise AssertionError("bootstrap must wait for representation QC")
+    monkeypatch.setattr(runner.qc,"representation_qc",fail_qc)
+    monkeypatch.setattr(runner,"bootstrap_mapper",unexpected_bootstrap)
+    args=SimpleNamespace(state=state_path,metadata=metadata_path,integrated=state_path,intervals=tmp_path/"absent_intervals",
+                         config=ROOT/"src/studies/longitudinal_graph/config.yaml",dry_run=False,output_root=tmp_path/"bundle")
+    with pytest.raises(RuntimeError,match="representation_QC_failed"):MAP.run(args)
+    assert not args.output_root.exists()
