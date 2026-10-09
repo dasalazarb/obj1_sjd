@@ -160,3 +160,211 @@ The optional TO other-domains outcome sensitivity is not implemented. Treatment
 adjustment remains outside Step 14. Results describe observational associations,
 not causality or a validated clinical prediction model. Changes in significance
 are not an implementation success criterion.
+
+## Second-review correction and validation
+
+The preceding sections are the historical first-refactor record. This section
+records the second review, also on 2026-10-09, on
+`codex/step14-second-review`, based on `83a26fe` from `origin/main`.
+Only Step 14 code, its tests and the two Step 14 documents were changed.
+
+### Source inspection and root-cause decisions
+
+The second-review CSV/JSON/PDF attachments named in the request are **not
+present** in this workspace. Neither are the productive Step 10/11/13
+Parquets, the Step 10 variable registry/context, or the Step 11 dictionary.
+The numbers 159 patients, 497 episodes, 63 discordant panels, 48 negative
+articular subtractions and six failed articular Cox hypotheses are therefore
+request-supplied reference observations, not independently reproduced findings.
+The reference commit `433ff9827938bd80dcd4e6aa11e6f9f27a628d27`, together with
+`git_worktree_dirty=true` and no supplied patch hash, does not identify the
+exact code that produced that run.
+
+| P0 | Evidence and confirmed cause | Action and remaining limitation |
+| --- | --- | --- |
+| Composition | Old aggregate flags overlap and repeat complete-panel counts across domains; partial-panel subtraction lacked documentary inclusion evidence. The productive 63/48 causes and their overlap are **not determined**. | `derive_other_domain_adjustments` adds an exclusive priority partition, full discordant × negative intersection, unique-FROM delta distribution, exact reconstruction and stricter partial-panel provenance. No totals, weights, ordinal scores or TO outcomes are corrected. Productive episode-level diagnosis is `source_unavailable`. |
+| Duration | Canonical producer can derive duration from `dx_date`, but productive schema/coverage are unavailable. Other similarly named variables do not establish a source. | `duration_source_report` records the explicit decision, definition, baseline anchor, coverage, reason and version. Synthetic inputs have `not_available`, 0/60. Verified canonical dates without duration yield a separate upstream proposal; Step 14 derives nothing. Productive source audit is `source_unavailable`. |
+| Static age/sex reporting | `build_predictor_availability` inspected raw integrated columns while interval construction uses official baseline demographics by patient ID. | Preserve raw availability and add effective interval and exact selected complete-case scopes. This is a confirmed reporting inconsistency, not a new demographic derivation. Tests verify constant propagation, missing baseline age and rejection of TO age. |
+| Six articular Cox failures | The generic warning does not distinguish separation, invalid covariance, design problems or numerical exceptions. Productive designs are unavailable, so their causes are **not determined**. | `fit_baseline_cox_model` records per-attempt aggregate design/group diagnostics, typed warnings/exceptions, raw coefficient/SE/covariance diagnostics and concrete failure reasons, including successful controls. Invalid inference remains NA; no convergence-driven reduction or penalized rescue. |
+| Execution identity | Commit alone is inadequate for dirty code. | `runtime_code_fingerprint` records branch, dirty state, binary-diff SHA-256, every code/config file hash and a code-tree hash without exporting patch content. Metadata is written before input loading; unidentifiable code cannot be labeled fully reproducible. |
+
+Zero-domain provenance is explicitly unknown when upstream metadata cannot
+distinguish observed from filled zeros. Producer names and an arithmetically
+matching total are not substituted for documentary proof on partial panels.
+No upstream producer, study module, clinical definition, support gate,
+episode ordering, risk-set rule or pre-fit adjustment hierarchy was changed.
+
+### QC before/after and scientific comparison
+
+The prior first-refactor **synthetic** inputs were reused byte-for-byte. All
+1,360 historical hypotheses retain their pre-fit patient, interval, event and
+complete-case counts, adjustment level/covariates and support status. No
+historical feasibility columns disappeared. The new 12 separately labeled
+`complete_concordant_panel_only` hypotheses bring the total to 1,372; three
+are supported in these synthetic inputs, giving 75 supported instead of 72.
+This is an added sensitivity, not increased support for historical hypotheses.
+
+| Check | Historical synthetic validation | Second-review synthetic validation |
+| --- | --- | --- |
+| Patients / episodes | 60 / 240 | 60 / 240, identical input SHA-256 |
+| Structural / temporal QC | 6 / 12 PASS | 6 / 12 PASS |
+| Available other-domain FROM values | 180 per domain | 180 per domain |
+| Complete-panel conflicts / negative articular subtraction | 0 / 0 | 0 / 0 |
+| Missing duration | 0/60 available | 0/60 available; explicit `not_available` |
+| Planned / supported hypotheses | 1,360 / 72 | 1,372 / 75; all historical counts unchanged |
+| Full-run planned hypotheses | Not run on this fixture previously | 75 valid; 1,169 not estimable; 128 descriptive-only |
+| Supported primary trajectory estimator | Not fitted in prior dry-run | 5/5 Gaussian GEE after retained MixedLM rejection |
+| Canonical primary Cox failures | Not fitted in prior dry-run | 0; does not explain the six productive failures |
+
+A separate 325-row **synthetic** audit fixture deliberately contains 63
+discordant panels, 48 negative articular subtractions and 21 missing totals.
+The articular 48 are constructed inside the 63 only in that fixture; this is
+**not evidence of the productive overlap**. It validates 241 available values,
+exclusive-category sums of 325 for each domain, and a distribution counting
+304 unique complete/known-total FROM episodes with 63 discrepancies once.
+Tests also reject noninteger tiny deltas rather than assuming rounding.
+
+The effective-availability fixture reports baseline age on 117/120 eligible
+intervals for 39 patients despite absent raw longitudinal age; each selected
+model scope matches its own complete cases. A 40-patient matched-comparison
+fixture reduces 120 primary intervals to a shared 80/80 and checks identical
+sample hashes and frozen primary demographic adjustments for all 12 domains.
+All 36 comparison rows are retained, including nonestimable fits; additional
+attempts are labeled separately and never enter primary BH.
+
+Productive N/events, beta/HR/IRR, CI95%, p, historical family q and outcome-wide
+q **cannot be compared** without the reference outputs and canonical inputs.
+No claim is made that a productive association persists, disappears or changes
+significance. The synthetic full run has 40 valid canonical primary hypotheses,
+six with family q < .05 and five with outcome-wide q < .05; these are test-data
+outputs with no clinical interpretation. The all-hypothesis summary and
+matched table retain nonsignificant, unsupported and failed rows as well.
+The run-comparison outer join compares every planned hypothesis when a backed-up
+reference exists; dry-run comparisons explicitly suppress fitted-inference
+claims. Identical nonmissing canonical input hashes enforce patient/episode
+invariance. Changed inputs do not falsely enforce the old cohort size.
+
+### Executed checks and commands
+
+Use the installed Python 3.12 environment, with caches outside the checkout:
+
+```bash
+export PYTHONDONTWRITEBYTECODE=1
+export MPLCONFIGDIR=/workspace/work/step14-second-review/matplotlib
+export XDG_CACHE_HOME=/workspace/work/step14-second-review/cache
+PYTHON=/workspace/.venvs/obj1_sjd/bin/python
+"$PYTHON" -m pytest -q tests/test_risk_factors_progression.py
+"$PYTHON" -m pytest -q tests/test_integrated_longitudinal_dataset.py \
+  tests/test_integrated_baseline_characterization.py \
+  tests/test_disease_activity_progression.py
+"$PYTHON" src/block_A/14_risk_factors_progression.py --dry-run \
+  --output-root /workspace/work/step14-second-review/production-check
+"$PYTHON" src/block_A/14_risk_factors_progression.py --dry-run \
+  --integrated /workspace/work/step14-refactor-validation/synthetic_integrated.parquet \
+  --baseline /workspace/work/step14-refactor-validation/synthetic_baseline.parquet \
+  --progression /workspace/work/step14-refactor-validation/synthetic_progression.parquet \
+  --output-root /workspace/work/step14-second-review/synthetic-dry-run
+"$PYTHON" src/block_A/14_risk_factors_progression.py \
+  --integrated /workspace/work/step14-refactor-validation/synthetic_integrated.parquet \
+  --baseline /workspace/work/step14-refactor-validation/synthetic_baseline.parquet \
+  --progression /workspace/work/step14-refactor-validation/synthetic_progression.parquet \
+  --output-root /workspace/work/step14-second-review/synthetic-full
+git diff --check
+```
+
+Final tests: **74 Step 14 passed + 79 upstream passed = 153 passed**.
+The initial iterations exposed incorrect synthetic test-column assumptions;
+they were corrected and the final complete Step 14 suite passed. NumPy
+timedelta deprecations and warnings from deliberate nonfinite-design fixtures
+remain visible. Tests cover complete/partial/incompatible panels, duplicate
+FROM rejection, effective static covariates, absence of duration, real complete
+separation, collinearity, extreme scale, nonfinite design, invalid times,
+invalid covariance/SE, successful Cox controls, matched fits, independent BH
+with six named failed hypotheses, source-schema reporting, fingerprints and
+input-hash invariance. Failed models and alternate/sensitivity representations
+are excluded from outcome-wide BH; `q_value == q_value_family` is checked.
+
+The productive dry-run failed with the expected missing Step 10 Parquet and
+preserved early provenance metadata. Synthetic dry-run and full runs completed.
+The full CLI is repeated after committing, against the same synthetic files
+and output root, to verify clean committed-source metadata and automatic backup
+hashes before push. The definitive commit, clean/dirty state, backup path,
+dependencies, parameters and code-tree hash are in that run's metadata; the
+output manifest records all generated file hashes. Validation assets stay
+outside the repository and are not productive exports.
+
+### Exact regenerated outputs and hashes
+
+Scratch full-run root: `/workspace/work/step14-second-review/synthetic-full`.
+The following paths are relative to that root; every listed file, except the
+manifest itself, has its exact SHA-256 and size in
+`outputs/qc/blockA/14_risk_factors_progression/14_output_manifest.csv`:
+
+```text
+outputs/tables/blockA/14_risk_factors_progression/
+  14_baseline_essdai_trajectory_models.csv
+  14_baseline_ge5_cox_models.csv
+  14_baseline_high_activity_models.csv
+  14_baseline_new_domain_models.csv
+  14_cross_domain_models.csv
+  14_cross_domain_support.csv
+  14_domain_sensitivity_comparison.csv
+  14_model_interpretation_summary.csv
+  14_predictor_feasibility.csv
+  14_predictor_registry.csv
+  14_sensitivity_models.csv
+  14_timevarying_essdai_models.csv
+  14_timevarying_ge5_models.csv
+  14_timevarying_new_domain_models.csv
+outputs/qc/blockA/14_risk_factors_progression/
+  14_adjustment_selection_qc.csv
+  14_analysis_metadata.json
+  14_baseline_model_attrition.csv
+  14_cox_failure_diagnostics.csv
+  14_domain_composition_audit_summary.csv
+  14_domain_composition_discrepancy_distribution.csv
+  14_domain_composition_qc.csv
+  14_domain_riskset_qc.csv
+  14_interval_model_attrition.csv
+  14_model_qc.csv
+  14_multiple_testing_qc.csv
+  14_outcome_wide_fdr_qc.csv
+  14_output_manifest.csv
+  14_predictor_availability.csv
+  14_predictor_redundancy_qc.csv
+  14_run_comparison.md
+  14_run_comparison_summary.csv
+  14_structural_qc.csv
+  14_temporal_leakage_qc.csv
+outputs/figures/blockA/14_risk_factors_progression/
+  14_baseline_risk_factor_forest.pdf
+  14_cross_domain_heatmap.pdf
+  14_essdai_slope_difference_forest.pdf
+  14_timevarying_progression_forest.pdf
+outputs/logs/14_risk_factors_progression/14_risk_factors_progression.log
+data/analytic/blockA/14_risk_factors_progression/
+  14_baseline_predictor_dataset.parquet
+  14_domain_incidence_risk_set.parquet
+  14_lagged_interval_dataset.parquet
+```
+
+Backups preserve original relative paths under
+`outputs/backups/14_risk_factors_progression/<UTC timestamp>/`; the exact
+timestamped location is `output_backup_path` in `14_analysis_metadata.json`.
+The backed-up manifest permits verification of preserved original bytes.
+Input SHA-256 values, for these **synthetic** fixtures only:
+
+| Input | SHA-256 |
+| --- | --- |
+| Integrated | `17c06bfb7722b05a881117ece1932e78012966aa2d62c5de2ad72520b9882793` |
+| Baseline | `0c8b7829c11b8970b8c3c10a7e254c0d9a05942e3080259897654aed35ea93a5` |
+| Progression | `b0835c05ed3f1483f0b8dd8ef0916008994f30ff3ac80af2aa23d641b3f5247d` |
+
+Productive acceptance items requiring those absent files remain
+`source_unavailable`: explanation of the 63/48 conflicts, diagnosis of the six
+specific Cox failures, physical duration-source coverage, reference 159/497
+invariance and scientific before/after inference. No upstream correction is
+proposed without identifiable producer/episode evidence. Remaining scientific
+limits include biological interval censoring, selection of evaluable episodes,
+unadjusted treatment and other residual confounding, and accumulated
+anti-Ro/SSA positivity rather than instantaneous serum-titer change.
