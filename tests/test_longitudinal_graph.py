@@ -477,3 +477,35 @@ def test_equal_node_weights_preserve_previous_method_and_no_nodes_have_zero_mass
     np.testing.assert_allclose(out.loc[0,["node_weight__a","node_weight__b","node_weight__c"]].astype(float),[1/3]*3)
     np.testing.assert_allclose(out.loc[0,["macrostate_weight__0","macrostate_weight__1"]].astype(float),[2/3,1/3])
     assert not out.loc[1,"mapper_covered"] and out.loc[1].filter(like="weight__").fillna(0).sum()==0
+
+
+def test_bootstrap_imputes_nullable_boolean_integer_and_float_measurements(monkeypatch):
+    from src.studies.longitudinal_graph import stability
+    raw=synthetic_mapper_state(n=60,n_features=4)
+    raw["ext__binary_mixed"]=pd.Series([True,False,pd.NA]*20,dtype="boolean")
+    raw["ext__binary_positive"]=pd.Series([True,True,pd.NA]*20,dtype="boolean")
+    raw["lab__integer_measurement"]=pd.Series([0,1,pd.NA]*20,dtype="Int64")
+    raw["lab__nullable_float"]=pd.Series([np.inf,2.,pd.NA]*20,dtype="Float64")
+    original=raw.copy(deep=True);features=list(raw.columns[2:]);cfg=mapper_config()
+    cfg["mapper_validation"]["bootstrap_replicates"]=1
+    imputed=raw[features].astype("float64").replace([np.inf,-np.inf],np.nan)
+    imputed=imputed.fillna(imputed.median())
+    state=pd.concat([raw[MAP.KEYS],imputed],axis=1)
+    primary=MAP.run_mapper_scenario(state,features,cfg,family_balance=True,scenario_name="S3-primary")
+    def fixed_draw(frame,rng):
+        sample=frame.copy();sample["original_episode_id"]=sample.clinical_episode_id
+        return sample,set(frame.patient_id)
+    monkeypatch.setattr(stability,"patient_draw",fixed_draw)
+    captured=[]
+    def checked_pruning(frame,threshold):
+        captured.append(frame.copy())
+        return MAP.reduce_redundancy(frame,threshold)
+    replicates,_,summary=stability.bootstrap_mapper(raw,primary,cfg,features,MAP.run_mapper_scenario,checked_pruning,MAP.jaccard)
+    assert not replicates.status.eq("failed").any() and summary["replicates_failed"]==0
+    fitted=captured[0]
+    assert all(dtype==np.dtype("float64") for dtype in fitted.dtypes)
+    assert np.isfinite(fitted.to_numpy()).all()
+    for feature,median in (("ext__binary_mixed",.5),("ext__binary_positive",1.),("lab__integer_measurement",.5)):
+        np.testing.assert_allclose(fitted.loc[raw[feature].isna(),feature],median)
+    np.testing.assert_allclose(fitted["lab__nullable_float"],2.)
+    pd.testing.assert_frame_equal(raw,original)

@@ -69,7 +69,10 @@ def bootstrap_mapper(raw, primary, config, features, fit, prune, jaccard):
         row = {"replicate":replicate, "n_patient_draws":raw.patient_id.nunique(), "n_unique_patients_drawn":len(common),
                "n_visits":len(sampled), "preprocessing":"sample_only_median_imputation_pruning_robust_scaler_family_balance_pca_cover_dbscan_support_modularity"}
         try:
-            numeric = sampled[features].replace([np.inf,-np.inf],np.nan)
+            # Raw Step-10 measurements may use pandas nullable boolean/Int64.
+            # Median imputation can produce 0.5 or 1.0, which those dtypes reject.
+            # Convert only fit features, preserving missing values and raw visit keys.
+            numeric = sampled[features].astype("float64").replace([np.inf,-np.inf],np.nan)
             medians = numeric.median(); usable = medians.index[medians.notna()].tolist()
             filled = numeric[usable].fillna(medians[usable])
             retained, _ = prune(filled, config["representation"]["redundancy_spearman_abs_threshold"])
