@@ -90,28 +90,104 @@ unexposed events, and 5 events per fitted parameter. Cross-domain pairs require
 5 exposed events. `--minimum-events` may raise the event gate but cannot lower
 it. These are conservative safeguards, not inferential guarantees.
 
-Full adjustment is baseline ESSDAI, age, sex and disease duration. If full
-complete-case support fails, the prespecified reduced set is baseline ESSDAI
-only; no-total sensitivities and lagged models use age only in the reduced set.
-Unavailable/constant adjustments, model rank, event support and exact attrition
-are reported. Starting ESSDAI remains in lagged models when it varies. No
-stepwise selection or silent threshold reduction occurs. Domain predictor
-models flag their structural relationship to baseline ESSDAI total.
+Adjustment is selected before fitting, in the fixed order Full → Reduced A →
+Reduced B → Minimal. Each level checks its own complete cases, design rank,
+patient/interval/event support and events per parameter. Effect sizes, p-values
+and convergence are never used to choose the level. Numerical failure preserves
+the chosen specification; only the existing estimator fallback is allowed.
+
+| Level | Baseline trajectory/Cox and interval event models | Lagged ESSDAI |
+| --- | --- | --- |
+| Full | baseline_essdai + age + C(sex) + duration | from_essdai + interval_years + age + C(sex) + duration |
+| Reduced A | baseline_essdai + age + C(sex) | from_essdai + interval_years + age + C(sex) |
+| Reduced B | baseline_essdai + age | from_essdai + interval_years + age |
+| Minimal | baseline_essdai | from_essdai + interval_years |
+
+The predictor, trajectory time and interaction, Poisson FROM-time bands and
+log(interval_years) offset remain constitutive terms at every level. Strictly
+constant state/spacing fields are omitted as intercept-redundant and recorded;
+constant demographic adjustments reject that candidate level. Sex uses observed
+categories only; missing sex is excluded when that level requires it. Static age,
+sex and disease duration always come from the official Step 11 baseline, joined
+by patient_id. An unsupported Minimal row remains not estimable with exact counts.
+
+Step 11 owns `disease_duration`: diagnosis to official clinical baseline, in
+years (days / 365.25). This refactor does not derive duration from follow-up or
+later diagnosis records. Negative values, values exceeding observed baseline age,
+and diagnoses after baseline are excluded with availability counts, never clipped.
+Pharma names `time_since_diagnosis_years`/`disease_duration_years` are schema hints,
+not verified cohort aliases; the previously accepted `disease_duration_years`
+alias, along with the unverified `demo__disease_duration` alias, is removed under
+the versioned source policy. The legacy
+`disease_duration_yrs_model` is clipped upstream and is not used. No additional
+alias or Step 11 derivation is introduced without canonical schema evidence.
+
+Every model records `adjustment_status`, `selected_adjustment_level`, covariates,
+effective formula, selection rule/reason and JSON diagnostics for all four levels.
+The detailed adjustment QC flattens those candidates. Historical full-model
+support fields remain; `adjustment_status_legacy` maps reduced levels to the old
+`prespecified_reduced` label. When no level is supported, selection is `none`,
+and counts/formula describe the unsupported Minimal candidate.
 
 Continuous predictors use 1-SD effects, preserving their raw values. Baseline
 scaling uses one row per patient in the outcome-eligible source cohort; interval
 scaling uses available FROM observations. The mean, SD and cohort are recorded.
 Ordinal domain effects use +1 level; active/inactive comparisons are separate
-sensitivities. BH-FDR includes only valid selected inference within distinct
-analysis, predictor-family and outcome families; sensitivities are separated.
+sensitivities. `q_value` preserves historical BH-FDR within analysis,
+predictor-family and outcome families; `q_value_family` is its compatibility
+alias. Sensitivities retain their own historical BH families.
+
+`q_value_outcome_wide` is a separate multiplicity sensitivity over valid primary
+canonical hypotheses, grouped by analysis_type × outcome × effect_measure.
+Baseline, time-varying and cross-domain analyses, and HR/IRR/beta scales, never
+pool. Duplicate construct representations, sensitivities and invalid/nonfinite
+p-values receive NaN and an exclusion reason. Duplicate policy precedes fitting
+and FDR eligibility; it is never selected by observed correlation or significance.
+The outcome-wide QC lists planned/valid/duplicate/test counts, predictor IDs and
+rule versions. Report both corrections consistently; do not choose whichever
+procedure yields a more favorable conclusion.
+
+`domain_glandular` ordinal is the canonical glandular hypothesis. Salivary gland
+swelling remains in all descriptive/result CSVs as an alternate representation,
+with `alternative_to`, construct ID, evidence and FDR eligibility in the registry.
+It remains in historical family BH for comparability, but is excluded from the
+primary outcome-wide BH and primary forest plots. Redundancy QC requires at least
+20 complete pairs and nonconstant variables before flagging high correlation;
+small-pair correlations can be reported without establishing redundancy or
+independence. Binary pairs use phi/contingency; ordinal/continuous pairs use
+Spearman. Glandular activity concordance and the versioned construct policy are
+reported separately. QC never automatically drops a predictor.
 
 Sensitivities include total ESSDAI +5, domain ordinal versus binary, domain
-models without baseline total, at least 0.5 years between the first and last
+baseline models `without_baseline_total`, at least 0.5 years between the first and last
 subsequent trajectory assessments, continuous laboratories, and an upstream
 anchor-day lab restriction when days-from-anchor exists. No new generic lab
 recency window is imposed. Treatment adjustment is explicitly not implemented;
 individual comorbidity analyses remain in Step 07. All interpretation describes
 associations, not causal effects or a deployable prediction model.
+
+For every ESSDAI domain, the required lagged sensitivity is
+`domain_from_other_domains_adjusted`:
+
+```text
+Primary:     ESSDAI_TO ~ domain_d_FROM + ESSDAI_FROM + interval_years + selected demographic adjustments
+Sensitivity: ESSDAI_TO ~ domain_d_FROM + ESSDAI_FROM_other_domains_d + interval_years + selected demographic adjustments
+ESSDAI_FROM_other_domains_d = ESSDAI_FROM - weight[d] * ordinal_d_FROM
+```
+
+The domain remains an unweighted ordinal predictor. Weights come exclusively
+from config.ESSDAI_DOMAIN_WEIGHTS; verified aliases are gland_swell→glandular
+and neuro_periph→pns. Known, evaluable domain/total measurements and a
+nonnegative difference are required. Complete panels must reconstruct the total;
+mismatches/invalid subtractions become missing sensitivity values with QC, never
+silent corrections. Partial panels permit only subtraction of the known target
+contribution and are identified in QC. Source columns, weights and counts are
+recorded. Numerical equality with the original state covariate is flagged as
+nonindependent evidence. The outcome stays total subsequent ESSDAI; this does
+not estimate propagation exclusively into other domains. The optional TO
+other-domains outcome sensitivity is not implemented. The redundant lagged
+`without_baseline_essdai` sensitivity is removed; the baseline omission is
+renamed `without_baseline_total` and still omits only baseline total.
 
 ## Outputs and CLI
 
@@ -125,18 +201,29 @@ the project root for those same relative paths. The three Parquet products are:
   with wide baseline predictors and eligibility metadata.
 
 All required result and QC tables are emitted, including unavailable and sparse
-rows with support reasons. Main forest plots contain valid selected models; an
+rows with support reasons. `claim_status`/`inference_tier` distinguish primary,
+sensitivity, alternative_representation, unsupported and failed rows. Main forest
+plots contain valid canonical primary representations, label the adjustment level
+and retain caution labels; an
 unsupported analysis receives a labeled empty plot. The secondary cross-domain
 heatmap appears only with at least four valid pairs; unsupported cells are gray,
 not zero effects. Metadata records gates, inputs, methods and software versions.
+Metadata records versioned adjustment/composition/hypothesis/FDR rules, input
+SHA-256 and paths (including context), Git commit/worktree state, UTC run time,
+dependencies, supported trajectory counts and actual MixedLM/GEE use. QC adds
+`14_adjustment_selection_qc.csv`, `14_domain_composition_qc.csv` and
+`14_outcome_wide_fdr_qc.csv` without removing previous output columns.
 The log records availability, feasibility, attempts, fallbacks, warnings and
 output locations. Review structural/temporal QC before feasibility and models.
 
 CLI overrides: `--integrated`, `--baseline`, `--context`, `--progression`,
 `--output-root`, `--minimum-events`, `--overwrite`/`--no-overwrite`, `--dry-run`.
-Outputs regenerate by default. `--no-overwrite` protects all existing dedicated
+Outputs regenerate by default after backing up every existing dedicated file to
+`outputs/backups/14_risk_factors_progression/<UTC timestamp>/` with its original
+relative path. Backup failure aborts before replacement. `--no-overwrite` protects all existing dedicated
 outputs before any write. Dry run validates datasets, builds risk sets and
-feasibility, prints planned models, and writes only QC/log diagnostics. Structural
+feasibility, prints planned models, and writes only QC/log diagnostics (including
+metadata and adjustment/composition QC). Structural
 or temporal disagreements fail loudly, with available diagnostics saved.
 
 Verification:
