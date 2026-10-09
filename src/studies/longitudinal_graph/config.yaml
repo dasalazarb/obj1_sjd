@@ -27,3 +27,16 @@ bootstrap: {replicates: 1000}
 null_models: {replicates: 1000, temporal_reversal: true, next_visit_permutation: true}
 characterization: {minimum_transition_patients: 5, bootstrap_replicates: 1000, fdr_alpha: 0.05}
 figures: {dpi: 160}
+# Prespecified alternatives; none changes the historical S3-primary features or weights.
+mapper_validation:
+  hscrp_prior_transformation: identity # Step-10 raw values; unknown/logged values disable log1p.
+  pro_summary_features: [] # Requires a clinically documented whitelist; no name guessing.
+  comparable_visit_features: [] # Requires a protocol/visit availability review.
+  robust_cover_quantiles: [0.01, 0.99] # Sensitivity only; outside visits explicitly audited.
+  parameter_grid:
+    - {name: S3-cover6, n_cubes: 6, perc_overlap: 0.40, min_samples: 3}
+    - {name: S3-cover10, n_cubes: 10, perc_overlap: 0.40, min_samples: 3}
+  bootstrap_replicates: 1000
+  bootstrap_match_jaccard: 0.50
+  bootstrap_stability_frequency: 0.80
+  admin_permutations: 199

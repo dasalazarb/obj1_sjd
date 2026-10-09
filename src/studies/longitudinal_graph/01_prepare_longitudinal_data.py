@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import yaml
 import common
+from src.studies.longitudinal_graph import validation as qc
 from src.studies._shared import (STUDY_CONTRACT_VERSION, create_study_dirs, load_parquet,
     resolve_concept, sha256_file, validate_integrated_dataset, validate_transition_intervals, write_json)
 
@@ -145,10 +146,29 @@ def parse_args(argv=None):
     p=argparse.ArgumentParser(); p.add_argument("--integrated",type=Path,default=common.INTEGRATED_LONGITUDINAL_PARQUET)
     p.add_argument("--intervals",type=Path,default=common.POP_TRANSITION_INTERVALS_PARQUET)
     p.add_argument("--config",type=Path,default=Path(__file__).with_name("config.yaml")); p.add_argument("--dry-run",action="store_true")
+    p.add_argument("--output-root",type=Path,help="Isolated preparation outputs")
     return p.parse_args(argv)
 
 def run(args):
-    dirs=create_study_dirs("longitudinal_graph"); logging.basicConfig(filename=dirs["logs"]/"01_prepare.log",level=logging.INFO,force=True)
+    if args.dry_run:
+        cfg=load_config(args.config)
+        if not args.integrated.exists():
+            result={"status":"not_run_missing_data","dry_run":True,"missing_inputs":[str(args.integrated)],"outputs_written":False}
+        else:
+            master=load_parquet(args.integrated); contract=validate_integrated_dataset(master)
+            intervals=build_consecutive_intervals(master)
+            if args.intervals.exists(): validate_transition_intervals(load_parquet(args.intervals),master)
+            registry_path=args.integrated.with_name("10_variable_registry.csv")
+            registry=pd.read_csv(registry_path) if registry_path.exists() else None
+            manifest,_=feature_manifest(master,intervals,cfg,registry)
+            if not manifest.included.any(): raise ValueError("No eligible longitudinal state features")
+            result={"status":"validated","dry_run":True,"n_visits":len(master),"n_features":int(manifest.included.sum()),"outputs_written":False,"contract":contract}
+        import json
+        print(json.dumps(result,default=str));return result
+    root=getattr(args,"output_root",None)
+    dirs={k:Path(root)/k for k in qc.study_paths(common)} if root else create_study_dirs("longitudinal_graph")
+    for p in dirs.values():p.mkdir(parents=True,exist_ok=True)
+    logging.basicConfig(filename=dirs["logs"]/"01_prepare.log",level=logging.INFO,force=True)
     cfg=load_config(args.config); master=load_parquet(args.integrated); contract=validate_integrated_dataset(master)
     canonical=load_parquet(args.intervals) if args.intervals.exists() else None
     intervals=build_consecutive_intervals(master)
@@ -161,7 +181,7 @@ def run(args):
     manifest,state=feature_manifest(master,intervals,cfg,registry)
     included=manifest.loc[manifest.included,"feature"].tolist()
     if not included: raise ValueError("No eligible longitudinal state features")
-    state=state[included]; coverage_qc=preimputation_coverage(state)
+    state=state[included]; original_state=state.copy(); coverage_qc=preimputation_coverage(state)
     observed_counts=coverage_qc.state_features_observed; coverage=coverage_qc.state_coverage_fraction
     imputed=int(state.isna().sum().sum()); total_values=len(state)*len(included); state=state.fillna(state.median())
     keys=master[["patient_id","clinical_episode_id"]].reset_index(drop=True); state=pd.concat([keys,state.reset_index(drop=True)],axis=1)
@@ -188,6 +208,8 @@ def run(args):
       "q1_interval_min_endpoint_coverage":intervals.min_endpoint_coverage.quantile(.25),
       "q3_interval_min_endpoint_coverage":intervals.min_endpoint_coverage.quantile(.75),
       "feasibility_status":"viable_descriptive" if counts.ge(2).sum()>=8 and (positive&both).sum()>=8 else "sparse_exploratory"}
+    pd.concat([keys,original_state.reset_index(drop=True)],axis=1).to_parquet(dirs["analytic"]/"01_longitudinal_visit_raw.parquet",index=False)
+    pd.concat([keys,original_state.notna().reset_index(drop=True)],axis=1).to_parquet(dirs["analytic"]/"01_longitudinal_visit_observability.parquet",index=False)
     state.to_parquet(dirs["analytic"]/"01_longitudinal_visit_state.parquet",index=False); metadata.to_parquet(dirs["analytic"]/"01_longitudinal_visit_metadata.parquet",index=False)
     intervals.to_parquet(dirs["analytic"]/"01_longitudinal_intervals.parquet",index=False); manifest.to_csv(dirs["tables"]/"01_longitudinal_feature_manifest.csv",index=False)
     pd.DataFrame([summary]).to_csv(dirs["tables"]/"01_longitudinal_feasibility_summary.csv",index=False)

@@ -92,74 +92,75 @@ python src/studies/longitudinal_graph/01_prepare_longitudinal_data.py
 python src/studies/longitudinal_graph/02_run_longitudinal_mapper.py
 ```
 
-Script 02 runs the complete S3 primary and S2 unbalanced Mappers, plus S3
-sensitivities with enough PCs to reach the configured variance target, without
-urine squamous cells, and with hsCRP transformed by `log1p` when the original
-observed values are nonnegative. All share the fixed post-redundancy feature set
-(except the specified exclusion) and fixed Mapper hyperparameters. Full80 removes
-only the PCA component cap; the primary retains its configured cap. Every scenario
-uses PC1/PC2 as its lens and all retained PCs for local clustering. Family weights
-are applied after RobustScaler, preserving the primary representation.
+Script 02 preserves the S3 primary and the S2, full80, urine and valid hsCRP-log1p
+sensitivities. Its explicit scenario registry additionally refits without hsCRP,
+without PRO, with equal patient mass, with local DBSCAN epsilon, with a small
+prespecified cover grid, and with a robust lens range. PRO-summary-only and
+comparable-visit-feature alternatives require documented clinical whitelists;
+empty/unavailable whitelists produce `not_applicable`, with a reason.
 
-Before running temporal flow, review these tables and JSON under
-`outputs/tables/studies/longitudinal_graph/`:
+Each scenario records exact features, transformation, PCA and Mapper parameters,
+status, support and coverage. PC1/PC2 remain the lens and all retained PCs are used
+for clustering. Loading fractions use the sum of squared loadings **within a PC**;
+they are not percentages of total variance. RobustScaler does not clip extremes.
 
-- `02_mapper_sensitivity_summary.csv`: five scenarios, PCA variance, support,
-  coverage, and ARI with comparable visit and patient counts.
-- `02_s2_s3_macrostate_stability.csv` and `02_s2_s3_stability_summary.json`:
-  visit/patient overlap and ARI. Each primary macrostate matches independently by
-  maximal patient Jaccard, then visit Jaccard; many-to-one matches expose mergers.
-  Numeric macrostate IDs are not used as evidence of correspondence. Sets include
-  all visits in macrostate nodes, including ties. Scalar Jaccard summaries are
-  unweighted means over supported primary macrostates; review each macrostate,
-  including the core, rather than relying on the mean.
-- `02_full80_macrostate_stability.csv`,
-  `02_no_urine_squamous_macrostate_stability.csv`, and
-  `02_hscrp_log1p_macrostate_stability.csv`: per-macrostate sensitivity matches.
-- `02_feature_distribution_diagnostics.csv`: original finite observations on the
-  Script-01 cohort, before imputation; extremes are strictly below Q1 minus three
-  IQRs or above Q3 plus three IQRs. Missing raw data or negative hsCRP observations
-  are documented; ineligible sensitivities have `status: not_applicable` and no
-  invented metrics.
-- `02_mapper_pc_feature_diagnostics.csv`: hsCRP and urine squamous loadings, squared
-  loading fractions, and loading ranks on PC1--PC4 in the fitted scenarios.
-- `02_longitudinal_mapper_summary.json`: coverage reconciliation, administrative
-  association flag, interval endpoint coverage, and representation-stability gate.
+Before temporal analysis, inspect `02_longitudinal_mapper_summary.json`, the
+scenario/representation manifests, loading/family/scale/lens diagnostics, cover
+occupancy/noise tables, coverage strata and original interval endpoint QC.
+`02_mapper_admin_availability.csv` explicitly marks missing confounders, and
+`02_mapper_admin_association.csv` adds patient-vector permutations to descriptive
+visit-level V. Missing variables or absence of a flag do not prove no confounding.
+01 now retains raw values and an observation mask; 02 contrasts original-pair PRO
+correlations against the historical imputed-state pruning, and audits serology
+eligibility without changing the eligible upstream feature set.
 
-ARI excludes ambiguous or missing supported hard assignments. Its interpretation
-requires enough common visits/patients and represented labels; high ARI on a small
-subset or a single macrostate does not establish stability. No ARI cutoff or
-automatic parameter tuning is used. Administrative associations below the flag
-threshold do not establish absence of confounding.
+`02_mapper_bootstrap_replicates.csv` refits preprocessing, representation and the
+Mapper after resampling complete patient series. Support counts original unique
+patients even for duplicate draws. Matches use patient and then visit Jaccard on
+common sampled patients; splits, merges and unmatched structures remain visible.
+ARI includes comparable hard visits, patients and label counts; one label or a
+small subset cannot establish stability. Components, modularity communities and
+macrostates have separate identities. `branch_id` remains undefined until the
+researcher documents the topology definition; the branch stability file explicitly
+labels its current component QC. See the bootstrap summary for pending checks.
 
-The summary's Mapper coverage counts any graph node. In membership files,
-`mapper_graph_covered` exposes that measure, while the existing `mapper_covered`
-continues to mean membership in at least one supported macrostate for Script 03.
-Graph-covered visits partition into hard assignments, ties, and covered visits
-with neither a supported hard assignment nor a tie. Percentages use all input
-visits or unique patients as denominators, on a 0--100 scale. Visits/patients in
-unsupported macrostates can also belong to supported macrostates. Unsupported
-macrostates remain descriptive and contribute no primary temporal weights.
-The endpoint counts use only the original consecutive intervals, with positive
-time and the configured maximum interval; missing endpoints never create skips.
+The membership contract is unchanged: `mapper_graph_covered` means any graph node,
+while `mapper_covered` means a supported macrostate for Script 03. Weights use
+`equal_weight_per_supported_node`, rather than a silently introduced temperature
+rule. Exclusive visit/patient coverage categories reconcile to the input universe;
+macrostate patient sets may overlap. Endpoint QC uses original consecutive
+intervals and never connects across a missing intermediate visit.
 
-The gate reports objective blockers and otherwise remains `requires_review`.
-Proceed only after reviewing useful supported endpoint coverage, at least two
-supported primary macrostates, recognition of the core across representations,
-per-macrostate overlap, hsCRP/urine diagnostics, and administrative QC. Clinical
-macrostate labels remain deferred to held-out characterization in Script 04.
-Script 02 does not execute Script 03 or approve the scientific gate automatically.
-After that review, run:
+The two reference PNGs now show all nodes with the same geometry: one colors
+connected components, the other colors communities and labels support. Edges are
+shared visits, not temporal transitions. Additional diagnostic figures cover lens
+distributions, occupancy, PCA dominance, coverage and sensitivity comparability.
+04 records whether each variable was actually used in the post-pruning primary
+Mapper; a held-out variable still requires proxy-dependence review.
+
+Both 01 and 02 support `--output-root` for isolated review bundles, and true
+`--dry-run` validates/describes without fitting the Mapper or writing canonical
+outputs. Missing clinical data returns `not_run_missing_data`. Successful 02
+bundles archive prior `02_*` files outside canonical directories before replacement,
+including obsolete sensitivity files. `02_run_manifest.json` records Git/script,
+configuration/input hashes, seed, date, dependencies and check states.
+
+The scientific gate never autoapproves flow. Missing branch evidence blocks branch
+inference; other unavailable validations remain explicit. Review coverage,
+comparability, patient stability, administration, observability and circularity,
+and document the investigator's decision, date, SHA and justification before
+using 03/04 for scientific inference. A technically completed run is not approval.
+No all-in-one command runs those stages. After documented review, run manually:
 
 ```bash
 python src/studies/longitudinal_graph/03_analyze_temporal_flow.py
 python src/studies/longitudinal_graph/04_characterize_transitions.py
 ```
 
-Study datasets, tables, figures, QC, and logs are written under the standard
-`studies/longitudinal_graph/` roots in `data/analytic/` and `outputs/`. Each
-command also supports `--config`, `--integrated`, and `--dry-run`; dependent
-stages expose arguments for their preceding-stage inputs.
+Study outputs remain under the standard `studies/longitudinal_graph/` roots.
+[Implementation, validation and real-data limitations](docs/longitudinal_mapper_validation.md)
+include isolated-run commands, historical provenance and the ten requested
+scientific questions, explicitly `not_run_missing_data` in this review.
 
 
 ## Section 5 comorbidity analysis
