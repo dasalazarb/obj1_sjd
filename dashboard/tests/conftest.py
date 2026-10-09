@@ -14,7 +14,16 @@ def mock_run(tmp_path):
     cfg=yaml.safe_load((APP_ROOT/'objectives/objective_01/config.yml').read_text())
     registry=Registry(outputs=tmp_path/'MOCK_outputs',repo=tmp_path/'MOCK_repo')
     cells={}
-    for ref in configured_refs(cfg):
+    refs=list(configured_refs(cfg))
+    # Explicitly include cells addressed dynamically by population and retention views.
+    for row in cfg['pro_rows'] + cfg['lab_rows'] + cfg['overlap_segments']:
+        refs.extend(f't11_by_pop:{row["row_key"]}@{group}#raw' for group in cfg['pop_columns'])
+    refs.extend(f't12_ret:Overall|{time}@{column}#raw' for time in cfg['retention_times'] for column in ['pct_retained','n_retained','denominator'])
+    refs.extend([
+        't11_overall:Glandular / extended phenotype|Any sicca symptom present, n/N (%)@Summary#raw',
+        't12_long:Patients with exactly 1 clinical episode|Overall@Value#k',
+    ])
+    for ref in refs:
         rid,key,tail=ref.split(':',1)[0],ref.split(':',1)[1].split('@',1)[0],ref.split('@',1)[1]
         col,field=tail.rsplit('#',1)
         row=cells.setdefault(rid,{}).setdefault(key,{})

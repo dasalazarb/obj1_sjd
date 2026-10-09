@@ -9,12 +9,54 @@ from shared.components.layout import page_header, section_header, run_badge
 from shared.components.evidence import missing_output
 
 
+SECTION_LABELS = {
+    'study_design': 'Study design', 'cohort': 'Cohort', 'baseline': 'Baseline',
+    'phenotype': 'Phenotype', 'glandular_serology': 'Glandular & serology',
+    'organ_involvement': 'Organ involvement', 'followup': 'Follow-up',
+    'variable_explorer': 'Variable explorer',
+}
+
+
+def section_navigation(sections):
+    ids = [section['id'] for section in sections]
+    linked = st.query_params.get('section')
+    incoming = linked != st.session_state.get('sjd_section_url')
+    if incoming and linked in ids:
+        st.session_state['sjd_section'] = linked
+    elif 'sjd_section' not in st.session_state:
+        st.session_state['sjd_section'] = 'variable_explorer' if st.query_params.get('var') else 'baseline'
+    if st.session_state['sjd_section'] not in ids:
+        st.session_state['sjd_section'] = ids[0]
+
+    def change(offset=0):
+        if offset:
+            index = ids.index(st.session_state['sjd_section'])
+            st.session_state['sjd_section'] = ids[index + offset]
+        st.query_params['section'] = st.session_state['sjd_section']
+        st.session_state['sjd_section_url'] = st.session_state['sjd_section']
+
+    index = ids.index(st.session_state['sjd_section'])
+    left, center, right = st.columns([1, 4, 1])
+    left.button('← Previous', disabled=index == 0, key='read_previous', on_click=change, args=(-1,))
+    center.selectbox('Section', ids, key='sjd_section', on_change=change,
+        format_func=lambda value: str(ids.index(value) + 1) + ' · ' + SECTION_LABELS[value], label_visibility='collapsed')
+    right.button('Next →', disabled=index == len(ids) - 1, key='read_next', on_click=change, args=(1,))
+    change()
+    section = sections[ids.index(st.session_state['sjd_section'])]
+    st.caption('Slides ' + '–'.join(str(value) for value in dict.fromkeys([section['slides'][0], section['slides'][-1]])))
+    return section
+
+
 def render():
     cfg=yaml.safe_load((APP_ROOT/'objectives/objective_01/config.yml').read_text())
     present=st.query_params.get('mode')=='present'
     try:
         registry=attach_figures(Registry())
-        refresh=st.button('Refresh outputs',key='refresh_outputs') if not present else False
+        if not present:
+            header, action = st.columns([5, 1])
+            with header: page_header(cfg['eyebrow'],cfg['title'],cfg['subtitle'],'cover')
+            refresh = action.button('Refresh outputs', key='refresh_outputs')
+        else: refresh = False
         if refresh or 'sjd_run' not in st.session_state:
             st.cache_data.clear()
             st.cache_resource.clear()
@@ -24,9 +66,9 @@ def render():
         run=st.session_state['sjd_run']
         if current_key(registry)[0]!=run.key:
             st.warning('A newer run is available — Refresh')
-        if not present:
-            page_header(cfg['eyebrow'],cfg['title'],cfg['subtitle'],'cover')
-        run_badge(run)
+        if present: run_badge(run)
+        else:
+            with st.sidebar: run_badge(run)
         sections=cfg['sections']
         if present:
             st.html('<style>[data-testid="stSidebar"]{display:none}.sjd-kpi-label,.sjd-kpi-detail,.sjd-caution,.sjd-bar-row,.sjd-table,.sjd-source,.sjd-run,.sjd-missing{font-size:20px}</style>')
@@ -40,6 +82,11 @@ def render():
             if right.button('Next →',disabled=index==len(sections)-1):
                 st.session_state['sjd_slide']=index+1; st.rerun()
             sections=[sections[index]]
+        else:
+            selected = section_navigation(sections)
+            read_all = st.sidebar.checkbox('Read all sections in slide order', key='sjd_read_all')
+            if not read_all:
+                sections = [selected]
         for section in sections:
             section_header(section)
             module=importlib.import_module('objectives.objective_01.'+section['file'].replace('/','.').removesuffix('.py'))
