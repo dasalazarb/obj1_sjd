@@ -6,7 +6,10 @@ fuentes de prueba y semilla configurada 20260831 para Mapper/bootstrap.
 
 ## Resultado ejecutivo
 
-**56 tests específicos pasan**: 37 del pipeline existente y 19 de la revisión.
+**65 tests específicos pasan**: 37 del pipeline existente, 19 de la revisión
+y nueve del arranque de CLI. Estos últimos cubren:
+invocación sin flags, ID único, descubrimiento de archivo/sello, ambigüedad,
+selección explícita, IDs inválidos, sello con archivo ausente y dry-run sin escritura.
 La prueba end-to-end conserva la referencia, ejecuta ocho candidatos S4 y registra
 dos alternativas no aplicables por listas clínicas ausentes. También comprueba
 una reproducción paralela con informe de diff y referencia intacta.
@@ -25,8 +28,8 @@ log inicial `/workspace/setup/obj1_sjd/pytest.log`; ninguno pertenece a
 ## Comandos y evidencia
 
 ```bash
-python -m pytest tests/test_longitudinal_graph.py tests/test_longitudinal_methodology_review.py -q
-# 56 passed; 40.03 s en la verificación combinada.
+python -m pytest tests/test_longitudinal_graph.py tests/test_longitudinal_methodology_review.py tests/test_longitudinal_mapper_cli.py -q
+# 65 passed; 51.66 s. Incluye los módulos agrupados bajo _review/.
 
 python -m pytest tests/test_longitudinal_methodology_review.py::test_candidate_end_to_end_preserves_reference_and_blocks_inference -q
 # 1 passed; incluye reproducción paralela y diff, 20.94 s.
@@ -109,9 +112,11 @@ El inventario de la referencia sintética conservado antes/después tiene SHA-25
 `a4d8cc9ab9eae5121d78043f840e724cc4a2fd02866304eb3b7a0a8f50343f68`.
 Esto no sustituye la auditoría clínica. Ver `02_reference_integrity.json`.
 
-Código nuevo: `reference.py`, `graph_export.py`, `scenarios.py`, `review_qc.py`,
-`review_runner.py`, `temporal_gate.py`, `methodology_review.yaml` y la suite
-`test_longitudinal_methodology_review.py`. Se extendieron CLI de 02/03, bootstrap
+Auxiliares internos en `_review/`: `reference.py`, `graph_export.py`, `scenarios.py`,
+`review_qc.py`, `review_runner.py`, `temporal_gate.py` y `review_cli.py`. La ejecución
+sigue 01→02→03→04; estos módulos no son pasos adicionales. Se añadieron la política
+`methodology_review.yaml` y las suites `test_longitudinal_methodology_review.py` y
+`test_longitudinal_mapper_cli.py`. Se extendieron CLI de 02/03, bootstrap
 y publicación; Script 01, Script 04 y config histórico no se alteraron.
 
 Los bundles nuevos generan inventarios/hashes, comparación y crosswalk de

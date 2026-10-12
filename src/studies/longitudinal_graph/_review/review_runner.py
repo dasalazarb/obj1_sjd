@@ -15,11 +15,11 @@ from scipy.optimize import linear_sum_assignment
 from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
 
 from src.studies.longitudinal_graph import validation as qc
-from src.studies.longitudinal_graph import review_qc
-from src.studies.longitudinal_graph.graph_export import graph_views, membership_tables, write_graphs
-from src.studies.longitudinal_graph.reference import (new_bundle, reference_artifact, safe_id,
+from src.studies.longitudinal_graph._review import review_qc
+from src.studies.longitudinal_graph._review.graph_export import graph_views, membership_tables, write_graphs
+from src.studies.longitudinal_graph._review.reference import (new_bundle, reference_artifact, safe_id,
     seal_reference, sha256, verify_reference, protect_path, inventory)
-from src.studies.longitudinal_graph.scenarios import (HSCRP, TrainingPreprocessor,
+from src.studies.longitudinal_graph._review.scenarios import (HSCRP, TrainingPreprocessor,
     candidate_registry, negative_patient_blocks, observed_pruning)
 from src.studies.longitudinal_graph.stability import bootstrap_mapper
 from src.studies.longitudinal_graph.figures import candidate_representation_figures
@@ -248,6 +248,8 @@ def execute_review(args, api):
     report_manifest = {k: v for k, v in reference.items() if k.startswith("reference_") and k != "reference_root"}
     manifest = qc.run_manifest(api.ROOT, args.config, [], config["random_seed"], args.mode, api.sha256_file)
     manifest.update(run_id=run_id, mode=args.mode, schema_version="longitudinal_mapper_v2", **report_manifest)
+    manifest["cli_resolution"] = {"run_id_generated": getattr(args, "run_id_generated", False),
+                                  "reference_selection": getattr(args, "reference_selection", "explicit")}
     with new_bundle(target, [reference["reference_root"]], force=args.force) as staged:
         for folder in ("tables", "figures", "analytic", "diagnostics", "logs"):
             (staged / folder).mkdir()

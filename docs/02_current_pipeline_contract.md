@@ -10,6 +10,12 @@ genera corridas nuevas y permite revisar alternativas sin sustituir la referenci
 No hay selección automática. El análisis inferencial de Script 03 exige aprobación
 científica documentada y vinculada a los hashes del run y sus membresías.
 
+La lógica de ejecución sigue siendo **01 → 02 → 03 → 04**. Los módulos auxiliares
+de revisión se agrupan en `src/studies/longitudinal_graph/_review/` y los importan
+02/03 automáticamente; no son scripts ni pasos que el investigador deba ejecutar.
+01 prepara, 02 construye Mapper y hace QC, 03 analiza flujo una vez aprobado y
+04 caracteriza transiciones.
+
 Este checkout no contiene los Parquet clínicos, CSV/JSON/PNG históricos ni
 `longitudinal_graph_history/20261009T204529419045Z`. No se ha sellado ni reconstruido
 la referencia clínica. Las cifras 159 pacientes / 497 visitas y 98 features son
@@ -180,6 +186,25 @@ es in-sample. Las pruebas de fit/train-only no prueban generalización OOS.
 
 Usar el entorno del proyecto (en esta sesión: `/workspace/.venvs/obj1_sjd/bin/python`).
 
+Script 02 admite el comando habitual sin flags:
+
+```bash
+python src/studies/longitudinal_graph/02_run_longitudinal_mapper.py
+```
+
+Genera un run ID único con timestamp UTC y busca primero un sello externo único
+en `<output-root>/references/`. Si todavía no existe, reutiliza un archivo único
+en `<output-root>/history/` o en el `longitudinal_graph_history/` contiguo a las
+tablas estándar (incluida la ubicación del publicador anterior). La primera
+ejecución completa crea el sello externo; ninguna escribe dentro del archivo.
+El arranque muestra IDs, referencia elegida y destino antes del ajuste.
+
+Si hay varias referencias no elige la más reciente: exige `--reference-run-id`
+o `--reference-root`. Un ID explícito inexistente nunca se sustituye por otro.
+Si no encuentra ninguna, imprime una explicación y las opciones necesarias,
+termina con código 2 y conserva G0 bloqueado, sin traceback por IDs vacíos. Las
+opciones explícitas de los ejemplos siguientes siguen siendo válidas.
+
 Primero auditar/sellar el archivo existente y generar diagnósticos sin refit:
 
 ```bash
@@ -209,9 +234,11 @@ python src/studies/longitudinal_graph/02_run_longitudinal_mapper.py \
 ```
 
 `--scenario S4-no-pro` puede repetirse para limitar el plan. `--dry-run` no crea
-carpetas, sella ni ajusta Mapper; requiere IDs y devuelve blocked si falta G0.
+carpetas, sella ni ajusta Mapper; no requiere IDs y devuelve blocked si falta G0
+o si el archivo descubierto todavía no está sellado.
 La reproducción del algoritmo anterior usa `--mode legacy-reproduction`,
-`--output-root`, un `--run-id` nuevo y el `--reference-run-id` sellado. Produce
+con un run nuevo y una referencia sellada (IDs y root admiten los mismos defaults
+del arranque, o pueden fijarse explícitamente). Produce
 `02_reproduction_diff.json`, crosswalk y universo comparado. No sobrescribe
 outputs históricos y no constituye una reproducción certificada de un estado sucio.
 

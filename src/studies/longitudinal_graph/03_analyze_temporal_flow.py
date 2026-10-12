@@ -13,8 +13,8 @@ import yaml
 import common
 from src.studies._shared import STUDY_CONTRACT_VERSION, benjamini_hochberg, create_study_dirs, sha256_file, write_json
 from src.studies.longitudinal_graph import validation as qc
-from src.studies.longitudinal_graph.reference import new_bundle, safe_id
-from src.studies.longitudinal_graph.temporal_gate import require_temporal_approval
+from src.studies.longitudinal_graph._review.reference import new_bundle, safe_id
+from src.studies.longitudinal_graph._review.temporal_gate import require_temporal_approval
 
 KEYS=["patient_id","clinical_episode_id"]
 def load_config(path): return yaml.safe_load(Path(path).read_text())

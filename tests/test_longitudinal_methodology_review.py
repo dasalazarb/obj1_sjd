@@ -10,13 +10,13 @@ import pandas as pd
 import pytest
 import yaml
 
-from src.studies.longitudinal_graph import review_qc
-from src.studies.longitudinal_graph.graph_export import graph_views
-from src.studies.longitudinal_graph.reference import (inventory, new_bundle, safe_id, seal_reference, sha256, verify_reference)
-from src.studies.longitudinal_graph.review_runner import compare_reference
-from src.studies.longitudinal_graph.scenarios import (HSCRP, TrainingPreprocessor, candidate_registry, negative_patient_blocks, observed_pruning)
+from src.studies.longitudinal_graph._review import review_qc
+from src.studies.longitudinal_graph._review.graph_export import graph_views
+from src.studies.longitudinal_graph._review.reference import (inventory, new_bundle, safe_id, seal_reference, sha256, verify_reference)
+from src.studies.longitudinal_graph._review.review_runner import compare_reference
+from src.studies.longitudinal_graph._review.scenarios import (HSCRP, TrainingPreprocessor, candidate_registry, negative_patient_blocks, observed_pruning)
 from src.studies.longitudinal_graph.stability import bootstrap_mapper, patient_draw
-from src.studies.longitudinal_graph.temporal_gate import require_temporal_approval
+from src.studies.longitudinal_graph._review.temporal_gate import require_temporal_approval
 
 ROOT = Path(__file__).parents[1]
 def load(name):
