@@ -13,7 +13,7 @@ import yaml
 from src.studies.longitudinal_graph._review import review_qc
 from src.studies.longitudinal_graph._review.graph_export import graph_views
 from src.studies.longitudinal_graph._review.reference import (inventory, new_bundle, safe_id, seal_reference, sha256, verify_reference)
-from src.studies.longitudinal_graph._review.review_runner import compare_reference
+from src.studies.longitudinal_graph._review.review_runner import compare_reference, load_reference, _adapt_reference_membership
 from src.studies.longitudinal_graph._review.scenarios import (HSCRP, TrainingPreprocessor, candidate_registry, negative_patient_blocks, observed_pruning)
 from src.studies.longitudinal_graph.stability import bootstrap_mapper, patient_draw
 from src.studies.longitudinal_graph._review.temporal_gate import require_temporal_approval
@@ -110,6 +110,69 @@ def test_s3_primary_reference_metadata(tmp_path):
     (root / "02_longitudinal_mapper_summary.json").write_text(json.dumps(values))
     seal_reference(root, tmp_path / "seal.json", "specification-fixture")
     assert json.loads((root / "02_longitudinal_mapper_summary.json").read_text()) == values
+
+
+def legacy_fixture(tmp_path, state, cfg):
+    """Persist the actual pre-coverage-audit contract of Script 02 (906db45)."""
+    root, scenario = freeze_fixture(tmp_path, state, cfg)
+    scenario["visit_membership"].drop(columns=["mapper_graph_covered", "in_unsupported_macrostate"]).to_parquet(root / "02_visit_mapper_membership.parquet", index=False)
+    scenario["node_table"].drop(columns=["connected_component_id", "community_id", "branch_id", "branch_status"]).to_csv(root / "02_mapper_nodes.csv", index=False)
+    summary = {key: scenario["summary"][key] for key in ("n_visits", "n_patients", "n_features", "eps", "n_nodes", "n_supported_nodes", "n_macrostates", "n_supported_macrostates")}
+    summary.update(status="completed", primary_scenario="S3-like", sensitivity_scenario="S2-like", mapper_parameters=cfg["mapper"], random_seed=cfg["random_seed"])
+    (root / "02_longitudinal_mapper_summary.json").write_text(json.dumps(summary))
+    return root, scenario
+
+
+def test_legacy_reference_missing_flags_is_readonly_and_exact(tmp_path):
+    _, state, _, _ = source()
+    root, original = legacy_fixture(tmp_path, state, config())
+    persisted = pd.read_parquet(root / "02_visit_mapper_membership.parquet")
+    before = inventory(root)
+    seal = tmp_path / "references/legacy.json"
+    seal_reference(root, seal, "legacy")
+    reference, tables, integrity = load_reference(verify_reference(seal), MAP)
+    pd.testing.assert_frame_equal(reference["visit_membership"][persisted.columns], persisted)
+    for field in ("mapper_graph_covered", "in_unsupported_macrostate"):
+        pd.testing.assert_series_equal(reference["visit_membership"][field], original["visit_membership"][field])
+    audit = integrity["reference_schema_adapter"]
+    assert {row["field"] for row in audit["adapted_fields"]} == {"mapper_graph_covered", "in_unsupported_macrostate"}
+    assert audit["historical_files_modified"] is False
+    assert integrity["views"]["full"]["n_components"] == original["summary"]["n_connected_components"]
+    assert integrity["historical_summary_metrics_unavailable"] == ["graph_degree_distribution", "n_connected_components"]
+    assert "community_id" in tables["mapper_nodes_full"]
+    assert "n_connected_components" not in reference["summary"]
+    assert inventory(root) == before and verify_reference(seal)["integrity_status"] == "passed"
+
+
+def test_legacy_flags_distinguish_all_graph_supported_ties_and_overlap():
+    visits = pd.DataFrame({"patient_id": [f"p{i}" for i in range(7)], "clinical_episode_id": [f"v{i}" for i in range(7)]})
+    graph = {"nodes": {"a": {0, 1, 4}, "b": {1, 2, 4}, "exploratory": {3, 4}, "unsupported": {5}}}
+    mapping = {"a": 0, "b": 1, "exploratory": 2}
+    macros = pd.DataFrame({"macrostate_id": [0, 1, 2], "macrostate_supported": [True, True, False]})
+    expected = MAP.normalized_memberships(graph, visits, mapping, macros)
+    records = pd.DataFrame([{"_index": i, "macrostate_id": mapping.get(node)} for node, ids in graph["nodes"].items() for i in ids])
+    old = expected.drop(columns=["mapper_graph_covered", "in_unsupported_macrostate", "macrostate_membership_tie"])
+    restored, audit = _adapt_reference_membership(old, records, macros)
+    pd.testing.assert_frame_equal(restored[expected.columns], expected)
+    assert restored.loc[5, "mapper_graph_covered"] and not restored.loc[5, "mapper_covered"]
+    assert restored.loc[4, "in_unsupported_macrostate"] and restored.loc[4, "mapper_covered"]
+    assert restored.loc[4, "macrostate_membership_tie"] and not restored.loc[6, "mapper_graph_covered"]
+    assert len(audit["adapted_fields"]) == 3
+    conflicting = expected.copy()
+    conflicting.loc[5, "mapper_graph_covered"] = False
+    with pytest.raises(ValueError, match="disagrees"):
+        _adapt_reference_membership(conflicting, records, macros)
+
+
+def test_legacy_reference_incomplete_all_node_inventory_is_rejected(tmp_path):
+    _, state, _, _ = source()
+    root, _ = legacy_fixture(tmp_path, state, config())
+    records = pd.read_parquet(root / "02_mapper_node_membership.parquet")
+    records.loc[records.node_id.ne(records.node_id.iloc[0])].to_parquet(root / "02_mapper_node_membership.parquet", index=False)
+    seal = tmp_path / "seal.json"
+    seal_reference(root, seal, "incomplete")
+    with pytest.raises(ValueError, match="disagrees|incomplete"):
+        load_reference(verify_reference(seal), MAP)
 
 
 def test_visit_coverage_partitions():
