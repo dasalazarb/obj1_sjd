@@ -186,7 +186,9 @@ def run_mapper_scenario(state, features, config, *, family_balance, scenario_nam
     counts=pd.Series([feature_family(f) for f in features]).value_counts()
     weights=[1/math.sqrt(counts[feature_family(f)]) for f in features] if family_balance else None
     if patient_weighted:
-        embedding,pca=qc.weighted_embedding(state[features],config,weights,state.patient_id)
+        # Candidate bootstrap copies keep ORIGINAL patient IDs for support, but
+        # every sampled patient draw contributes one unit of fitting mass.
+        embedding,pca=qc.weighted_embedding(state[features],config,weights,state.get("fit_patient_id", state.patient_id))
     else:
         embedding,pca=fit_visit_embedding(state[features],config,weights)
     eps=eps_kdist(embedding,config["mapper"]["eps_k_neighbors"],config["mapper"]["eps_percentile"])
@@ -377,10 +379,71 @@ def parse_args(argv=None):
     p.add_argument("--intervals",type=Path,default=dirs["analytic"]/"01_longitudinal_intervals.parquet")
     p.add_argument("--feature-manifest",type=Path,default=dirs["tables"]/"01_longitudinal_feature_manifest.csv")
     p.add_argument("--output-root",type=Path,help="Isolated output bundle root (analytic/tables/figures/qc/logs)")
+    p.add_argument("--mode", choices=("candidate-qc", "reference-only", "legacy-reproduction"), default="candidate-qc")
+    p.add_argument("--run-id", help="Create-only run identifier; omitted => unique UTC timestamp ID")
+    p.add_argument("--reference-run-id", help="Historical S3-primary ID; omitted => use the only available reference")
+    p.add_argument("--reference-root", type=Path, help="Existing complete archive, audited in place; its name supplies the reference ID")
+    p.add_argument("--freeze-reference", action="store_true", help="Write an external inventory seal once, without changing the archive")
+    p.add_argument("--scenario", action="append", help="Prespecified S4 name; repeat to restrict candidate QC")
+    p.add_argument("--force", action="store_true", help="Only in an explicit development namespace; never history")
+    p.add_argument("--review-config", type=Path, default=Path(__file__).with_name("methodology_review.yaml"),
+                   help="Candidate-only settings; the historical config.yaml is preserved")
     p.add_argument("--config",type=Path,default=Path(__file__).with_name("config.yaml")); p.add_argument("--dry-run",action="store_true"); return p.parse_args(argv)
 
 def run(args):
+    # Programmatic legacy callers retain their scientific algorithm; public CLI
+    # review modes consume the frozen historical bundle and use a new namespace.
+    mode = getattr(args, "mode", "legacy-reproduction")
+    if mode in {"candidate-qc", "reference-only"} or (getattr(args, "mode", None) == "legacy-reproduction" and not args.dry_run):
+        from src.studies.longitudinal_graph._review.review_cli import ReviewStartupError, resolve_review_options
+        try:
+            args = resolve_review_options(args, common)
+        except ReviewStartupError as error:
+            if args.dry_run:
+                result = {"status": "blocked", "reason": error.reason, "message": str(error),
+                          "outputs_written": False, "temporal_flow_executed": False}
+                print(json.dumps(result))
+                return result
+            raise
+        if not args.dry_run:
+            print(json.dumps({"stage": "reference_preflight", "mode": args.mode, "run_id": args.run_id,
+                              "reference_run_id": args.reference_run_id, "reference_root": str(args.reference_root),
+                              "reference_selection": args.reference_selection, "output_root": str(args.output_root)}))
+    if mode in {"candidate-qc", "reference-only"}:
+        from src.studies.longitudinal_graph._review.review_runner import execute_review
+        return execute_review(args, SimpleNamespace(**globals()))
+    if getattr(args, "mode", None) == "legacy-reproduction" and not args.dry_run:
+        from src.studies.longitudinal_graph._review.reference import new_bundle, safe_id, seal_reference, verify_reference, protect_path
+        if args.output_root is None or args.run_id is None:
+            raise ValueError("Legacy reproduction requires --output-root and --run-id; canonical S3-primary cannot be replaced")
+        if args.force:
+            raise ValueError("Legacy reproduction is create-only; --force is not permitted")
+        protect_path(args.output_root / "runs" / safe_id(args.run_id), [args.reference_root] if args.reference_root else [])
+        seal = args.output_root / "references" / f"{safe_id(args.reference_run_id)}.json"
+        if args.freeze_reference and not seal.exists():
+            if args.reference_root is None:
+                raise ValueError("Reference archive required before reproduction")
+            seal_reference(args.reference_root, seal, args.reference_run_id)
+        reference = verify_reference(seal)
+        with new_bundle(args.output_root / "runs" / safe_id(args.run_id), [reference["reference_root"]]) as staged:
+            from src.studies.longitudinal_graph.runner import execute
+            from src.studies.longitudinal_graph._review.review_runner import reproduction_diff
+            local = copy.copy(args)
+            local.output_root = staged
+            result = execute(local, SimpleNamespace(**globals()))
+            reproduction_diff(staged, reference, seal, SimpleNamespace(**globals()))
+        return result
     from src.studies.longitudinal_graph.runner import execute
     return execute(args, SimpleNamespace(**globals()))
 
-if __name__=="__main__": run(parse_args())
+def main(argv=None):
+    from src.studies.longitudinal_graph._review.review_cli import ReviewStartupError
+    try:
+        result = run(parse_args(argv))
+    except ReviewStartupError as error:
+        print(f"Script 02 blocked: {error}", file=sys.stderr)
+        return 2
+    return 2 if result.get("status") == "blocked" else 0
+
+
+if __name__=="__main__": sys.exit(main())

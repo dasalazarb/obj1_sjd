@@ -294,14 +294,19 @@ def test_script02_end_to_end_preserves_canonical_outputs_and_all_five_scenarios(
     FLOW.validate_memberships(supported)
     attached=FLOW.attach_interval_memberships(intervals,supported)
     assert attached.flow_eligible.sum()==summary["interval_coverage"]["n_intervals_both_endpoints_supported_macrostate_covered"]
-    # A second run with unavailable raw observations must not retain old log evidence.
+    # A second run cannot replace the first; a distinct namespace has no stale evidence.
     args.integrated=tmp_path/"absent.parquet"
+    import pytest
+    before=(dirs["tables"]/"02_longitudinal_mapper_summary.json").read_bytes()
+    with pytest.raises(FileExistsError, match="read-only"):
+        MAP.run(args)
+    assert before==(dirs["tables"]/"02_longitudinal_mapper_summary.json").read_bytes()
+    args.output_root=tmp_path/"parallel_reproduction"
     rerun=MAP.run(args)
     log=rerun["sensitivity_comparisons"]["S3-hsCRP-log1p"]
     assert log["status"]=="not_applicable" and log["ari"] is None
-    assert pd.read_csv(dirs["tables"]/"02_hscrp_log1p_macrostate_stability.csv").empty
-    assert rerun["run_manifest"]["historical_archive"]
-    assert Path(rerun["run_manifest"]["historical_archive"]).exists()
+    assert pd.read_csv(args.output_root/"tables"/"02_hscrp_log1p_macrostate_stability.csv").empty
+    assert rerun["run_manifest"]["historical_archive"] is None
     assert (dirs["figures"]/"02_reference_visit_mapper.png").read_bytes()!=(dirs["figures"]/"02_reference_visit_mapper_macrostates.png").read_bytes()
 
 

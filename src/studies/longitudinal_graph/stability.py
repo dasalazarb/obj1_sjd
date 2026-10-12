@@ -15,6 +15,7 @@ def patient_draw(raw, rng):
         chunk = raw.loc[raw.patient_id.eq(patient)].copy()
         chunk["original_patient_id"] = chunk.patient_id
         chunk["original_episode_id"] = chunk.clinical_episode_id
+        chunk["bootstrap_draw_id"] = f"patient_draw_{i}"
         # Copies are independent sample rows, but support still counts ORIGINAL patients.
         chunk["clinical_episode_id"] = [f"bootstrap_copy_{i}_visit_{j}" for j in range(len(chunk))]
         chunks.append(chunk)
@@ -53,7 +54,7 @@ def match_structures(left, right, jaccard):
     return rows
 
 
-def bootstrap_mapper(raw, primary, config, features, fit, prune, jaccard):
+def bootstrap_mapper(raw, primary, config, features, fit, prune, jaccard, *, preprocessor=None, fit_options=None):
     settings = config.get("mapper_validation", {}); reps = int(settings.get("bootstrap_replicates", 0))
     columns = ["replicate", "status", "reason", "n_patient_draws", "n_unique_patients_drawn", "n_visits", "n_nodes",
                "n_connected_components", "n_macrostates", "n_supported_macrostates", "pct_mapper_covered_visits", "n_retained_features", "preprocessing"]
@@ -73,12 +74,16 @@ def bootstrap_mapper(raw, primary, config, features, fit, prune, jaccard):
             # Median imputation can produce 0.5 or 1.0, which those dtypes reject.
             # Convert only fit features, preserving missing values and raw visit keys.
             numeric = sampled[features].astype("float64").replace([np.inf,-np.inf],np.nan)
-            medians = numeric.median(); usable = medians.index[medians.notna()].tolist()
-            filled = numeric[usable].fillna(medians[usable])
-            retained, _ = prune(filled, config["representation"]["redundancy_spearman_abs_threshold"])
-            state = pd.concat([sampled[KEYS], filled[retained]], axis=1)
+            if preprocessor is None:
+                medians = numeric.median(); usable = medians.index[medians.notna()].tolist()
+                filled = numeric[usable].fillna(medians[usable])
+                retained, _ = prune(filled, config["representation"]["redundancy_spearman_abs_threshold"])
+                state = pd.concat([sampled[KEYS], filled[retained]], axis=1)
+            else:
+                state, retained = preprocessor(sampled, features)
+                row["preprocessing"] = "sample_only_scenario_transformation_imputation_selection_scaling_PCA_cover_DBSCAN_support_modularity"
             if len(retained)<2: raise ValueError("fewer_than_two_fit_features")
-            scenario = fit(state, retained, config, family_balance=True, scenario_name=f"bootstrap-{replicate}")
+            scenario = fit(state, retained, config, family_balance=True, scenario_name=f"bootstrap-{replicate}", **(fit_options or {}))
             row.update({k:scenario["summary"][k] for k in ("n_nodes","n_connected_components","n_macrostates","n_supported_macrostates","pct_mapper_covered_visits")})
             row["status"] = "completed" if scenario["graph"]["nodes"] else "no_nodes"
             row["n_retained_features"] = len(retained)

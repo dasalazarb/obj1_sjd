@@ -1,0 +1,31 @@
+{
+  "reference_status": "not_available",
+  "historical_reproducibility": "not_established_missing_artifacts_and_historical_dirty_state",
+  "git_commit": "0c2130bd5523dab919211a5161008b1c7ef2cade",
+  "git_dirty_before": false,
+  "supplied_historical_hash_comparison": {
+    "src/studies/longitudinal_graph/config.yaml": {
+      "expected": "352d8fc0e4be06a04a7a0535e3abda6549d1b2b9bd5e8725b9bb7edd5f02e841",
+      "actual": "352d8fc0e4be06a04a7a0535e3abda6549d1b2b9bd5e8725b9bb7edd5f02e841",
+      "matches": true
+    },
+    "src/studies/longitudinal_graph/02_run_longitudinal_mapper.py": {
+      "expected": "328cd22348a0f279e58c5168b6e440add69695845dcb4830869fea74c2d5d1e6",
+      "actual": "328cd22348a0f279e58c5168b6e440add69695845dcb4830869fea74c2d5d1e6",
+      "matches": true
+    }
+  },
+  "historical_artifacts_found": [],
+  "data_inputs_found": [],
+  "limitations": [
+    "No supplied historical CSV/JSON/PNG, Step-10 Parquet or historical archive in workspace.",
+    "Current clean checkout cannot reconstruct uncommitted state of supplied historical run."
+  ],
+  "snapshot_scope": "initial_source_only; clinical_outputs_unavailable",
+  "historical_archive_requested": "longitudinal_graph_history/20261009T204529419045Z",
+  "historical_artifact_sha256_before": null,
+  "historical_artifact_sha256_after": null,
+  "config_preserved_after_sha256": "352d8fc0e4be06a04a7a0535e3abda6549d1b2b9bd5e8725b9bb7edd5f02e841",
+  "synthetic_reference_test_inventory_sha256_before_after": "a4d8cc9ab9eae5121d78043f840e724cc4a2fd02866304eb3b7a0a8f50343f68",
+  "reference_integrity_test_scope": "synthetic_only; clinical_archive_unavailable"
+}

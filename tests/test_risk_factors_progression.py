@@ -69,6 +69,13 @@ def get_spec(registry, name):
     return next(s for s in registry if s.name == name)
 
 
+def confirmed_composition_metadata():
+    return {domain: {"total_column": mod.ESSDAI, "domain_column": mod.step13.DOMAIN_ALIASES[domain][0],
+        "weight": weight, "index_version": "synthetic-v1", "total_includes_domain": True,
+        "verification_status": "verified", "evidence_reference": "synthetic test composition contract",
+        "evidence_sha256": "a"*64} for domain, weight in mod.canonical_domain_weights().items()}
+
+
 def test_registry_public_names_and_absent_glandular_not_substituted():
     df, base, _, _, registry = datasets(episodes())
     assert get_spec(registry, "low_c4").baseline_column == "sero__baseline_low_c4"
@@ -538,6 +545,7 @@ def test_weighted_other_domain_adjustments_aliases_missing_and_inconsistent_pane
     source = episodes(scores=(12, 12, 12, 12), domains=(np.nan,)*4)
     source["essdai__articular_ordinal_score"] = 2
     source["essdai__biological_ordinal_score"] = 2
+    source.attrs["essdai_composition_provenance"] = confirmed_composition_metadata()
     _, _, intervals, _, _ = datasets(source)
     assert intervals.from_essdai_other_domains_articular.isna().all()
     assert intervals.to_essdai_other_domains_articular.isna().all()

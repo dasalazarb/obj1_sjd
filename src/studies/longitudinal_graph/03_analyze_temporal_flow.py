@@ -12,6 +12,9 @@ import pandas as pd
 import yaml
 import common
 from src.studies._shared import STUDY_CONTRACT_VERSION, benjamini_hochberg, create_study_dirs, sha256_file, write_json
+from src.studies.longitudinal_graph import validation as qc
+from src.studies.longitudinal_graph._review.reference import new_bundle, safe_id
+from src.studies.longitudinal_graph._review.temporal_gate import require_temporal_approval
 
 KEYS=["patient_id","clinical_episode_id"]
 def load_config(path): return yaml.safe_load(Path(path).read_text())
@@ -99,11 +102,43 @@ def next_visit_permutation_null(attached,replicates,seed):
     return pd.DataFrame(rows)
 
 def parse_args(argv=None):
-    p=argparse.ArgumentParser(); d=create_study_dirs("longitudinal_graph"); p.add_argument("--integrated",type=Path,default=common.INTEGRATED_LONGITUDINAL_PARQUET)
-    p.add_argument("--intervals",type=Path,default=d["analytic"]/"01_longitudinal_intervals.parquet"); p.add_argument("--membership",type=Path,default=d["analytic"]/"02_visit_mapper_membership.parquet"); p.add_argument("--nodes",type=Path,default=d["analytic"]/"02_mapper_node_membership.parquet"); p.add_argument("--config",type=Path,default=Path(__file__).with_name("config.yaml")); p.add_argument("--dry-run",action="store_true"); return p.parse_args(argv)
+    p=argparse.ArgumentParser(); d=qc.study_paths(common); p.add_argument("--integrated",type=Path,default=common.INTEGRATED_LONGITUDINAL_PARQUET)
+    p.add_argument("--intervals",type=Path,default=d["analytic"]/"01_longitudinal_intervals.parquet"); p.add_argument("--membership",type=Path,default=d["analytic"]/"02_visit_mapper_membership.parquet"); p.add_argument("--nodes",type=Path,default=d["analytic"]/"02_mapper_node_membership.parquet"); p.add_argument("--config",type=Path,default=Path(__file__).with_name("config.yaml")); p.add_argument("--dry-run",action="store_true")
+    p.add_argument("--mode", choices=("reference-only", "approved-temporal"), default="reference-only")
+    p.add_argument("--readiness", type=Path)
+    p.add_argument("--approval-record", type=Path)
+    p.add_argument("--run-manifest", type=Path)
+    p.add_argument("--output-root", type=Path)
+    p.add_argument("--run-id")
+    p.add_argument("--allow-blocked-preview", action="store_true")
+    return p.parse_args(argv)
 
 def run(args):
-    d=create_study_dirs("longitudinal_graph"); logging.basicConfig(filename=d["logs"]/"03_flow.log",level=logging.INFO,force=True); cfg=load_config(args.config); intervals=pd.read_parquet(args.intervals); membership=pd.read_parquet(args.membership)
+    preview = getattr(args, "allow_blocked_preview", False)
+    if not preview and getattr(args, "mode", "reference-only") == "reference-only":
+        return {"status": "reference-only", "temporal_flow_executed": False, "outputs_written": False}
+    approval = None
+    if not preview:
+        approval = require_temporal_approval(getattr(args, "readiness", None), getattr(args, "approval_record", None),
+                                             getattr(args, "run_manifest", None), args.membership,
+                                             intervals_path=args.intervals, config_path=args.config)
+    if args.dry_run:
+        return {"status": "validated", "temporal_flow_executed": False, "outputs_written": False, "exploratory": preview}
+    if getattr(args, "output_root", None) is None or not getattr(args, "run_id", None):
+        raise ValueError("Temporal runs and previews require isolated --output-root and --run-id")
+    target = args.output_root / ("previews" if preview else "approved_temporal") / safe_id(args.run_id)
+    with new_bundle(target) as staged:
+        d = {kind: staged / kind for kind in ("analytic", "tables", "figures", "qc", "logs")}
+        for path in d.values(): path.mkdir()
+        result = execute_flow(args, d, preview, approval)
+        if preview:
+            (staged / "EXPLORATORY_NOT_FOR_INFERENCE").write_text("Blocked-gate preview; official readiness and approval remain unchanged.\n")
+    return result
+
+
+def execute_flow(args, d, preview, approval):
+    cfg=load_config(args.config); intervals=pd.read_parquet(args.intervals); membership=pd.read_parquet(args.membership)
+    qc.validate_keys(membership, "temporal membership")
     attached=attach_interval_memberships(intervals,membership,cfg["temporal"]["maximum_interval_years"]); eligible=attached.loc[attached.flow_eligible]
     if eligible.empty: raise ValueError("No temporal intervals map at both endpoints")
     node=compute_temporal_flow(attached,"node_weight__"); macro=compute_temporal_flow(attached); node=node.rename(columns={"from_state":"from_node","to_state":"to_node"}); macro=macro.rename(columns={"from_state":"from_macrostate","to_state":"to_macrostate"})
@@ -125,7 +160,7 @@ def run(args):
     attached.to_parquet(d["analytic"]/"03_patient_temporal_transitions.parquet",index=False)
     outputs={"03_node_temporal_flow.csv":node,"03_macrostate_temporal_flow.csv":macro,"03_hard_macrostate_transition_matrix.csv":hard,"03_macrostate_retention.csv":retention,"03_macrostate_net_flow.csv":net,"03_transition_support.csv":macro[["from_macrostate","to_macrostate","weighted_interval_mass","n_contributing_intervals","n_unique_patients","support_status"]],"03_patient_bootstrap.csv":boot,"03_temporal_reversal_null.csv":reversal,"03_next_visit_permutation_null.csv":permutation,"03_temporal_flow_inference.csv":inference}
     for name,frame in outputs.items(): frame.to_csv(d["tables"]/name,index=False)
-    summary={"status":"completed","contract_version":STUDY_CONTRACT_VERSION,"input_files":[args.intervals,args.membership,args.nodes],"config_file":args.config,"config_sha256":sha256_file(args.config),"random_seed":cfg["random_seed"],"n_intervals_total":len(attached),"n_mapped_temporal_intervals":len(eligible),"n_unique_patients":eligible.patient_id.nunique(),"n_supported_macrostates":len(weight_columns(membership,"macrostate_weight__")),"overall_retention":retention.iloc[0].hard_retention,"overall_switching":retention.iloc[0].hard_switching,"n_supported_macrostate_edges":int(macro.support_status.eq("supported").sum()),"directional_imbalance_beyond_null":bool(((inference.reversal_q<.05)&(inference.permutation_q<.05)).any())}
+    summary={"status":"EXPLORATORY_NOT_FOR_INFERENCE" if preview else "completed","exploratory":preview,"approval_record":approval,"contract_version":STUDY_CONTRACT_VERSION,"input_files":[args.intervals,args.membership,args.nodes],"config_file":args.config,"config_sha256":sha256_file(args.config),"random_seed":cfg["random_seed"],"n_intervals_total":len(attached),"n_mapped_temporal_intervals":len(eligible),"n_unique_patients":eligible.patient_id.nunique(),"n_supported_macrostates":len(weight_columns(membership,"macrostate_weight__")),"overall_retention":retention.iloc[0].hard_retention,"overall_switching":retention.iloc[0].hard_switching,"n_supported_macrostate_edges":int(macro.support_status.eq("supported").sum()),"directional_imbalance_beyond_null":bool(((inference.reversal_q<.05)&(inference.permutation_q<.05)).any())}
     write_json(d["tables"]/"03_temporal_flow_summary.json",summary)
     pivot=macro.pivot(index="from_macrostate",columns="to_macrostate",values="weighted_interval_mass").fillna(0); fig,ax=plt.subplots(); im=ax.imshow(pivot,cmap="Blues"); ax.set(title="Fractional macrostate temporal flow",xlabel="To macrostate",ylabel="From macrostate"); fig.colorbar(im,ax=ax,label="Weighted interval mass"); fig.tight_layout(); fig.savefig(d["figures"]/"03_macrostate_transition_matrix.png",dpi=cfg["figures"]["dpi"]); plt.close(fig)
     print("ORDER TO REVIEW LONGITUDINAL GRAPH OUTPUTS\n1. Temporal flow\n2. Transition matrix\n3. Net flow and null results")

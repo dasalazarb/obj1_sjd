@@ -1,5 +1,11 @@
 # longitudinal_graph: revisión de representación, topología y validación
 
+> Actualización 2026-10-12: este documento describe la revisión del 2026-10-09.
+> La publicación que archivaba/reemplazaba resultados y los comandos de ejecución
+> canónica aquí descritos fueron sustituidos por runs create-only y referencia
+> sellada. Consultar [el contrato actual](02_current_pipeline_contract.md) y
+> [el reporte de pruebas](02_validation_test_report.md) para la revisión S4.
+
 Fecha: 2026-10-09. Base de `main`: `433ff9827938bd80dcd4e6aa11e6f9f27a628d27`.
 SHA-256 inicial de Script 02:
 `64092b0158953f6e2c28fc4fe1f2d21a9cb86e5234fc2949b6025eeb27de6d18`.
