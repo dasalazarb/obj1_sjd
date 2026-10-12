@@ -85,19 +85,20 @@ first builds a time-blind reference Mapper from eligible clinical visits and onl
 then overlays actual consecutive visits. Mapper proximity is never treated as a
 temporal transition.
 
-Run preparation and the reference Mapper first:
+Prepare inputs with Script 01; use Script 02's versioned review commands documented
+below to consume the frozen reference and evaluate candidates:
 
 ```bash
 python src/studies/longitudinal_graph/01_prepare_longitudinal_data.py
-python src/studies/longitudinal_graph/02_run_longitudinal_mapper.py
+python src/studies/longitudinal_graph/02_run_longitudinal_mapper.py --help
 ```
 
-Script 02 preserves the S3 primary and the S2, full80, urine and valid hsCRP-log1p
-sensitivities. Its explicit scenario registry additionally refits without hsCRP,
-without PRO, with equal patient mass, with local DBSCAN epsilon, with a small
-prespecified cover grid, and with a robust lens range. PRO-summary-only and
-comparable-visit-feature alternatives require documented clinical whitelists;
-empty/unavailable whitelists produce `not_applicable`, with a reason.
+Historical S3/S2 names and results remain historical references. New review runs
+use S4 names for an unchanged visit comparator, hsCRP transformation/winsorization
+and ablation, equal patient mass, no PRO, approved PRO-summary/common feature
+whitelists, observed-pair redundancy pruning and full80 PCA. Empty or unapproved
+clinical whitelists produce `not_applicable`, with a reason. Legacy reproduction
+retains its prior S3 sensitivity names in a separate create-only bundle.
 
 Each scenario records exact features, transformation, PCA and Mapper parameters,
 status, support and coverage. PC1/PC2 remain the lens and all retained PCs are used
@@ -138,29 +139,32 @@ distributions, occupancy, PCA dominance, coverage and sensitivity comparability.
 04 records whether each variable was actually used in the post-pruning primary
 Mapper; a held-out variable still requires proxy-dependence review.
 
-Both 01 and 02 support `--output-root` for isolated review bundles, and true
-`--dry-run` validates/describes without fitting the Mapper or writing canonical
-outputs. Missing clinical data returns `not_run_missing_data`. Successful 02
-bundles archive prior `02_*` files outside canonical directories before replacement,
-including obsolete sensitivity files. `02_run_manifest.json` records Git/script,
-configuration/input hashes, seed, date, dependencies and check states.
+Script 02 defaults to `candidate-qc`, reads a sealed historical S3-primary and
+publishes S4 alternatives under `--output-root/runs/--run-id`. Supply a
+`--reference-run-id`; audit the existing archive once with `--reference-root`
+and `--freeze-reference`. The seal lives outside the archive. Existing runs and
+historical outputs cannot be overwritten. Missing G0 reference evidence blocks
+candidate execution. `--dry-run` does not fit, seal or write outputs. The original
+algorithm can be reproduced under `--mode legacy-reproduction` in a new run.
+Candidate policy is in `methodology_review.yaml`; historical `config.yaml` remains
+unchanged. Run manifests record code/config/input/artifact hashes and seed.
 
 The scientific gate never autoapproves flow. Missing branch evidence blocks branch
 inference; other unavailable validations remain explicit. Review coverage,
 comparability, patient stability, administration, observability and circularity,
 and document the investigator's decision, date, SHA and justification before
 using 03/04 for scientific inference. A technically completed run is not approval.
-No all-in-one command runs those stages. After documented review, run manually:
+No all-in-one command runs those stages. Script 03 defaults to `reference-only`.
+After documented scientific approval, its `approved-temporal` mode requires the
+exact reviewed run manifest, scenario readiness and approval record before it
+writes an isolated temporal run. An explicit `--allow-blocked-preview` writes a
+separate bundle marked `EXPLORATORY_NOT_FOR_INFERENCE` and retains the official gate.
 
-```bash
-python src/studies/longitudinal_graph/03_analyze_temporal_flow.py
-python src/studies/longitudinal_graph/04_characterize_transitions.py
-```
-
-Study outputs remain under the standard `studies/longitudinal_graph/` roots.
-[Implementation, validation and real-data limitations](docs/longitudinal_mapper_validation.md)
-include isolated-run commands, historical provenance and the ten requested
-scientific questions, explicitly `not_run_missing_data` in this review.
+[Current contract and commands](docs/02_current_pipeline_contract.md) and
+[validation evidence](docs/02_validation_test_report.md) document full/supported
+graph exports, coverage, patient refits, administrative availability, circularity
+and open scientific decisions. Clinical data and the historical archive were
+unavailable in this workspace; published experiment aggregates are synthetic only.
 
 
 ## Section 5 comorbidity analysis
