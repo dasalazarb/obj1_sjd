@@ -4,6 +4,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 import numpy as np
+import pandas as pd
 
 
 def mapper_figures(scenario, directory, dpi):
@@ -73,3 +74,40 @@ def diagnostic_figures(primary, tables, comparisons, bootstrap, directory, dpi):
     if len(bootstrap):ax.hist(bootstrap.n_nodes.dropna(),bins=15)
     else:ax.text(.5,.5,"Bootstrap not applicable: inspect summary",ha="center",transform=ax.transAxes)
     ax.set(xlabel="Nodes per patient refit",ylabel="Replicates");save(fig,"02_mapper_stability_distributions.png")
+
+
+def candidate_representation_figures(scenario, experiment, raw, directory, dpi):
+    """Individual PC1/PC2 diagnostics; within-PC loadings are not total variance."""
+    name = scenario["summary"]["scenario"]
+    features = scenario["features"]
+    for pc in range(2):
+        fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+        scores = scenario["embedding"][:, pc]
+        axes[0].hist(scores, bins=25, color="steelblue")
+        axes[0].set(title=f"PC{pc+1} scores ({100 * scenario['pca'].explained_variance_ratio_[pc]:.1f}% variance)", xlabel="Visit score", ylabel="Visits")
+        component = scenario["pca"].components_[pc]
+        fractions = np.square(component) / np.square(component).sum()
+        top = np.argsort(fractions)[-8:]
+        axes[1].barh([features[j] for j in top], fractions[top], color="steelblue")
+        axes[1].tick_params(axis="y", labelsize=7)
+        axes[1].set(title=f"Effective contributing features: {1 / np.square(fractions).sum():.2f}", xlabel="Within-component squared-loading fraction")
+        fig.suptitle(f"{name}: PC{pc+1} representation diagnostic")
+        fig.tight_layout()
+        fig.savefig(directory / f"02_PC{pc+1}_representation_qc.png", dpi=dpi)
+        plt.close(fig)
+    feature = "lab__crp_high_sensitivity__value"
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    for ax, source, title in ((axes[0], raw, "Original finite source values; units require audit"),
+                               (axes[1], experiment, "Scenario fit values; includes historical imputation")):
+        values = pd.to_numeric(source[feature], errors="coerce").astype("float64").to_numpy() if source is not None and feature in source else np.array([])
+        values = values[np.isfinite(values)]
+        if len(values):
+            ax.hist(values, bins=25, color="steelblue")
+            ax.set_ylabel(f"Visits (n={len(values)})")
+        else:
+            ax.text(.5, .5, "Feature unavailable or ablated", ha="center", transform=ax.transAxes)
+        ax.set(title=title, xlabel="hsCRP value on the displayed scale")
+    fig.suptitle(f"{name}: hsCRP distribution; loading dominance alone does not establish error")
+    fig.tight_layout()
+    fig.savefig(directory / "02_hscrp_distribution_qc.png", dpi=dpi)
+    plt.close(fig)

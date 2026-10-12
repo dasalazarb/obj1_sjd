@@ -1,0 +1,12 @@
+data_origin,scenario,role,status,n_patients,n_visits,n_features,pct_mapper_covered_visits,n_intervals_total,n_intervals_graph,n_intervals_supported,n_intervals_hard,n_connected_components,n_macrostates,n_supported_macrostates,bootstrap_replicates,n_stable_macrostates,administrative_status,ari,n_visits_compared,gate,stability_evidence_status,n_branches,OOS_status
+SYNTHETIC_FIXTURE_NOT_CLINICAL_COHORT,S3-primary,reference,historical_frozen,40.0,80.0,8.0,78.75,,,,,1.0,3.0,3.0,,,,,,blocked,,,
+SYNTHETIC_FIXTURE_NOT_CLINICAL_COHORT,S4-visit-comparator,candidate,completed,40.0,80.0,8.0,78.75,40.0,24.0,24.0,10.0,1.0,3.0,3.0,2.0,0.0,inconclusive_T3_not_tested,1.0,43.0,blocked,exploratory_reduced_budget,,not_run
+SYNTHETIC_FIXTURE_NOT_CLINICAL_COHORT,S4-hscrp-log-robust,candidate,completed,40.0,80.0,8.0,61.25000000000001,40.0,16.0,13.0,11.0,2.0,4.0,3.0,2.0,1.0,inconclusive_T3_not_tested,0.2229367631296891,25.0,blocked,exploratory_reduced_budget,,not_run
+SYNTHETIC_FIXTURE_NOT_CLINICAL_COHORT,S4-hscrp-winsor,candidate,completed,40.0,80.0,8.0,76.25,40.0,25.0,25.0,15.0,1.0,3.0,3.0,2.0,0.0,inconclusive_T3_not_tested,0.7135380006136409,32.0,blocked,exploratory_reduced_budget,,not_run
+SYNTHETIC_FIXTURE_NOT_CLINICAL_COHORT,S4-no-hscrp,candidate,completed,40.0,80.0,7.0,62.5,40.0,13.0,9.0,9.0,2.0,5.0,3.0,2.0,1.0,inconclusive_T3_not_tested,0.2419817470664928,18.0,blocked,exploratory_reduced_budget,,not_run
+SYNTHETIC_FIXTURE_NOT_CLINICAL_COHORT,S4-patient-mass,candidate,completed,40.0,80.0,8.0,77.5,40.0,24.0,21.0,16.0,1.0,3.0,2.0,2.0,1.0,inconclusive_T3_not_tested,0.2428019996203252,32.0,blocked,exploratory_reduced_budget,,not_run
+SYNTHETIC_FIXTURE_NOT_CLINICAL_COHORT,S4-no-pro,candidate,completed,40.0,80.0,7.0,68.75,40.0,20.0,18.0,13.0,3.0,4.0,2.0,2.0,0.0,inconclusive_T3_not_tested,-0.0270410816432657,25.0,blocked,exploratory_reduced_budget,,not_run
+SYNTHETIC_FIXTURE_NOT_CLINICAL_COHORT,S4-pro-summary,candidate,not_applicable,,,,,,,,,,,,,,,,,blocked,,,
+SYNTHETIC_FIXTURE_NOT_CLINICAL_COHORT,S4-common-features,candidate,not_applicable,,,,,,,,,,,,,,,,,blocked,,,
+SYNTHETIC_FIXTURE_NOT_CLINICAL_COHORT,S4-preimputation-pruning,candidate,completed,40.0,80.0,8.0,78.75,40.0,24.0,24.0,10.0,1.0,3.0,3.0,2.0,0.0,inconclusive_T3_not_tested,1.0,43.0,blocked,exploratory_reduced_budget,,not_run
+SYNTHETIC_FIXTURE_NOT_CLINICAL_COHORT,S4-full80,candidate,completed,40.0,80.0,8.0,78.75,40.0,24.0,24.0,10.0,1.0,3.0,3.0,2.0,0.0,inconclusive_T3_not_tested,1.0,43.0,blocked,exploratory_reduced_budget,,not_run

@@ -427,17 +427,22 @@ def administrative_audit(membership, metadata, embedding, config):
 
 
 def archive_and_publish(staged, destination, manifest, write_json):
-    """Publish only a completed bundle, with an external archive of every old 02 file."""
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    archive = destination["tables"].parent / "longitudinal_graph_history" / stamp
+    """Create-only legacy publication; historical files are never archived/replaced.
+
+    Public CLI callers stage this inside a new run bundle. Programmatic callers
+    also fail closed if any previous Script 02 artifact exists.
+    """
+    from src.studies.longitudinal_graph.reference import protect_path
+    for path in destination.values():
+        protect_path(path)
     old = [(kind, p) for kind, root in destination.items() for p in root.glob("02_*") if p.is_file()]
-    for kind, p in old:
-        target = archive / kind / p.name; target.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(p, target)
-    manifest["historical_archive"] = str(archive) if old else None
+    if old:
+        raise FileExistsError("Previous Script 02 artifacts are read-only; use a new --run-id")
+    manifest["historical_archive"] = None
     write_json(staged["qc"] / "02_run_manifest.json", manifest)
-    # Remove only archived files, including stale sensitivities, then install this bundle.
-    for _, p in old: p.unlink()
     for kind, root in staged.items():
         destination[kind].mkdir(parents=True, exist_ok=True)
         for p in root.iterdir():
-            if p.is_file(): shutil.copy2(p, destination[kind] / p.name)
+            if p.is_file():
+                with (destination[kind] / p.name).open("xb") as stream:
+                    stream.write(p.read_bytes())

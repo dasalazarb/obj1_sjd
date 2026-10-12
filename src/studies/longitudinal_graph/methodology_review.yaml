@@ -1,0 +1,12 @@
+# Candidate-only policy. Never merged into or used to rewrite historical S3-primary.
+hscrp_unit_status: unknown  # Set verified_consistent only after documented assay/unit review.
+hscrp_prior_transformation: unknown
+redundancy_minimum_pairs: 20
+redundancy_minimum_patients: 10
+coverage_bootstrap_replicates: 200
+negative_control_replicates: 0  # Explicit not_run until investigator prespecifies the null experiment budget.
+negative_control_bootstrap_replicates: 200
+pro_summary: {features: [], approved_by: null, rationale: null}
+common_features: {features: [], approved_by: null, rationale: null}
+validation_anchors: []
+# No automatic selection, branch definition, OOS projection or temporal approval.
