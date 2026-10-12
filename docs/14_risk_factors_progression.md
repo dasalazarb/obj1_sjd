@@ -17,8 +17,9 @@ from Step 13. No raw clinical forms, BTRIS records, new baseline, serologic
 thresholds, phenotype reconstruction, or imputation are used.
 
 The Step 10 `10_integrated_longitudinal_context.parquet` companion is discovered
-beside `--integrated`, or supplied with `--context`. Only lab dates, days from
-anchor, units, and evaluability metadata are joined. Episode keys must match
+beside `--integrated`, or supplied with `--context`. Lab dates, days from
+anchor, units, evaluability metadata, and explicitly named protocol/ESSDAI
+provenance fields are joined when present. Episode keys must match
 exactly and shared fields must agree. Official Step 11 baseline rows receive
 metadata through their existing episode keys; their predictors are preserved.
 Labs without embedded or companion as-of timing evidence are unavailable for
@@ -135,7 +136,9 @@ scaling uses available FROM observations. The mean, SD and cohort are recorded.
 Ordinal domain effects use +1 level; active/inactive comparisons are separate
 sensitivities. `q_value` preserves historical BH-FDR within analysis,
 predictor-family and outcome families; `q_value_family` is its compatibility
-alias. Sensitivities retain their own historical BH families.
+alias. Existing sensitivities retain their own historical BH families. The new
+leave-source outcome and its matched comparisons have no BH q-values and never
+enter either primary correction.
 
 `q_value_outcome_wide` is a separate multiplicity sensitivity over valid primary
 canonical hypotheses, grouped by analysis_type × outcome × effect_measure.
@@ -162,7 +165,14 @@ Sensitivities include total ESSDAI +5, domain ordinal versus binary, domain
 baseline models `without_baseline_total`, at least 0.5 years between the first and last
 subsequent trajectory assessments, continuous laboratories, and an upstream
 anchor-day lab restriction when days-from-anchor exists. No new generic lab
-recency window is imposed. Treatment adjustment is explicitly not implemented;
+recency window is imposed. Treatment exposure receives an explicit source and
+temporal-validity audit in `14_treatment_adjustment_decision.csv`. Without a
+registered, dated canonical binary systemic exposure it is `not_implemented`;
+no treatments are derived from raw data or retrospective ever-exposure. A usable
+exposure enters treatment-adjusted sensitivities only, subject to existing support
+gates, while primary specifications remain unchanged. Future/unknown exposure
+dates stay missing. Neither treatment adjustment nor its absence establishes
+causality. See metadata for the observed decision;
 individual comorbidity analyses remain in Step 07. All interpretation describes
 associations, not causal effects or a deployable prediction model.
 
@@ -178,14 +188,41 @@ ESSDAI_FROM_other_domains_d = ESSDAI_FROM - weight[d] * ordinal_d_FROM
 The domain remains an unweighted ordinal predictor. Weights come exclusively
 from config.ESSDAI_DOMAIN_WEIGHTS; verified aliases are gland_swell→glandular
 and neuro_periph→pns. Known, evaluable domain/total measurements and a
-nonnegative difference are required. Complete panels must reconstruct the total;
-mismatches/invalid subtractions become missing sensitivity values with QC, never
-silent corrections. Partial panels permit only subtraction of the known target
-contribution and are identified in QC. Source columns, weights and counts are
+nonnegative difference are required. Both sides now require complete evaluable
+panels that reconstruct the total with absolute tolerance 1e-8. Partial panels,
+mismatches and invalid subtractions become missing sensitivity values with QC,
+never silent corrections or clipping. No producer contract certifies partial
+panels as same-version composition. Raw weighted contributions remain available
+for audit. Source columns, weights and counts are
 recorded. Numerical equality with the original state covariate is flagged as
-nonindependent evidence. The outcome stays total subsequent ESSDAI; this does
-not estimate propagation exclusively into other domains. The optional TO
-other-domains outcome sensitivity is not implemented. The redundant lagged
+nonindependent evidence. That existing sensitivity keeps total subsequent ESSDAI
+as its outcome. The new `leave_source_domain_outcome` instead uses:
+
+```text
+ESSDAI_TO_other_domains_d ~ ordinal_d_FROM + ESSDAI_FROM_other_domains_d
+                         + interval_years + selected demographic adjustments
+ESSDAI_TO_other_domains_d = ESSDAI_TO - weight[d] * ordinal_d_TO
+```
+
+`14_domain_sensitivity_comparison.csv` separates primary full sample, primary
+matched sample, prior other-domain-adjusted matched sample, and future
+leave-source outcome matched sample. The last three share exact patient/interval
+keys, `matched_sample_hash`, and a demographic level selected once before fitting.
+Thus sample restriction, prior state adjustment, and future outcome removal can
+be assessed separately. These are associations with subsequent activity outside
+the source domain, not causal effects or incident organ involvement.
+
+Unique discordant episodes, all weighted domains, source producers and available
+upstream provenance fields are exported in
+`14_domain_composition_discordant_episodes.csv`. The accompanying discordance
+summary stratifies deltas, visits, protocols where present, calendar years,
+activity states, active domains and negative subtractions. Counts in metadata
+use unique FROM episodes; the all-episode snapshot is recorded separately. A
+generic ESSDAI version field is never relabeled as a verified domain version.
+No bug or version equivalence is inferred from equality or discordance alone.
+The recorded total is not replaced by a reconstructed score.
+
+The redundant lagged
 `without_baseline_essdai` sensitivity is removed; the baseline omission is
 renamed `without_baseline_total` and still omits only baseline total.
 
@@ -213,10 +250,32 @@ SHA-256 and paths (including context), Git commit/worktree state, UTC run time,
 dependencies, supported trajectory counts and actual MixedLM/GEE use. QC adds
 `14_adjustment_selection_qc.csv`, `14_domain_composition_qc.csv` and
 `14_outcome_wide_fdr_qc.csv` without removing previous output columns.
+Additional exports are `14_leave_source_domain_outcome_models.csv`,
+`14_leave_source_domain_outcome_qc.csv`, `14_domain_composition_audit_summary.csv`,
+the comparison and treatment-decision tables, `14_output_manifest.csv`, and
+`14_closure_summary.md` in the dedicated QC directory. The manifest hashes all
+published data/tables/figures/QC except itself and the still-open log.
+
+`runtime_code_fingerprint` retains commit, branch, scientific diff hash, per-file
+hashes and a code-tree hash. It prunes virtual environments, caches, vendor and
+dependency trees, generated data/outputs, and work/build directories before
+traversal. Source, tests, dashboard code, config.py and common.py remain included.
+Tracked modifications/deletions and untracked scientific code prevent a clean
+code status. Output-only changes can be `code_identified_noncode_changes`.
+
+Closure is `CONDITIONAL` for missing canonical inputs, a dry run, unidentified or
+dirty scientific code, or `--input-origin synthetic_validation`. Missing required
+inputs produce an explicit conditional summary and fail with FileNotFoundError;
+they never produce an empty successful analysis. A final canonical run must
+follow passing tests and a code commit. Do not edit code after that run without
+rerunning. See [closure validation](14_step14_closure_validation.md) for the
+current environment's validation and real-cohort limitations.
+
 The log records availability, feasibility, attempts, fallbacks, warnings and
 output locations. Review structural/temporal QC before feasibility and models.
 
-CLI overrides: `--integrated`, `--baseline`, `--context`, `--progression`,
+CLI overrides: `--integrated`, `--baseline`, `--context`, `--variable-registry`,
+`--input-origin`, `--progression`,
 `--output-root`, `--minimum-events`, `--overwrite`/`--no-overwrite`, `--dry-run`.
 Outputs regenerate by default after backing up every existing dedicated file to
 `outputs/backups/14_risk_factors_progression/<UTC timestamp>/` with its original

@@ -156,7 +156,10 @@ separately. Patient/episode/event drift must be investigated before accepting
 results. Backups protect prior outputs; no patient data belong in this note or
 public validation assets.
 
-The optional TO other-domains outcome sensitivity is not implemented. Treatment
-adjustment remains outside Step 14. Results describe observational associations,
-not causality or a validated clinical prediction model. Changes in significance
-are not an implementation success criterion.
+This historical validation describes the earlier refactor. The subsequent
+[closure implementation](14_step14_closure_validation.md) adds the TO
+leave-source-domain outcome, matched comparisons, formal treatment decision,
+composition audit and code fingerprint. Its real-cohort validation status is
+documented separately. Results describe observational associations, not
+causality or a validated clinical prediction model. Changes in significance are
+not an implementation success criterion.

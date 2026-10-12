@@ -1,0 +1,16 @@
+# Runtime environments, generated analysis products and scratch work.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.venv*/
+venv/
+env/
+node_modules/
+data/analytic/
+outputs/
+work/
+dist/
+build/
