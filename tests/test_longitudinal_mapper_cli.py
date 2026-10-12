@@ -133,7 +133,9 @@ def test_bare_cli_executes_default_candidate_with_generated_id(tmp_path, monkeyp
     raw, state, metadata, intervals = fixtures.source(40)
     cfg = fixtures.config()
     cfg["mapper_validation"].update(bootstrap_replicates=0, admin_permutations=0)
-    historical, _ = fixtures.freeze_fixture(paths.STUDIES_TABLES_DIR, state, cfg)
+    # Match the user's real archive: no mapper_graph_covered flag and no
+    # connected-component count in the original historical summary.
+    historical, _ = fixtures.legacy_fixture(paths.STUDIES_TABLES_DIR, state, cfg)
     historical.parent.rename(paths.STUDIES_TABLES_DIR / "longitudinal_graph_history")
     historical = paths.STUDIES_TABLES_DIR / "longitudinal_graph_history" / historical.name
     before = inventory(historical)

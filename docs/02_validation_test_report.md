@@ -6,7 +6,7 @@ fuentes de prueba y semilla configurada 20260831 para Mapper/bootstrap.
 
 ## Resultado ejecutivo
 
-**65 tests específicos pasan**: 37 del pipeline existente, 19 de la revisión
+**68 tests específicos pasan**: 37 del pipeline existente, 22 de la revisión
 y nueve del arranque de CLI. Estos últimos cubren:
 invocación sin flags, ID único, descubrimiento de archivo/sello, ambigüedad,
 selección explícita, IDs inválidos, sello con archivo ausente y dry-run sin escritura.
@@ -29,7 +29,7 @@ log inicial `/workspace/setup/obj1_sjd/pytest.log`; ninguno pertenece a
 
 ```bash
 python -m pytest tests/test_longitudinal_graph.py tests/test_longitudinal_methodology_review.py tests/test_longitudinal_mapper_cli.py -q
-# 65 passed; 51.66 s. Incluye los módulos agrupados bajo _review/.
+# 68 passed; 52.75 s. Incluye compatibilidad con el contrato histórico anterior.
 
 python -m pytest tests/test_longitudinal_methodology_review.py::test_candidate_end_to_end_preserves_reference_and_blocks_inference -q
 # 1 passed; incluye reproducción paralela y diff, 20.94 s.
@@ -55,6 +55,14 @@ El dry-run real, sin archivos de cohorte, devuelve:
 ```json
 {"status":"blocked","reason":"G0_frozen_reference_unavailable","outputs_written":false}
 ```
+
+Se añadieron tres regresiones para el esquema previo de 02 (inspeccionado en
+`906db45`): ausencia de flags de cobertura y de conteo de componentes, visitas
+compartidas/empatadas/solo exploratorias/solo en nodos no soportados, y rechazo
+de inventarios incompletos o flags contradictorias. El test de CLI sin argumentos
+también consume ese formato antiguo. Las asignaciones y pesos leídos del Parquet
+se comparan exactamente antes/después y los hashes del archivo histórico permanecen
+idénticos; las adaptaciones se registran sólo en el run nuevo.
 
 ## Matriz de controles solicitados
 

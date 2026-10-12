@@ -54,6 +54,22 @@ convierte automáticamente en rama. `branch_id` permanece sin definir; H1 no est
 establecida. La unidad paciente-basal y la agregación necesaria para T3 requieren
 un estimando aprobado; el flujo no impone esa adaptación.
 
+Las referencias de versiones anteriores de 02 pueden carecer de
+`mapper_graph_covered` e `in_unsupported_macrostate`. El lector las recupera
+**sólo en memoria** desde `02_mapper_node_membership.parquet` (todos los nodos,
+incluidos los no soportados) y las flags originales de soporte del macroestado.
+No usa `mapper_covered` como sustituto de cobertura total: ambas tienen distintos
+universos. Si falta la flag de empate, necesita los pesos históricos guardados;
+las asignaciones duras y pesos originales se conservan. Evidencia contradictoria
+o un inventario incompleto detienen la lectura.
+
+Los resúmenes antiguos sin número de componentes se acompañan con el conteo
+calculado desde los solapamientos persistidos, sin añadir campos a su JSON original.
+El informe `02_reference_graph_integrity_qc.json` registra las adaptaciones y
+las métricas ausentes del resumen. La tabla compatible se exporta como
+`02_reference_membership_compatibility.parquet` únicamente dentro del run nuevo;
+el inventario/hash de la referencia histórica sigue intacto.
+
 Las membresías históricas son `equal_weight_per_supported_node`. Pesos de nodo y
 comunidad suman 1 en visitas cubiertas por macroestados soportados; fuera de ese
 universo el peso largo es NA. `soft_membership_tau=1` sigue siendo un parámetro

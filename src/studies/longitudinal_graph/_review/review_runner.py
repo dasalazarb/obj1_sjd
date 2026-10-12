@@ -25,6 +25,61 @@ from src.studies.longitudinal_graph.stability import bootstrap_mapper
 from src.studies.longitudinal_graph.figures import candidate_representation_figures
 
 
+def _adapt_reference_membership(membership, indexed, macros):
+    """Add absent legacy flags in memory from persisted memberships, never a refit.
+
+    The older Script 02 stored supported coverage, hard assignments and weights,
+    but omitted full-graph/unsupported-community flags. Node records retain all
+    visits in all nodes and their original community IDs, so those flags are exact.
+    Existing labels, weights and flags are preserved; conflicting evidence fails.
+    """
+    membership = membership.copy()
+    if macros.macrostate_id.isna().any() or macros.macrostate_id.duplicated().any():
+        raise ValueError("Historical macrostate IDs are missing or duplicated")
+    if not macros.macrostate_supported.isin([True, False]).all():
+        raise ValueError("Historical macrostate support flags are invalid")
+    known = set(macros.macrostate_id)
+    if not set(indexed.macrostate_id.dropna()) <= known:
+        raise ValueError("Historical node memberships refer to unknown macrostates")
+    supported = set(macros.loc[macros.macrostate_supported.astype(bool), "macrostate_id"])
+    masks = {}
+    for field, records in (("mapper_graph_covered", indexed),
+                           ("mapper_covered", indexed.loc[indexed.macrostate_id.isin(supported)]),
+                           ("in_unsupported_macrostate", indexed.loc[indexed.macrostate_id.isin(known - supported)])):
+        mask = np.zeros(len(membership), dtype=bool)
+        mask[records._index.astype(int).unique()] = True
+        masks[field] = mask
+    adapted = []
+    for field, mask in masks.items():
+        if field not in membership:
+            membership[field] = mask
+            adapted.append({"field": field, "source": "persisted_all_node_memberships_and_original_macrostate_support"})
+        elif not membership[field].isin([True, False]).all():
+            raise ValueError(f"Reference has invalid boolean memberships: {field}")
+        elif not np.array_equal(membership[field].to_numpy(dtype=bool), mask):
+            raise ValueError(f"Historical membership flag disagrees with original node records: {field}")
+    if "macrostate_membership_tie" not in membership:
+        columns = [c for c in membership if c.startswith("macrostate_weight__")]
+        if not columns and masks["mapper_covered"].any():
+            raise ValueError("Missing historical tie flag cannot be reconstructed without saved macrostate weights")
+        tie = np.zeros(len(membership), dtype=bool)
+        if columns:
+            weights = membership[columns].fillna(0).to_numpy(dtype=float)
+            if not np.isfinite(weights).all() or (weights < 0).any():
+                raise ValueError("Historical macrostate weights are invalid")
+            maximum = weights.max(axis=1)
+            tie = masks["mapper_covered"] & (np.isclose(weights, maximum[:, None], atol=1e-12, rtol=0).sum(axis=1) > 1)
+        membership["macrostate_membership_tie"] = tie
+        adapted.append({"field": "macrostate_membership_tie", "source": "saved_macrostate_weights; historical_maximum_tie_rule_atol_1e-12"})
+    elif not membership.macrostate_membership_tie.isin([True, False]).all():
+        raise ValueError("Reference has invalid boolean memberships: macrostate_membership_tie")
+    if "hard_macrostate" not in membership:
+        raise ValueError("Historical hard assignments are unavailable; labels must not be invented")
+    return membership, {"status": "adapted_in_memory" if adapted else "current_schema_validated",
+                        "adapted_fields": adapted, "historical_files_modified": False,
+                        "historical_assignments_and_weights": "preserved"}
+
+
 def load_reference(reference, api):
     summary = json.loads(reference_artifact(reference, "02_longitudinal_mapper_summary", ".json").read_text())
     try:
@@ -32,20 +87,18 @@ def load_reference(reference, api):
     except ValueError:
         membership = pd.read_csv(reference_artifact(reference, "02_mapper_visit_membership", ".csv"))
     qc.validate_keys(membership, "historical membership")
-    for column in ("mapper_graph_covered", "mapper_covered", "macrostate_membership_tie", "in_unsupported_macrostate"):
-        if column not in membership:
-            raise ValueError(f"Reference lacks historical membership semantic field: {column}")
-        if not membership[column].isin([True, False]).all():
-            raise ValueError(f"Reference has invalid boolean memberships: {column}")
-    for key, count in api.coverage_summary(membership).items():
-        if key.startswith("n_") and key in summary and summary[key] != count:
-            raise ValueError(f"Historical visit coverage disagrees with summary: {key}")
     nodes = pd.read_csv(reference_artifact(reference, "02_mapper_nodes", ".csv"))
+    if nodes.node_id.isna().any() or nodes.node_id.duplicated().any():
+        raise ValueError("Historical node IDs are missing or duplicated")
     macros = pd.read_csv(reference_artifact(reference, "02_mapper_macrostate_summary", ".csv"))
     node_records = pd.read_parquet(reference_artifact(reference, "02_mapper_node_membership", ".parquet"))
     indexed = node_records.merge(membership[api.KEYS].assign(_index=np.arange(len(membership))), on=api.KEYS, how="left", validate="many_to_one")
     if indexed._index.isna().any() or indexed[api.KEYS + ["node_id"]].duplicated().any():
         raise ValueError("Historical node memberships have missing or duplicate visit keys")
+    membership, schema_audit = _adapt_reference_membership(membership, indexed, macros)
+    for key, count in api.coverage_summary(membership).items():
+        if key.startswith("n_") and key in summary and summary[key] != count:
+            raise ValueError(f"Historical visit coverage disagrees with summary: {key}")
     graph_nodes = {node: set(group._index.astype(int)) for node, group in indexed.groupby("node_id")}
     if set(nodes.node_id) != set(graph_nodes):
         raise ValueError("Historical all-node membership inventory is incomplete")
@@ -56,6 +109,8 @@ def load_reference(reference, api):
             raise ValueError("Historical node has inconsistent community identity")
         if len(values):
             mapping[node] = int(values[0])
+    if "community_id" not in nodes:
+        nodes["community_id"] = nodes.node_id.map(mapping)
     links = {n: [] for n in graph_nodes}
     names = sorted(graph_nodes)
     for i, a in enumerate(names):
@@ -72,12 +127,14 @@ def load_reference(reference, api):
     raw.add_edges_from((a, b) for a, neighbors in links.items() for b in neighbors)
     value["raw_nerve"] = raw
     tables, integrity = graph_views(value, membership)
+    integrity["reference_schema_adapter"] = schema_audit
+    integrity["historical_summary_metrics_unavailable"] = [key for key in ("graph_degree_distribution", "n_connected_components") if key not in summary]
     claimed = summary.get("graph_degree_distribution")
     if claimed is not None:
         claimed = {str(k): int(v) for k, v in claimed.items()}
         if claimed != integrity["views"]["full"]["degree_distribution"]:
             raise ValueError("Historical degree distribution disagrees with all-node memberships")
-    if summary.get("n_connected_components") != integrity["views"]["full"]["n_components"]:
+    if "n_connected_components" in summary and summary["n_connected_components"] != integrity["views"]["full"]["n_components"]:
         raise ValueError("Historical component count disagrees with source memberships")
     # Validate endpoints and overlap counts in the actual frozen edge CSV, not just its row count.
     expected = tables["mapper_edges_supported"].set_index(["from_node", "to_node"])
@@ -242,6 +299,9 @@ def execute_review(args, api):
     reference_row = {**historic["summary"], "scenario": "S3-primary", "role": "reference", "status": "historical_frozen",
                      "gate": historic["summary"].get("representation_stability_gate", {}).get("status", "blocked"),
                      "historical_execution_status": historic["summary"].get("status")}
+    if "n_connected_components" not in reference_row:
+        reference_row["n_connected_components"] = ref_graph_qc["views"]["full"]["n_components"]
+        reference_row["connected_components_source"] = "persisted_node_overlap_companion_QC; absent_from_original_summary"
     rows = [reference_row]
     definitions, summaries = [], {}
     comparison_frames, crosswalk_frames, universe_frames = [], [], []
@@ -257,6 +317,7 @@ def execute_review(args, api):
         for stem, table in ref_tables.items():
             table.to_csv(staged / "tables" / f"02_reference_{stem}.csv", index=False)
         api.write_json(staged / "diagnostics/02_reference_graph_integrity_qc.json", ref_graph_qc)
+        historic["visit_membership"].to_parquet(staged / "analytic/02_reference_membership_compatibility.parquet", index=False)
         if args.mode == "candidate-qc":
             state = pd.read_parquet(args.state).reset_index(drop=True)
             metadata = pd.read_parquet(args.metadata).reset_index(drop=True)
