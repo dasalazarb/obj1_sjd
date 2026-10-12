@@ -122,6 +122,24 @@ the versioned source policy. The legacy
 `disease_duration_yrs_model` is clipped upstream and is not used. No additional
 alias or Step 11 derivation is introduced without canonical schema evidence.
 
+Duration reporting explicitly records `duration_source_status`, definition,
+baseline anchor, available-patient count, exclusion reason and rule version.
+The decision is verified_source_used, not_available, or
+upstream_change_proposed_pending_approval. Missing source is labeled
+`no_verified_canonical_diagnosis_date`; potential canonical diagnosis dates do
+not cause a new duration derivation inside Step 14. Source schema, companion
+registry/dictionary availability and hashes are audited in run metadata.
+
+Availability now has an explicit grain: `availability_scope` distinguishes
+official_baseline, integrated_raw, lagged_interval_effective and
+selected_model_complete_cases. The historical baseline/raw rows and columns
+remain. A raw integrated age/sex column can be unavailable while the effective
+static adjustment is available from Step 11. Effective rows report the origin,
+eligible/available intervals and available patients. Model rows are outcome- and
+predictor-specific and identify whether a static field actually participates
+in the selected formula. Filter scope before aggregating; these denominators
+are different cohorts, not independent measurements to add together.
+
 Every model records `adjustment_status`, `selected_adjustment_level`, covariates,
 effective formula, selection rule/reason and JSON diagnostics for all four levels.
 The detailed adjustment QC flattens those candidates. Historical full-model
@@ -180,14 +198,63 @@ from config.ESSDAI_DOMAIN_WEIGHTS; verified aliases are gland_swell→glandular
 and neuro_periph→pns. Known, evaluable domain/total measurements and a
 nonnegative difference are required. Complete panels must reconstruct the total;
 mismatches/invalid subtractions become missing sensitivity values with QC, never
-silent corrections. Partial panels permit only subtraction of the known target
-contribution and are identified in QC. Source columns, weights and counts are
+silent corrections. Concordance requires exact equality; unexplained integer or
+small decimal discrepancies are not reinterpreted as rounding error. Partial
+panels are excluded unless canonical upstream metadata document that the total
+contains that domain contribution in the same index/version. Source columns, weights and counts are
 recorded. Numerical equality with the original state covariate is flagged as
 nonindependent evidence. The outcome stays total subsequent ESSDAI; this does
 not estimate propagation exclusively into other domains. The optional TO
 other-domains outcome sensitivity is not implemented. The redundant lagged
 `without_baseline_essdai` sensitivity is removed; the baseline omission is
 renamed `without_baseline_total` and still omits only baseline total.
+
+Composition rule `weighted-other-domains-v2` records FROM domain contributions,
+number of evaluable domains, complete-panel total-minus-reconstruction delta,
+total source/version metadata when present, and per-domain categories. Existing
+patient/episode/date keys stay only in the controlled analytic Parquet. Public QC
+is aggregated; no new per-episode audit export is written. The explicit priority
+`exclusive-priority-v1` is: missing_total → missing_target_domain →
+incompatible_provenance_or_scale → negative_target_subtraction →
+complete_panel_discordant → partial_panel → complete_panel_concordant →
+other_unresolved. This partition is separate from overlapping flags. Each
+domain/category row contains the four cells of the discordant × negative
+intersection, category denominators, availability and exclusion counts.
+The discrepancy distribution counts unique FROM episodes once, never 12 times.
+Zero scores without upstream zero-origin evidence are labeled unknown origin;
+they are not claimed to be observed zeros rather than upstream-filled zeros.
+
+The optional canonical Step 10 Parquet metadata attribute
+`essdai_composition_provenance` maps domain IDs to verified assertions containing
+total_column, domain_column, weight, index_version, total_includes_domain=true,
+verification_status=verified, evidence_reference and evidence_sha256. The assertion
+must match the resolved columns/config weights; conflicting row versions override
+it. Step 14 neither creates this evidence nor changes Step 10 to obtain it.
+Absent evidence excludes partial panels. Registry producer names alone do not
+establish matching scales or index inclusion.
+
+`complete_concordant_panel_only` is a separately labeled exploratory sensitivity
+for all 12 domains; unsupported domains retain rows. The
+`14_domain_sensitivity_comparison.csv` compares the primary full sample, primary
+matched sample and other-domains matched sample. Matched samples intersect the
+two pre-fit eligible interval sets and freeze the primary's already selected
+demographic adjustments before fitting. They share exact keys (audited with a
+sample hash); support/rank failures remain not estimable. These additional fits
+do not replace primary rows or enter primary BH. Numerical equality is flagged
+as nonindependent evidence. N in unsupported/failed rows is pre-fit support;
+`n_fitted_patients`/`n_fitted_intervals` are missing when no valid estimator exists.
+
+Cox now retains one diagnostic row per actual attempt, for both failures and
+successful controls, in `14_cox_failure_diagnostics.csv`. Diagnostics include
+the fixed formula/level, exact sample counts, finite/rank/condition checks,
+variances/correlations, event/censor group summaries, binary contingencies,
+possible-separation flags, ties/nonpositive time, observed sex levels, typed
+warnings/exceptions, raw coefficients/SE and covariance/information diagnostics.
+Raw attempted inference remains QC only. Possible separation from contingency
+cells is not proof of Cox time-order separation. Failed primary estimate, SE,
+CI, p and q are missing. Statistical failure never causes post-fit adjustment
+reselection; no penalized/Firth rescue is introduced. Structural/temporal risk
+contracts still come from Steps 10/11/13.
 
 ## Outputs and CLI
 
@@ -210,9 +277,26 @@ heatmap appears only with at least four valid pairs; unsupported cells are gray,
 not zero effects. Metadata records gates, inputs, methods and software versions.
 Metadata records versioned adjustment/composition/hypothesis/FDR rules, input
 SHA-256 and paths (including context), Git commit/worktree state, UTC run time,
-dependencies, supported trajectory counts and actual MixedLM/GEE use. QC adds
+dependencies, supported trajectory counts and actual MixedLM/GEE use. It is
+written before input processing/fitting and records branch, SHA-256 of the code
+diff (content never exported), per-code/config file hashes and a code-tree hash.
+Unidentified/untracked code is marked dirty_untracked_code; tracked changes with
+hashes are distinguished from fully_reproducible committed clean code and
+non-code output changes. Input hashes/configuration stay separate from code
+identity; a dirty reference commit alone never establishes the same exact run.
+QC adds
 `14_adjustment_selection_qc.csv`, `14_domain_composition_qc.csv` and
 `14_outcome_wide_fdr_qc.csv` without removing previous output columns.
+Second-review outputs add `14_domain_composition_audit_summary.csv`,
+`14_domain_composition_discrepancy_distribution.csv`,
+`14_cox_failure_diagnostics.csv`, `14_run_comparison_summary.csv` and
+`14_run_comparison.md` in QC, plus `14_domain_sensitivity_comparison.csv` in
+tables. Run comparison uses preserved prior outputs if available, retains all
+selected hypothesis rows including failures, and separates effects/CI/p/q from
+pre-fit-only dry-run comparisons. Identical nonmissing input hashes require the
+same baseline/episode counts. Missing references are explicitly unavailable,
+never replaced by invented before values. `14_output_manifest.csv` lists exact
+current artifacts, bytes and SHA-256 (excluding its own recursive hash).
 The log records availability, feasibility, attempts, fallbacks, warnings and
 output locations. Review structural/temporal QC before feasibility and models.
 
@@ -225,6 +309,15 @@ outputs before any write. Dry run validates datasets, builds risk sets and
 feasibility, prints planned models, and writes only QC/log diagnostics (including
 metadata and adjustment/composition QC). Structural
 or temporal disagreements fail loudly, with available diagnostics saved.
+
+The model summary has one selected row per planned hypothesis; model QC has all
+attempts, including rejected MixedLM and separately labeled matched comparison
+fits. Attempt failures and failed primary hypotheses therefore have different
+denominators. Figures identify the actual estimator, HR/IRR/beta scale, 95% CI,
+N and adjustment/caution; empty inference figures remain explicit. Limitations
+include biological interval censoring, selection of evaluable episodes, residual
+confounding (including unadjusted treatment), and accumulated anti-Ro/SSA
+`ever_positive_through_episode`, which is not an instantaneous serum-titer change.
 
 Verification:
 
