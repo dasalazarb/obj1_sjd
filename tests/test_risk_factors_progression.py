@@ -2,7 +2,6 @@
 import importlib.util
 import json
 import subprocess
-import warnings
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -53,6 +52,17 @@ def datasets(df):
     intervals = mod.build_lagged_interval_dataset(df, base, registry)
     risks = mod.build_domain_risk_sets(df, base)
     return df, base, intervals, risks, registry
+
+
+def complete_composition(n=40, seed=93):
+    source = episodes(n=n)
+    rng = np.random.default_rng(seed)
+    for domain in mod.DOMAINS:
+        source[mod.step13.DOMAIN_ALIASES[domain][0]] = 0
+    for domain in ("articular", "biological", "glandular", "pulmonary"):
+        source[mod.step13.DOMAIN_ALIASES[domain][0]] = rng.integers(0, 3, len(source))
+    source[mod.ESSDAI] = sum(source[mod.step13.DOMAIN_ALIASES[d][0]] * w for d, w in mod.canonical_domain_weights().items())
+    return source
 
 
 def get_spec(registry, name):
@@ -537,11 +547,22 @@ def test_weighted_other_domain_adjustments_aliases_missing_and_inconsistent_pane
     source["essdai__biological_ordinal_score"] = 2
     source.attrs["essdai_composition_provenance"] = confirmed_composition_metadata()
     _, _, intervals, _, _ = datasets(source)
+    assert intervals.from_essdai_other_domains_articular.isna().all()
+    assert intervals.to_essdai_other_domains_articular.isna().all()
+    assert intervals.from_domain_weighted_contribution_raw_articular.eq(8).all()
+    for domain in mod.DOMAINS:
+        source[mod.step13.DOMAIN_ALIASES[domain][0]] = 0
+    source["essdai__articular_ordinal_score"] = 2
+    source["essdai__biological_ordinal_score"] = 2
+    source[mod.step13.DOMAIN_ALIASES["glandular"][0]] = 1
+    _, _, intervals, _, _ = datasets(source)
     assert intervals.from_domain_contribution_articular.eq(8).all()
     assert intervals.from_essdai_other_domains_articular.eq(4).all()
     assert intervals.from_domain_contribution_biological.eq(2).all()
     assert intervals.from_essdai_other_domains_biological.eq(10).all()
-    assert intervals.from_essdai_other_domains_glandular.isna().all()
+    assert intervals.from_essdai_other_domains_glandular.eq(10).all()
+    assert intervals.to_essdai_other_domains_articular.eq(4).all()
+    assert intervals.to_essdai_other_domains_biological.eq(10).all()
     assert mod.canonical_domain_weights()["glandular"] == 2
     assert mod.canonical_domain_weights()["pns"] == mod.ESSDAI_DOMAIN_WEIGHTS["neuro_periph"] == 5
     source[mod.ESSDAI] = 3
@@ -557,11 +578,7 @@ def test_weighted_other_domain_adjustments_aliases_missing_and_inconsistent_pane
 
 
 def test_lagged_domain_sensitivity_uses_other_domains_and_no_false_baseline_omission():
-    rng = np.random.default_rng(222)
-    source = episodes(n=40)
-    source.attrs["essdai_composition_provenance"] = confirmed_composition_metadata()
-    source["essdai__glandular_ordinal_score"] = rng.integers(0, 3, len(source))
-    source[mod.ESSDAI] = 2*source.essdai__glandular_ordinal_score + rng.uniform(1, 4, len(source))
+    source = complete_composition(seed=222)
     df, base, intervals, risks, registry = datasets(source)
     tasks = mod.build_analysis_tasks(df, base, intervals, risks, registry)
     lagged = [t for t in tasks if t.kind == "lagged"]
@@ -643,285 +660,195 @@ def test_existing_outputs_are_backed_up_and_metadata_records_rules(tmp_path):
     assert "statsmodels" in metadata["versions"] and metadata["treatment_adjustment"]
 
 
-def composition_fixture(n=325):
-    frame = pd.DataFrame({"patient_id": [f"synthetic-{i}" for i in range(n)],
-        "from_clinical_episode_id": [f"episode-{i}" for i in range(n)]})
-    for domain in mod.DOMAINS:
-        frame["from_domain_"+domain] = 0.
-    frame["from_essdai"] = 0.
-    frame.loc[:47, "from_domain_articular"] = 2
-    frame.loc[:47, "from_essdai"] = 3  # 48 negative targets; contained in the 63 mismatches in THIS fixture only.
-    frame.loc[48:62, "from_essdai"] = 1
-    frame.loc[304:, "from_essdai"] = np.nan
-    return frame
+def test_to_negative_subtraction_and_discordance_fail_closed_without_clipping():
+    source = complete_composition(n=1)
+    source.loc[1, mod.ESSDAI] = 1
+    source.loc[1, mod.step13.DOMAIN_ALIASES["articular"][0]] = 2
+    source.loc[2, mod.ESSDAI] += 1
+    _, _, intervals, _, _ = datasets(source)
+    assert pd.isna(intervals.to_essdai_other_domains_articular.iloc[0])
+    assert intervals.to_domain_weighted_contribution_raw_articular.iloc[0] == 8
+    assert intervals.to_composition_category_articular.iloc[0] == "invalid_subtraction"
+    assert intervals.to_composition_category_biological.iloc[1] == "complete_panel_discordant"
+    assert intervals.to_essdai_other_domains_biological.iloc[:2].isna().all()
+    assert intervals.from_essdai_other_domains_biological.iloc[1:].isna().all()
 
 
-def test_composition_snapshot_counts_exclusive_categories_and_intersection_no_twelvefold_count():
-    frame = composition_fixture()
-    original = frame.copy()
-    out, qc = mod.derive_other_domain_adjustments(frame, mod.build_predictor_registry())
-    pd.testing.assert_frame_equal(out[original.columns], original)
-    assert qc.n_intervals.eq(325).all() and qc.n_available.eq(241).all()
-    assert qc.n_complete_panel_total_mismatch.eq(63).all()
-    assert qc.n_missing_total_or_domain.eq(21).all()
-    assert qc.loc[qc.domain.eq("articular"), "n_invalid_subtraction"].iloc[0] == 48
-    audit = pd.DataFrame(out.attrs["domain_composition_audit_summary"])
-    assert audit.groupby("domain").n_category.sum().eq(325).all()
-    assert audit.groupby("domain").n_eligible.sum().eq(241).all()
-    articular = audit.loc[audit.domain.eq("articular")]
-    assert articular.n_discordant_and_negative.sum() == 48
-    assert articular.n_discordant_not_negative.sum() == 15
-    assert articular.n_negative_not_discordant.sum() == 0
-    assert articular.n_neither_flag.sum() == 262
-    distribution = pd.DataFrame(out.attrs["domain_composition_discrepancy_distribution"])
-    assert distribution.n_unique_from_episodes.sum() == 304
-    assert distribution.loc[distribution.from_composition_total_delta.ne(0), "n_unique_from_episodes"].sum() == 63
-    assert out.from_essdai_other_domains_articular.iloc[:48].isna().all()
-    assert out.from_domain_weighted_contribution_raw_articular.iloc[:48].eq(8).all()
-    assert out.from_composition_complete_panel_discordant.sum() == 63
-
-
-def test_partial_composition_requires_documented_same_version_and_never_fills_missing():
-    frame = composition_fixture(3)
-    frame["from_essdai"] = 12
-    frame["from_domain_biological"] = 2
-    frame["from_domain_pulmonary"] = np.nan
-    out, qc = mod.derive_other_domain_adjustments(frame, mod.build_predictor_registry())
-    assert out.from_essdai_other_domains_articular.isna().all()
-    assert qc.loc[qc.domain.ne("pulmonary"), "n_partial_unverified"].eq(3).all()
-    assert qc.loc[qc.domain.eq("pulmonary"), "n_missing_total_or_domain"].iloc[0] == 3
-    proven, _ = mod.derive_other_domain_adjustments(frame, mod.build_predictor_registry(), confirmed_composition_metadata())
-    assert proven.from_essdai_other_domains_articular.eq(4).all()
-    assert proven.from_essdai_other_domains_biological.eq(10).all()
-    assert proven.from_essdai_other_domains_pulmonary.isna().all()
-    assert proven.from_domain_pulmonary.isna().all()
-    frame["from_essdai_version"], frame["from_essdai_total_version"] = "old", "new"
-    excluded, _ = mod.derive_other_domain_adjustments(frame, mod.build_predictor_registry(), confirmed_composition_metadata())
-    assert excluded.from_essdai_other_domains_articular.isna().all()
-    assert excluded.from_composition_category_articular.eq("incompatible_provenance_or_scale").all()
-
-
-def test_complete_composition_rejects_even_small_unexplained_difference_and_duplicate_from():
-    frame = composition_fixture(3)
-    frame["from_essdai"] = 8
-    out, _ = mod.derive_other_domain_adjustments(frame, mod.build_predictor_registry())
-    assert out.from_essdai_other_domains_articular.eq(0).all()
-    frame["from_essdai"] += .00001
-    out, _ = mod.derive_other_domain_adjustments(frame, mod.build_predictor_registry())
-    assert out.from_essdai_other_domains_articular.isna().all()
-    with pytest.raises(ValueError, match="unique canonical FROM"):
-        mod.derive_other_domain_adjustments(pd.concat([frame, frame.iloc[[0]]]), mod.build_predictor_registry())
-
-
-def test_effective_static_availability_matches_patient_baseline_and_selected_cases():
-    source = episodes(n=40)
-    source.loc[(source.patient_id.eq("p0")) & source.is_clinical_baseline, "demo__age_at_baseline"] = np.nan
-    source.loc[~source.is_clinical_baseline, "demo__age_at_baseline"] = 999
-    df, base, intervals, _, registry = datasets(source)
-    assert intervals.loc[intervals.patient_id.eq("p0"), "age"].isna().all()
-    task = mod.ModelTask(get_spec(registry, "biopsy_focus_score"), intervals.rename(columns={"to_essdai": "y"}),
-        "timevarying", "subsequent_essdai", "lagged")
-    data, meta = mod.prepare_model(task, 40)
-    available = mod.build_predictor_availability(base, df, registry, intervals, [(task, data, meta)])
-    age = available.loc[available.name.eq("age")]
-    raw = age.loc[age.availability_scope.eq("integrated_raw")].iloc[0]
-    effective = age.loc[age.availability_scope.eq("lagged_interval_effective")].iloc[0]
-    selected = age.loc[age.availability_scope.eq("selected_model_complete_cases")].iloc[0]
-    assert raw.n_available == 0 and effective.n_available_intervals == 117
-    assert effective.n_eligible_intervals == 120 and effective.n_available_patients == 39
-    assert selected.included_in_formula and selected.n_available_intervals == len(data) == meta["n_complete_cases"]
-    assert data.age.max() < 999
-    for name in ("age", "sex"):
-        assert intervals.groupby("patient_id")[name].nunique(dropna=True).le(1).all()
-
-
-def test_duration_decision_is_explicit_without_proxy_or_upstream_derivation():
-    source = episodes().drop(columns="disease_duration")
-    source["time_since_first_visit"] = 10
-    registry = mod.resolve_predictors(mod.build_predictor_registry(), source, source)
-    report = mod.duration_source_report(source.loc[source.is_clinical_baseline], registry)
-    assert report["duration_source_status"] == "not_available"
-    assert report["duration_exclusion_reason"] == "no_verified_canonical_diagnosis_date"
-    assert report["duration_n_available"] == 0
-    source["dx_date"] = pd.Timestamp("2019-01-01")
-    report = mod.duration_source_report(source.loc[source.is_clinical_baseline], registry)
-    assert report["duration_source_status"] == "upstream_change_proposed_pending_approval"
-    assert "disease_duration" not in source
-
-
-@pytest.mark.parametrize("failure", ["warning", "covariance", "standard_error"])
-def test_cox_invalid_attempt_is_diagnosed_and_never_reselects_or_publishes(monkeypatch, failure):
-    import lifelines
-    from lifelines.exceptions import ConvergenceWarning
-    task = event_task()
-    data, meta = mod.prepare_model(task, 120)
-    calls = []
-    class FakeCox:
-        def __init__(self, **kwargs):
-            assert kwargs["penalizer"] == 0
-        def fit(self, design, **kwargs):
-            calls.append(design)
-            columns = [c for c in design if c not in {"time_years", "event"}]
-            self.summary = pd.DataFrame({"coef": .1, "se(coef)": .2, "p": .3, "exp(coef)": 1.1,
-                "exp(coef) lower 95%": .8, "exp(coef) upper 95%": 1.4}, index=columns)
-            self.variance_matrix_ = pd.DataFrame(np.eye(len(columns))*(-1 if failure == "covariance" else 1), index=columns, columns=columns)
-            if failure == "standard_error":
-                self.summary.loc["x", "se(coef)"] = np.nan
-            if failure == "warning":
-                warnings.warn("synthetic separation convergence failure", ConvergenceWarning)
-            return self
-    monkeypatch.setattr(lifelines, "CoxPHFitter", FakeCox)
-    attempts = []
-    row = mod.fit_task(task, data, meta, attempts)
-    assert len(calls) == len(attempts) == 1
-    assert row["model_status"] == "model_failed" and not row["valid_for_inference"]
-    assert row["selected_adjustment_level"] == meta["selected_adjustment_level"] == "full"
-    assert row["formula"] == meta["formula"] and not row["fallback_used"]
-    for name in ("estimate", "standard_error", "ci95_low", "ci95_high", "p_value", "q_value"):
-        assert pd.isna(row[name])
-    diagnostic = attempts[0]
-    assert diagnostic["cox_failure_reason"] == {"warning": "cox_convergence_warning", "covariance": "invalid_covariance",
-        "standard_error": "invalid_coefficient_inference"}[failure]
-    assert diagnostic["cox_raw_coefficients"] and diagnostic["cox_covariance"]
-    if failure == "warning":
-        assert diagnostic["cox_warning_types"] == "ConvergenceWarning"
-        assert "separation" in diagnostic["cox_warning_messages"]
-
-
-def test_complete_separation_cox_is_not_rescued_by_dropping_adjustment():
-    task = event_task()
-    task.spec = mod.replace(task.spec, variable_type="continuous")
-    task.data["y"] = task.data.pred__test
-    data, meta = mod.prepare_model(task, 120)
-    assert meta["selected_adjustment_level"] == "full"
-    attempts = []
-    row = mod.fit_task(task, data, meta, attempts)
-    assert not row["valid_for_inference"] and pd.isna(row["estimate"])
-    assert row["selected_adjustment_level"] == "full"
-    assert "x" in attempts[0]["separation_pattern_columns"]
-    assert attempts[0]["cox_failure_reason"] in {"cox_convergence_warning", "cox_fit_exception"}
-
-
-@pytest.mark.parametrize("problem,reason", [("collinearity", "rank_deficient_design"), ("extreme_scale", "rank_deficient_design"),
-                                          ("nonfinite", "nonfinite_design"), ("zero_time", "invalid_time_or_event_coding")])
-def test_cox_design_failure_diagnostic_is_specific(problem, reason):
-    task = event_task()
-    data, meta = mod.prepare_model(task, 120)
-    if problem == "collinearity":
-        data["age"] = data.baseline_essdai
-    elif problem == "extreme_scale":
-        data["age"] *= 1e100
-    elif problem == "nonfinite":
-        data.loc[0, "age"] = np.inf
-    else:
-        data.loc[0, "time_years"] = 0
-    attempts = []
-    row = mod.fit_task(task, data, meta, attempts)
-    assert row["cox_failure_reason"] == reason and row["model_status"] == "model_failed"
-    assert row["selected_adjustment_level"] == meta["selected_adjustment_level"]
-    assert pd.isna(row["estimate"]) and not row["valid_for_inference"]
-
-
-def test_successful_cox_has_design_covariance_and_raw_qc_without_extra_attempts():
-    task = event_task()
-    data, meta = mod.prepare_model(task, 120)
-    attempts = []
-    row = mod.fit_task(task, data, meta, attempts)
-    assert row["valid_for_inference"] and row["standard_error"] > 0
-    assert len(attempts) == 1 and attempts[0]["cox_failure_reason"] == "none"
-    assert attempts[0]["design_rank"] == attempts[0]["design_parameters"]
-    assert attempts[0]["covariance_min_eigenvalue"] > 0 and attempts[0]["n_nonpositive_times"] == 0
-
-
-def test_matched_domain_comparison_freezes_adjustment_uses_identical_keys_and_preserves_primary_results():
-    rng = np.random.default_rng(823)
-    source = episodes(n=40)
-    for domain in mod.DOMAINS:
-        source[mod.step13.DOMAIN_ALIASES[domain][0]] = rng.integers(0, 2, len(source))
-    source[mod.ESSDAI] = sum(source[mod.step13.DOMAIN_ALIASES[d][0]]*w for d, w in mod.canonical_domain_weights().items())
-    # Preserve total, but make one FROM visit per patient incomplete: no provenance assertion.
-    source.loc[source.clinical_visit_number.eq(2), mod.step13.DOMAIN_ALIASES["pulmonary"][0]] = np.nan
+def test_matched_domain_sensitivity_uses_same_intervals_patients_level_and_hash():
+    source = complete_composition()
+    # Exclude both sides of a discordant episode; age missingness also has to
+    # produce one frozen demographic complete-case cohort across comparisons.
+    source.loc[1, mod.ESSDAI] += 1
+    source.loc[source.patient_id.eq("p0"), "demo__age_at_baseline"] = np.nan
     df, base, intervals, risks, registry = datasets(source)
-    tasks = [task for task in mod.build_analysis_tasks(df, base, intervals, risks, registry)
-        if task.kind == "lagged" and task.spec.family == "essdai_domain" and task.sensitivity in {"none", "domain_from_other_domains_adjusted"}]
-    prepared = [(task, *mod.prepare_model(task, 40)) for task in tasks]
-    attempts = []
-    results = pd.DataFrame([mod.fit_task(task, data, meta, attempts) for task, data, meta in prepared])
-    saved = results.copy(deep=True)
-    compared = mod.build_domain_sensitivity_comparison(prepared, results, 10, attempts)
-    pd.testing.assert_frame_equal(results, saved)
-    assert len(compared) == 36
-    matched = compared.loc[compared.comparison_variant.ne("primary_full_sample")]
-    for _, pair in matched.groupby("predictor"):
-        assert pair.n_intervals.nunique() == pair.matched_sample_sha256.nunique() == pair.adjustment_covariates.nunique() == 1
-        assert pair.n_intervals.iloc[0] == 80
-    assert all(row["sensitivity"] != "none" for row in attempts if row["attempt_scope"] == "domain_sensitivity_comparison")
-    assert compared.loc[~compared.valid_for_inference, "n_fitted_intervals"].isna().all()
+    tasks = mod.build_analysis_tasks(df, base, intervals, risks, registry)
+    domain_tasks = [t for t in tasks if t.spec.name == "domain_biological" and t.comparison_role]
+    assert len(domain_tasks) == 3
+    prepared = [mod.prepare_model(t, len(base)) for t in domain_tasks]
+    keys = [d[["patient_id", "from_clinical_episode_id", "to_clinical_episode_id"]] for d, _ in prepared]
+    for key in keys[1:]:
+        pd.testing.assert_frame_equal(key, keys[0])
+    assert len({m["matched_sample_hash"] for _, m in prepared}) == 1
+    assert len({m["selected_adjustment_level"] for _, m in prepared}) == 1
+    data, meta = prepared[0]
+    assert domain_tasks[0].sensitivity == mod.LEAVE_SOURCE_SENSITIVITY
+    np.testing.assert_allclose(data.y, data.to_essdai - data.to_domain_biological)
+    np.testing.assert_allclose(data.from_essdai_other_domains_biological, data.from_essdai - data.from_domain_biological)
+    assert "from_essdai_other_domains_biological" in meta["formula"]
+    rows = pd.DataFrame([mod.fit_task(t, d, m, []) for t, (d, m) in zip(domain_tasks, prepared)])
+    assert rows.valid_for_inference.all() and rows.claim_status.eq("sensitivity").all()
+    assert rows.fdr_eligibility.eq(False).all()
+    assert len(mod.build_domain_sensitivity_comparison(rows)) == 3
 
 
-def test_code_fingerprint_identifies_dirty_code_without_exporting_diff_or_secrets(tmp_path):
-    def git(*args):
-        return subprocess.run(["git", *args], cwd=tmp_path, capture_output=True, text=True, check=True)
-    git("init")
-    source = tmp_path/"analysis.py"
-    source.write_text("value = 1\n")
-    git("add", "analysis.py")
-    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "fixture")
-    clean = mod.runtime_code_fingerprint(tmp_path)
-    assert clean["reproducibility_status"] == "fully_reproducible"
-    source.write_text("value = 'sensitive-fixture-string'\n")
-    dirty = mod.runtime_code_fingerprint(tmp_path)
-    assert dirty["reproducibility_status"] == "dirty_tracked_code_with_hash"
-    assert clean["git_commit"] == dirty["git_commit"] and clean["code_tree_sha256"] != dirty["code_tree_sha256"]
-    assert clean["git_diff_sha256"] != dirty["git_diff_sha256"]
-    assert "sensitive-fixture-string" not in json.dumps(dirty)
-    (tmp_path/"helper.py").write_text("untracked = 1\n")
-    assert mod.runtime_code_fingerprint(tmp_path)["reproducibility_status"] == "dirty_untracked_code"
+def test_leave_source_sensitivity_excluded_from_family_and_outcome_wide_BH():
+    rows = pd.DataFrame([{"predictor": "a", "hypothesis_group_id": "a", "p_value": .04,
+        "fdr_family": "primary", "analysis_type": "timevarying", "outcome": "subsequent_essdai", "effect_measure": "beta",
+        "sensitivity": "none", "primary_canonical": True, "fdr_eligibility": True, "valid_for_inference": True},
+        {"predictor": "a", "hypothesis_group_id": "a", "p_value": .00001,
+        "fdr_family": "leave_source_sensitivity", "analysis_type": "timevarying", "outcome": "subsequent_essdai", "effect_measure": "beta",
+        "sensitivity": mod.LEAVE_SOURCE_SENSITIVITY, "primary_canonical": True, "fdr_eligibility": False, "valid_for_inference": True}])
+    family, _ = mod.apply_fdr_by_family(rows)
+    out, qc = mod.apply_outcome_wide_fdr(family)
+    assert out.q_value_family.iloc[0] == out.q_value_outcome_wide.iloc[0] == .04
+    assert pd.isna(out.q_value_family.iloc[1]) and pd.isna(out.q_value_outcome_wide.iloc[1])
+    assert qc.n_tests_bh.sum() == 1
 
 
-def test_run_comparison_checks_same_input_counts_and_keeps_dirty_reference_limitation():
-    hashes = {"integrated": "a"*64, "baseline": "b"*64, "context": None, "progression": None}
-    previous = {"input_sha256": hashes, "n_baseline_patients": 159, "n_episodes": 497, "git_worktree_dirty": True}
-    current = {**previous, "dry_run": True}
-    reference = {"status": "backed_up_reference", "metadata": previous, "results": pd.DataFrame()}
-    compared = mod.build_run_comparison(reference, current, pd.DataFrame())
-    assert compared.loc[compared.metric.eq("n_episodes"), "delta"].iloc[0] == 0
-    with pytest.raises(ValueError, match="cohort/episode count changed"):
-        mod.build_run_comparison(reference, {**current, "n_episodes": 498}, pd.DataFrame())
+@pytest.mark.parametrize("side", ["from", "to"])
+def test_temporal_qc_detects_composition_from_wrong_episode(side):
+    df, base, intervals, risks, registry = datasets(complete_composition(n=1))
+    assert mod.run_temporal_leakage_qc(df, base, intervals, risks, registry).status.eq("pass").all()
+    intervals.loc[0, side + "_essdai_other_domains_biological"] += 1
+    qc = mod.run_temporal_leakage_qc(df, base, intervals, risks, registry, hard_fail=False)
+    assert qc.check.eq(side + "_composition_source_episode").any()
+    with pytest.raises(ValueError, match="temporal leakage"):
+        mod.run_temporal_leakage_qc(df, base, intervals, risks, registry)
 
 
-def test_six_failed_cox_never_enter_family_or_outcome_wide_bh():
-    rows = [{"predictor": "supported-"+str(i), "hypothesis_group_id": "supported-"+str(i),
-        "p_value": p, "fdr_family": "cox-organ-domains", "analysis_type": "baseline",
-        "outcome": "new_domain_articular", "effect_measure": "HR", "sensitivity": "none",
-        "primary_canonical": True, "fdr_eligibility": True, "valid_for_inference": True}
-        for i, p in enumerate((.01, .03, .2))]
-    for name in ("salivary_flow_unstimulated", "ocular_schirmer_min", "rf", "leukopenia", "domain_hematologic", "domain_biological"):
-        rows.append({**rows[0], "predictor": name, "hypothesis_group_id": name,
-            "p_value": np.nan, "valid_for_inference": False, "model_status": "model_failed"})
-    family, qc = mod.apply_fdr_by_family(pd.DataFrame(rows))
-    out, wide = mod.apply_outcome_wide_fdr(family)
-    assert out.q_value.equals(out.q_value_family)
-    assert out.q_value_outcome_wide.iloc[:3].tolist() == pytest.approx([.03, .045, .2])
-    assert out.q_value.iloc[3:].isna().all() and out.q_value_outcome_wide.iloc[3:].isna().all()
-    assert qc.n_valid_tests.sum() == wide.n_tests_bh.sum() == 3
+def test_episode_discordance_audit_deduplicates_shared_interval_endpoints():
+    source = complete_composition(n=2)
+    source.loc[1, mod.ESSDAI] -= 2
+    source.loc[1, "source_protocol"] = "protocol-A"
+    df, _, _, _, registry = datasets(source)
+    original = df.copy(deep=True)
+    audit = mod.composition_episode_audit(df, registry)
+    discordant = audit.loc[audit.composition_category.eq("complete_panel_discordant")]
+    assert len(discordant) == 1 and discordant.total_minus_reconstructed.iloc[0] == -2
+    assert discordant.patient_id.iloc[0] == "p0" and discordant.clinical_episode_id.iloc[0] == "p0e1"
+    assert "essdai_total_version" not in audit and "domain_version" not in audit
+    assert audit.essdai_total_producer.eq("01_pop_distribution.py").all()
+    assert audit.domain_producer.eq("06_overlap_glandular.py").all()
+    summary = mod.composition_discordance_summary(audit)
+    assert summary.loc[summary.scope.eq("discordant_episodes") & summary.dimension.eq("total_minus_reconstructed"), "n_episodes"].sum() == 1
+    assert mod.composition_snapshot(audit)["n_discordant"] == 1
+    pd.testing.assert_frame_equal(df, original)
 
 
-def test_source_schema_audit_reads_canonical_registry_dictionary_without_inventing_provenance(tmp_path):
+def test_treatment_missing_or_retrospective_exposure_not_promoted_to_covariate():
     source = episodes()
-    registry = mod.resolve_predictors(mod.build_predictor_registry(), source, source)
-    pulmonary_column = next(s.time_varying_column for s in registry if s.name == "domain_pulmonary")
-    registry_path, dictionary_path = tmp_path/"10_variable_registry.csv", tmp_path/"11_variable_dictionary.csv"
-    pd.DataFrame({"public_variable": [mod.ESSDAI, pulmonary_column, "unrelated"],
-        "producer_script": ["official_total.py", "official_domains.py", "other.py"],
-        "source": ["pop", "overlap", "other"]}).to_csv(registry_path, index=False)
-    pd.DataFrame({"variable": ["dx_date", "disease_duration"], "description": ["diagnosis", "baseline duration"]}).to_csv(dictionary_path, index=False)
-    inventory = {"step10_registry": {"status": "available", "path": str(registry_path)},
-        "step11_dictionary": {"status": "available", "path": str(dictionary_path)},
-        "step11_dictionary_tables": {"status": "source_unavailable"}}
-    report = mod.build_source_schema_audit(source.loc[source.is_clinical_baseline], source, registry, inventory)
-    assert len(report["upstream_column_producers"]) == 2
-    assert report["dictionary_status"] == "inspected"
-    assert report["dictionary_duration_variables"] == ["dx_date", "disease_duration"]
-    assert not report["composition_provenance_manifest_present"]
-    assert "synthetic-" not in json.dumps(report)
+    source["ever_treated_during_followup"] = 1
+    table, metadata, exposure = mod.treatment_adjustment_decision({"integrated": source})
+    assert table.decision.eq("not_implemented").all() and not exposure
+    assert metadata["status"] == "not_implemented" and "no canonical temporally valid" in metadata["reason"]
+    df, base, intervals, risks, registry = datasets(source)
+    tasks = mod.build_analysis_tasks(df, base, intervals, risks, registry)
+    assert mod.add_treatment_sensitivities(tasks, df, base, exposure) is tasks
+    assert not any(t.extra_covariates for t in tasks)
+
+
+def test_registered_treatment_sensitivity_uses_exact_baseline_and_FROM_exposures():
+    source = complete_composition(n=2)
+    source["current_systemic_treatment"] = [0, 1, 0, 1]*2
+    source["current_systemic_treatment__measurement_date"] = source.clinical_anchor_date
+    source.loc[1, "current_systemic_treatment__measurement_date"] += pd.Timedelta(days=1)
+    evidence = pd.DataFrame([{"public_variable": "current_systemic_treatment",
+        "canonical_concept": "systemic_treatment_exposure", "temporal_scope": "as_of_episode", "producer_script": "verified_upstream.py"}])
+    df, base, intervals, risks, registry = datasets(source)
+    _, metadata, exposure = mod.treatment_adjustment_decision({"integrated": df, "baseline": base}, evidence)
+    assert metadata["status"] == "sensitivity_only"
+    tasks = mod.build_analysis_tasks(df, base, intervals, risks, registry)
+    enriched = mod.add_treatment_sensitivities(tasks, df, base, exposure)
+    sensitivities = [t for t in enriched if t.sensitivity == "treatment_adjusted"]
+    baseline = next(t for t in sensitivities if t.analysis_type == "baseline" and t.kind == "trajectory")
+    assert baseline.data.treatment_exposure.eq(0).all()
+    tv = next(t for t in sensitivities if t.analysis_type == "timevarying" and t.kind == "lagged")
+    assert pd.isna(tv.data.loc[tv.data.from_clinical_episode_id.eq("p0e1"), "treatment_exposure"].iloc[0])
+    assert tv.data.loc[tv.data.from_clinical_episode_id.eq("p0e0"), "treatment_exposure"].iloc[0] == 0
+    assert all(t.extra_covariates == ("treatment_exposure",) for t in sensitivities)
+    assert not any(t.extra_covariates for t in tasks)
+
+
+def test_code_fingerprint_excludes_environments_preserves_scientific_source_and_detects_changes(tmp_path):
+    paths = ["src/block_A/14_risk_factors_progression.py", "tests/test_risk_factors_progression.py", "config.py", "common.py", "dashboard/app.py"]
+    for name in paths + [".venv_dashboard/lib/python3.11/site-packages/example.py", "outputs/generated.py", "work/helper.py", "vendor/example.py"]:
+        path = tmp_path/name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# version 1\n")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", *paths], cwd=tmp_path, check=True)
+    subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.org", "commit", "-qm", "Source"], cwd=tmp_path, check=True)
+    first = mod.runtime_code_fingerprint(tmp_path)
+    assert set(first["code_file_sha256"]) == set(paths) and not first["git_code_dirty"]
+    (tmp_path/".venv_dashboard/lib/python3.11/site-packages/example.py").write_text("# changed dependency\n")
+    assert mod.runtime_code_fingerprint(tmp_path)["code_tree_sha256"] == first["code_tree_sha256"]
+    (tmp_path/"config.py").write_text("# changed configuration\n")
+    changed = mod.runtime_code_fingerprint(tmp_path)
+    assert changed["git_code_dirty"] and changed["code_tree_sha256"] != first["code_tree_sha256"]
+    (tmp_path/"src/untracked.py").write_text("# untracked scientific code\n")
+    assert mod.runtime_code_fingerprint(tmp_path)["reproducibility_status"] == "dirty_untracked_code"
+    (tmp_path/"config.py").unlink()
+    assert "config.py" in mod.runtime_code_fingerprint(tmp_path)["changed_scientific_code"]
+
+
+def test_missing_canonical_inputs_write_conditional_closure_and_fail(tmp_path):
+    args = mod.parse_args(["--integrated", str(tmp_path/"missing-integrated.parquet"),
+        "--baseline", str(tmp_path/"missing-baseline.parquet"), "--output-root", str(tmp_path/"run")])
+    with pytest.raises(FileNotFoundError, match="Required canonical inputs"):
+        mod.main(args)
+    qc = mod.output_directories(args.output_root)["qc"]
+    metadata = json.loads((qc/"14_analysis_metadata.json").read_text())
+    assert metadata["closure_status"]["final_decision"] == "CONDITIONAL"
+    assert metadata["input_sha256"]["integrated"] is None
+    assert metadata["treatment_adjustment"]["status"] == "not_audited"
+    closure = (qc/"14_closure_summary.md").read_text()
+    assert closure.endswith("STEP 14 CLOSURE STATUS: CONDITIONAL\n")
+    assert "Structural QC: not_run" in closure and "0 violations" not in closure
+    assert (qc/"14_output_manifest.csv").exists()
+
+
+def test_synthetic_run_cannot_close_real_cohort_even_with_clean_code(tmp_path):
+    dirs = mod.output_directories(tmp_path)
+    dirs["qc"].mkdir(parents=True)
+    metadata = {"input_origin": "synthetic_validation", "reproducibility_status": "fully_reproducible",
+        "git_code_dirty": False, "treatment_adjustment": {"status": "not_implemented"}}
+    mod.write_closure_summary(metadata, dirs)
+    assert metadata["closure_status"]["final_decision"] == "CONDITIONAL"
+    assert any("Synthetic" in item for item in metadata["closure_status"]["pending"])
+
+
+def test_treatment_sensitivity_cannot_silently_drop_constant_exposure():
+    source = complete_composition()
+    df, base, intervals, risks, registry = datasets(source)
+    spec = get_spec(registry, "domain_biological")
+    task = mod.ModelTask(spec, intervals.assign(y=intervals.to_essdai, treatment_exposure=1.),
+        "timevarying", "subsequent_essdai", "lagged", "treatment_adjusted", extra_covariates=("treatment_exposure",))
+    _, meta = mod.prepare_model(task, len(base))
+    assert not meta["supported_for_model"] and "required sensitivity adjustment" in meta["support_reason"]
+
+
+def test_companion_provenance_is_preserved_without_inventing_domain_version():
+    source = complete_composition(n=1)
+    context = source[mod.KEYS + ["clinical_anchor_date"]].copy()
+    context["source_protocol"] = "canonical-protocol"
+    context["_essdai_version"] = "recorded-ESSDAI-version"
+    enriched, baseline = mod.attach_episode_context(source, source.loc[source.is_clinical_baseline], context)
+    df, _, _, _, registry = datasets(enriched)
+    evidence = pd.DataFrame([{"public_variable": mod.ESSDAI, "producer_script": "01_pop_distribution.py"},
+        {"public_variable": mod.ESSDAI, "producer_script": "01_pop_distribution.py"}])
+    audit = mod.composition_episode_audit(df, registry, evidence)
+    assert audit.source_protocol.eq("canonical-protocol").all()
+    assert audit._essdai_version.eq("recorded-ESSDAI-version").all()
+    assert "domain_version" not in audit
+    assert audit.essdai_total_producer.eq("01_pop_distribution.py").all()
+    assert baseline.source_protocol.iloc[0] == "canonical-protocol"

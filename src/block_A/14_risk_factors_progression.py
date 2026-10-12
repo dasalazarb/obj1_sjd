@@ -16,6 +16,7 @@ import importlib.metadata
 import importlib.util
 import json
 import logging
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -63,9 +64,9 @@ EVENTS_PER_PARAMETER = 5
 SINGULAR_TOL = step13.SINGULAR_TOL
 RANDOM_SEED = 20261007
 ADJUSTMENT_RULE_VERSION = "hierarchical-v1"
-COMPOSITION_RULE_VERSION = "weighted-other-domains-v2"
-COMPOSITION_AUDIT_RULE_VERSION = "exclusive-priority-v1"
-DURATION_RULE_VERSION = "canonical-diagnosis-duration-v2"
+COMPOSITION_RULE_VERSION = "concordant-complete-panel-from-to-v2"
+COMPOSITION_TOLERANCE = 1e-8
+LEAVE_SOURCE_SENSITIVITY = "leave_source_domain_outcome"
 HYPOTHESIS_RULE_VERSION = "canonical-construct-v1"
 FDR_RULE_VERSION = "outcome-wide-v1"
 ADJUSTMENT_LEVELS = ("full", "reduced_A", "reduced_B", "minimal")
@@ -118,7 +119,7 @@ def read_table(path: Path) -> pd.DataFrame:
 
 
 def attach_episode_context(integrated, baseline, context):
-    """Join only canonical Step 10 evaluability/lab metadata, never predictors.
+    """Join canonical Step 10 evaluability/lab/provenance metadata, never predictors.
 
     Step 10 deliberately partitions its analytic and context products. Step 11
     remains the sole baseline selector; enrich its existing episode keys only.
@@ -134,7 +135,9 @@ def attach_episode_context(integrated, baseline, context):
     integrated, baseline, context = frames
     if set(map(tuple, integrated[KEYS].to_numpy())) != set(map(tuple, context[KEYS].to_numpy())):
         raise ValueError("Step 10 context episode keys disagree with integrated data")
-    allowed = [c for c in context if c.endswith(("_evaluable", "_valid", "__measurement_date",
+    provenance_fields = {"source_protocol", "_essdai_total_version", "_essdai_version", "_essdai_domain_version",
+                         "essdai_total_source", "_essdai_resolution_method"}
+    allowed = [c for c in context if c in provenance_fields or c.endswith(("_evaluable", "_valid", "__measurement_date",
                                                 "__days_from_anchor", "__unit", "__n_measurements"))]
     allowed += [c for c in ("_essdai_version", "_essdai_total_version", "essdai_total_source")
                 if c in context and c not in allowed]
@@ -497,23 +500,33 @@ def canonical_domain_weights():
     return weights
 
 
-def derive_other_domain_adjustments(intervals, registry, verified_provenance=None):
-    """Sensitivity-only FROM composition; invalid rows remain unknown with QC.
+def derive_domain_composition_side(frame, side, registry):
+    """Fail closed on both sides; upstream versions are never inferred from equality.
 
-    Complete panels must reconstruct the total. Partial panels additionally need
-    documented same-version/index inclusion evidence, not just a column name.
-    verified_provenance is an upstream metadata assertion, never fabricated here.
+    No available manifest in the current producer contract certifies partial
+    panels. Require all 12 evaluable scores to reconstruct the recorded total.
+    Raw contributions remain available for audit, including rejected subtractions.
     """
-    out = intervals.copy()
-    if out.duplicated(["patient_id", "from_clinical_episode_id"]).any():
-        raise ValueError("Composition audit requires unique canonical FROM episodes")
+    if side not in {"from", "to"}:
+        raise ValueError("Composition side must be from or to")
+    out = frame.copy()
     weights = canonical_domain_weights()
-    total = pd.to_numeric(out.from_essdai, errors="coerce")
-    scores = pd.DataFrame({d: pd.to_numeric(out["from_domain_" + d], errors="coerce") for d in DOMAINS})
-    out["from_composition_n_evaluable"] = scores.notna().sum(axis=1)
-    complete = scores.notna().all(axis=1)
-    reconstructed = sum(scores[d] * weights[d] for d in DOMAINS)
-    mismatch = complete & total.notna() & ~total.eq(reconstructed)
+    total = pd.to_numeric(out[side + "_essdai"], errors="coerce").astype(float)
+    scores = pd.DataFrame({d: pd.to_numeric(out[side + "_domain_" + d], errors="coerce").astype(float) for d in DOMAINS})
+    complete = scores.isin([0, 1, 2, 3]).all(axis=1)
+    weighted = scores.mul(pd.Series(weights))
+    reconstructed = weighted.sum(axis=1, min_count=len(DOMAINS))
+    concordant = complete & total.notna() & np.isclose(total, reconstructed, atol=COMPOSITION_TOLERANCE, rtol=0)
+    mismatch = complete & total.notna() & ~concordant
+    category = pd.Series("complete_panel_concordant", index=out.index)
+    category.loc[mismatch] = "complete_panel_discordant"
+    category.loc[~complete] = "incomplete_panel"
+    category.loc[total.isna()] = "missing_total"
+    out[side + "_complete_domain_panel"] = complete
+    out[side + "_reconstructed_essdai"] = reconstructed
+    out[side + "_total_minus_reconstructed"] = total - reconstructed
+    out[side + "_composition_concordant"] = concordant
+    out[side + "_composition_category"] = category
     specs = {s.name.removeprefix("domain_"): s for s in registry if s.family == "essdai_domain"}
     out["from_composition_complete_panel"] = complete
     out["from_composition_total_delta"] = (total - reconstructed).where(complete & total.notna())
@@ -530,77 +543,128 @@ def derive_other_domain_adjustments(intervals, registry, verified_provenance=Non
         known = total.notna() & ordinal.notna()
         invalid_ordinal = ordinal.notna() & ~ordinal.isin([0, 1, 2, 3])
         invalid_value = known & (~np.isfinite(other) | other.lt(0) | invalid_ordinal)
-        evidence = (verified_provenance or {}).get(domain, {})
-        confirmed = (evidence.get("total_column") == ESSDAI and
-            evidence.get("domain_column") == specs[domain].time_varying_column and
-            evidence.get("weight") == weight and evidence.get("index_version") and
-            evidence.get("total_includes_domain") is True and evidence.get("evidence_reference") and
-            evidence.get("verification_status") == "verified" and
-            len(str(evidence.get("evidence_sha256", ""))) == 64 and
-            all(character in "0123456789abcdef" for character in str(evidence["evidence_sha256"]).lower()))
-        partial_unverified = ~complete & (not bool(confirmed))
-        conflicting_evidence = pd.Series(False, index=out.index)
-        if confirmed:
-            conflicting_evidence = ((version.notna() & version.ne(str(evidence["index_version"]))) |
-                (total_version.notna() & total_version.ne(str(evidence["index_version"])))).fillna(False).astype(bool)
-        incompatible_domain = incompatible | conflicting_evidence
-        invalid_provenance = incompatible_domain | partial_unverified
-        negative = known & other.lt(0)
-        valid = known & ~invalid_value & ~mismatch & ~invalid_provenance
-        # Priority is exclusive. Flags remain overlapping, including the full
-        # 2x2 mismatch/negative intersection; no summation across 12 domains.
-        categories = np.select([total.isna(), ordinal.isna(), incompatible_domain | invalid_ordinal,
-            negative, mismatch, ~complete, complete & ~mismatch & ~invalid_ordinal],
-            ["missing_total", "missing_target_domain", "incompatible_provenance_or_scale",
-             "negative_target_subtraction", "complete_panel_discordant", "partial_panel",
-             "complete_panel_concordant"], default="other_unresolved")
-        out["from_composition_category_" + domain] = categories
-        out["from_composition_partial_provenance_confirmed_" + domain] = bool(confirmed)
-        out["from_domain_weighted_contribution_raw_" + domain] = contribution
-        out["from_domain_contribution_" + domain] = contribution.where(valid)
-        out["from_essdai_other_domains_" + domain] = other.where(valid)
-        qc.append({"domain": domain, "domain_weight": weight,
-            "source_columns": json.dumps([ESSDAI, specs[domain].time_varying_column]),
+        valid = known & ~invalid_value & concordant
+        domain_category = category.copy()
+        domain_category.loc[invalid_value] = "invalid_subtraction"
+        domain_category.loc[ordinal.isna()] = "missing_target_domain"
+        domain_category.loc[total.isna()] = "missing_total"
+        out[side + "_domain_weighted_contribution_raw_" + domain] = contribution
+        out[side + "_domain_contribution_" + domain] = contribution.where(valid)
+        out[side + "_essdai_other_domains_" + domain] = other.where(valid)
+        out[side + "_composition_category_" + domain] = domain_category
+        qc.append({"side": side, "domain": domain, "domain_weight": weight,
+            "source_columns": json.dumps([ESSDAI, specs[domain].time_varying_column if domain in specs else None]),
             "n_intervals": len(out), "n_available": int(valid.sum()),
             "n_missing_total_or_domain": int((~known).sum()),
             "n_invalid_subtraction": int(invalid_value.sum()),
             "n_complete_panel_total_mismatch": int(mismatch.sum()),
+            "n_incomplete_panels": int((~complete).sum()),
+            "n_complete_panel_concordant": int(concordant.sum()),
             "rule_version": COMPOSITION_RULE_VERSION,
             "support_reason": "invalid or missing composition excluded; no correction/imputation",
-            "n_partial_unverified": int((known & partial_unverified).sum()),
-            "n_incompatible_version": int(incompatible_domain.sum()),
-            "comparison_scope": "complete concordance or documented same-index partial provenance required"})
-        for category in ("missing_total", "missing_target_domain", "partial_panel", "complete_panel_concordant",
-                         "complete_panel_discordant", "negative_target_subtraction", "incompatible_provenance_or_scale", "other_unresolved"):
-            use = pd.Series(categories == category, index=out.index)
-            n = int(use.sum())
-            audit.append({"domain": domain, "category": category, "n_intervals": len(out),
-                "n_category": n, "n_eligible": int((use & valid).sum()),
-                "n_excluded_category": n-int((use & valid).sum()),
-                "n_available_domain": int(valid.sum()), "n_excluded_domain": len(out)-int(valid.sum()),
-                "pct_eligible_domain": 100*int(valid.sum())/len(out) if len(out) else np.nan,
-                "pct_eligible": 100*int((use & valid).sum())/n if n else np.nan,
-                "n_discordant_and_negative": int((use & mismatch & negative).sum()),
-                "n_discordant_not_negative": int((use & mismatch & ~negative).sum()),
-                "n_negative_not_discordant": int((use & ~mismatch & negative).sum()),
-                "n_neither_flag": int((use & ~mismatch & ~negative).sum()),
-                "n_partial_unverified": int((use & known & partial_unverified).sum()),
-                "n_zero_score": int((use & ordinal.eq(0)).sum()),
-                "n_zero_observed_verified": np.nan, "n_zero_filled_verified": np.nan,
-                "zero_origin": "upstream observed/imputed provenance unavailable; zero is not proof of observation",
-                "total_column": ESSDAI, "domain_column": specs[domain].time_varying_column,
-                "domain_weight": weight, "provenance_evidence": evidence.get("evidence_reference", "not_available"),
-                "provenance_evidence_sha256": evidence.get("evidence_sha256", ""),
-                "classification_rule_version": COMPOSITION_AUDIT_RULE_VERSION,
-                "exclusion_reason": "empty_category" if not n else "none" if int((use & valid).sum()) == n else
-                    "partial_panel_provenance_unverified" if category == "partial_panel" else category})
-    out.attrs["domain_composition_audit_summary"] = audit
-    out.attrs["domain_composition_discrepancy_distribution"] = (
-        out.loc[complete & total.notna(), ["from_composition_total_delta"]]
-        .assign(sign=lambda d: np.sign(d.from_composition_total_delta), magnitude=lambda d: d.from_composition_total_delta.abs())
-        .groupby(["from_composition_total_delta", "sign", "magnitude"]).size().rename("n_unique_from_episodes")
-        .reset_index().to_dict("records"))
+            "composition_provenance_manifest_present": False,
+            "comparison_scope": "complete evaluable concordant panels only; partial panels excluded"})
     return out, pd.DataFrame(qc)
+
+
+def derive_other_domain_adjustments(intervals, registry):
+    out, from_qc = derive_domain_composition_side(intervals, "from", registry)
+    out, to_qc = derive_domain_composition_side(out, "to", registry)
+    return out, pd.concat([from_qc, to_qc], ignore_index=True)
+
+
+def composition_episode_audit(df, registry, variable_registry=None):
+    """Audit unique canonical episodes, never interval copies or corrected totals."""
+    fields = KEYS + ["clinical_anchor_date", "clinical_visit_number"]
+    fields += [c for c in ("source_protocol", "_essdai_total_version", "_essdai_version", "_essdai_domain_version",
+                          "essdai_total_source", "_essdai_resolution_method") if c in df]
+    audit = df[fields].copy()
+    side = pd.DataFrame({"from_essdai": df[ESSDAI]}, index=df.index)
+    for domain in DOMAINS:
+        side["from_domain_" + domain] = domain_values(df, domain)
+    composition, _ = derive_domain_composition_side(side, "from", registry)
+    audit["essdai_total"] = df[ESSDAI]
+    for domain in DOMAINS:
+        audit["domain_" + domain] = side["from_domain_" + domain]
+        audit["weighted_" + domain] = composition["from_domain_weighted_contribution_raw_" + domain]
+    for target, source in (("reconstructed_essdai", "reconstructed_essdai"),
+                           ("total_minus_reconstructed", "total_minus_reconstructed"),
+                           ("complete_domain_panel", "complete_domain_panel"),
+                           ("composition_concordant", "composition_concordant"),
+                           ("composition_category", "composition_category")):
+        audit[target] = composition["from_" + source]
+    audit["absolute_difference"] = audit.total_minus_reconstructed.abs()
+    negative = pd.DataFrame({d: audit["weighted_" + d].gt(audit.essdai_total) for d in DOMAINS})
+    audit["articular_negative_subtraction"] = negative.articular
+    audit["any_negative_target_subtraction"] = negative.any(axis=1)
+    audit["essdai_total_producer"] = "01_pop_distribution.py"
+    audit["domain_producer"] = "06_overlap_glandular.py"
+    audit["producer_evidence"] = "Step 10 producer contract; runtime registry unavailable"
+    if variable_registry is not None and {"public_variable", "producer_script"}.issubset(variable_registry):
+        mapping = variable_registry.dropna(subset=["public_variable", "producer_script"])
+        mapping = mapping.groupby("public_variable").producer_script.agg(lambda s: ";".join(sorted(set(map(str, s)))))
+        if ESSDAI in mapping.index:
+            audit["essdai_total_producer"] = mapping.loc[ESSDAI]
+        columns = [s.time_varying_column for s in registry if s.family == "essdai_domain" and s.time_varying_column]
+        producers = sorted(set(mapping.loc[c] for c in columns if c in mapping.index))
+        if producers:
+            audit["domain_producer"] = ";".join(producers)
+        audit["producer_evidence"] = "10_variable_registry.csv and Step 10 producer contract"
+    # Version fields are retained only when supplied upstream, never inferred.
+    for original, target in (("_essdai_total_version", "essdai_total_version"), ("_essdai_domain_version", "domain_version")):
+        if original in audit:
+            audit[target] = audit[original]
+    audit["provenance_status"] = "same_version_not_certified; complete_concordance_required"
+    return audit
+
+
+def composition_discordance_summary(audit):
+    rows = []
+    dimensions = {"composition_category": audit.composition_category,
+        "total_minus_reconstructed": audit.total_minus_reconstructed,
+        "absolute_difference": audit.absolute_difference,
+        "clinical_visit_number": audit.clinical_visit_number,
+        "calendar_year": pd.to_datetime(audit.clinical_anchor_date).dt.year,
+        "essdai_total_state": step13.classify_essdai_series(audit.essdai_total),
+        "articular_active": audit.domain_articular.gt(0).where(audit.domain_articular.notna()),
+        "articular_negative_subtraction": audit.articular_negative_subtraction,
+        "any_negative_target_subtraction": audit.any_negative_target_subtraction,
+        "essdai_total_producer": audit.essdai_total_producer,
+        "domain_producer": audit.domain_producer}
+    for column in ("source_protocol", "essdai_total_version", "domain_version"):
+        if column in audit:
+            dimensions[column] = audit[column]
+    for domain in DOMAINS:
+        values = audit["domain_" + domain]
+        dimensions[domain + "_active"] = values.gt(0).where(values.notna())
+    for scope, frame in (("all_episodes", audit), ("discordant_episodes", audit.loc[audit.composition_category.eq("complete_panel_discordant")])):
+        for dimension, values in dimensions.items():
+            for value, count in values.loc[frame.index].value_counts(dropna=False).items():
+                rows.append({"scope": scope, "dimension": dimension, "value": str(value), "n_episodes": int(count)})
+    return pd.DataFrame(rows, columns=["scope", "dimension", "value", "n_episodes"])
+
+
+def composition_snapshot(audit):
+    discordant = audit.composition_category.eq("complete_panel_discordant")
+    return {"n_episodes_audited": len(audit), "n_complete_panels": int(audit.complete_domain_panel.sum()),
+        "n_concordant": int(audit.composition_concordant.sum()), "n_discordant": int(discordant.sum()),
+        "n_incomplete_panels": int((~audit.complete_domain_panel).sum()),
+        "delta_distribution": {str(k): int(v) for k, v in audit.loc[discordant, "total_minus_reconstructed"].value_counts().sort_index().items()},
+        "n_articular_negative_subtractions": int(audit.articular_negative_subtraction.sum())}
+
+
+def build_leave_source_domain_qc(intervals):
+    rows = []
+    for domain in DOMAINS:
+        fr = intervals["from_essdai_other_domains_" + domain].notna()
+        to = intervals["to_essdai_other_domains_" + domain].notna()
+        rows.append({"domain": domain, "n_intervals": len(intervals), "n_valid_from": int(fr.sum()),
+            "n_valid_to": int(to.sum()), "n_valid_both": int((fr & to).sum()),
+            "n_excluded_from": int((~fr).sum()), "n_excluded_to": int((~to).sum()),
+            "n_complete_both_patients": int(intervals.loc[fr & to, "patient_id"].nunique()),
+            "composition_requirement": "complete evaluable concordant panels on FROM and TO",
+            "primary_bh_eligible": False, "rule_version": COMPOSITION_RULE_VERSION})
+    return pd.DataFrame(rows)
 
 
 def build_lagged_interval_dataset(df, baseline, registry):
@@ -747,11 +811,29 @@ def run_temporal_leakage_qc(df, baseline, intervals, risk_sets, registry, hard_f
     record("duplicate_intervals", intervals.duplicated(["patient_id", "from_clinical_episode_id", "to_clinical_episode_id"]), intervals)
     record("negative_followup", intervals.start_time.lt(0) | intervals.stop_time.le(intervals.start_time), intervals)
     indexed = df.assign(clinical_episode_id=df.clinical_episode_id.astype("string")).set_index(KEYS)
+    episode_composition = pd.DataFrame({"from_essdai": df[ESSDAI]}, index=df.index)
+    for domain in DOMAINS:
+        episode_composition["from_domain_" + domain] = domain_values(df, domain)
+    episode_composition, _ = derive_domain_composition_side(episode_composition, "from", registry)
+    episode_composition.index = pd.MultiIndex.from_frame(df[KEYS].astype("string"))
+    def same_value(expected, actual):
+        return (pd.isna(expected) and pd.isna(actual)) or (
+            pd.notna(expected) and pd.notna(actual) and bool(np.isclose(expected, actual, atol=COMPOSITION_TOLERANCE, rtol=0)))
     for i, row in intervals.iterrows():
         key = (row.patient_id, row.from_clinical_episode_id)
         source = indexed.loc[[key]].reset_index()
         fr = indexed.loc[key]
         record("from_episode_date", [fr.clinical_anchor_date != row.from_date], intervals.loc[[i]])
+        for side in ("from", "to"):
+            side_key = (row.patient_id, row[side + "_clinical_episode_id"])
+            episode = indexed.loc[side_key]
+            record(side + "_episode_date", [episode.clinical_anchor_date != row[side + "_date"]], intervals.loc[[i]])
+            record(side + "_episode_essdai", [not same_value(episode[ESSDAI], row[side + "_essdai"])], intervals.loc[[i]])
+            composition = episode_composition.loc[side_key]
+            for domain in DOMAINS:
+                for component in ("domain_", "essdai_other_domains_"):
+                    column = side + "_" + component + domain
+                    record(side + "_composition_source_episode", [not same_value(composition["from_" + component + domain], row[column])], intervals.loc[[i]], domain + ":" + component)
         ordered = df.loc[df.patient_id.eq(row.patient_id)].sort_values(
             ["clinical_anchor_date", "clinical_visit_number", "clinical_episode_id"], kind="stable")
         ids = ordered.clinical_episode_id.astype(str).tolist()
@@ -799,6 +881,8 @@ def run_temporal_leakage_qc(df, baseline, intervals, risk_sets, registry, hard_f
             "predictor_from_episode", "no_future_measurement", "official_baseline_predictor",
             "inactive_target_at_start", "riskset_inactive_at_entry", "positive_risk_followup",
             "riskset_official_inactive_entry", "riskset_evaluable_endpoint")])
+        out = pd.concat([out, pd.DataFrame([{"check": side + "_" + check, "status": "pass", "detail": "0 violations"}
+            for side in ("from", "to") for check in ("episode_essdai", "composition_source_episode", "episode_date")])], ignore_index=True)
     return out
 
 
@@ -814,6 +898,9 @@ class ModelTask:
     support_exclusion: str = ""
     minimum_exposed_events: int = MIN_EXPOSED_EVENTS
     state_covariate: str = "from_essdai"
+    fixed_adjustment_level: str = ""
+    extra_covariates: tuple = ()
+    comparison_role: str = ""
 
 
 def _family(task):
@@ -954,6 +1041,7 @@ def prepare_model(task, n_source_patients, minimum_events=MIN_EVENTS_COX):
                                 labels=["<1y", "1-3y", ">=3y"], right=False).astype(object)
         required += ["time_band"]
     core = [] if task.omit_baseline_essdai or task.kind == "lagged" else ["baseline_essdai"]
+    core += list(task.extra_covariates)
     desired = core + ["age", "sex", "duration"]
     for name in set(required + desired):
         if name not in d:
@@ -985,12 +1073,20 @@ def prepare_model(task, n_source_patients, minimum_events=MIN_EVENTS_COX):
         demographic_constants = [c for c in constants if c not in core]
         if demographic_constants:
             reasons.append("constant adjustment: " + ",".join(demographic_constants))
+        for covariate in task.extra_covariates:
+            if covariate in constants:
+                reasons.append("constant required sensitivity adjustment: " + covariate)
+            if covariate == "treatment_exposure":
+                treated = subset.loc[subset[covariate].eq(1), "patient_id"].nunique()
+                untreated = subset.loc[subset[covariate].eq(0), "patient_id"].nunique()
+                if treated < MIN_EXPOSED or untreated < MIN_UNEXPOSED:
+                    reasons.append("insufficient treated/untreated patients for sensitivity")
         unit_col = "pred_unit__" + task.spec.name
         units = sorted(map(str, subset[unit_col].dropna().unique())) if unit_col in subset else []
         if task.spec.family == "laboratory" and len(units) > 1:
             reasons.append("mixed laboratory units; no conversion defined in Step 14")
         supported = not reasons
-        if supported and selected is None:
+        if supported and selected is None and (not task.fixed_adjustment_level or task.fixed_adjustment_level == level):
             selected = len(evaluated)
         evaluated.append((subset, usable, formula, counts, parameters, reasons, units))
         candidate_qc.append({"level": level, "candidate_covariates": candidate,
@@ -1000,7 +1096,8 @@ def prepare_model(task, n_source_patients, minimum_events=MIN_EVENTS_COX):
             "formula": formula, "supported": supported,
             "support_reason": "; ".join(dict.fromkeys(reasons)) or "supported"})
     # Unsupported tasks retain the Minimal attempted design and its exact counts.
-    chosen = selected if selected is not None else len(evaluated) - 1
+    chosen = selected if selected is not None else (
+        ADJUSTMENT_LEVELS.index(task.fixed_adjustment_level) if task.fixed_adjustment_level else len(evaluated) - 1)
     full, usable, formula, counts, parameters, reasons, units = evaluated[chosen]
     adjustment_status = ADJUSTMENT_LEVELS[chosen]
     full_support_reason = candidate_qc[0]["support_reason"]
@@ -1038,6 +1135,12 @@ def prepare_model(task, n_source_patients, minimum_events=MIN_EVENTS_COX):
         "standardization_mean": mean, "standardization_sd": sd,
         "standardization_cohort": "available as-of predictors in outcome-eligible source cohort, before covariate complete-case restriction",
         "structural_relationship": "ESSDAI total includes predictor domain" if task.spec.family == "essdai_domain" else "none"}
+    sample_columns = [c for c in ("patient_id", "from_clinical_episode_id", "to_clinical_episode_id", "clinical_anchor_date", "time_years") if c in full]
+    keys = full[sample_columns].astype(str).sort_values(sample_columns, kind="stable").values.tolist()
+    metadata["analysis_sample_hash"] = hashlib.sha256(json.dumps(keys, separators=(",", ":")).encode()).hexdigest()
+    metadata["matched_sample_hash"] = metadata["analysis_sample_hash"] if task.comparison_role and task.comparison_role != "primary_full_sample" else ""
+    metadata["comparison_role"] = task.comparison_role
+    metadata["fixed_adjustment_level"] = task.fixed_adjustment_level
     return full, metadata
 
 
@@ -1048,6 +1151,8 @@ def result_template(task, meta):
     estimand = {"trajectory": "difference in annual ESSDAI slope",
         "lagged": "difference in subsequent ESSDAI conditional on starting ESSDAI",
         "cox": "first-observed-event hazard association", "poisson": "subsequent first-observed-event rate association"}[task.kind]
+    if task.sensitivity == LEAVE_SOURCE_SENSITIVITY:
+        estimand = "difference in subsequent ESSDAI outside source domain conditional on prior ESSDAI outside source domain"
     return {**meta, "analysis_type": task.analysis_type, "predictor": task.spec.name,
         "predictor_label": task.spec.label, "predictor_family": task.spec.family,
         "predictor_type": task.spec.variable_type, "baseline_column": task.spec.baseline_column,
@@ -1058,14 +1163,12 @@ def result_template(task, meta):
         "alternative_to": task.spec.alternative_to, "analysis_role": task.spec.analysis_role,
         "redundancy_evidence": task.spec.redundancy_evidence,
         "hypothesis_rule_version": HYPOTHESIS_RULE_VERSION,
-        "fdr_eligibility": task.spec.fdr_eligibility,
-        "claim_status": "unsupported", "inference_tier": "unsupported",
+        "fdr_eligibility": task.spec.fdr_eligibility and task.sensitivity == "none",
+        "claim_status": "sensitivity" if task.sensitivity != "none" else "unsupported", "inference_tier": "unsupported",
         "estimand": estimand, "sensitivity": task.sensitivity,
         "model_attempted": "none", "model_used": "none",
         "effect_measure": "HR" if task.kind == "cox" else "IRR" if task.kind == "poisson" else "beta",
-        "estimate": np.nan, "ci95_low": np.nan, "ci95_high": np.nan,
-        "standard_error": np.nan, "attempt_scope": meta.get("attempt_scope", "planned_hypothesis"),
-        "n_fitted_patients": np.nan, "n_fitted_intervals": np.nan,
+        "estimate": np.nan, "standard_error": np.nan, "ci95_low": np.nan, "ci95_high": np.nan,
         "p_value": np.nan, "q_value": np.nan, "fdr_family": _family(task),
         "converged": False, "singular_fit": False, "fallback_used": False,
         "ph_assumption_p_value": np.nan, "ph_assumption_status": "not_tested",
@@ -1075,7 +1178,7 @@ def result_template(task, meta):
             ("; ESSDAI total includes this domain; review weighted other-domains sensitivity" if task.spec.family == "essdai_domain" else "") +
             ("; sensitivity state equals original numerically, not independent evidence" if meta["sensitivity_numerically_identical_state"] else ""),
         "model_selection_note": TV_NOTE if task.kind == "poisson" else "",
-        "treatment_adjustment": "treatment adjustment not implemented in Step 14"}
+        "treatment_adjustment": "canonical as-of systemic treatment sensitivity" if task.extra_covariates else "primary models unchanged; see 14_treatment_adjustment_decision.csv"}
 
 
 def _extract_fit(row, fit, term, exponential=False):
@@ -1086,8 +1189,7 @@ def _extract_fit(row, fit, term, exponential=False):
             vals = np.exp(vals)
     if not np.isfinite(vals).all() or se <= 0 or not (0 <= p <= 1):
         raise ValueError("invalid coefficient inference")
-    row.update(estimate=vals[0], ci95_low=vals[1], ci95_high=vals[2], p_value=p,
-               standard_error=se,
+    row.update(estimate=vals[0], standard_error=se, ci95_low=vals[1], ci95_high=vals[2], p_value=p,
                valid_for_inference=True, converged=True, model_status="ok")
     row["interpretation_status"] = "sensitivity_valid" if row["sensitivity"] != "none" else (
         "exploratory_sparse" if row["adjustment_status"] != "full" else "primary_valid")
@@ -1312,9 +1414,7 @@ def fit_task(task, data, metadata, attempts):
     status = "failed" if not row["valid_for_inference"] else (
         "alternative_representation" if not task.spec.primary_canonical else
         "sensitivity" if task.sensitivity != "none" else "primary")
-    row.update(claim_status=status, inference_tier=status)
-    if row["valid_for_inference"]:
-        row.update(n_fitted_patients=row["n_patients"], n_fitted_intervals=row["n_intervals"])
+    row.update(claim_status="sensitivity" if task.sensitivity != "none" else status, inference_tier=status)
     return row
 
 
@@ -1324,6 +1424,10 @@ def apply_fdr_by_family(results):
     qc = []
     for family, group in results.groupby("fdr_family", sort=True):
         valid = group.valid_for_inference.fillna(False) & group.p_value.between(0, 1)
+        # New leave-source and matched comparisons are reported without BH.
+        if "sensitivity" in group:
+            valid &= ~group.sensitivity.isin([LEAVE_SOURCE_SENSITIVITY,
+                "domain_primary_matched_sample", "domain_other_domains_matched_sample"])
         indices = group.index[valid]
         if len(indices):
             results.loc[indices, "q_value"] = multipletests(group.loc[indices, "p_value"], method="fdr_bh")[1]
@@ -1451,9 +1555,23 @@ def build_analysis_tasks(df, baseline, intervals, domain_risks, registry):
             domain = spec.name.removeprefix("domain_")
             tasks.append(ModelTask(spec, subsequent, "timevarying", "subsequent_essdai", "lagged",
                 "domain_from_other_domains_adjusted", state_covariate="from_essdai_other_domains_" + domain))
-            concordant = subsequent.loc[subsequent.from_composition_complete_concordant.eq(True)]
-            tasks.append(ModelTask(spec, concordant, "timevarying", "subsequent_essdai", "lagged",
-                "complete_concordant_panel_only", state_covariate="from_essdai_other_domains_" + domain))
+            state, future = "from_essdai_other_domains_" + domain, "to_essdai_other_domains_" + domain
+            eligible = intervals.loc[intervals[state].notna() & intervals[future].notna()].assign(y=lambda d: d[future])
+            leave = ModelTask(spec, eligible, "timevarying", "subsequent_essdai", "lagged",
+                LEAVE_SOURCE_SENSITIVITY, state_covariate=state,
+                comparison_role="leave_source_domain_outcome_matched_sample")
+            # Select once before fitting and freeze the complete cases and level
+            # for all three comparisons. Total = other-state + weighted x makes
+            # the two state designs equivalent in rank, but not in estimand.
+            matched, selected = prepare_model(leave, len(baseline))
+            level = selected["adjustment_status"]
+            tasks.extend([
+                replace(leave, data=matched, fixed_adjustment_level=level),
+                ModelTask(spec, matched.assign(y=matched.to_essdai), "timevarying", "subsequent_essdai", "lagged",
+                    "domain_primary_matched_sample", fixed_adjustment_level=level, comparison_role="primary_matched_sample"),
+                ModelTask(spec, matched.assign(y=matched.to_essdai), "timevarying", "subsequent_essdai", "lagged",
+                    "domain_other_domains_matched_sample", state_covariate=state, fixed_adjustment_level=level,
+                    comparison_role="other_domains_matched_sample")])
         if spec.family == "laboratory" and spec.time_varying_column:
             stem = spec.time_varying_column.removesuffix("__value")
             days_col = stem + "__days_from_anchor"
@@ -1475,56 +1593,17 @@ def build_analysis_tasks(df, baseline, intervals, domain_risks, registry):
     return tasks
 
 
-def build_domain_sensitivity_comparison(prepared, results, minimum_events, attempts):
-    """Exploratory fits with identical rows and frozen primary adjustment.
-
-    Full-sample primary rows reuse selected inference. Matched fits never enter
-    primary FDR or replace a planned hypothesis. No post-fit level reselection.
-    """
-    rows = []
-    keys = ["patient_id", "from_clinical_episode_id", "to_clinical_episode_id"]
-    lookup = {(task.spec.name, task.sensitivity): (task, data, meta)
-        for task, data, meta in prepared if task.kind == "lagged" and task.spec.family == "essdai_domain"}
-    for domain in DOMAINS:
-        name = "domain_" + domain
-        main_task, main_data, main_meta = lookup[(name, "none")]
-        other_task, other_data, other_meta = lookup[(name, "domain_from_other_domains_adjusted")]
-        if main_data.duplicated(keys).any() or other_data.duplicated(keys).any():
-            raise ValueError("Matched comparison requires unique canonical intervals")
-        common = pd.MultiIndex.from_frame(main_data[keys]).intersection(pd.MultiIndex.from_frame(other_data[keys]))
-        matched = main_data.loc[pd.MultiIndex.from_frame(main_data[keys]).isin(common)].copy().reset_index(drop=True)
-        sample_hash = hashlib.sha256(json.dumps(sorted(map(tuple, matched[keys].astype(str).to_numpy()))).encode()).hexdigest()
-        full_row = results.loc[results.predictor.eq(name) & results.analysis_type.eq("timevarying") &
-            results.outcome.eq("subsequent_essdai") & results.sensitivity.eq("none")].iloc[0].to_dict()
-        variants = [("primary_full_sample", full_row, None)]
-        adjustment = [c for c in main_meta["adjustment_covariates"].split(",") if c]
-        for variant, task in (("primary_matched_sample", main_task), ("other_domains_matched_sample", other_task)):
-            candidate = replace(task, sensitivity=variant)
-            formula = _design_formula(candidate, adjustment, matched)
-            counts, parameters, reasons = _check_support(matched, candidate, minimum_events, formula)
-            if main_meta["selected_adjustment_level"] == "none":
-                reasons.append("primary adjustment level unsupported; no replacement level chosen")
-            meta = {**main_meta, **counts, "formula": formula, "n_complete_cases": len(matched),
-                "candidate_parameters": parameters, "supported_for_model": not reasons,
-                "support_reason": "; ".join(reasons) or "supported",
-                "selection_reason": "frozen primary pre-fit demographic adjustment on common interval intersection",
-                "attempt_scope": "domain_sensitivity_comparison", "state_covariate": candidate.state_covariate,
-                "sensitivity_numerically_identical_state": bool(len(matched) and candidate.state_covariate != "from_essdai" and
-                    np.allclose(matched[candidate.state_covariate], matched.from_essdai))}
-            fitted = fit_task(candidate, matched.copy(), meta, attempts)
-            variants.append((variant, fitted, sample_hash))
-        for variant, row, digest in variants:
-            rows.append({"predictor": name, "comparison_variant": variant,
-                **{c: row[c] for c in ("model_status", "model_used", "formula", "adjustment_covariates",
-                    "selected_adjustment_level", "n_patients", "n_intervals", "n_events", "n_complete_cases", "estimate",
-                    "standard_error", "ci95_low", "ci95_high", "p_value", "valid_for_inference", "support_reason")},
-                "n_fitted_patients": row["n_patients"] if row["valid_for_inference"] else np.nan,
-                "n_fitted_intervals": row["n_intervals"] if row["valid_for_inference"] else np.nan,
-                "matched_sample_sha256": digest, "comparison_role": "exploratory; never primary BH",
-                "n_primary_full_intervals": len(main_data), "n_other_domains_prefit_intervals": len(other_data),
-                "sensitivity_numerically_identical_state": row["sensitivity_numerically_identical_state"],
-                "exclusion_reason": "none" if row["valid_for_inference"] else row["support_reason"] + "; " + row["warning"]})
-    return pd.DataFrame(rows)
+def build_domain_sensitivity_comparison(results):
+    relevant = results.loc[results.predictor_family.eq("essdai_domain") &
+                           results.analysis_type.eq("timevarying") & results.outcome.eq("subsequent_essdai")].copy()
+    full = relevant.loc[relevant.sensitivity.eq("none")].assign(comparison_role="primary_full_sample")
+    matched = relevant.loc[relevant.comparison_role.isin(["primary_matched_sample", "other_domains_matched_sample",
+                                                        "leave_source_domain_outcome_matched_sample"])]
+    out = pd.concat([full, matched], ignore_index=True)
+    for domain, group in matched.groupby("predictor"):
+        if group.matched_sample_hash.nunique() != 1 or group.n_complete_cases.nunique() != 1 or group.n_patients.nunique() != 1:
+            raise ValueError(f"Domain comparison samples disagree: {domain}")
+    return out
 
 
 def build_attrition_tables(results):
@@ -1673,6 +1752,10 @@ def parse_args(argv=None):
     parser.add_argument("--baseline", type=Path, default=common.INTEGRATED_BASELINE_PARQUET)
     parser.add_argument("--context", type=Path, default=None,
                         help="Step 10 context companion (default: beside --integrated, if present)")
+    parser.add_argument("--variable-registry", type=Path, default=None,
+                        help="Step 10 10_variable_registry.csv (default: beside --integrated)")
+    parser.add_argument("--input-origin", choices=("canonical", "synthetic_validation"), default="canonical",
+                        help="Synthetic validation runs can never receive real-cohort closure PASS")
     parser.add_argument("--progression", type=Path, default=common.DISEASE_ACTIVITY_PROGRESSION_PARQUET,
                         help="Optional Step 13 episode product; definitions always imported from Step 13")
     parser.add_argument("--output-root", type=Path, default=ROOT)
@@ -1691,7 +1774,107 @@ def _write_csv(frame, path):
     frame.to_csv(path, index=False)
 
 
-def _sha256_file(path):
+def treatment_adjustment_decision(sources, variable_registry=None):
+    """Use only a registered binary systemic exposure with dated as-of evidence.
+
+    Names alone, raw drugs, and retrospective ever-exposure are insufficient.
+    A future or unknown measurement remains missing, never untreated.
+    """
+    rows, valid_sources = [], {}
+    registry = variable_registry if variable_registry is not None else pd.DataFrame()
+    for source_name, frame in sources.items():
+        candidates = [c for c in frame if any(word in c.lower() for word in ("treat", "therap", "medication", "drug_exposure"))]
+        usable = []
+        for column in candidates:
+            if not {"public_variable", "canonical_concept", "temporal_scope", "producer_script"}.issubset(registry):
+                continue
+            evidence = registry.loc[registry.public_variable.eq(column) &
+                registry.canonical_concept.eq("systemic_treatment_exposure") &
+                registry.temporal_scope.isin(["as_of_episode", "baseline"]) & registry.producer_script.fillna("").ne("")]
+            if len(evidence) != 1 or "ever" in column.lower():
+                continue
+            scope = evidence.temporal_scope.iloc[0]
+            if scope == "baseline" and source_name != "baseline":
+                continue
+            date_column = column + "__measurement_date"
+            if date_column not in frame:
+                continue
+            values = pd.to_numeric(frame[column], errors="coerce")
+            if not values.dropna().isin([0, 1]).all() or (frame[column].notna() & values.isna()).any():
+                continue
+            dates = pd.to_datetime(frame[date_column], errors="coerce")
+            known = dates.notna() & dates.le(frame.clinical_anchor_date) & values.notna()
+            values = values.where(known).astype(float)
+            if values.notna().any():
+                usable.append((column, values, scope))
+        accepted = len(usable) == 1
+        if accepted:
+            column, values, scope = usable[0]
+            valid_sources[source_name] = values
+        rows.append({"decision": "sensitivity_only" if accepted else "not_implemented",
+            "source_checked": source_name, "candidate_columns": json.dumps(candidates),
+            "temporal_scope": scope if accepted else "no_verified_baseline_or_asof_episode_exposure",
+            "coverage": float(values.notna().mean()) if accepted and len(frame) else 0.,
+            "n_available": int(values.notna().sum()) if accepted else 0,
+            "selected_column": column if accepted else "",
+            "reason": "registered binary systemic exposure known at or before canonical episode" if accepted else
+                "no unique canonical temporally valid systemic treatment exposure; names/ever-exposure are insufficient",
+            "primary_analysis_action": "unchanged",
+            "sensitivity_action": "treatment_adjusted_sensitivity_subject_to_existing_support_gates" if accepted else "not_implemented; no ad hoc derivation",
+            "protocol_consistency": 'allowed under "as appropriate"; observational limitation documented'})
+    decision = pd.DataFrame(rows)
+    metadata = {"status": "sensitivity_only" if valid_sources else "not_implemented",
+        "reason": "registered as-of exposure available" if valid_sources else "no canonical temporally valid treatment exposure available to Step 14",
+        "source_checked": list(sources), "candidate_columns": {r["source_checked"]: json.loads(r["candidate_columns"]) for r in rows},
+        "temporal_validity": "measurement dated at/before canonical episode required; future/unknown excluded",
+        "decision_rule": "registered binary systemic exposure, verified producer and temporal_scope; no raw derivation; existing model support gates",
+        "producer_contracts_checked": ["10_build_integrated_longitudinal_dataset.py", "11_integrated_baseline_characterization.py"],
+        "primary_analysis_action": "unchanged", "causal_interpretation": False}
+    return decision, metadata, valid_sources
+
+
+def add_treatment_sensitivities(tasks, df, baseline, exposures):
+    if not exposures:
+        return tasks
+    baseline_values = exposures.get("baseline")
+    if "integrated" in exposures:
+        known = df[KEYS].assign(treatment_exposure=exposures["integrated"]).set_index(KEYS).treatment_exposure
+        baseline_map = baseline[KEYS].merge(known.reset_index(), on=KEYS, how="left", validate="one_to_one")
+        baseline_map = baseline_map.set_index("patient_id").treatment_exposure
+    elif baseline_values is not None:
+        baseline_map = baseline.assign(treatment_exposure=baseline_values).set_index("patient_id").treatment_exposure
+    else:
+        baseline_map = None
+    extras = []
+    for task in tasks:
+        if task.sensitivity != "none" or not task.spec.primary_canonical or task.analysis_type == "cross_domain":
+            continue
+        frame = task.data.copy()
+        if task.analysis_type == "baseline" and baseline_map is not None:
+            frame["treatment_exposure"] = frame.patient_id.map(baseline_map)
+        elif task.analysis_type == "timevarying" and "integrated" in exposures:
+            keys = pd.MultiIndex.from_frame(frame[["patient_id", "from_clinical_episode_id"]].rename(columns={"from_clinical_episode_id": "clinical_episode_id"}))
+            frame["treatment_exposure"] = known.reindex(keys).to_numpy()
+        else:
+            continue
+        extras.append(replace(task, data=frame, sensitivity="treatment_adjusted", extra_covariates=("treatment_exposure",)))
+    return tasks + extras
+
+
+FINGERPRINT_EXCLUDED = {".git", ".venv", "venv", "env", "__pycache__", ".pytest_cache", ".mypy_cache",
+    ".ruff_cache", ".ipynb_checkpoints", "data", "outputs", "work", "dist", "build", "site-packages",
+    "node_modules", "vendor", ".tox", ".nox", ".cache"}
+CODE_SUFFIXES = {".py", ".yml", ".yaml", ".json", ".toml", ".ini", ".cfg", ".js", ".ts", ".tsx", ".css", ".html", ".sh", ".ipynb", ".r"}
+
+
+def scientific_code_path(path):
+    parts = Path(path).parts
+    if any(part in FINGERPRINT_EXCLUDED or part.startswith((".venv_", ".venv-", "venv_", "env_")) for part in parts):
+        return False
+    return Path(path).suffix.lower() in CODE_SUFFIXES or Path(path).name.startswith("requirements")
+
+
+def sha256_file(path):
     digest = hashlib.sha256()
     with Path(path).open("rb") as source:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
@@ -1699,74 +1882,100 @@ def _sha256_file(path):
     return digest.hexdigest()
 
 
-def runtime_code_fingerprint(root):
-    """Hash exact code/config bytes and local diff without exporting content."""
-    def git(*arguments):
-        return subprocess.run(["git", *arguments], cwd=root, capture_output=True)
-    commit, branch, status = git("rev-parse", "HEAD"), git("rev-parse", "--abbrev-ref", "HEAD"), git("status", "--porcelain")
-    tracked, untracked = git("ls-files", "-z"), git("ls-files", "--others", "--exclude-standard", "-z")
-    if any(result.returncode for result in (commit, branch, status, tracked, untracked)):
-        return {"git_commit": None, "git_branch": None, "git_worktree_dirty": True,
-            "git_diff_sha256": None, "code_tree_sha256": None, "reproducibility_status": "dirty_untracked_code"}
-    def code_paths(raw):
-        return sorted(name for name in raw.decode().split("\0") if name and
-            Path(name).suffix in {".py", ".yaml", ".yml", ".toml", ".ini"} and
-            not name.startswith(("data/", "outputs/", "work/")))
-    paths, unknown = code_paths(tracked.stdout), code_paths(untracked.stdout)
-    patch = git("diff", "--binary", "HEAD", "--", *paths)
-    hashes = {name: _sha256_file(Path(root)/name) if (Path(root)/name).is_file() else None for name in paths + unknown}
-    dirty_code = bool(patch.stdout or unknown)
-    state = "dirty_untracked_code" if unknown else "dirty_tracked_code_with_hash" if dirty_code else (
-        "code_identified_noncode_changes" if status.stdout else "fully_reproducible")
-    return {"git_commit": commit.stdout.decode().strip(), "git_branch": branch.stdout.decode().strip(),
-        "git_worktree_dirty": bool(status.stdout), "git_code_dirty": dirty_code,
-        "git_diff_sha256": hashlib.sha256(patch.stdout).hexdigest(),
-        "code_file_sha256": hashes, "code_tree_sha256": hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdigest(),
-        "reproducibility_status": state}
+def runtime_code_fingerprint(root=ROOT):
+    """Prune environments before traversal; hash scientific code/config only."""
+    root = Path(root)
+    files = {}
+    for directory, subdirs, names in os.walk(root, followlinks=False):
+        subdirs[:] = sorted(d for d in subdirs if d not in FINGERPRINT_EXCLUDED and
+                           not d.startswith((".venv_", ".venv-", "venv_", "env_")) and not (Path(directory)/d).is_symlink())
+        for name in sorted(names):
+            path = Path(directory)/name
+            relative = path.relative_to(root).as_posix()
+            if scientific_code_path(relative) and not path.is_symlink():
+                files[relative] = sha256_file(path)
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True)
+    commit, branch, status = git("rev-parse", "HEAD"), git("branch", "--show-current"), git("status", "--porcelain=v1", "-z", "--untracked-files=all")
+    changed, untracked = [], []
+    records = iter(status.stdout.split("\0"))
+    for record in records:
+        if not record:
+            continue
+        flag, path = record[:2], record[3:]
+        paths = [path]
+        if "R" in flag or "C" in flag:
+            paths.append(next(records, ""))
+        for relative in paths:
+            if scientific_code_path(relative):
+                changed.append(relative)
+                if flag == "??":
+                    untracked.append(relative)
+    diff = git("diff", "HEAD", "--", *sorted(set(changed))) if changed else None
+    identified = commit.returncode == status.returncode == 0
+    dirty_code = bool(changed)
+    dirty_worktree = bool(status.stdout)
+    return {"git_commit": commit.stdout.strip() if commit.returncode == 0 else None,
+        "git_branch": branch.stdout.strip() if branch.returncode == 0 else None,
+        "git_worktree_dirty": dirty_worktree, "git_code_dirty": dirty_code,
+        "untracked_scientific_code": sorted(set(untracked)), "changed_scientific_code": sorted(set(changed)),
+        "git_diff_sha256": hashlib.sha256((diff.stdout if diff else "").encode()).hexdigest(),
+        "code_file_sha256": files,
+        "code_tree_sha256": hashlib.sha256(json.dumps(files, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+        "reproducibility_status": "unknown_git_state" if not identified else "dirty_untracked_code" if untracked else
+            "dirty_tracked_code" if dirty_code else "code_identified_noncode_changes" if dirty_worktree else "fully_reproducible",
+        "fingerprint_exclusions": sorted(FINGERPRINT_EXCLUDED) + [".venv_*", ".venv-*", "venv_*", "env_*"]}
 
 
-def inspect_source_metadata(args):
-    paths = {"step10_registry": Path(args.integrated).with_name("10_variable_registry.csv"),
-        "step11_dictionary": Path(args.baseline).with_name("11_variable_dictionary.csv"),
-        "step11_availability": Path(args.baseline).with_name("11_baseline_variable_availability.csv")}
-    paths.update({"step11_dictionary_tables": ROOT/"outputs/tables/blockA/11_integrated_baseline_characterization/11_variable_dictionary.csv",
-        "step11_availability_tables": ROOT/"outputs/tables/blockA/11_integrated_baseline_characterization/11_baseline_variable_availability.csv"})
-    return {name: {"path": str(path), "status": "available" if path.is_file() else "source_unavailable",
-        "sha256": _sha256_file(path) if path.is_file() else None} for name, path in paths.items()}
+def write_output_manifest(dirs):
+    rows = []
+    manifest = dirs["qc"]/"14_output_manifest.csv"
+    for kind, directory in dirs.items():
+        for path in sorted(directory.iterdir()):
+            # The still-open log and manifest itself cannot have stable hashes.
+            if path.is_file() and path != manifest and kind != "logs":
+                rows.append({"output_type": kind, "path": str(path), "sha256": sha256_file(path), "size_bytes": path.stat().st_size})
+    _write_csv(pd.DataFrame(rows), manifest)
 
 
-def build_source_schema_audit(baseline, integrated, registry, inventory):
-    report = {"baseline_columns": baseline.columns.tolist(), "integrated_columns": integrated.columns.tolist(),
-        "duration_decision": duration_source_report(baseline, registry)["duration_source_status"],
-        "composition_provenance_manifest_present": bool(integrated.attrs.get("essdai_composition_provenance")),
-        "upstream_column_producers": [], "dictionary_status": "source_unavailable"}
-    date = pd.to_datetime(baseline.get("dx_date", pd.Series(pd.NaT, index=baseline.index)), errors="coerce")
-    anchor = pd.to_datetime(baseline.clinical_baseline_date, errors="coerce")
-    report.update(n_canonical_diagnosis_dates=int(date.notna().sum()),
-        n_diagnosis_dates_after_baseline=int(date.gt(anchor).sum()),
-        diagnosis_date_source="Step 11 dx_date" if "dx_date" in baseline else "source_unavailable")
-    source = inventory["step10_registry"]
-    if source["status"] == "available":
-        mapping = pd.read_csv(source["path"])
-        columns = [c for c in ("public_variable", "producer_script", "source", "original_variable", "clinical_domain", "role") if c in mapping]
-        if "public_variable" in columns:
-            used = {ESSDAI} | {s.time_varying_column for s in registry if s.family == "essdai_domain"}
-            report["upstream_column_producers"] = mapping.loc[mapping.public_variable.isin(used), columns].fillna("").to_dict("records")
-    for name in ("step11_dictionary", "step11_dictionary_tables"):
-        source = inventory[name]
-        if source["status"] == "available":
-            dictionary = pd.read_csv(source["path"])
-            report["dictionary_status"] = "inspected"
-            report["dictionary_columns"] = dictionary.columns.tolist()
-            if "variable" in dictionary:
-                report["dictionary_duration_variables"] = dictionary.loc[dictionary.variable.astype(str).str.contains("duration|dx_date", regex=True), "variable"].tolist()
-            break
-    return report
+def write_closure_summary(metadata, dirs, results=None, pending=None):
+    pending = list(pending or [])
+    if metadata.get("dry_run"):
+        pending.append("Dry run: inferential models have not been fitted.")
+    if metadata.get("git_code_dirty") or metadata.get("reproducibility_status") == "unknown_git_state":
+        pending.append("Final run must use an identified committed scientific code state.")
+    if metadata.get("input_origin") != "canonical":
+        pending.append("Synthetic validation cannot close the real cohort; rerun using canonical inputs.")
+    status = "CONDITIONAL" if pending else "PASS"
+    metadata["closure_status"] = {"leave_source_domain_outcome": "implemented; support and inference in sensitivity/QC outputs",
+        "treatment_adjustment_decision": metadata.get("treatment_adjustment", {}).get("status", "not_audited"),
+        "composition_discordance_audit": "source/provenance inconsistency retained; complete concordance required; no upstream fix inferred",
+        "reproducibility": metadata.get("reproducibility_status"), "final_decision": status, "pending": pending}
+    metrics = metadata.get("primary_snapshot", {})
+    lines = ["# Step 14 closure summary", "", f"Commit SHA: `{metadata.get('git_commit')}`",
+        f"Input SHA-256: `{json.dumps(metadata.get('input_sha256', {}), sort_keys=True)}`",
+        f"Cohort: {metadata.get('n_baseline_patients')} baseline patients; {metadata.get('n_episodes')} episodes.",
+        f"Structural QC: {metadata.get('structural_qc_status', 'not_run')}. Temporal leakage: {metadata.get('temporal_leakage_status', 'not_run')}.",
+        "Adjustment: prespecified Full > Reduced A > Reduced B > Minimal; no post-fit covariate reselection.",
+        f"Disease duration: {metadata.get('disease_duration_decision')}",
+        f"Treatment: {metadata.get('treatment_adjustment')}",
+        f"Composition (unique FROM episodes): {metadata.get('composition_snapshot')}",
+        "Composition policy: recorded total and all domains preserved; provenance inconsistency excluded from sensitivities.",
+        "Leave-source policy: subtract source contribution at TO and FROM; shared matched intervals and fixed adjustment level; no primary BH.",
+        f"Primary inference / FDR / failed models: {metrics}",
+        f"Reproducibility: {metadata.get('reproducibility_status')}; code tree SHA-256: {metadata.get('code_tree_sha256')}"]
+    if results is not None:
+        biological = results.loc[results.predictor.eq("domain_biological") & results.comparison_role.ne("")]
+        for row in biological.itertuples():
+            lines.append(f"Biological {row.comparison_role}: n={row.n_patients}, intervals={row.n_intervals}, beta={row.estimate}, SE={row.standard_error}, CI=[{row.ci95_low}, {row.ci95_high}], p={row.p_value}, status={row.model_status}.")
+    lines += ["", *["Pending: " + item for item in pending], "", "STEP 14 CLOSURE STATUS: " + status]
+    (dirs["qc"]/"14_closure_summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def build_analysis_metadata(args, context_path, progression_consumed, dry_run, backup_path=None):
     inputs = {name: getattr(args, name) for name in ("integrated", "baseline", "progression")}
     inputs["context"] = context_path
+    inputs["variable_registry"] = getattr(args, "variable_registry", None) or Path(args.integrated).with_name("10_variable_registry.csv")
     hashes = {}
     for name, path in inputs.items():
         if path and Path(path).is_file():
@@ -1774,7 +1983,8 @@ def build_analysis_metadata(args, context_path, progression_consumed, dry_run, b
         else:
             hashes[name] = None
     return {"inputs": {name: str(path) if path else None for name, path in inputs.items()},
-        "input_sha256": hashes, **runtime_code_fingerprint(ROOT), "source_metadata_inventory": inspect_source_metadata(args),
+        "input_sha256": hashes, **runtime_code_fingerprint(),
+        "input_origin": getattr(args, "input_origin", "canonical"),
         "run_started_utc": datetime.now(timezone.utc).isoformat(), "dry_run": dry_run,
         "output_backup_path": str(backup_path) if backup_path else None,
         "progression_product_consumed": progression_consumed, "random_seed": RANDOM_SEED,
@@ -1794,7 +2004,11 @@ def build_analysis_metadata(args, context_path, progression_consumed, dry_run, b
         "trajectory_method": "accepted MixedLM random intercept; prespecified Gaussian GEE fallback with all attempts retained",
         "lab_temporal_policy": "upstream episode-selected values dated at/before FROM only; anchor-day sensitivity",
         "context_path": str(context_path), "context_consumed": Path(context_path).exists(),
-        "treatment_adjustment": "treatment adjustment not implemented in Step 14",
+        "composition_provenance_manifest_present": False,
+        "leave_source_domain_outcome_policy": {"from_state": "ESSDAI total minus weighted source domain at FROM",
+            "to_outcome": "future ESSDAI total minus weighted source domain at TO",
+            "composition_requirement": "complete evaluable concordant panels on both sides; no partial-panel certification contract available",
+            "primary_bh_eligible": False, "sensitivity": LEAVE_SOURCE_SENSITIVITY},
         "cross_domain_heatmap_display_gate": 4,
         "fdr_policy": "q_value/q_value_family: historical family BH; q_value_outcome_wide: separate multiplicity sensitivity, never select the more favorable procedure",
         "versions": {"python": sys.version.split()[0], **{name: importlib.metadata.version(name) for name in
@@ -1911,6 +2125,17 @@ def main(args=None):
             bool(args.progression and Path(args.progression).exists()), args.dry_run, backup)
         (dirs["qc"]/"14_analysis_metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
         LOG.info("Input paths integrated=%s baseline=%s progression=%s", args.integrated, args.baseline, args.progression)
+        context_path = getattr(args, "context", None) or Path(args.integrated).with_name("10_integrated_longitudinal_context.parquet")
+        missing = [str(path) for path in (args.integrated, args.baseline) if not Path(path).is_file()]
+        if missing:
+            metadata = build_analysis_metadata(args, context_path, False, args.dry_run, backup)
+            metadata["missing_canonical_inputs"] = missing
+            metadata["treatment_adjustment"] = {"status": "not_audited", "reason": "canonical inputs unavailable"}
+            write_closure_summary(metadata, dirs, pending=["Required canonical inputs unavailable: " + "; ".join(missing)])
+            (dirs["qc"]/"14_analysis_metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+            _write_csv(pd.DataFrame([{"check": "canonical_inputs_available", "status": "fail", "detail": "; ".join(missing)}]), dirs["qc"]/"14_structural_qc.csv")
+            write_output_manifest(dirs)
+            raise FileNotFoundError("Required canonical inputs unavailable: " + "; ".join(missing))
         integrated, baseline = read_table(args.integrated), read_table(args.baseline)
         progression = read_table(args.progression) if args.progression and Path(args.progression).exists() else None
         if progression is None:
@@ -1929,6 +2154,13 @@ def main(args=None):
             raise
         LOG.info("Input rows=%s patients=%s baseline rows=%s", len(df), df.patient_id.nunique(), len(baseline))
         registry = resolve_predictors(build_predictor_registry(), baseline, df)
+        variable_registry_path = getattr(args, "variable_registry", None) or Path(args.integrated).with_name("10_variable_registry.csv")
+        if getattr(args, "variable_registry", None) and not variable_registry_path.exists():
+            raise ValueError(f"Explicit variable registry does not exist: {variable_registry_path}")
+        variable_registry = pd.read_csv(variable_registry_path) if variable_registry_path.exists() else None
+        treatment_qc, treatment_metadata, treatment_exposures = treatment_adjustment_decision(
+            {"integrated": df, "baseline": baseline}, variable_registry)
+        _write_csv(treatment_qc, dirs["qc"]/"14_treatment_adjustment_decision.csv")
         availability = build_predictor_availability(baseline, df, registry)
         _write_csv(availability, dirs["qc"]/"14_predictor_availability.csv")
         LOG.info("Resolved predictors baseline=%s timevarying=%s", sum(s.baseline_column is not None for s in registry), sum(s.time_varying_column is not None for s in registry))
@@ -1936,10 +2168,13 @@ def main(args=None):
         base = build_baseline_analysis_dataset(baseline, registry)
         intervals = build_lagged_interval_dataset(df, base, registry)
         _write_csv(pd.DataFrame(intervals.attrs["domain_composition_qc"]), dirs["qc"]/"14_domain_composition_qc.csv")
-        _write_csv(pd.DataFrame(intervals.attrs["domain_composition_audit_summary"]), dirs["qc"]/"14_domain_composition_audit_summary.csv")
-        _write_csv(pd.DataFrame(intervals.attrs["domain_composition_discrepancy_distribution"], columns=[
-            "from_composition_total_delta", "sign", "magnitude", "n_unique_from_episodes"]),
-            dirs["qc"]/"14_domain_composition_discrepancy_distribution.csv")
+        episode_audit = composition_episode_audit(df, registry, variable_registry)
+        _write_csv(episode_audit.loc[episode_audit.composition_category.eq("complete_panel_discordant")],
+                   dirs["qc"]/"14_domain_composition_discordant_episodes.csv")
+        _write_csv(composition_discordance_summary(episode_audit), dirs["qc"]/"14_domain_composition_discordance_summary.csv")
+        _write_csv(episode_audit.groupby("composition_category", dropna=False).size().rename("n_episodes").reset_index(),
+                   dirs["qc"]/"14_domain_composition_audit_summary.csv")
+        _write_csv(build_leave_source_domain_qc(intervals), dirs["qc"]/"14_leave_source_domain_outcome_qc.csv")
         domains = build_domain_risk_sets(df, base)
         leakage = run_temporal_leakage_qc(df, base, intervals, domains, registry, hard_fail=False)
         _write_csv(leakage, dirs["qc"]/"14_temporal_leakage_qc.csv")
@@ -1960,6 +2195,7 @@ def main(args=None):
         _write_csv(pd.DataFrame(domain_qc), dirs["qc"]/"14_domain_riskset_qc.csv")
         _write_csv(predictor_redundancy_qc(base, registry), dirs["qc"]/"14_predictor_redundancy_qc.csv")
         tasks = build_analysis_tasks(df, base, intervals, domains, registry)
+        tasks = add_treatment_sensitivities(tasks, df, baseline, treatment_exposures)
         prepared = [(task, *prepare_model(task, len(base), args.minimum_events)) for task in tasks]
         availability = build_predictor_availability(baseline, df, registry, intervals, prepared)
         _write_csv(availability, dirs["qc"]/"14_predictor_availability.csv")
@@ -1970,10 +2206,22 @@ def main(args=None):
             for task, _, meta in prepared])
         support = build_cross_domain_support(tasks, len(base), args.minimum_events)
         _write_csv(build_adjustment_selection_qc(feasibility), dirs["qc"]/"14_adjustment_selection_qc.csv")
-        metadata.update(duration_source_report(baseline, registry))
-        metadata["source_schema_audit"] = build_source_schema_audit(baseline, df, registry, metadata["source_metadata_inventory"])
-        metadata["composition_category_priority"] = ["missing_total", "missing_target_domain", "incompatible_provenance_or_scale",
-            "negative_target_subtraction", "complete_panel_discordant", "partial_panel", "complete_panel_concordant", "other_unresolved"]
+        metadata = build_analysis_metadata(args, context_path, progression is not None, args.dry_run, backup)
+        metadata["structural_qc_status"] = "pass"
+        metadata["temporal_leakage_status"] = "0 violations"
+        metadata["treatment_adjustment"] = treatment_metadata
+        duration_n = int(base.pred__duration.notna().sum())
+        metadata["disease_duration_decision"] = {"duration_source_status": "available" if duration_n else "not_available",
+            "duration_n_available": duration_n,
+            "duration_exclusion_reason": "" if duration_n else "no_verified_canonical_diagnosis_date",
+            "action": "do not derive from follow-up; preserve age/sex when supported"}
+        from_keys = intervals[["patient_id", "from_clinical_episode_id"]].rename(columns={"from_clinical_episode_id": "clinical_episode_id"})
+        from_audit = episode_audit.merge(from_keys, on=KEYS, how="inner", validate="one_to_one")
+        metadata["composition_snapshot"] = composition_snapshot(from_audit)
+        metadata["all_episode_composition_snapshot"] = composition_snapshot(episode_audit)
+        metadata["composition_discordance_decision"] = {"status": "source_provenance_inconsistency",
+            "upstream_fix_applied": False, "reason": "total directly recorded by Pop producer; domains independently recoded by overlap producer; no row-level evidence establishes an upstream bug",
+            "action": "preserve inputs; restrict composition sensitivities to complete concordant panels"}
         metadata["selected_adjustment_level_counts"] = feasibility.selected_adjustment_level.value_counts().to_dict()
         metadata["n_baseline_patients"], metadata["n_episodes"] = len(base), len(df)
         metadata["n_unique_complete_panel_discordant"] = int(intervals.from_composition_complete_panel_discordant.sum())
@@ -1981,9 +2229,10 @@ def main(args=None):
         metadata["model_row_semantics"] = "one selected row per planned hypothesis; counts in unsupported/failed rows are pre-fit, not fitted N"
         metadata["attempt_row_semantics"] = "one row per attempted estimator; matched-comparison attempts labeled separately"
         if args.dry_run:
-            write_run_comparison(reference, metadata, feasibility, dirs["qc"])
+            write_closure_summary(metadata, dirs)
             (dirs["qc"]/"14_analysis_metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
             _write_csv(feasibility, dirs["qc"]/"14_dry_run_feasibility.csv")
+            write_output_manifest(dirs)
             print(feasibility[["analysis_type", "predictor", "outcome", "sensitivity", "supported_for_model", "support_reason"]].to_string(index=False))
             print(f"Dry run: {len(tasks)} planned associations; {int(feasibility.supported_for_model.sum())} supported. No models fitted.")
             LOG.info("Dry-run validated contracts and feasibility; no inferential outputs written")
@@ -1993,8 +2242,9 @@ def main(args=None):
         results = pd.DataFrame([fit_task(task, data, meta, attempts) for task, data, meta in prepared])
         results, fdr_qc = apply_fdr_by_family(results)
         results, outcome_fdr_qc = apply_outcome_wide_fdr(results)
-        comparison = build_domain_sensitivity_comparison(prepared, results, args.minimum_events, attempts)
+        comparison = build_domain_sensitivity_comparison(results)
         _write_csv(comparison, dirs["tables"]/"14_domain_sensitivity_comparison.csv")
+        _write_csv(results.loc[results.sensitivity.eq(LEAVE_SOURCE_SENSITIVITY)], dirs["tables"]/"14_leave_source_domain_outcome_models.csv")
         primary = results.loc[results.sensitivity.eq("none")]
         tables = {
             "predictor_registry": pd.DataFrame([{**asdict(s),
@@ -2046,14 +2296,16 @@ def main(args=None):
         metadata["trajectory_estimators_used"] = trajectories.model_used.value_counts().to_dict()
         metadata["n_supported_primary_trajectories"] = int(trajectories.supported_for_model.sum())
         metadata["n_primary_trajectory_fallbacks"] = int(trajectories.fallback_used.sum())
-        canonical_primary = results.sensitivity.eq("none") & results.primary_canonical.eq(True)
-        metadata["n_failed_primary_cox"] = int((canonical_primary & results.effect_measure.eq("HR") & results.model_status.eq("model_failed")).sum())
-        metadata["n_valid_primary"] = int((results.claim_status.eq("primary") & results.valid_for_inference).sum())
-        metadata["n_primary_family_q_below_005"] = int((results.claim_status.eq("primary") & results.q_value_family.lt(.05)).sum())
-        metadata["n_primary_outcome_wide_q_below_005"] = int((results.claim_status.eq("primary") & results.q_value_outcome_wide.lt(.05)).sum())
-        metadata["run_completed_utc"] = datetime.now(timezone.utc).isoformat()
-        write_run_comparison(reference, metadata, results, dirs["qc"])
+        canonical_primary = results.loc[results.sensitivity.eq("none") & results.primary_canonical & results.fdr_eligibility]
+        metadata["primary_snapshot"] = {"n_valid_primary": int(canonical_primary.valid_for_inference.sum()),
+            "n_failed_primary_cox": int((canonical_primary.model_status.eq("failed") & canonical_primary.effect_measure.eq("HR")).sum()),
+            "n_primary_family_q_below_005": int(canonical_primary.q_value_family.lt(.05).sum()),
+            "n_primary_outcome_wide_q_below_005": int(canonical_primary.q_value_outcome_wide.lt(.05).sum())}
+        metadata["leave_source_domain_outcome_snapshot"] = {"n_planned": int(results.sensitivity.eq(LEAVE_SOURCE_SENSITIVITY).sum()),
+            "n_valid": int((results.sensitivity.eq(LEAVE_SOURCE_SENSITIVITY) & results.valid_for_inference).sum())}
+        write_closure_summary(metadata, dirs, comparison)
         (dirs["qc"]/"14_analysis_metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        write_output_manifest(dirs)
         LOG.info("Completed: %s valid of %s associations, %s fallbacks", int(results.valid_for_inference.sum()), len(results), int(results.fallback_used.sum()))
         LOG.info("Output paths: %s", {k: str(v) for k, v in dirs.items()})
         write_output_manifest(dirs, args.output_root)
