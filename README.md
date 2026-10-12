@@ -85,6 +85,11 @@ first builds a time-blind reference Mapper from eligible clinical visits and onl
 then overlays actual consecutive visits. Mapper proximity is never treated as a
 temporal transition.
 
+The execution order stays **01 → 02 → 03 → 04**. Run only the numbered scripts:
+01 prepares inputs, 02 builds Mapper and runs its QC, 03 analyzes temporal flow
+after scientific approval, and 04 characterizes transitions. The `_review/`
+directory contains internal modules imported by 02/03; it adds no execution steps.
+
 Prepare inputs with Script 01; use Script 02's versioned review commands documented
 below to consume the frozen reference and evaluate candidates:
 
@@ -140,9 +145,12 @@ distributions, occupancy, PCA dominance, coverage and sensitivity comparability.
 Mapper; a held-out variable still requires proxy-dependence review.
 
 Script 02 defaults to `candidate-qc`, reads a sealed historical S3-primary and
-publishes S4 alternatives under `--output-root/runs/--run-id`. Supply a
-`--reference-run-id`; audit the existing archive once with `--reference-root`
-and `--freeze-reference`. The seal lives outside the archive. Existing runs and
+publishes S4 alternatives under `--output-root/runs/<run-id>`. A bare invocation
+generates a unique UTC run ID and uses the only available seal or historical
+archive. An archive is audited in place and sealed externally on its first full
+run. If there are several references, select one with `--reference-run-id` or
+`--reference-root`; it never chooses the latest silently. The seal lives outside
+the archive. Existing runs and
 historical outputs cannot be overwritten. Missing G0 reference evidence blocks
 candidate execution. `--dry-run` does not fit, seal or write outputs. The original
 algorithm can be reproduced under `--mode legacy-reproduction` in a new run.

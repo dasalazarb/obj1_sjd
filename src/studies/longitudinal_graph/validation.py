@@ -51,7 +51,8 @@ def run_manifest(root, config, inputs, seed, scenario, sha256_file):
     import platform
     return {"git_commit": commit, "config_sha256": sha256_file(config),
             "git_dirty": bool(subprocess.check_output(["git","status","--porcelain"],cwd=root,text=True).strip()),
-            "code_sha256": {p.name:sha256_file(p) for p in (Path(root)/"src/studies/longitudinal_graph").glob("*.py")},
+            "code_sha256": {str(p.relative_to(Path(root)/"src/studies/longitudinal_graph")):sha256_file(p)
+                            for p in (Path(root)/"src/studies/longitudinal_graph").rglob("*.py")},
             "input_sha256": {str(p): sha256_file(p) for p in inputs if p.exists()},
             "script_sha256": sha256_file(Path(root) / "src/studies/longitudinal_graph/02_run_longitudinal_mapper.py"),
             "seed": seed, "date_utc": datetime.now(timezone.utc).isoformat(),
@@ -432,7 +433,7 @@ def archive_and_publish(staged, destination, manifest, write_json):
     Public CLI callers stage this inside a new run bundle. Programmatic callers
     also fail closed if any previous Script 02 artifact exists.
     """
-    from src.studies.longitudinal_graph.reference import protect_path
+    from src.studies.longitudinal_graph._review.reference import protect_path
     for path in destination.values():
         protect_path(path)
     old = [(kind, p) for kind, root in destination.items() for p in root.glob("02_*") if p.is_file()]

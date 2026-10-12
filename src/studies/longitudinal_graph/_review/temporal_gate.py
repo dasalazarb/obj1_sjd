@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from datetime import datetime
-from src.studies.longitudinal_graph.reference import sha256
+from src.studies.longitudinal_graph._review.reference import sha256
 
 
 def require_temporal_approval(readiness_path, approval_path, manifest_path, membership_path, *, intervals_path=None, config_path=None):
