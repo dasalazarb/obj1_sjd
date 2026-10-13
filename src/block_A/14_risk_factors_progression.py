@@ -65,6 +65,8 @@ SINGULAR_TOL = step13.SINGULAR_TOL
 RANDOM_SEED = 20261007
 ADJUSTMENT_RULE_VERSION = "hierarchical-v1"
 COMPOSITION_RULE_VERSION = "concordant-complete-panel-from-to-v2"
+COMPOSITION_AUDIT_RULE_VERSION = COMPOSITION_RULE_VERSION
+DURATION_RULE_VERSION = "verified-step11-baseline-duration-v1"
 COMPOSITION_TOLERANCE = 1e-8
 LEAVE_SOURCE_SENSITIVITY = "leave_source_domain_outcome"
 HYPOTHESIS_RULE_VERSION = "canonical-construct-v1"
@@ -528,12 +530,12 @@ def derive_domain_composition_side(frame, side, registry):
     out[side + "_composition_concordant"] = concordant
     out[side + "_composition_category"] = category
     specs = {s.name.removeprefix("domain_"): s for s in registry if s.family == "essdai_domain"}
-    out["from_composition_complete_panel"] = complete
-    out["from_composition_total_delta"] = (total - reconstructed).where(complete & total.notna())
-    out["from_composition_complete_panel_discordant"] = mismatch
-    out["from_composition_complete_concordant"] = complete & total.notna() & ~mismatch
-    version = out.get("from_essdai_version", pd.Series(pd.NA, index=out.index)).astype("string")
-    total_version = out.get("from_essdai_total_version", pd.Series(pd.NA, index=out.index)).astype("string")
+    out[side + "_composition_complete_panel"] = complete
+    out[side + "_composition_total_delta"] = (total - reconstructed).where(complete & total.notna())
+    out[side + "_composition_complete_panel_discordant"] = mismatch
+    out[side + "_composition_complete_concordant"] = complete & total.notna() & ~mismatch
+    version = out.get(side + "_essdai_version", pd.Series(pd.NA, index=out.index)).astype("string")
+    total_version = out.get(side + "_essdai_total_version", pd.Series(pd.NA, index=out.index)).astype("string")
     incompatible = (version.notna() & total_version.notna() & version.ne(total_version)).fillna(False).astype(bool)
     qc, audit = [], []
     for domain, weight in weights.items():
@@ -740,7 +742,7 @@ def build_lagged_interval_dataset(df, baseline, registry):
     out = out.merge(baseline[["patient_id", "baseline_essdai", "pred__age", "pred__sex", "pred__duration"]]
                      .rename(columns={"pred__age": "age", "pred__sex": "sex", "pred__duration": "duration"}),
                      on="patient_id", how="left", validate="many_to_one")
-    out, qc = derive_other_domain_adjustments(out, registry, df.attrs.get("essdai_composition_provenance"))
+    out, qc = derive_other_domain_adjustments(out, registry)
     out.attrs["domain_composition_qc"] = qc.to_dict("records")
     return out
 
@@ -1927,17 +1929,6 @@ def runtime_code_fingerprint(root=ROOT):
         "fingerprint_exclusions": sorted(FINGERPRINT_EXCLUDED) + [".venv_*", ".venv-*", "venv_*", "env_*"]}
 
 
-def write_output_manifest(dirs):
-    rows = []
-    manifest = dirs["qc"]/"14_output_manifest.csv"
-    for kind, directory in dirs.items():
-        for path in sorted(directory.iterdir()):
-            # The still-open log and manifest itself cannot have stable hashes.
-            if path.is_file() and path != manifest and kind != "logs":
-                rows.append({"output_type": kind, "path": str(path), "sha256": sha256_file(path), "size_bytes": path.stat().st_size})
-    _write_csv(pd.DataFrame(rows), manifest)
-
-
 def write_closure_summary(metadata, dirs, results=None, pending=None):
     pending = list(pending or [])
     if metadata.get("dry_run"):
@@ -1979,7 +1970,7 @@ def build_analysis_metadata(args, context_path, progression_consumed, dry_run, b
     hashes = {}
     for name, path in inputs.items():
         if path and Path(path).is_file():
-            hashes[name] = _sha256_file(path)
+            hashes[name] = sha256_file(path)
         else:
             hashes[name] = None
     return {"inputs": {name: str(path) if path else None for name, path in inputs.items()},
@@ -2027,7 +2018,7 @@ def load_run_reference(backup):
         path = qc/"14_dry_run_feasibility.csv"
     return {"status": "backed_up_reference" if metadata else "reference_metadata_unavailable",
         "metadata": metadata, "results": pd.read_csv(path) if path.exists() else pd.DataFrame(),
-        "results_sha256": _sha256_file(path) if path.exists() else None}
+        "results_sha256": sha256_file(path) if path.exists() else None}
 
 
 def build_run_comparison(reference, metadata, results):
@@ -2090,7 +2081,7 @@ def write_run_comparison(reference, metadata, results, qc_directory):
 
 
 def write_output_manifest(dirs, root):
-    records = [{"path": str(path.relative_to(root)), "sha256": _sha256_file(path), "bytes": path.stat().st_size}
+    records = [{"path": str(path.relative_to(root)), "sha256": sha256_file(path), "bytes": path.stat().st_size}
         for directory in dirs.values() for path in sorted(directory.iterdir())
         if path.is_file() and path.name != "14_output_manifest.csv"]
     _write_csv(pd.DataFrame(records), dirs["qc"]/"14_output_manifest.csv")
@@ -2134,7 +2125,7 @@ def main(args=None):
             write_closure_summary(metadata, dirs, pending=["Required canonical inputs unavailable: " + "; ".join(missing)])
             (dirs["qc"]/"14_analysis_metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
             _write_csv(pd.DataFrame([{"check": "canonical_inputs_available", "status": "fail", "detail": "; ".join(missing)}]), dirs["qc"]/"14_structural_qc.csv")
-            write_output_manifest(dirs)
+            write_output_manifest(dirs, args.output_root)
             raise FileNotFoundError("Required canonical inputs unavailable: " + "; ".join(missing))
         integrated, baseline = read_table(args.integrated), read_table(args.baseline)
         progression = read_table(args.progression) if args.progression and Path(args.progression).exists() else None
@@ -2172,6 +2163,9 @@ def main(args=None):
         _write_csv(episode_audit.loc[episode_audit.composition_category.eq("complete_panel_discordant")],
                    dirs["qc"]/"14_domain_composition_discordant_episodes.csv")
         _write_csv(composition_discordance_summary(episode_audit), dirs["qc"]/"14_domain_composition_discordance_summary.csv")
+        discrepancy_distribution = episode_audit.loc[episode_audit.complete_domain_panel & episode_audit.essdai_total.notna()]
+        _write_csv(discrepancy_distribution.groupby("total_minus_reconstructed", dropna=False).size().rename("n_episodes").reset_index(),
+                   dirs["qc"]/"14_domain_composition_discrepancy_distribution.csv")
         _write_csv(episode_audit.groupby("composition_category", dropna=False).size().rename("n_episodes").reset_index(),
                    dirs["qc"]/"14_domain_composition_audit_summary.csv")
         _write_csv(build_leave_source_domain_qc(intervals), dirs["qc"]/"14_leave_source_domain_outcome_qc.csv")
@@ -2232,10 +2226,10 @@ def main(args=None):
             write_closure_summary(metadata, dirs)
             (dirs["qc"]/"14_analysis_metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
             _write_csv(feasibility, dirs["qc"]/"14_dry_run_feasibility.csv")
-            write_output_manifest(dirs)
             print(feasibility[["analysis_type", "predictor", "outcome", "sensitivity", "supported_for_model", "support_reason"]].to_string(index=False))
             print(f"Dry run: {len(tasks)} planned associations; {int(feasibility.supported_for_model.sum())} supported. No models fitted.")
             LOG.info("Dry-run validated contracts and feasibility; no inferential outputs written")
+            write_run_comparison(reference, metadata, feasibility, dirs["qc"])
             write_output_manifest(dirs, args.output_root)
             return
         attempts = []
@@ -2305,9 +2299,9 @@ def main(args=None):
             "n_valid": int((results.sensitivity.eq(LEAVE_SOURCE_SENSITIVITY) & results.valid_for_inference).sum())}
         write_closure_summary(metadata, dirs, comparison)
         (dirs["qc"]/"14_analysis_metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-        write_output_manifest(dirs)
         LOG.info("Completed: %s valid of %s associations, %s fallbacks", int(results.valid_for_inference.sum()), len(results), int(results.fallback_used.sum()))
         LOG.info("Output paths: %s", {k: str(v) for k, v in dirs.items()})
+        write_run_comparison(reference, metadata, results, dirs["qc"])
         write_output_manifest(dirs, args.output_root)
         print("ORDER TO REVIEW PRIMARY OBJECTIVE 3 OUTPUTS\n"
               "1. Structural / temporal leakage QC\n2. Predictor registry and availability\n"

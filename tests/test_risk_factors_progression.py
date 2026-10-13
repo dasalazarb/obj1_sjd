@@ -1,5 +1,6 @@
 """Temporal and inferential contracts for Primary Objective 3 associations."""
 import importlib.util
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -852,3 +853,44 @@ def test_companion_provenance_is_preserved_without_inventing_domain_version():
     assert "domain_version" not in audit
     assert audit.essdai_total_producer.eq("01_pop_distribution.py").all()
     assert baseline.source_protocol.iloc[0] == "canonical-protocol"
+
+
+@pytest.mark.parametrize("reference_kind", ["fitted", "dry_run"])
+def test_load_run_reference_hashes_existing_backup_results(tmp_path, reference_kind):
+    dirs = mod.output_directories(tmp_path)
+    dirs["qc"].mkdir(parents=True)
+    (dirs["qc"]/"14_analysis_metadata.json").write_text(json.dumps({"git_commit": "previous-run"}))
+    if reference_kind == "fitted":
+        dirs["tables"].mkdir(parents=True)
+        path = dirs["tables"]/"14_model_interpretation_summary.csv"
+    else:
+        path = dirs["qc"]/"14_dry_run_feasibility.csv"
+    path.write_bytes(b"predictor,n_patients\ndomain_biological,25\n")
+    reference = mod.load_run_reference(tmp_path)
+    assert reference["status"] == "backed_up_reference"
+    assert reference["metadata"]["git_commit"] == "previous-run"
+    assert reference["results"].n_patients.iloc[0] == 25
+    assert reference["results_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_manifest_hashes_existing_outputs(tmp_path):
+    dirs = mod.output_directories(tmp_path)
+    for directory in dirs.values():
+        directory.mkdir(parents=True)
+    artifact = dirs["tables"]/"14_example.csv"
+    artifact.write_bytes(b"value\n1\n")
+    mod.write_output_manifest(dirs, tmp_path)
+    manifest = pd.read_csv(dirs["qc"]/"14_output_manifest.csv")
+    row = manifest.loc[manifest.path.eq(str(artifact.relative_to(tmp_path)))].iloc[0]
+    assert row.sha256 == hashlib.sha256(artifact.read_bytes()).hexdigest()
+    assert row.bytes == artifact.stat().st_size
+
+
+def test_to_composition_audit_does_not_overwrite_from_flags():
+    source = complete_composition(n=1)
+    source.loc[1, mod.ESSDAI] += 1
+    _, _, intervals, _, _ = datasets(source)
+    assert not intervals.from_composition_complete_panel_discordant.iloc[0]
+    assert intervals.to_composition_complete_panel_discordant.iloc[0]
+    assert intervals.from_composition_complete_panel_discordant.iloc[1]
+    assert not intervals.to_composition_complete_panel_discordant.iloc[1]
