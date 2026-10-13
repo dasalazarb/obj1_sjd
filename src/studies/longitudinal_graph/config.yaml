@@ -29,6 +29,7 @@ characterization: {minimum_transition_patients: 5, bootstrap_replicates: 1000, f
 figures: {dpi: 160}
 # Prespecified alternatives; none changes the historical S3-primary features or weights.
 mapper_validation:
+  serology_ohe_scenarios: [S4-serology-OHE, S4-without-missing, S4-no-serology]
   hscrp_prior_transformation: identity # Step-10 raw values; unknown/logged values disable log1p.
   pro_summary_features: [] # Requires a clinically documented whitelist; no name guessing.
   comparable_visit_features: [] # Requires a protocol/visit availability review.
@@ -40,3 +41,17 @@ mapper_validation:
   bootstrap_match_jaccard: 0.50
   bootstrap_stability_frequency: 0.80
   admin_permutations: 199
+serology_ohe:
+  enabled: true
+  schema_version: serology_ohe_v1
+  drop_first: false
+  categories: [positive, negative, indeterminate, missing]
+  strict_unknown_values: true
+  require_temporal_review: true
+  sources: {ssa: lab__anti_ro_ssa__text, ssb: lab__anti_la_ssb__text, ana: lab__ana_status__text}
+  mapping_file: src/studies/longitudinal_graph/serology_ohe_mapping.yaml
+  prefix: sero_ohe
+  preserve_legacy_s3: true
+  feature_block_policy: complete_fixed_schema
+  clinical_missingness_sensitivity: true
+  family_weight: 1.0

@@ -447,3 +447,36 @@ def archive_and_publish(staged, destination, manifest, write_json):
             if p.is_file():
                 with (destination[kind] / p.name).open("xb") as stream:
                     stream.write(p.read_bytes())
+
+
+def serology_lineage_audit(manifest, features, source):
+    """Source and derived concepts are separate; encoded serology is circular."""
+    rows = []
+    for parent, group in manifest.groupby('source', sort=False):
+        used = [f for f in group.feature if f in features]
+        rows.append({'source': parent, 'derived_features': '|'.join(group.feature),
+                     'present_in_source': parent in source, 'encoded': True,
+                     'used_in_S3': False, 'used_in_S4': bool(used), 'held_out': not used,
+                     'independent_external_validator': not used,
+                     'interpretation': 'definitional_circularity' if used else 'held_out_requires_proxy_review'})
+    return pd.DataFrame(rows)
+
+
+def serology_episode_concordance(ohe, metadata):
+    """Report within-patient changes without propagating or correcting results."""
+    from src.studies.longitudinal_graph.serology_ohe import SOURCES, LEVELS
+    joined = align_source(ohe[KEYS], metadata, ['clinical_anchor_date']) if 'clinical_anchor_date' in metadata else None
+    if joined is None: return pd.DataFrame([{'status': 'not_tested_missing_variable', 'variable': 'clinical_anchor_date'}])
+    frame = ohe.copy(); frame['clinical_anchor_date'] = pd.to_datetime(joined.clinical_anchor_date)
+    frame = frame.sort_values(['patient_id', 'clinical_anchor_date', 'clinical_episode_id'])
+    rows = []
+    for marker in SOURCES:
+        cols = [f'sero_ohe__{marker}__{level}' for level in LEVELS]
+        labels = frame[cols].idxmax(axis=1).str.rsplit('__', n=1).str[-1]
+        previous = labels.groupby(frame.patient_id).shift()
+        comparable = previous.notna() & labels.ne('missing') & previous.ne('missing')
+        rows.append({'biomarker': marker, 'n_adjacent_pairs': int(previous.notna().sum()),
+                     'n_clinically_comparable_pairs': int(comparable.sum()),
+                     'n_discordant_pairs': int((comparable & labels.ne(previous)).sum()),
+                     'status': 'descriptive_no_correction_or_propagation'})
+    return pd.DataFrame(rows)

@@ -285,6 +285,9 @@ def execute_review(args, api):
         result = {"status": "not_run_missing_data" if missing and args.mode == "candidate-qc" else "validated",
                   "mode": args.mode, "reference_integrity": "passed", "missing_inputs": missing,
                   "outputs_written": False, "temporal_flow_executed": False}
+        if args.mode == "candidate-qc" and not missing:
+            from src.studies.longitudinal_graph.serology_runner import input_status
+            result["serology_ohe"] = input_status(args, config, api)
         print(json.dumps(result))
         return result
     # Read-only reference audit does not require fitting data or recomputing Mapper.
@@ -359,7 +362,10 @@ def execute_review(args, api):
                 pd.DataFrame({"feature_original": eligible, "decision": ["include" if f in retained else "exclude" for f in eligible],
                               "rationale": "observed_pairs_prespecified_coverage_priority; semantic_review_pending", "alternative_sensitivity": "S4-preimputation-pruning"}).to_csv(staged / "tables/02_redundancy_decisions.csv", index=False)
             definitions = candidate_registry(features, config)
+            serology_names = {"S4-serology-OHE", "S4-without-missing", "S4-no-serology"}
             requested = set(args.scenario or [row["name"] for row in definitions])
+            requested_serology = serology_names if args.scenario is None else requested & serology_names
+            requested -= serology_names
             if requested - {row["name"] for row in definitions}:
                 raise ValueError("Unknown scenario; new runs must use the prespecified S4 namespace")
             definitions = [row for row in definitions if row["name"] in requested]
@@ -503,6 +509,21 @@ def execute_review(args, api):
                              "administrative_status": "inconclusive_T3_not_tested", "OOS_status": "not_run"})
                 definition.update(status="completed", preprocessing_full_fit="historical_imputed_state_fixed; isolated_change_only",
                                   preprocessing_bootstrap="raw_patient_sample_only; all_fit_stages_relearned")
+            if requested_serology and config.get("serology_ohe", {}).get("enabled"):
+                from src.studies.longitudinal_graph.serology_runner import execute_s4, input_status
+                serology_status = input_status(args, config, api)
+                if serology_status["status"] == "validated":
+                    legacy_loadings = pd.read_csv(reference_artifact(reference, "02_longitudinal_pca_loadings", ".csv"))
+                    frozen_features = legacy_loadings.feature.tolist()
+                else:
+                    frozen_features = features # Used only to emit a blocking report; never fitted.
+                if not set(frozen_features) <= set(eligible): raise ValueError("Frozen S3 features unavailable")
+                if set(map(tuple, historic["visit_membership"][api.KEYS].to_numpy())) != set(map(tuple, state[api.KEYS].to_numpy())):
+                    raise ValueError("S3/S4 comparison requires the identical frozen visit universe")
+                destinations = {kind: staged / kind for kind in ("analytic", "tables", "figures")}
+                result = execute_s4(args, api, state, raw if raw is not None else state[api.KEYS], metadata,
+                                    frozen_features, historic, destinations, config)
+                manifest["serology_ohe"] = result
         pd.DataFrame(rows).to_csv(staged / "tables/02_scenario_comparison.csv", index=False)
         pd.DataFrame(comparison_frames or [{"status": "not_run_reference_only", "reason": "no_candidates_requested"}]).to_csv(staged / "tables/02_scenario_comparison_universe_summary.csv", index=False)
         if crosswalk_frames:

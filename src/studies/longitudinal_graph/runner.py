@@ -47,7 +47,8 @@ def dry_run(args, api):
     state=pd.read_parquet(args.state); metadata=pd.read_parquet(args.metadata)
     validate_inputs(state,metadata,cfg,api)
     features,audit=api.reduce_redundancy(state.drop(columns=api.KEYS),cfg["representation"]["redundancy_spearman_abs_threshold"])
-    return {"status":"validated","dry_run":True,"n_visits":len(state),"n_patients":state.patient_id.nunique(),
+    from src.studies.longitudinal_graph.serology_runner import input_status
+    return {"serology_ohe": input_status(args,cfg,api), "status":"validated","dry_run":True,"n_visits":len(state),"n_patients":state.patient_id.nunique(),
             "n_features":len(features),"scenarios_planned":registry(features,cfg),"outputs_written":False,
             "representation_stability_gate":{"status":"requires_review","temporal_flow_executed":False}}
 
@@ -60,6 +61,7 @@ def validate_inputs(state,metadata,cfg,api):
     import importlib
     prep=importlib.import_module("src.studies.longitudinal_graph.01_prepare_longitudinal_data")
     for feature in state.drop(columns=api.KEYS):
+        if feature.startswith("sero_ohe__"): raise ValueError("OHE must be supplied in its separate S4 artifact")
         reason=prep.forbidden_reason(feature,set(),cfg["feature_selection"]["forbidden_name_patterns"])
         if reason:raise ValueError(f"Ineligible state feature {feature}: {reason}")
     if not np.isfinite(state.drop(columns=api.KEYS).to_numpy(dtype=float)).all():raise ValueError("State must contain finite imputed clinical values")
@@ -243,5 +245,7 @@ def execute(args,api):
         qc.archive_and_publish(staged,destination,manifest,api.write_json)
         # Persist the archive location in the summary as well as the standalone manifest.
         api.write_json(destination["tables"]/"02_longitudinal_mapper_summary.json",summary)
+    from src.studies.longitudinal_graph.serology_runner import execute_s4
+    execute_s4(args, api, state, raw, metadata, features, primary, destination, cfg)
     print("Review representation QC, sensitivity comparability, patient refits and the scientific gate before Script 03.")
     return summary
