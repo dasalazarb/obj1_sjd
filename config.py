@@ -162,7 +162,7 @@ ESSDAI_DOMAIN_WEIGHTS: dict[str, int] = {
     "constitutional":  3,
     "lymphadenopathy": 4,
     "gland_swell":     2,
-    "articular":       4,
+    "articular":       2,
     "cutaneous":       3,
     "pulmonary":       5,
     "renal":           5,
