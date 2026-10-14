@@ -27,8 +27,10 @@ KEYS = ["patient_id", "clinical_episode_id"]
 HSCRP = "lab__crp_high_sensitivity__value"
 URINE_SQUAMOUS = "lab__urine_squamous_cells__value"
 
-def fit_visit_embedding(matrix, config, weights=None):
+def fit_visit_embedding(matrix, config, weights=None, indicator_columns=()):
     scaled=RobustScaler().fit_transform(matrix)
+    for column in indicator_columns:
+        scaled[:, matrix.columns.get_loc(column)] = matrix[column].to_numpy(dtype=float)
     if weights is not None: scaled=scaled*np.asarray(weights,dtype=float)
     cap=config["pca"]["max_components"]
     limit=min(*scaled.shape) if cap is None else min(int(cap),*scaled.shape)
@@ -59,7 +61,7 @@ def feature_family(feature):
     low=feature.lower()
     if low.startswith("lab__"): return "LAB"
     if low.startswith("pro__"): return "PRO"
-    if low.startswith("sero__"): return "SEROLOGY_CURRENT"
+    if low.startswith(("sero__", "sero_ohe__")): return "SEROLOGY_CURRENT"
     if low.startswith("ovl__"): return "OVERLAP"
     if low.startswith("ext__"): return "CLINICAL"
     return "OTHER"
@@ -73,6 +75,9 @@ def reduce_redundancy(matrix, threshold=.95):
         if left not in remaining: continue
         for right in sorted(remaining,key=priority):
             if right==left or right not in remaining or priority(right)<=priority(left): continue
+            if left.startswith("sero_ohe__") or right.startswith("sero_ohe__"):
+                # Full categorical blocks are dependent by design; never prune against them.
+                continue
             pair=matrix[[left,right]].dropna()
             if len(pair)<2: continue
             rho=float(pair.corr(method="spearman").iloc[0,1])
@@ -180,17 +185,21 @@ def sensitivity_features(features, excluded_feature):
     """Drop only the nominated feature from the fixed post-pruning feature set."""
     return [f for f in features if f != excluded_feature]
 
-def run_mapper_scenario(state, features, config, *, family_balance, scenario_name, patient_weighted=False):
+def run_mapper_scenario(state, features, config, *, family_balance, scenario_name, patient_weighted=False, feature_weights=None, indicator_columns=()):
     """Run the complete time-blind pipeline; lens is always (PC1, PC2)."""
     qc.validate_keys(state, "visit state")
     counts=pd.Series([feature_family(f) for f in features]).value_counts()
     weights=[1/math.sqrt(counts[feature_family(f)]) for f in features] if family_balance else None
+    if feature_weights is not None:
+        weights = [feature_weights[f] for f in features]
+        if not np.isfinite(weights).all() or np.any(np.asarray(weights) <= 0): raise ValueError("Invalid feature weights")
+    if patient_weighted and indicator_columns: raise ValueError("Patient weighted OHE is not prespecified")
     if patient_weighted:
         # Candidate bootstrap copies keep ORIGINAL patient IDs for support, but
         # every sampled patient draw contributes one unit of fitting mass.
         embedding,pca=qc.weighted_embedding(state[features],config,weights,state.get("fit_patient_id", state.patient_id))
     else:
-        embedding,pca=fit_visit_embedding(state[features],config,weights)
+        embedding,pca=fit_visit_embedding(state[features],config,weights,indicator_columns)
     eps=eps_kdist(embedding,config["mapper"]["eps_k_neighbors"],config["mapper"]["eps_percentile"])
     try:
         graph=run_mapper(embedding[:,:2],embedding,config,eps)
@@ -375,6 +384,7 @@ def interval_coverage_summary(intervals, membership, maximum_interval_years=None
 def parse_args(argv=None):
     p=argparse.ArgumentParser(); dirs=qc.study_paths(common)
     p.add_argument("--integrated",type=Path,default=common.INTEGRATED_LONGITUDINAL_PARQUET); p.add_argument("--state",type=Path,default=dirs["analytic"]/"01_longitudinal_visit_state.parquet")
+    p.add_argument("--serology-state", type=Path, help="Separate validated Script-01 OHE state")
     p.add_argument("--metadata",type=Path,default=dirs["analytic"]/"01_longitudinal_visit_metadata.parquet")
     p.add_argument("--intervals",type=Path,default=dirs["analytic"]/"01_longitudinal_intervals.parquet")
     p.add_argument("--feature-manifest",type=Path,default=dirs["tables"]/"01_longitudinal_feature_manifest.csv")

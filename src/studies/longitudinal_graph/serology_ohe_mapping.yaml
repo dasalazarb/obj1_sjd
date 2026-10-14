@@ -1,0 +1,7 @@
+version: serology_ohe_mapping_v1
+# Intentionally unapproved: real Step-10 vocabulary and clinical review unavailable.
+approved_by: null
+approved_on: null
+rationale: null
+markers: {ssa: {}, ssb: {}, ana: {}}
+temporal_review: {approved_by: null, approved_on: null, rationale: null, date_columns: {}}

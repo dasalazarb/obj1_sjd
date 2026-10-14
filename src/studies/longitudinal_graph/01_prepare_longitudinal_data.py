@@ -149,6 +149,47 @@ def parse_args(argv=None):
     p.add_argument("--output-root",type=Path,help="Isolated preparation outputs")
     return p.parse_args(argv)
 
+def prepare_serology(master, cfg, registry, args, dirs=None):
+    from src.studies.longitudinal_graph.serology_ohe import load_mapping, build_serology_ohe, SerologyBlocked
+    if not cfg.get("serology_ohe", {}).get("enabled"): return {"status": "disabled"}
+    try:
+        mapping, path = load_mapping(cfg, ROOT)
+        state, manifest, audit, report = build_serology_ohe(master, cfg, registry, mapping)
+    except SerologyBlocked as error:
+        if dirs:
+            # A failed rerun must not leave a previous successful S4 consumable.
+            for name in ("01_longitudinal_serology_ohe_raw.parquet", "01_longitudinal_serology_ohe_state.parquet", "01_serology_ohe_provenance.json"):
+                (dirs["analytic"] / name).unlink(missing_ok=True)
+            write_json(dirs["qc"] / "01_serology_ohe_blocked.json", error.report)
+        return error.report
+    result = {"status": "completed", "n_visits": len(state), "n_patients": state.patient_id.nunique(),
+              "mapping_version": mapping["version"], "input_sha256": sha256_file(args.integrated),
+              "mapping_sha256": sha256_file(path), "config_sha256": sha256_file(args.config),
+              "temporal_review": mapping.get("temporal_review"), "confirmation": "requires_researcher_review"}
+    if dirs:
+        import datetime, subprocess
+        result["created_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        result["code_sha"] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+        result["git_dirty"] = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True).strip())
+        result["artifact_sha256"] = {}
+        for kind in ("raw", "state"):
+            target = dirs["analytic"] / f"01_longitudinal_serology_ohe_{kind}.parquet"
+            state.to_parquet(target, index=False); result["artifact_sha256"][target.name] = sha256_file(target)
+        for kind, table in (("feature_manifest", manifest), ("mapping", audit), ("qc", report)):
+            table.to_csv(dirs["tables"] / f"01_serology_ohe_{kind}.csv", index=False)
+        strata = []
+        for column in ("protocol", "demo__protocol", "era", "visit_type", "spine__interval_name", "clinical_anchor_date"):
+            if column not in master:
+                strata.append({"variable": column, "status": "not_tested_missing_variable"}); continue
+            groups = pd.to_datetime(master[column], errors="coerce").dt.year if column == "clinical_anchor_date" else master[column]
+            for marker in ("ssa", "ssb", "ana"):
+                frame = pd.DataFrame({"stratum": groups.to_numpy(), "missing": state[f"sero_ohe__{marker}__missing"]})
+                for group, data in frame.groupby("stratum", dropna=False):
+                    strata.append({"variable": column, "stratum": group, "biomarker": marker, "n_visits": len(data), "missing_fraction": data.missing.mean(), "status": "completed"})
+        pd.DataFrame(strata).to_csv(dirs["tables"] / "01_serology_ohe_missingness_strata.csv", index=False)
+        write_json(dirs["analytic"] / "01_serology_ohe_provenance.json", result)
+    return result
+
 def run(args):
     if args.dry_run:
         cfg=load_config(args.config)
@@ -162,7 +203,8 @@ def run(args):
             registry=pd.read_csv(registry_path) if registry_path.exists() else None
             manifest,_=feature_manifest(master,intervals,cfg,registry)
             if not manifest.included.any(): raise ValueError("No eligible longitudinal state features")
-            result={"status":"validated","dry_run":True,"n_visits":len(master),"n_features":int(manifest.included.sum()),"outputs_written":False,"contract":contract}
+            serology = prepare_serology(master, cfg, registry, args)
+            result={"serology_ohe": serology, "status":"validated","dry_run":True,"n_visits":len(master),"n_features":int(manifest.included.sum()),"outputs_written":False,"contract":contract}
         import json
         print(json.dumps(result,default=str));return result
     root=getattr(args,"output_root",None)
@@ -219,6 +261,7 @@ def run(args):
     visit_summary.to_csv(dirs["tables"]/"01_longitudinal_visit_type_summary.csv",index=False)
     intervals.interval_days.describe().rename_axis("statistic").reset_index(name="interval_days").to_csv(dirs["tables"]/"01_longitudinal_interval_distribution.csv",index=False)
     write_json(dirs["qc"]/"01_longitudinal_data_qc.json",{"status":"completed","contract_version":STUDY_CONTRACT_VERSION,"input_files":[args.integrated,args.intervals],"input_sha256":sha256_file(args.integrated),"config_file":args.config,"config_sha256":sha256_file(args.config),"random_seed":cfg["random_seed"],"contract":contract,**summary})
+    prepare_serology(master, cfg, registry, args, dirs)
     print("ORDER TO REVIEW LONGITUDINAL GRAPH OUTPUTS\n1. Feasibility summary\n2. Feature manifest\n3. Data QC")
     return summary
 if __name__ == "__main__": run(parse_args())
