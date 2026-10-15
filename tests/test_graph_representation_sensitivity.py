@@ -4,6 +4,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
+import yaml
 
 
 SCRIPT = (Path(__file__).parents[1] / "src/studies/graph" /
@@ -11,6 +13,96 @@ SCRIPT = (Path(__file__).parents[1] / "src/studies/graph" /
 SPEC = importlib.util.spec_from_file_location("graph_representation_sensitivity", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+
+
+@pytest.mark.parametrize("pop_columns", [
+    {"pop__status": ["Pop1", "Pop2", "Pop3"]},
+    {"pop_status": ["Pop1", "Pop2", "Pop3"]},
+    {"pop__status": ["Pop1", "Pop2", "Pop3"], "pop_status": ["Pop3"] * 3},
+])
+def test_patient_membership_resolves_pop_labels(pop_columns):
+    baseline = pd.DataFrame({"patient_id": ["p1", "p2", "p3"], **pop_columns})
+    mapped = {"hard": np.array([0., 1., np.nan]),
+              "probabilities": np.array([[.8, .2], [.1, .9], [np.nan, np.nan]]),
+              "covered": np.array([True, True, False]),
+              "ties": np.array([False, False, False]), "supported": [True, True]}
+
+    result = MODULE.patient_membership("S0", baseline, mapped)
+
+    assert result.baseline_pop.tolist() == ["Pop1", "Pop2", "Pop3"]
+    assert result.patient_id.tolist() == ["p1", "p2", "p3"]
+    assert result.community_supported.tolist() == [True, True, False]
+    assert result.hard_community.isna().tolist() == [False, False, True]
+
+
+def test_patient_membership_requires_pop_concept():
+    with pytest.raises(ValueError, match="Missing required concept 'pop'"):
+        MODULE.patient_membership("S0", pd.DataFrame({"patient_id": ["p1"]}),
+                                  {"hard": np.array([0.]), "probabilities": np.ones((1, 1)),
+                                   "covered": [True], "ties": [False], "supported": [True]})
+
+
+def test_run_all_scenarios_with_public_episode_schema(tmp_path, monkeypatch):
+    rng = np.random.default_rng(17)
+    n = 24
+    master = pd.DataFrame({
+        "patient_id": [f"p{i}" for i in range(n)],
+        "clinical_episode_id": [f"e{i}" for i in range(n)],
+        "clinical_anchor_date": pd.Timestamp("2020-01-01"),
+        "clinical_visit_number": 1, "clinical_visit": True, "is_clinical_baseline": True,
+        "pop__status": ["Pop1", "Pop2", "Pop3"] * (n // 3),
+        "essdai__total": rng.uniform(0, 10, n), "esspri__total": rng.uniform(0, 10, n),
+        "ovl__status": ["overlap", "glandular_only", "neither"] * (n // 3),
+        **{f"pro__{feature}": rng.uniform(1, 10, n) for feature in MODULE.CANON.PRO_FEATURES},
+        "lab__test__value": rng.uniform(1, 10, n),
+    })
+    integrated = tmp_path / "integrated.parquet"
+    master.to_parquet(integrated, index=False)
+    original_parquet = integrated.read_bytes()
+    candidates = tmp_path / "candidates.csv"
+    pd.DataFrame([{"lab": "test", "graph_candidate_status": "include_numeric",
+                   "graph_encoding_hint": "continuous", "primary_result_source": "value_column",
+                   "value_column": "lab__test__value", "text_column": "",
+                   "reference_status_column": ""}]).to_csv(candidates, index=False)
+    metrics = tmp_path / "baseline.csv"
+    master[["patient_id"]].to_csv(metrics, index=False)
+    group_map = tmp_path / "groups.csv"
+    pd.DataFrame({"lab": ["test"], "s4_group": ["HEMATOLOGY"],
+                  "s4_subgroup": ["CBC"], "mapping_status": ["MAPPED"]}).to_csv(group_map, index=False)
+    config = MODULE.CANON.load_config(SCRIPT.with_name("config_sensitivity.yaml"))
+    config["bootstrap"]["replicates"] = 1
+    config["permutation"]["ari_replicates"] = 5
+    config["persistent_homology"]["enabled"] = False
+    config["mapper"].update(n_cubes=2, min_samples=2, minimum_node_support=2)
+    config["community_detection"]["minimum_patients"] = 2
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump(config))
+    dirs = {name: tmp_path / name for name in ("tables", "logs", "figures")}
+    for path in dirs.values():
+        path.mkdir()
+    monkeypatch.setattr(MODULE, "create_study_dirs", lambda _: dirs)
+
+    MODULE.run(MODULE.parse_args([
+        "--integrated", str(integrated), "--graph-lab-candidates", str(candidates),
+        "--baseline-metrics", str(metrics), "--config", str(config_path),
+        "--lab-group-map", str(group_map)]))
+
+    membership = pd.read_csv(dirs["tables"] / "02_graph_scenario_patient_membership.csv")
+    assert len(membership) == n * len(MODULE.SCENARIOS)
+    for scenario in MODULE.SCENARIOS:
+        assert membership.loc[membership.scenario.eq(scenario), "baseline_pop"].tolist() == master["pop__status"].tolist()
+    summary = pd.read_csv(dirs["tables"] / "02_graph_representation_sensitivity_summary.csv")
+    assert summary.scenario.tolist() == list(MODULE.SCENARIOS)
+    assert summary.n_pro_features.eq(4).all()
+    assert summary.n_clinical_features.eq(1).all()
+    assert summary.n_lab_features.eq(1).all()
+    crosswalk = pd.read_csv(dirs["tables"] / "02_graph_scenario_community_pop_crosswalk.csv")
+    assert set(crosswalk.baseline_pop) <= {"Pop1", "Pop2", "Pop3"}
+    assert set(crosswalk.scenario) == set(MODULE.SCENARIOS)
+    features = pd.read_csv(dirs["tables"] / "02_graph_scenario_feature_sets.csv")
+    assert not features.feature.isin(["pop_status", "pop__status", "essdai_total", "essdai__total", "esspri__total"]).any()
+    assert len(list(dirs["figures"].glob("*.png"))) == 3
+    assert integrated.read_bytes() == original_parquet
 
 
 def test_strict_coverage_preserves_full_one_hot_and_missing_values():
