@@ -90,18 +90,34 @@ def load_real_inputs(integrated: Path, candidates_path: Path) -> tuple[pd.DataFr
 
 
 def load_age_at_diagnosis(path: Path) -> pd.DataFrame:
-    """Load Block A's canonical patient-level age-at-diagnosis derivation."""
+    """Load Block A's diagnosis age, retaining missingness when unavailable.
+
+    Curated episode inputs need not contain diagnosis history, so Block A
+    cannot always derive this feature. Never substitute visit or baseline age.
+    """
     if not path.exists():
         raise FileNotFoundError(
             f"Baseline metrics file not found: {path}. Run "
             "src/block_A/11_integrated_baseline_characterization.py first."
         )
-    metrics = pd.read_csv(path, usecols=lambda column: column in {"patient_id", "age_dx"})
-    missing = {"patient_id", "age_dx"} - set(metrics)
+    metrics = pd.read_csv(
+        path, usecols=lambda column: column in {"patient_id", "age_dx", "age_at_diagnosis"})
+    missing = {"patient_id"} - set(metrics)
     if missing:
         raise ValueError(f"Baseline metrics missing required columns: {sorted(missing)}")
     if metrics["patient_id"].duplicated().any():
         raise ValueError("Baseline metrics must contain one row per patient")
+    if "age_dx" not in metrics:
+        if "age_at_diagnosis" in metrics:
+            metrics["age_dx"] = metrics["age_at_diagnosis"]
+        else:
+            metrics["age_dx"] = np.nan
+    if metrics["age_dx"].isna().all():
+        logging.warning(
+            "Age at diagnosis unavailable in baseline metrics %s; "
+            "excluding age_dx from Graph features. Visit/baseline age is not a substitute.",
+            path,
+        )
     return metrics[["patient_id", "age_dx"]]
 
 
@@ -250,7 +266,9 @@ def build_feature_manifest(baseline: pd.DataFrame, candidates: pd.DataFrame,
         found = column in baseline
         numeric = pd.to_numeric(baseline[column], errors="coerce") if found else pd.Series(np.nan, index=baseline.index)
         nonmissing, unique = int(numeric.notna().sum()), int(numeric.nunique(dropna=True))
-        reason = "" if found and nonmissing and unique > 1 else ("source_column_missing" if not found else "no_baseline_variability")
+        reason = ("source_column_missing" if not found else
+                  "no_observed_baseline_data" if not nonmissing else
+                  "no_baseline_variability" if unique < 2 else "")
         included = not reason
         if included:
             values[column] = numeric.astype(float)
