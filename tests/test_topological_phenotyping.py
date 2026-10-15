@@ -1,15 +1,131 @@
 """Focused tests for the topological phenotyping study."""
 import importlib.util
+import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
+import yaml
 
 
 SCRIPT = Path(__file__).parents[1] / "src/studies/graph/01_run_topological_phenotyping.py"
 SPEC = importlib.util.spec_from_file_location("topological_phenotyping", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+
+
+def test_public_features_use_canonical_sources_and_keep_unknown_overlap_missing():
+    baseline = pd.DataFrame({
+        "pro__sf36_pcs": [35., 45., 55., 65.], "sf36_pcs": [0.] * 4,
+        "pro__sf36_mcs": [36., 46., 56., 66.],
+        "pro__profad_total": [1., 2., 3., 4.],
+        "pro__mdafs_global": [4., 3., 2., 1.],
+        "ovl__status": ["overlap", "glandular_only", "unclassifiable", None],
+        "overlap_baseline": [1.] * 4,
+        "pop__status": ["Pop1", "Pop2", "Pop3", "Pop1"],
+        "essdai__total": [1., 2., 3., 4.], "esspri__total": [2., 3., 4., 5.],
+    })
+
+    manifest, values, _, _ = MODULE.build_feature_manifest(baseline, pd.DataFrame(), .5)
+
+    assert set(values) == {*MODULE.PRO_FEATURES, "overlap_baseline"}
+    assert values["sf36_pcs"].tolist() == [35., 45., 55., 65.]
+    assert values["overlap_baseline"].iloc[:2].tolist() == [1., 0.]
+    assert values["overlap_baseline"].iloc[2:].isna().all()
+    sources = manifest.set_index("feature").source_column
+    assert sources["sf36_pcs"] == "pro__sf36_pcs"
+    assert sources["overlap_baseline"] == "ovl__status"
+
+
+def test_longitudinal_models_resolve_public_outcomes_and_covariates():
+    baseline = pd.DataFrame({"patient_id": ["p1", "p2", "p3", "p4"],
+                             "demo__age_at_visit": [40., 50., 60., 70.],
+                             "demo__sex": ["Female", "Male", "Female", "Male"]})
+    master = pd.DataFrame({"patient_id": baseline.patient_id,
+                           "time_since_clinical_baseline_years": [0., 0., 0., 0.],
+                           "essdai__total": [1., 2., 3., 4.],
+                           "esspri__total": [2., 3., 4., 5.],
+                           "pro__sf36_pcs": [35., 45., 55., 65.],
+                           "pro__profad_total": [1., 2., 3., 4.],
+                           "pro__mdafs_global": [4., 3., 2., 1.]})
+    membership = pd.DataFrame({"patient_id": baseline.patient_id,
+                               "mapper_covered": True, "community_membership_tie": False,
+                               "community_supported": True, "hard_community": [0, 0, 1, 1]})
+
+    models, longitudinal, _ = MODULE.fit_longitudinal_models(master, baseline, membership)
+
+    assert set(models.model_status) == {"insufficient_information"}
+    assert models.n_observations.tolist() == [4] * len(MODULE.OUTCOMES)
+    assert longitudinal.baseline_age.tolist() == [40., 50., 60., 70.]
+    assert longitudinal.baseline_sex.tolist() == ["Female", "Male", "Female", "Male"]
+    assert longitudinal.essdai_total.tolist() == [1., 2., 3., 4.]
+    assert all("baseline_age" in formula and "baseline_sex" in formula for formula in models.model)
+
+
+def test_overlap_feature_respects_evaluability():
+    baseline = pd.DataFrame({
+        "ovl__status": ["overlap", "glandular_only", "extraglandular_only", "neither", "overlap", "overlap"],
+        "ovl__evaluable": pd.Series([True, True, True, True, False, None], dtype="boolean"),
+    })
+
+    _, values, _, _ = MODULE.build_feature_manifest(baseline, pd.DataFrame(), .5)
+
+    assert values["overlap_baseline"].iloc[:4].tolist() == [1., 0., 0., 0.]
+    assert values["overlap_baseline"].iloc[4:].isna().all()
+
+
+def test_run_with_public_episode_schema(tmp_path, monkeypatch):
+    rng = np.random.default_rng(17)
+    n = 24
+    master = pd.DataFrame({
+        "patient_id": [f"p{i}" for i in range(n)],
+        "clinical_episode_id": [f"e{i}" for i in range(n)],
+        "clinical_anchor_date": pd.Timestamp("2020-01-01"),
+        "clinical_visit_number": 1, "clinical_visit": True, "is_clinical_baseline": True,
+        "time_since_clinical_baseline_years": 0.,
+        "pop__status": ["Pop1", "Pop2", "Pop3"] * (n // 3),
+        "essdai__total": rng.uniform(0, 10, n), "esspri__total": rng.uniform(0, 10, n),
+        "ovl__status": ["overlap", "glandular_only", "neither"] * (n // 3),
+        "demo__age_at_visit": rng.uniform(30, 70, n), "demo__sex": "Female",
+        **{f"pro__{feature}": rng.uniform(1, 10, n) for feature in MODULE.PRO_FEATURES},
+        "lab__test__value": rng.uniform(1, 10, n),
+    })
+    integrated = tmp_path / "integrated.parquet"
+    master.to_parquet(integrated, index=False)
+    original_parquet = integrated.read_bytes()
+    candidates = tmp_path / "candidates.csv"
+    pd.DataFrame([{"lab": "test", "graph_candidate_status": "include_numeric",
+                   "graph_encoding_hint": "continuous", "primary_result_source": "value_column",
+                   "value_column": "lab__test__value", "text_column": "",
+                   "reference_status_column": ""}]).to_csv(candidates, index=False)
+    metrics = tmp_path / "baseline.csv"
+    master[["patient_id"]].to_csv(metrics, index=False)
+    config = MODULE.load_config(SCRIPT.with_name("config.yaml"))
+    config["bootstrap"]["replicates"] = 2
+    config["permutation"]["ari_replicates"] = 5
+    config["persistent_homology"]["enabled"] = False
+    config["mapper"].update(n_cubes=2, min_samples=2, minimum_node_support=2)
+    config["community_detection"]["minimum_patients"] = 2
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump(config))
+    dirs = {name: tmp_path / name for name in ("tables", "logs", "figures")}
+    for path in dirs.values():
+        path.mkdir()
+    monkeypatch.setattr(MODULE, "create_study_dirs", lambda _: dirs)
+
+    MODULE.run(MODULE.parse_args([
+        "--integrated", str(integrated), "--graph-lab-candidates", str(candidates),
+        "--baseline-metrics", str(metrics), "--config", str(config_path)]))
+
+    embedding = pd.read_csv(dirs["tables"] / "01_graph_patient_embedding.csv")
+    assert embedding.baseline_pop.tolist() == master["pop__status"].tolist()
+    summary = json.loads((dirs["tables"] / "01_graph_results_summary.json").read_text())
+    assert summary["embedding_feature_families"] == {
+        "lab": 1, "pro": 4, "overlap": 1, "age_at_diagnosis": 0}
+    assert summary["n_embedding_features"] == 6
+    assert len(list(dirs["figures"].glob("*.png"))) == 5
+    assert integrated.read_bytes() == original_parquet
 
 
 @pytest.mark.parametrize("age_column", ["age_dx", "age_at_diagnosis"])
