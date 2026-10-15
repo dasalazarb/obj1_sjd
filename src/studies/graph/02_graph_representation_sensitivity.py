@@ -70,9 +70,17 @@ def family_name(value: str) -> str:
     return "LAB" if value == "lab" else "PRO" if value == "pro" else "CLINICAL"
 
 
+def canonical_lab_name(lab: str) -> str:
+    """Normalize the optional public namespace, preserving compound lab names."""
+    return lab.strip().lower().removeprefix("lab__")
+
+
 def feature_stem(feature: str) -> str:
-    """Return the lab concept before encoding suffixes."""
-    return feature.split("__", 1)[0].strip().lower()
+    """Remove encoding suffixes without truncating compound lab concepts."""
+    stem = canonical_lab_name(feature).split("__cat_", 1)[0]
+    for suffix in ("__value", "__binary"):
+        stem = stem.removesuffix(suffix)
+    return stem
 
 
 def load_lab_group_map(path: Path) -> pd.DataFrame:
@@ -90,7 +98,9 @@ def load_lab_group_map(path: Path) -> pd.DataFrame:
             raise ValueError(f"S4 lab group map has blank {column} values at rows "
                              f"{(mapping.index[blank] + 2).tolist()}")
     mapping = mapping.copy()
-    mapping["lab"] = mapping["lab"].astype(str).str.strip().str.lower()
+    mapping["lab"] = mapping["lab"].astype(str).map(canonical_lab_name)
+    if mapping["lab"].eq("").any():
+        raise ValueError("S4 lab group map has blank lab names after namespace normalization")
     mapping["s4_group"] = mapping["s4_group"].astype(str).str.strip()
     mapping["s4_subgroup"] = mapping["s4_subgroup"].fillna("").astype(str).str.strip()
     mapping["mapping_status"] = mapping["mapping_status"].astype(str).str.strip()
@@ -115,7 +125,7 @@ def validate_s4_mapping(values: dict[str, pd.Series], families: dict[str, str],
     for feature in sorted(values):
         if families[feature] != "LAB":
             continue
-        lab = feature_to_lab.get(feature, "")
+        lab = canonical_lab_name(feature_to_lab.get(feature, ""))
         if not lab:
             raise ValueError(
                 f"LAB feature is missing canonical lab metadata in manifest: {feature}"
@@ -277,7 +287,7 @@ def prepare_matrix(raw: pd.DataFrame, families: dict[str, str], balance: bool,
         if family == "LAB" and lab_group_balance:
             grouped: dict[str, list[str]] = {}
             for column in columns:
-                lab = feature_to_lab.get(column, "")
+                lab = canonical_lab_name(feature_to_lab.get(column, ""))
                 if not lab:
                     raise ValueError(
                         f"S4 LAB feature is absent from canonical manifest mapping: {column}"
@@ -594,7 +604,7 @@ def run(args: argparse.Namespace) -> None:
     # with the canonical threshold to reproduce current coverage exceptions exactly.
     full_manifest, full_values, _, _ = CANON.build_feature_manifest(baseline, candidates, 0.0)
     feature_to_lab = {
-        str(row.feature): str(row.lab).strip().lower()
+        str(row.feature): canonical_lab_name(str(row.lab))
         for row in full_manifest.loc[
             full_manifest["included"] & full_manifest["family"].eq("lab")
         ].itertuples(index=False)

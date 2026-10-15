@@ -13,6 +13,10 @@ SCRIPT = (Path(__file__).parents[1] / "src/studies/graph" /
 SPEC = importlib.util.spec_from_file_location("graph_representation_sensitivity", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+PHARMA_SPEC = importlib.util.spec_from_file_location(
+    "pharma_lab_profile", SCRIPT.parents[1] / "pharma" / "00_profile_labs.py")
+PHARMA = importlib.util.module_from_spec(PHARMA_SPEC)
+PHARMA_SPEC.loader.exec_module(PHARMA)
 
 
 @pytest.mark.parametrize("pop_columns", [
@@ -54,21 +58,18 @@ def test_run_all_scenarios_with_public_episode_schema(tmp_path, monkeypatch):
         "essdai__total": rng.uniform(0, 10, n), "esspri__total": rng.uniform(0, 10, n),
         "ovl__status": ["overlap", "glandular_only", "neither"] * (n // 3),
         **{f"pro__{feature}": rng.uniform(1, 10, n) for feature in MODULE.CANON.PRO_FEATURES},
-        "lab__test__value": rng.uniform(1, 10, n),
+        "lab__albumin__value": rng.uniform(1, 10, n),
+        "lab__acute_care_panel__chloride_blood__value": rng.uniform(90, 110, n),
+        "lab__anti_ro_ssa__text": ["positive"] * (n // 2) + ["negative"] * (n // 2),
     })
     integrated = tmp_path / "integrated.parquet"
     master.to_parquet(integrated, index=False)
     original_parquet = integrated.read_bytes()
     candidates = tmp_path / "candidates.csv"
-    pd.DataFrame([{"lab": "test", "graph_candidate_status": "include_numeric",
-                   "graph_encoding_hint": "continuous", "primary_result_source": "value_column",
-                   "value_column": "lab__test__value", "text_column": "",
-                   "reference_status_column": ""}]).to_csv(candidates, index=False)
+    # Exercise the actual Pharma -> Graph boundary, including lab__ in lab keys.
+    PHARMA.profile_labs(master).to_csv(candidates, index=False)
     metrics = tmp_path / "baseline.csv"
     master[["patient_id"]].to_csv(metrics, index=False)
-    group_map = tmp_path / "groups.csv"
-    pd.DataFrame({"lab": ["test"], "s4_group": ["HEMATOLOGY"],
-                  "s4_subgroup": ["CBC"], "mapping_status": ["MAPPED"]}).to_csv(group_map, index=False)
     config = MODULE.CANON.load_config(SCRIPT.with_name("config_sensitivity.yaml"))
     config["bootstrap"]["replicates"] = 1
     config["permutation"]["ari_replicates"] = 5
@@ -84,8 +85,7 @@ def test_run_all_scenarios_with_public_episode_schema(tmp_path, monkeypatch):
 
     MODULE.run(MODULE.parse_args([
         "--integrated", str(integrated), "--graph-lab-candidates", str(candidates),
-        "--baseline-metrics", str(metrics), "--config", str(config_path),
-        "--lab-group-map", str(group_map)]))
+        "--baseline-metrics", str(metrics), "--config", str(config_path)]))
 
     membership = pd.read_csv(dirs["tables"] / "02_graph_scenario_patient_membership.csv")
     assert len(membership) == n * len(MODULE.SCENARIOS)
@@ -95,7 +95,11 @@ def test_run_all_scenarios_with_public_episode_schema(tmp_path, monkeypatch):
     assert summary.scenario.tolist() == list(MODULE.SCENARIOS)
     assert summary.n_pro_features.eq(4).all()
     assert summary.n_clinical_features.eq(1).all()
-    assert summary.n_lab_features.eq(1).all()
+    assert summary.n_lab_features.eq(3).all()
+    mapping_audit = pd.read_csv(dirs["tables"] / "02_graph_S4_lab_group_mapping_audit.csv")
+    assert mapping_audit.mapped.all()
+    assert set(mapping_audit.lab) == {"albumin", "acute_care_panel__chloride_blood", "anti_ro_ssa"}
+    assert mapping_audit.feature.str.startswith("lab__").all()
     crosswalk = pd.read_csv(dirs["tables"] / "02_graph_scenario_community_pop_crosswalk.csv")
     assert set(crosswalk.baseline_pop) <= {"Pop1", "Pop2", "Pop3"}
     assert set(crosswalk.scenario) == set(MODULE.SCENARIOS)
@@ -200,6 +204,70 @@ def test_lab_group_map_validation_and_retained_mapping_audit(tmp_path):
         assert "lab_b__value" in str(exc)
     else:
         raise AssertionError("An included UNMAPPED lab must be rejected")
+
+
+def test_group_map_normalizes_public_namespace_and_rejects_collisions(tmp_path):
+    path = tmp_path / "groups.csv"
+    pd.DataFrame({"lab": [" LAB__Albumin "], "s4_group": ["LIVER_PANCREAS"],
+                  "s4_subgroup": ["PROTEINS"], "mapping_status": ["MAPPED"]}).to_csv(path, index=False)
+    assert MODULE.load_lab_group_map(path).lab.tolist() == ["albumin"]
+    pd.DataFrame({"lab": ["albumin", "lab__albumin"], "s4_group": ["LIVER_PANCREAS"] * 2,
+                  "s4_subgroup": ["PROTEINS"] * 2, "mapping_status": ["MAPPED"] * 2}).to_csv(path, index=False)
+    with pytest.raises(ValueError, match="duplicate lab values"):
+        MODULE.load_lab_group_map(path)
+
+
+def test_default_group_map_covers_labs_reported_by_s4():
+    # Regression fixture from the real S4 failure; compound stems stay intact.
+    labs = """
+        acute_care_panel__chloride_blood acute_care_panel__co2_total_blood
+        acute_care_panel__potassium_blood acute_care_panel__sodium_blood
+        albumin alkaline_phosphatase alpha1_globulin alpha2_globulin alt amylase anc
+        anti_la_ssb anti_rnp anti_ro_ssa anti_scl70 anti_sm ast basophil_absolute
+        basophil_percent beta1_globulin beta2_globulin bilirubin_total bun complement_c3
+        complement_c4 creatine_kinase creatinine eosinophil_absolute eosinophil_percent
+        esr estimated_average_glucose ferritin gamma_globulin glucose hdl_cholesterol
+        hematocrit hemoglobin hepatitis_b_core_antibody hepatitis_c_antibody iga igg igm
+        immature_granulocyte_absolute immature_granulocyte_percent
+        immunofixation_electrophoresis_serum__albumin_ord_electrophoresis_pro_or_ife_blood
+        iron_saturation lactate_dehydrogenase ldl_cholesterol_calculated lymphocyte_count
+        lymphocyte_percent mch mchc mcv monocyte_absolute monocyte_percent mpv
+        neutrophil_percent phosphorus platelet_count protein_total protein_total_electrophoresis
+        rbc rdw serum_iron total_cholesterol transferrin triglycerides uric_acid
+        urine_nitrite urine_squamous_cells wbc
+    """.split()
+    mapping = MODULE.load_lab_group_map(MODULE.DEFAULT_LAB_GROUP_MAP)
+    lookup = MODULE.lab_group_lookup(mapping)
+    assert set(labs) <= set(lookup)
+    values = {f"lab__{lab}__value": pd.Series([1., 2.]) for lab in labs}
+    audit = MODULE.validate_s4_mapping(
+        values, {feature: "LAB" for feature in values}, mapping,
+        {f"lab__{lab}__value": f"lab__{lab}" for lab in labs}, included=set(values))
+    assert len(audit) == len(labs)
+    assert audit.mapped.all()
+
+
+@pytest.mark.parametrize("feature, expected", [
+    ("lab__hemoglobin_a1c__value", "hemoglobin_a1c"),
+    ("lab__anti_ro_ssa__binary", "anti_ro_ssa"),
+    ("lab__ana__cat_positive", "ana"),
+    ("lab__acute_care_panel__chloride_blood__value", "acute_care_panel__chloride_blood"),
+    ("acute_care_panel__chloride_blood__value", "acute_care_panel__chloride_blood"),
+])
+def test_feature_stem_preserves_compound_lab_concept(feature, expected):
+    assert MODULE.feature_stem(feature) == expected
+
+
+def test_configured_redundancy_pair_matches_public_lab_features():
+    values = {"lab__hemoglobin_a1c__value": pd.Series([1., 2., 3., 4.]),
+              "lab__estimated_average_glucose__value": pd.Series([3., 1., 4., 2.])}
+    config = {"redundancy": {"conceptual_pairs": [["hemoglobin_a1c", "estimated_average_glucose"]],
+                              "spearman_abs_threshold": .95}}
+
+    selected, audit = MODULE.reduce_redundancy(values, config)
+
+    assert set(selected) == {"lab__hemoglobin_a1c__value"}
+    assert audit.reason.str.startswith("configured_conceptual_pair").all()
 
 
 def test_s4_uses_manifest_metadata_for_compound_lab_names():
