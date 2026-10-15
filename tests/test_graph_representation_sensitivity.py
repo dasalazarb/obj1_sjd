@@ -270,6 +270,15 @@ def test_configured_redundancy_pair_matches_public_lab_features():
     assert audit.reason.str.startswith("configured_conceptual_pair").all()
 
 
+def test_default_group_map_covers_either_member_of_configured_redundancy_pairs():
+    # Selection can retain either member depending on its baseline coverage.
+    config = MODULE.CANON.load_config(SCRIPT.with_name("config_sensitivity.yaml"))
+    mapping = MODULE.load_lab_group_map(MODULE.DEFAULT_LAB_GROUP_MAP)
+    lookup = MODULE.lab_group_lookup(mapping)
+    for pair in config["redundancy"]["conceptual_pairs"]:
+        assert set(pair) <= set(lookup), f"S4 lacks mapping for configured alternatives: {pair}"
+
+
 def test_s4_uses_manifest_metadata_for_compound_lab_names():
     feature = "acute_care_panel__chloride_blood__value"
     lab = "acute_care_panel__chloride_blood"
