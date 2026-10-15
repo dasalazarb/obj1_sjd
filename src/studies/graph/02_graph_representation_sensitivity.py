@@ -29,7 +29,7 @@ from sklearn.metrics import adjusted_rand_score
 from sklearn.preprocessing import RobustScaler
 
 import common
-from src.studies._shared import create_study_dirs
+from src.studies._shared import create_study_dirs, resolve_concept
 
 
 def _load_canonical():
@@ -403,6 +403,7 @@ def bootstrap_stability(all_values: dict[str, pd.Series], families: dict[str, st
 
 def patient_membership(scenario: str, baseline: pd.DataFrame, mapped: dict) -> pd.DataFrame:
     """Create the common patient-level assignment contract for one scenario."""
+    pop_column = resolve_concept(baseline, "pop")
     hard, probabilities = mapped["hard"], mapped["probabilities"]
     result = pd.DataFrame({
         "scenario": scenario, "patient_id": baseline["patient_id"].to_numpy(),
@@ -412,7 +413,7 @@ def patient_membership(scenario: str, baseline: pd.DataFrame, mapped: dict) -> p
                                 if np.isfinite(value) else False for value in hard],
         "max_community_membership": (probabilities.max(axis=1)
                                      if probabilities.shape[1] else np.nan),
-        "baseline_pop": baseline["pop_status"].to_numpy(),
+        "baseline_pop": baseline[pop_column].to_numpy(),
     })
     for community in range(probabilities.shape[1]):
         result[f"pi_community_{community}"] = probabilities[:, community]
@@ -583,6 +584,7 @@ def run(args: argparse.Namespace) -> None:
     CANON._configure_logging(dirs["logs"] / "02_graph_representation_sensitivity.log")
     master, candidates, _ = CANON.load_real_inputs(args.integrated, args.graph_lab_candidates)
     baseline = CANON.select_baseline(master)
+    pop = baseline[resolve_concept(baseline, "pop")].to_numpy()
     age = CANON.load_age_at_diagnosis(args.baseline_metrics)
     baseline = baseline.merge(age, on="patient_id", how="left", validate="one_to_one", suffixes=("", "_blockA"))
     if "age_dx_blockA" in baseline:
@@ -660,7 +662,6 @@ def run(args: argparse.Namespace) -> None:
         stable_ids[scenario] = stable_id
         memberships[scenario] = patient_membership(scenario, baseline, mapped)
         hard, covered, ties, supported = mapped["hard"], mapped["covered"], mapped["ties"], mapped["supported"]
-        pop = baseline["pop_status"].to_numpy()
         valid = covered & ~ties & np.isfinite(hard) & np.isin(pop, CANON.POPS)
         valid &= np.array([supported[int(x)] if np.isfinite(x) else False for x in hard])
         if supported.sum() >= 2:
