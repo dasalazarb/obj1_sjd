@@ -39,7 +39,7 @@ import statsmodels.formula.api as smf
 
 import common
 from src.studies._shared import (benjamini_hochberg, create_study_dirs,
-                                 load_parquet, validate_integrated_dataset,
+                                 load_parquet, resolve_concept, validate_integrated_dataset,
                                  write_json)
 
 POPS = ("Pop1", "Pop2", "Pop3")
@@ -50,9 +50,15 @@ EXPECTED_LAB_AUDIT = ("anti_ro_ssa", "anti_la_ssb", "ana", "rheumatoid_factor",
                       "iga", "igm", "esr", "crp")
 OUTCOMES = ("essdai_total", "esspri_total_observed", "sf36_pcs",
             "profad_total", "mdafs_global")
-ADMIN = ("protocol", "ids__protocol", "ids__protocol_number", "parent_protocol")
-AGES = ("ids__age_at_visit", "age_at_visit", "age")
-SEXES = ("ids__sex", "ids__gender", "sex", "gender")
+GRAPH_COLUMNS = {
+    **{feature: (f"pro__{feature}", feature) for feature in PRO_FEATURES},
+    "overlap_baseline": ("ovl__status", "overlap_status", "overlap_baseline"),
+    "essdai_total": ("essdai__total", "essdai_total"),
+    "esspri_total_observed": ("esspri__total", "esspri_total_observed", "esspri_total"),
+}
+ADMIN = ("demo__protocol", "protocol", "ids__protocol", "ids__protocol_number", "parent_protocol")
+AGES = ("demo__age_at_visit", "demo__age_at_baseline", "ids__age_at_visit", "age_at_visit", "age")
+SEXES = ("demo__sex", "ids__sex", "ids__gender", "sex", "gender")
 COLORS = ["#2E5A87", "#C1666B", "#5B8C5A", "#B08B4F", "#6C6C8C",
           "#7A5C8E", "#3C8DAD", "#C77C3B"]
 plt.rcParams.update({"figure.dpi": 130, "font.size": 10, "axes.grid": True,
@@ -163,6 +169,12 @@ def _candidate_source_column(row: object) -> str:
     return "" if pd.isna(value) else str(value).strip()
 
 
+def _graph_source_column(frame: pd.DataFrame, feature: str) -> str | None:
+    """Prefer public Step-10 columns while retaining legacy input support."""
+    return next((column for column in GRAPH_COLUMNS.get(feature, (feature,))
+                 if column in frame), None)
+
+
 def build_feature_manifest(baseline: pd.DataFrame, candidates: pd.DataFrame,
                            minimum_coverage: float) -> tuple[pd.DataFrame, dict[str, pd.Series], dict[str, str], pd.DataFrame]:
     rows: list[dict] = []
@@ -263,8 +275,21 @@ def build_feature_manifest(baseline: pd.DataFrame, candidates: pd.DataFrame,
     fixed += [(column, "overlap", "integrated_master") for column in OVERLAP_FEATURES]
     fixed += [("age_dx", "age_at_diagnosis", "blockA_11_integrated_baseline_characterization")]
     for column, family, source in fixed:
-        found = column in baseline
-        numeric = pd.to_numeric(baseline[column], errors="coerce") if found else pd.Series(np.nan, index=baseline.index)
+        source_column = _graph_source_column(baseline, column)
+        found = source_column is not None
+        if column == "overlap_baseline" and source_column in {"ovl__status", "overlap_status"}:
+            # Derive the baseline indicator from the official episode's state;
+            # unclassifiable/unknown states must remain missing, not negative.
+            status = baseline[source_column].astype("string").str.strip().str.lower()
+            numeric = status.map({"overlap": 1., "glandular_only": 0.,
+                                  "extraglandular_only": 0., "neither": 0.})
+            evaluable = next((name for name in ("ovl__evaluable", "overlap_evaluable")
+                              if name in baseline), None)
+            if evaluable:
+                numeric = numeric.where(baseline[evaluable].eq(True).fillna(False))
+        else:
+            numeric = (pd.to_numeric(baseline[source_column], errors="coerce") if found
+                       else pd.Series(np.nan, index=baseline.index))
         nonmissing, unique = int(numeric.notna().sum()), int(numeric.nunique(dropna=True))
         reason = ("source_column_missing" if not found else
                   "no_observed_baseline_data" if not nonmissing else
@@ -274,7 +299,7 @@ def build_feature_manifest(baseline: pd.DataFrame, candidates: pd.DataFrame,
             values[column] = numeric.astype(float)
         rows.append({"feature": column, "family": family, "source": source, "lab": "",
                      "representation_type": "numeric", "graph_candidate_status": "",
-                     "graph_encoding_hint": "", "source_column": column,
+                     "graph_encoding_hint": "", "source_column": source_column or column,
                      "n_nonmissing_baseline": nonmissing,
                      "pct_nonmissing_baseline": nonmissing / denominator if denominator else 0.0,
                      "n_unique_baseline": unique, "included": included, "exclusion_reason": reason})
@@ -586,8 +611,11 @@ def fit_longitudinal_models(master: pd.DataFrame, baseline: pd.DataFrame,
     long = long.merge(baseline[covars].rename(columns={age: "baseline_age", sex: "baseline_sex"}), on="patient_id", how="left", validate="many_to_one")
     rows, plotted = [], []
     for outcome in OUTCOMES:
-        if outcome not in long:
+        source_column = _graph_source_column(long, outcome)
+        if source_column is None:
             rows.append({"outcome": outcome, "n_observations": 0, "n_patients": 0, "n_communities": 0, "model": "", "interaction_lr": np.nan, "interaction_df": np.nan, "interaction_p_value": np.nan, "interaction_q_value": np.nan, "model_status": "outcome_not_available", "error": ""}); continue
+        # Model/output labels remain stable; the integrated master is unchanged.
+        long[outcome] = long[source_column]
         keep = ["patient_id", "hard_community", "time", outcome] + (["baseline_age"] if age else []) + (["baseline_sex"] if sex else [])
         data = long[keep].copy()
         data["time"] = pd.to_numeric(data["time"], errors="coerce")
@@ -767,6 +795,7 @@ def run(args: argparse.Namespace) -> None:
     logging.info("Integrated input: %s", args.integrated)
     master, candidates, contract = load_real_inputs(args.integrated, args.graph_lab_candidates)
     baseline = select_baseline(master)
+    pop_column = resolve_concept(baseline, "pop")
     age_dx = load_age_at_diagnosis(args.baseline_metrics)
     baseline = baseline.merge(age_dx, on="patient_id", how="left", validate="one_to_one",
                               suffixes=("", "_blockA"))
@@ -861,7 +890,7 @@ def run(args: argparse.Namespace) -> None:
     baseline_episode = baseline["clinical_episode_id"]
     patient_embedding = pd.DataFrame({"patient_id": baseline.patient_id,
                                       "baseline_clinical_episode_id": baseline_episode,
-                                      "baseline_pop": baseline.pop_status})
+                                      "baseline_pop": baseline[pop_column]})
     for index in range(embedding.shape[1]): patient_embedding[f"PC{index+1}"] = embedding[:, index]
     patient_embedding["mapper_covered"] = covered
     patient_embedding["community_membership_tie"] = ties
@@ -911,12 +940,12 @@ def run(args: argparse.Namespace) -> None:
                           "bootstrap_stability": float(stability[community]),
                           "community_stability_status": stability_status[community]})
     community_sizes = pd.DataFrame(size_rows)
-    valid = (covered & ~ties & pd.notna(hard) & baseline.pop_status.isin(POPS).to_numpy()
+    valid = (covered & ~ties & pd.notna(hard) & baseline[pop_column].isin(POPS).to_numpy()
              & np.array([supported[int(value)] if np.isfinite(value) else False for value in hard]))
     if supported.sum() < 2:
         ari, ari_p, ari_status = np.nan, np.nan, "not_estimable_single_community"
     else:
-        ari, ari_p = ari_permutation(hard[valid].astype(int), baseline.loc[valid, "pop_status"].to_numpy(), int(config["permutation"]["ari_replicates"]), int(config["random_seed"]))
+        ari, ari_p = ari_permutation(hard[valid].astype(int), baseline.loc[valid, pop_column].to_numpy(), int(config["permutation"]["ari_replicates"]), int(config["random_seed"]))
         ari_status = "estimated" if np.isfinite(ari) else "not_estimable"
     crosswalk = community_pop_crosswalk(membership)
     administrative = administrative_sensitivity(baseline, membership)
