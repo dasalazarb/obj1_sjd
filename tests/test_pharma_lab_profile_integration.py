@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import yaml
+from graph_contract_fixtures import write_bundle
 
 from test_pharma_lab_profile import profile_module as mod, episode_frame, approved_registry
 
@@ -142,8 +143,9 @@ def test_actual_pharma_and_graph_readers_consume_only_existing_approved_sources(
     assert [x["column"] for x in numeric] == ["lab__glucose__value"]
     assert [x["column"] for x in categorical] == ["lab__ana_status__text"]
     assert all(x["column"] in frame for x in numeric + categorical)
+    write_bundle(integrated, candidates_path, profile=profile)
     master, candidates, contract = graph.load_real_inputs(integrated, candidates_path)
-    assert contract["status"] == "passed"
+    assert contract["dataset_contract"]["status"] == "passed"
     assert candidates.lab.str.startswith("lab__").all()
     baseline = master.loc[master.is_clinical_baseline].copy()
     manifest, values, _, audit = graph.build_feature_manifest(baseline, candidates, 0.)
@@ -166,4 +168,8 @@ def test_empty_catalog_is_readable_by_both_consumers(tmp_path):
     mod.graph_candidates(profile).to_csv(cp, index=False)
     frame.to_parquet(ip)
     assert pharma._lab_specs(pharma.load_lab_profile(pp), frame, "numeric_longitudinal") == []
-    assert graph.load_real_inputs(ip, cp)[1].empty
+    write_bundle(ip, cp, profile=profile)
+    # Pharma's empty-inventory exporter currently omits v2 headers. Fail closed;
+    # a separate Graph test covers a correctly headered empty v2 CSV + summary.
+    with pytest.raises(ValueError, match="CONTRACT_MISMATCH"):
+        graph.load_real_inputs(ip, cp)
