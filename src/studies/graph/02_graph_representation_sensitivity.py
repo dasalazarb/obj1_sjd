@@ -91,9 +91,7 @@ def family_name(value: str) -> str:
     return "LAB" if value == "lab" else "PRO" if value == "pro" else "CLINICAL"
 
 
-def canonical_lab_name(lab: str) -> str:
-    """Normalize the optional public namespace, preserving compound lab names."""
-    return lab.strip().lower().removeprefix("lab__")
+canonical_lab_name = CANON.canonical_lab_name
 
 
 def feature_stem(feature: str) -> str:
@@ -275,6 +273,73 @@ def select_features(all_values: dict[str, pd.Series], families: dict[str, str],
     if len(values) < 2:
         raise ValueError(f"{scenario} has fewer than two features after selection")
     return values, audit, redundancy
+
+
+def feature_selection_audit(master: pd.DataFrame, baseline: pd.DataFrame,
+                            candidates: pd.DataFrame, manifest: pd.DataFrame,
+                            universe: dict[str, pd.Series], coverage: pd.DataFrame,
+                            redundancy: pd.DataFrame, rep: Representation,
+                            mapping: pd.DataFrame, scenario: str) -> pd.DataFrame:
+    """Trace availability separately from approval, selection and actual PCA input.
+
+    Manifest rows retain rejected candidates. LAB source columns absent from the
+    Pharma catalog are availability-only records, never additional model inputs.
+    """
+    rows = manifest.to_dict("records")
+    catalog_sources = {
+        str(value).strip() for field in ("value_column", "text_column", "reference_status_column")
+        if field in candidates for value in candidates[field].dropna() if str(value).strip()
+    }
+    for column in master:
+        if (column.startswith("lab__") and column.endswith(("__value", "__text", "__reference_status"))
+                and column not in catalog_sources):
+            lab = column.rsplit("__", 1)[0]
+            rows.append({"feature": column, "family": "lab", "lab": lab,
+                         "source": "integrated_master_uncatalogued",
+                         "source_column": column, "representation_type": "not_encoded",
+                         "graph_candidate_status": "", "graph_encoding_hint": "",
+                         "pct_nonmissing_baseline": (float(baseline[column].notna().mean())
+                                                     if len(baseline) else 0.0),
+                         "included": False, "exclusion_reason": "not_catalogued_by_pharma00"})
+    coverage_index = coverage.set_index("feature")
+    removed = set(redundancy.feature_removed)
+    mapping_index = mapping.set_index("lab")
+    audit = []
+    for row in rows:
+        feature, source_column = row["feature"], row["source_column"]
+        is_lab = row["family"] == "lab"
+        lab = canonical_lab_name(row["lab"]) if is_lab else ""
+        catalogued = is_lab and row["source"] == "pharma_00_graph_lab_candidates"
+        approved = catalogued and row["graph_candidate_status"] in {"include_numeric", "include_categorical"}
+        encoded = bool(row["included"])
+        eligible = feature in universe
+        covered = (bool(coverage_index.at[feature, "included_after_coverage_filter"])
+                   if feature in coverage_index.index else False)
+        mapping_status = (mapping_index.at[lab, "mapping_status"] if lab in mapping_index.index
+                          else "MISSING" if is_lab else "NOT_APPLICABLE")
+        reason = row["exclusion_reason"] if not encoded else ""
+        if encoded and not eligible:
+            reason = "excluded_from_conventional_manifest"
+        elif eligible and not covered:
+            reason = coverage_index.at[feature, "exclusion_reason"]
+        elif feature in removed:
+            reason = "redundancy"
+        audit.append({"scenario": scenario, "feature": feature, "family": family_name(row["family"]),
+                      "lab": lab, "source": row["source"], "source_column": source_column,
+                      "present_in_integrated_parquet": source_column in master,
+                      "source_column_found": source_column in baseline,
+                      "catalogued_by_pharma00": catalogued, "approved_by_pharma00": approved,
+                      "graph_candidate_status": row["graph_candidate_status"],
+                      "baseline_coverage": row["pct_nonmissing_baseline"],
+                      "representation_type": row["representation_type"],
+                      "encoded_in_expanded_manifest": encoded,
+                      "eligible_in_scenario": eligible, "passed_coverage_filter": covered,
+                      "selected_after_redundancy": feature in rep.raw,
+                      "s4_mapping_status": mapping_status,
+                      "mapped_s4": mapping_status == "MAPPED",
+                      "present_in_pca": feature in rep.transformed_features,
+                      "exclusion_reason": reason})
+    return pd.DataFrame(audit)
 
 
 def _first_singular_value(block: np.ndarray, name: str) -> float:
@@ -908,6 +973,7 @@ def run(args: argparse.Namespace) -> None:
     results, memberships, stable_ids = {}, {}, {}
     summary_rows, coverage_rows, redundancy_rows, feature_rows, stability_rows = [], [], [], [], []
     bootstrap_audits, bootstrap_summaries, bootstrap_balance = [], [], []
+    selection_audits = []
 
     for scenario in SCENARIOS:
         universe = current_values if scenario == "S0" else full_values
@@ -942,6 +1008,11 @@ def run(args: argparse.Namespace) -> None:
             raise ValueError(f"Full-sample {scenario} representation is not estimable: {exc}") from exc
         rep.balance_audit.to_csv(
             dirs["tables"] / f"02_graph_{scenario}_full_fit_balance_audit.csv", index=False)
+        selection_audits.append(feature_selection_audit(
+            master, baseline, candidates, full_manifest, universe, coverage,
+            redundancy, rep, lab_group_frame, scenario))
+        pd.concat(selection_audits, ignore_index=True).to_csv(
+            dirs["tables"] / "02_graph_feature_selection_audit.csv", index=False)
         mapped = analyze_mapper(rep, config)
         boot = bootstrap_stability(universe, families, full_manifest, scenario,
                                         mapped["community_sets"], config,
@@ -1112,7 +1183,7 @@ def run(args: argparse.Namespace) -> None:
         print(f"{row.scenario_a}-{row.scenario_b} = {value} "
               f"(n={row.n_patients_used}/{row.n_patients_total}; {row.fraction_total_used:.1%})")
     print("\nORDER TO REVIEW GRAPH REPRESENTATION SENSITIVITY")
-    names = ["02_graph_S4_lab_group_mapping_audit.csv",
+    names = ["02_graph_S4_lab_group_mapping_audit.csv", "02_graph_feature_selection_audit.csv",
              "02_graph_bootstrap_replicate_audit.csv", "02_graph_bootstrap_qc_summary.csv",
              "02_graph_bootstrap_balance_audit.csv", "02_graph_common_intersection_ari.csv",
              "02_graph_stable_core_node_union_overlap.csv", "02_graph_interpretation_qc.json",

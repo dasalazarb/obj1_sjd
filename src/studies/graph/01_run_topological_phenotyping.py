@@ -175,6 +175,11 @@ def _graph_source_column(frame: pd.DataFrame, feature: str) -> str | None:
                  if column in frame), None)
 
 
+def canonical_lab_name(lab: str) -> str:
+    """Normalize the optional public namespace, preserving compound lab names."""
+    return lab.strip().lower().removeprefix("lab__")
+
+
 def build_feature_manifest(baseline: pd.DataFrame, candidates: pd.DataFrame,
                            minimum_coverage: float) -> tuple[pd.DataFrame, dict[str, pd.Series], dict[str, str], pd.DataFrame]:
     rows: list[dict] = []
@@ -249,7 +254,7 @@ def build_feature_manifest(baseline: pd.DataFrame, candidates: pd.DataFrame,
         if feature_series:
             for feature, series in feature_series.items():
                 values[feature] = series
-                lab_names.setdefault(lab.lower(), feature)
+                lab_names.setdefault(canonical_lab_name(lab), feature)
                 rows.append({"feature": feature, "family": "lab", "source": "pharma_00_graph_lab_candidates",
                              "lab": lab, "representation_type": representation,
                              "graph_candidate_status": status, "graph_encoding_hint": hint,
@@ -834,7 +839,7 @@ def run(args: argparse.Namespace) -> None:
     numeric_labs = lab_audit.loc[lab_audit.graph_candidate_status.eq("include_numeric") & lab_audit.included_in_graph, "lab"].nunique()
     categorical_labs = lab_audit.loc[lab_audit.graph_candidate_status.eq("include_categorical") & lab_audit.included_in_graph, "lab"].nunique()
     expected_approved = lab_audit.loc[
-        lab_audit.lab.str.lower().isin(EXPECTED_LAB_AUDIT)
+        lab_audit.lab.map(canonical_lab_name).isin(EXPECTED_LAB_AUDIT)
         & lab_audit.graph_candidate_status.isin({"include_numeric", "include_categorical"})]
     for row in expected_approved.loc[~expected_approved.included_in_graph].itertuples(index=False):
         logging.warning("Expected clinically important approved lab %s was not included: %s",
