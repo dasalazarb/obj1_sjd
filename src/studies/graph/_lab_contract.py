@@ -326,3 +326,62 @@ def write_failure(dirs, prefix, report, exc, args=None):
                              for role, path in input_paths(args).items()}
     (dirs["tables"] / f"{prefix}_preflight.json").write_text(json.dumps(payload, indent=2, default=str) + "\n")
     (dirs["tables"] / f"{prefix}_input_provenance.json").write_text(json.dumps(payload, indent=2, default=str) + "\n")
+
+
+# Baseline exploratory contract: clinical gates above are retained verbatim.
+from ._feature_catalog import CONTRACT_VERSION, file_hash
+
+
+def resolve_candidates(path: Path) -> Path:
+    # A historical unversioned candidate file must never shadow a fresh run.
+    runs = path.parent / "runs"
+    found = sorted(runs.glob("*/" + path.name)) if runs.exists() else []
+    return found[-1] if found else path
+
+
+def validate_provenance(integrated: Path, candidates: Path, analysis_mode: str) -> dict:
+    summary_path = candidates.with_name("00_pharma_profile_summary.json")
+    if not summary_path.is_file():
+        raise ValueError("MISSING_PROFILE_PROVENANCE: rerun Pharma 00 with the current contract")
+    summary = json.loads(summary_path.read_text())
+    if summary.get("feature_contract_version") != CONTRACT_VERSION:
+        raise ValueError("STALE_FEATURE_CONTRACT: rerun Pharma 00")
+    expected = next((r["sha256"] for r in summary["input_hashes"] if r["role"] == "integrated"), None)
+    if expected != file_hash(integrated):
+        raise ValueError("PROFILE_SOURCE_HASH_MISMATCH: candidates are from a different master")
+    for name in (candidates.name, "00_pharma_graph_lab_selection_audit.csv", summary.get("profile_output_name", "00_pharma_lab_profile.csv")):
+        path = candidates.with_name(name)
+        if not path.is_file() or summary.get("output_hashes", {}).get(name) != file_hash(path):
+            raise ValueError("PROFILE_OUTPUT_HASH_MISMATCH: " + name)
+    return {"analysis_mode": analysis_mode, "clinical_validation": "not_established",
+            "input_hash": expected, "feature_contract_version": CONTRACT_VERSION,
+            "profile_summary_hash": file_hash(summary_path)}
+
+
+def enforce_lab_mode(manifest: pd.DataFrame, *, analysis_mode: str, allow_without_lab: bool = False,
+                     release_path: Path | None = None, integrated_path: Path | None = None,
+                     candidates_path: Path | None = None) -> dict:
+    selected = manifest.loc[manifest.included & manifest.family.eq("lab")]
+    if analysis_mode == "clinical_release":
+        release = yaml.safe_load(release_path.read_text()) if release_path and release_path.is_file() else None
+        if integrated_path is None or candidates_path is None:
+            raise LabContractError("INCOMPLETE_RELEASE_REVIEW", "Clinical release requires the complete input bundle")
+        candidates_path = resolve_candidates(candidates_path)
+        folder = candidates_path.parent
+        summary = json.loads((folder / "00_pharma_profile_summary.json").read_text())
+        profile = pd.read_csv(folder / summary.get("profile_output_name", "00_pharma_lab_profile.csv"))
+        approved = profile.loc[profile.graph_candidate_status.isin({"include_numeric", "include_categorical"})]
+        validate_candidate_rows(pd.read_parquet(integrated_path), approved)
+        validate_release(release, approved, summary, {
+            "integrated": integrated_path, "pharma_candidates": candidates_path,
+            "pharma_summary": folder / "00_pharma_profile_summary.json",
+            "pharma_expected_audit": folder / "00_pharma_expected_lab_audit.csv",
+            "pharma_impact_audit": folder / "00_pharma_downstream_impact.csv"})
+        if selected.empty or not selected.clinical_approval_status.eq("approved").all():
+            raise LabContractError("NO_APPROVED_LABS", "No clinically released labs survive selection")
+    if selected.empty and not allow_without_lab:
+        raise ValueError("NO_TECHNICALLY_ELIGIBLE_LABS: review the selection audit; use --allow-without-lab for an explicit no-LAB sensitivity")
+    return {"analysis_mode": analysis_mode,
+            "clinical_validation": "released" if analysis_mode == "clinical_release" else "not_established",
+            "lab_modality": "present" if len(selected) else "EXPLICIT_NO_LAB_SENSITIVITY",
+            "n_selected_lab_features": len(selected)}

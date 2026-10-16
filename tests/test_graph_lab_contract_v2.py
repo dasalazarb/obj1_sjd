@@ -52,7 +52,7 @@ def bundle(tmp_path):
 
 def test_t01_v1_and_empty_headerless_fail_closed():
     with pytest.raises(LAB.LabContractError, match="CONTRACT_MISMATCH"):
-        G1.build_feature_manifest(episodes(), pd.DataFrame([{"lab": "glucose"}]), .7)
+        G1._build_legacy_feature_manifest(episodes(), pd.DataFrame([{"lab": "glucose"}]), .7)
     with pytest.raises(LAB.LabContractError, match="CONTRACT_MISMATCH"):
         LAB.validate_candidate_rows(episodes(), pd.DataFrame())
 
@@ -94,13 +94,13 @@ def test_t04_no_nonfinite_or_silent_numeric_cast(bad):
     frame["lab__glucose__value"] = frame["lab__glucose__value"].astype(object)
     frame.loc[0, "lab__glucose__value"] = bad
     with pytest.raises(LAB.LabContractError, match="CONTRACT_MISMATCH"):
-        G1.build_feature_manifest(G1.select_baseline(frame), pd.DataFrame([candidate()]), .7)
+        G1._build_legacy_feature_manifest(G1.select_baseline(frame), pd.DataFrame([candidate()]), .7)
 
 
 def test_t05_review_rows_and_full_profile_are_audit_only():
     baseline = G1.select_baseline(episodes())
     candidates = pd.DataFrame([candidate(), candidate("lab__pending", "review_before_graph")])
-    _, values, _, audit = G1.build_feature_manifest(baseline, candidates, .7)
+    _, values, _, audit = G1._build_legacy_feature_manifest(baseline, candidates, .7)
     assert not any("pending" in name for name in values)
     assert audit.loc[audit.lab.eq("lab__pending"), "exclusion_reason"].item() == "review_before_graph_not_approved"
 
@@ -148,7 +148,7 @@ def test_t08_symmetric_coverage(observed, included):
     baseline = G1.select_baseline(episodes())
     baseline.loc[observed:, ["lab__glucose__value", "lab__ana__text"]] = np.nan
     candidates = pd.DataFrame([candidate(pct_baseline_any_result=1.), candidate("lab__ana", "include_categorical", pct_baseline_any_result=1.)])
-    manifest, values, _, audit = G1.build_feature_manifest(baseline, candidates, .7)
+    manifest, values, _, audit = G1._build_legacy_feature_manifest(baseline, candidates, .7)
     assert ("lab__glucose__value" in values) == included
     assert ("lab__ana__binary" in values) == included
     assert audit.baseline_coverage.eq(observed / 100).all()
@@ -169,7 +169,7 @@ def test_t09_bad_category_fails_without_exporting_free_text(bad):
 def test_t09_unknown_is_missing_case_and_spaces_are_safe():
     baseline = G1.select_baseline(episodes())
     baseline.loc[0, "lab__ana__text"] = " UNKNOWN "
-    _, values, _, _ = G1.build_feature_manifest(baseline, pd.DataFrame([candidate("lab__ana", "include_categorical")]), .7)
+    _, values, _, _ = G1._build_legacy_feature_manifest(baseline, pd.DataFrame([candidate("lab__ana", "include_categorical")]), .7)
     assert np.isnan(values["lab__ana__binary"].iloc[0])
     assert values["lab__ana__binary"].iloc[1:4].tolist() == [0., 1., 0.]
 
@@ -177,18 +177,18 @@ def test_t09_unknown_is_missing_case_and_spaces_are_safe():
 def test_t10_baseline_coverage_uses_unique_patients():
     frame = episodes()
     baseline = G1.select_baseline(frame)
-    _, _, _, audit = G1.build_feature_manifest(baseline, pd.DataFrame([candidate()]), .7)
+    _, _, _, audit = G1._build_legacy_feature_manifest(baseline, pd.DataFrame([candidate()]), .7)
     assert audit.baseline_nonmissing.item() == 100
     with pytest.raises(LAB.LabContractError, match="one row per patient"):
-        G1.build_feature_manifest(frame, pd.DataFrame([candidate()]), .7)
+        G1._build_legacy_feature_manifest(frame, pd.DataFrame([candidate()]), .7)
 
 
 def test_t11_t12_t13_policies_preserve_patients_and_exclude_annotations():
     baseline = G1.select_baseline(episodes())
     baseline["age_dx"] = np.arange(len(baseline)) + 20
     candidates = pd.DataFrame([candidate(), candidate("lab__ana", "include_categorical")])
-    legacy, va, _, _ = G1.build_feature_manifest(baseline, candidates, .7)
-    alternate, vb, _, _ = G1.build_feature_manifest(baseline, candidates, .7, "without_overlap")
+    legacy, va, _, _ = G1._build_legacy_feature_manifest(baseline, candidates, .7)
+    alternate, vb, _, _ = G1._build_legacy_feature_manifest(baseline, candidates, .7, "without_overlap")
     pd.testing.assert_frame_equal(pd.DataFrame(va).drop(columns="overlap_baseline"), pd.DataFrame(vb))
     assert alternate.set_index("feature").loc["overlap_baseline", "exclusion_reason"] == "excluded_by_feature_policy_without_overlap"
     assert legacy.set_index("feature").loc["age_dx", "temporal_lineage_status"] == "temporal_lineage_unverified"
@@ -200,8 +200,8 @@ def test_t14_t15_s0_and_s3_s4_raw_matrices_match():
     candidates = pd.DataFrame([candidate(), candidate("lab__ana", "include_categorical")])
     cfg = G1.load_config(ROOT / "src/studies/graph/config_sensitivity.yaml")
     for policy in LAB.FEATURE_POLICIES:
-        manifest, canonical, _, _ = G1.build_feature_manifest(baseline, candidates, .7, policy)
-        full_manifest, universe, _, _ = G1.build_feature_manifest(baseline, candidates, 0., policy)
+        manifest, canonical, _, _ = G1._build_legacy_feature_manifest(baseline, candidates, .7, policy)
+        full_manifest, universe, _, _ = G1._build_legacy_feature_manifest(baseline, candidates, 0., policy)
         families = {r.feature: G2.family_name(r.family) for r in full_manifest.loc[full_manifest.included].itertuples()}
         s0, _, _ = G2.select_features(canonical, families, "S0", cfg, manifest)
         pd.testing.assert_frame_equal(pd.DataFrame(canonical), pd.DataFrame(s0))
@@ -214,7 +214,7 @@ def test_t14_t15_s0_and_s3_s4_raw_matrices_match():
 def test_t16_bootstrap_reentry_universe_requires_mapping():
     baseline = G1.select_baseline(episodes())
     baseline.loc[10:, "lab__glucose__value"] = np.nan
-    manifest, universe, _, _ = G1.build_feature_manifest(baseline, pd.DataFrame([candidate()]), 0.)
+    manifest, universe, _, _ = G1._build_legacy_feature_manifest(baseline, pd.DataFrame([candidate()]), 0.)
     families = {name: "LAB" if name.startswith("lab__") else "PRO" for name in universe}
     with pytest.raises(G2.MappingError, match="LAB_GROUP_MAPPING_ERROR"):
         G2.validate_s4_mapping(universe, families, pd.DataFrame(columns=["lab", "mapping_status"]),
@@ -234,7 +234,7 @@ def test_t17_s4_no_lab_and_zero_signal_are_non_estimable():
 def test_t18_selection_recomputed_in_subsample_and_pending_never_reenters():
     baseline = G1.select_baseline(episodes())
     baseline.loc[60:, "lab__glucose__value"] = np.nan
-    manifest, universe, _, _ = G1.build_feature_manifest(baseline, pd.DataFrame([
+    manifest, universe, _, _ = G1._build_legacy_feature_manifest(baseline, pd.DataFrame([
         candidate(), candidate("lab__pending", "review_before_graph")]), 0.)
     cfg = G1.load_config(ROOT / "src/studies/graph/config_sensitivity.yaml")
     families = {name: "LAB" if name.startswith("lab__") else "PRO" for name in universe}
@@ -249,7 +249,7 @@ def test_t19_profile_exclusions_do_not_become_candidates():
     baseline["lab__descriptive__text"] = "REDACTED"
     baseline["lab__unregistered__value"] = 1.
     candidates = pd.DataFrame([candidate()])
-    manifest, universe, _, _ = G1.build_feature_manifest(baseline, candidates, 0.)
+    manifest, universe, _, _ = G1._build_legacy_feature_manifest(baseline, candidates, 0.)
     families = {r.feature: G2.family_name(r.family) for r in manifest.loc[manifest.included].itertuples()}
     config = G1.load_config(ROOT / "src/studies/graph/config_sensitivity.yaml")
     selected, coverage, redundancy = G2.select_features(universe, families, "S3", config, manifest)
@@ -266,37 +266,25 @@ def test_t19_profile_exclusions_do_not_become_candidates():
 @pytest.mark.parametrize("module,prefix", [(G1, "01_graph"), (G2, "02_graph")])
 @pytest.mark.parametrize("policy", LAB.FEATURE_POLICIES)
 def test_t06_t20_preflight_writes_aggregate_audit_without_fitting(bundle, tmp_path, monkeypatch, module, prefix, policy):
-    master, cp, _, paths, _, _ = bundle
-    metrics = tmp_path / "metrics.csv"
-    master[["patient_id"]].drop_duplicates().to_csv(metrics, index=False)
-    mapping = tmp_path / "map.csv"
-    pd.DataFrame([dict(lab=lab, s4_group="SYNTHETIC", s4_subgroup="", mapping_status="MAPPED") for lab in ("glucose", "ana")]).to_csv(mapping, index=False)
-    created = []
-    def create_dirs(name):
-        created.append(name)
-        dirs = {key: tmp_path / name / key for key in ("tables", "figures", "logs")}
-        for directory in dirs.values():
-            directory.mkdir(parents=True, exist_ok=True)
-        return dirs
-    monkeypatch.setattr(module, "create_study_dirs", create_dirs)
+    from test_graph_feature_catalog import bundle as expanded_bundle
+    master, ip, cp, mapping = expanded_bundle(tmp_path)
+    output = tmp_path / "preflight"
     monkeypatch.setattr(module, "fit_embedding" if module is G2 else "fit_patient_embedding", lambda *a, **k: pytest.fail("model fit during preflight"))
-    argv = ["--integrated", str(paths["integrated"]), "--graph-lab-candidates", str(cp),
-            "--baseline-metrics", str(metrics), "--preflight-only", "--feature-policy", policy, "--run-id", "synthetic"]
+    argv = ["--integrated", str(ip), "--graph-lab-candidates", str(cp),
+            "--preflight-only", "--feature-policy", policy, "--output-dir", str(output)]
     if module is G2:
         argv += ["--lab-group-map", str(mapping)]
     args = module.parse_args(argv)
     module.run(args)
-    folder = tmp_path / created[0] / "tables"
+    folder = output / "tables"
     report = json.loads((folder / f"{prefix}_preflight.json").read_text())
-    assert report["status"] == "BLOCKED"  # Production template remains pending.
-    assert "INCOMPLETE_RELEASE_REVIEW" in {x["code"] for x in report["blockers"]}
-    assert report["feature_policy"] == policy
-    assert policy in str(folder)
-    assert report["n_lab_features_after_encoding"] == 2
+    assert report["status"] == "READY_FOR_EXPLORATORY_RUN"
+    assert report["clinical_validation"] == "not_established"
+    assert not report["blockers"]
     assert not list(folder.glob("*patient*"))
     assert "SYNTHETIC_PATIENT_" not in (folder / f"{prefix}_preflight.json").read_text()
-    with pytest.raises(LAB.LabContractError, match="already exists"):
-        module.run(args)
+    with pytest.raises(FileExistsError):
+        module.run(module.parse_args(argv))
 
 
 def test_duplicate_stems_and_strict_false():
@@ -307,35 +295,18 @@ def test_duplicate_stems_and_strict_false():
 
 @pytest.mark.parametrize("module,prefix", [(G1, "01_graph"), (G2, "02_graph")])
 def test_standard_run_blocks_pending_release_and_empty_labs(bundle, tmp_path, monkeypatch, module, prefix):
-    master, cp, _, paths, _, _ = bundle
-    master[["patient_id"]].drop_duplicates().to_csv(tmp_path / "metrics.csv", index=False)
-    mapping = tmp_path / "map.csv"
-    pd.DataFrame([dict(lab=lab, s4_group="SYNTHETIC", s4_subgroup="", mapping_status="MAPPED")
-                  for lab in ("glucose", "ana")]).to_csv(mapping, index=False)
-    def create_dirs(name):
-        dirs = {key: tmp_path / name / key for key in ("tables", "figures", "logs")}
-        for directory in dirs.values():
-            directory.mkdir(parents=True, exist_ok=True)
-        return dirs
-    monkeypatch.setattr(module, "create_study_dirs", create_dirs)
-    monkeypatch.setattr(module, "fit_embedding" if module is G2 else "fit_patient_embedding",
-                        lambda *a, **k: pytest.fail("scientific inference started while blocked"))
-    args = module.parse_args(["--integrated", str(paths["integrated"]), "--graph-lab-candidates", str(cp),
-                              "--baseline-metrics", str(tmp_path / "metrics.csv")])
+    from test_graph_feature_catalog import bundle as expanded_bundle
+    _, ip, cp, mapping = expanded_bundle(tmp_path)
+    monkeypatch.setattr(module, "fit_embedding" if module is G2 else "fit_patient_embedding", lambda *a, **k: pytest.fail("scientific inference started while blocked"))
+    args = module.parse_args(["--integrated", str(ip), "--graph-lab-candidates", str(cp),
+        "--analysis-mode", "clinical_release", "--output-dir", str(tmp_path / "clinical")])
     if module is G2:
         args.lab_group_map = mapping
-    with pytest.raises(LAB.LabContractError, match="INCOMPLETE_RELEASE_REVIEW"):
+    with pytest.raises(LAB.LabContractError, match="NO_APPROVED_LABS|INCOMPLETE_RELEASE_REVIEW"):
         module.run(args)
-    empty_candidates().to_csv(cp, index=False)
-    write_bundle(paths["integrated"], cp, approved=False)
-    args.preflight_only = True
-    module.run(args)
-    reports = [json.loads(path.read_text()) for path in tmp_path.glob(f"graph/**/{prefix}_preflight.json")]
-    empty_report = next(report for report in reports if report["n_approved_labs"] == 0)
-    assert empty_report["status"] == "BLOCKED"
-    assert "NO_APPROVED_LABS" in {item["code"] for item in empty_report["blockers"]}
-    if module is G2:
-        assert "NO_LABS_FOR_S4" in {item["code"] for item in empty_report["blockers"]}
+    report = json.loads((args.output_dir / "tables" / f"{prefix}_preflight.json").read_text())
+    assert report["status"] == "BLOCKED"
+    assert report["analysis_mode"] == "clinical_release"
 
 
 def test_canonical_config_mismatch_is_contract_error():

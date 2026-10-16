@@ -29,10 +29,10 @@ egfr_ckd_epi_2021,RENAL_URINALYSIS,RENAL_FUNCTION,2,47,egfr_ckd_epi_2021__,True,
 egfr_legacy_african_american,RENAL_URINALYSIS,RENAL_FUNCTION,2,48,egfr_legacy_african_american__,True,True,True,MAPPED,Legacy eGFR representation; current S2 redundancy filtering may remove it.
 egfr_legacy_non_african_american,RENAL_URINALYSIS,RENAL_FUNCTION,2,49,egfr_legacy_non_african_american__,True,True,True,MAPPED,Legacy eGFR representation; current S2 redundancy filtering may remove it.
 uric_acid,RENAL_URINALYSIS,RENAL_FUNCTION,2,123,uric_acid__,True,True,True,MAPPED,
-urinalysis_includes_microscopic__hyalin_casts_urinalysis,RENAL_URINARY,URINALYSIS,MAPPED
-urinalysis_includes_microscopic__renal_epithelial_cells_urinalysis,RENAL_URINARY,URINALYSIS,MAPPED
-urinalysis_includes_microscopic__transitional_epith_urinalysis,RENAL_URINARY,URINALYSIS,MAPPED
-urinalysis_includes_microscopic__unclassified_casts_urinalysis,RENAL_URINARY,URINALYSIS,MAPPED
+urinalysis_includes_microscopic__hyalin_casts_urinalysis,RENAL_URINARY,URINALYSIS,,,urinalysis_includes_microscopic__hyalin_casts_urinalysis__,,,,MAPPED,Repaired truncated four-field row; preserved supplied clinical group and MAPPED decision. Source-column presence is assessed from the master at runtime.
+urinalysis_includes_microscopic__renal_epithelial_cells_urinalysis,RENAL_URINARY,URINALYSIS,,,urinalysis_includes_microscopic__renal_epithelial_cells_urinalysis__,,,,MAPPED,Repaired truncated four-field row; preserved supplied clinical group and MAPPED decision. Source-column presence is assessed from the master at runtime.
+urinalysis_includes_microscopic__transitional_epith_urinalysis,RENAL_URINARY,URINALYSIS,,,urinalysis_includes_microscopic__transitional_epith_urinalysis__,,,,MAPPED,Repaired truncated four-field row; preserved supplied clinical group and MAPPED decision. Source-column presence is assessed from the master at runtime.
+urinalysis_includes_microscopic__unclassified_casts_urinalysis,RENAL_URINARY,URINALYSIS,,,urinalysis_includes_microscopic__unclassified_casts_urinalysis__,,,,MAPPED,Repaired truncated four-field row; preserved supplied clinical group and MAPPED decision. Source-column presence is assessed from the master at runtime.
 urine_appearance,RENAL_URINALYSIS,URINALYSIS,2,124,urine_appearance__,True,True,True,MAPPED,
 urine_bacteria,RENAL_URINALYSIS,URINALYSIS,2,125,urine_bacteria__,True,True,True,MAPPED,
 urine_bilirubin,RENAL_URINALYSIS,URINALYSIS,2,126,urine_bilirubin__,True,True,True,MAPPED,
@@ -106,7 +106,7 @@ creatine_kinase,INFLAMMATION_TISSUE,INFLAMMATION_TISSUE_INJURY,6,43,creatine_kin
 crp_high_sensitivity,INFLAMMATION_TISSUE,INFLAMMATION_TISSUE_INJURY,6,45,crp_high_sensitivity__,True,True,True,MAPPED,
 esr,INFLAMMATION_TISSUE,INFLAMMATION_TISSUE_INJURY,6,52,esr__,True,True,True,MAPPED,
 lactate_dehydrogenase,INFLAMMATION_TISSUE,INFLAMMATION_TISSUE_INJURY,6,87,lactate_dehydrogenase__,True,True,True,MAPPED,
-acute_care_panel__anion_gap_blood,METABOLIC_ENDOCRINE,ELECTROLYTES,MAPPED
+acute_care_panel__anion_gap_blood,METABOLIC_ENDOCRINE,ELECTROLYTES,,,acute_care_panel__anion_gap_blood__,,,,MAPPED,Repaired truncated four-field row; preserved supplied clinical group and MAPPED decision. Source-column presence is assessed from the master at runtime.
 acute_care_panel__chloride_blood,METABOLIC_ENDOCRINE,ELECTROLYTES,7,145,acute_care_panel__chloride_blood__,True,False,False,MAPPED,Canonical Graph lab from pharma candidate manifest; acute-care electrolyte.
 acute_care_panel__co2_total_blood,METABOLIC_ENDOCRINE,ELECTROLYTES,7,146,acute_care_panel__co2_total_blood__,True,False,False,MAPPED,Canonical Graph lab from pharma candidate manifest; acute-care electrolyte/acid-base chemistry.
 acute_care_panel__potassium_blood,METABOLIC_ENDOCRINE,ELECTROLYTES,7,147,acute_care_panel__potassium_blood__,True,False,False,MAPPED,Canonical Graph lab from pharma candidate manifest; acute-care electrolyte.

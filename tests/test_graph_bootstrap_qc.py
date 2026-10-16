@@ -166,8 +166,8 @@ def test_mapping_error_is_blocking_before_any_replicate(monkeypatch):
 
 def test_approved_ace_and_hepatitis_surface_antibody_mapping():
     mapping = M.load_lab_group_map(M.DEFAULT_LAB_GROUP_MAP).set_index("lab")
-    assert mapping.loc["angiotensin_converting_enzyme", "s4_group"] == "GRANULOMATOUS_DISEASE"
-    assert mapping.loc["hepatitis_b_surface_antibody", "s4_group"] == "INFECTIOUS_SEROLOGY"
+    assert mapping.loc["angiotensin_converting_enzyme", "s4_group"] == "INFLAMMATION_TISSUE"
+    assert mapping.loc["hepatitis_b_surface_antibody", "s4_group"] == "INFECTIOUS_SCREENING"
     assert mapping.loc[["angiotensin_converting_enzyme", "hepatitis_b_surface_antibody"], "mapping_status"].eq("MAPPED").all()
 
 

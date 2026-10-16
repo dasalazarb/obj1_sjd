@@ -25,6 +25,8 @@ import yaml
 
 import common
 from src.studies._shared import load_parquet, validate_integrated_dataset
+from src.studies.graph._feature_catalog import (CONTRACT_VERSION as FEATURE_CONTRACT_VERSION,
+    build_catalog, namespace_audit, new_run_id)
 
 SCRIPT_NAME = Path(__file__).stem
 OUTPUT_DIR = common.STUDIES_TABLES_DIR / "pharma" / SCRIPT_NAME
@@ -36,6 +38,8 @@ SEROLOGY_NAME = "00_pharma_serology_profile.csv"
 TEXT_AUDIT_NAME = "00_pharma_text_code_audit.csv"
 IMPACT_NAME = "00_pharma_downstream_impact.csv"
 SUMMARY_NAME = "00_pharma_profile_summary.json"
+SELECTION_AUDIT_NAME = "00_pharma_graph_lab_selection_audit.csv"
+NAMESPACE_AUDIT_NAME = "00_pharma_feature_namespace_audit.csv"
 CONTRACT_VERSION = "pharma_lab_profile_v2"
 KEYS = ["patient_id", "clinical_episode_id"]
 LAB_RESULT_SUFFIXES = ("__value", "__text")
@@ -456,6 +460,51 @@ def profile_labs(frame: pd.DataFrame, context: pd.DataFrame | None = None, *, re
     return result
 
 
+def exploratory_lab_catalog(frame, context, profile, registry, coverage=.70, source_hash=""):
+    """Parallel baseline route; never changes legacy recommended_use labels."""
+    _, joined, _ = extract_lab_representations(frame, context)
+    baseline = joined.loc[joined.is_clinical_baseline.fillna(False).astype(bool)].reset_index(drop=True)
+    specs = []
+    for row in profile.to_dict("records"):
+        rule = registry["assays"].get(row["lab"], {})
+        for field in ("value_column", "text_column"):
+            if row.get(field):
+                specs.append({"source_column": row[field], "clinical_approval_status": row["clinically_approved"],
+                              "n_units": row["n_units"], "unit_assessment_status": row["unit_assessment_status"],
+                              "conflict_assessment_status": row["conflict_assessment_status"],
+                              "ordinal_values_json": json.dumps({str(v).lower(): i for i, v in enumerate(rule.get("ordinal_categories", []))})})
+    manifest, _, _, _ = build_catalog(baseline, pd.DataFrame(specs), coverage, source_hash=source_hash)
+    audit = manifest.loc[manifest.lab.ne("")].copy()
+    indexed = profile.set_index("lab")
+    for field in GRAPH_COLUMNS:
+        if field not in audit:
+            audit[field] = audit.lab.map(indexed[field]) if field in indexed else ""
+    audit["longitudinal_graph_candidate_status"] = audit.lab.map(indexed.graph_candidate_status)
+    audit["graph_use_mode"] = "exploratory"
+    audit["feature_contract_version"] = FEATURE_CONTRACT_VERSION
+    for field in ("n_units", "unit_assessment_status", "conflict_assessment_status"):
+        audit[field] = audit.lab.map(indexed[field])
+    audit["ordinal_values_json"] = audit.lab.map(lambda lab: json.dumps({str(v).lower(): i for i, v in enumerate(registry["assays"].get(lab, {}).get("ordinal_categories", []))}))
+    audit["primary_result_source"] = audit.source_column.map(lambda c: "value_column" if c.endswith("__value") else "text_column")
+    for field, default in (("exploratory_graph_eligible", False), ("exploratory_graph_representation", ""),
+                           ("exploratory_graph_reason", ""), ("baseline_numeric_coverage", 0.),
+                           ("baseline_categorical_coverage", 0.)):
+        profile[field] = default
+    # Recompute representation-specific coverage independently of legacy longitudinal support.
+    for i, row in profile.iterrows():
+        part = audit.loc[audit.lab.eq(row.lab)]
+        eligible = part.loc[part.included]
+        profile.loc[i, "exploratory_graph_eligible"] = not eligible.empty
+        profile.loc[i, "exploratory_graph_representation"] = " | ".join(eligible.encoding)
+        profile.loc[i, "exploratory_graph_reason"] = "eligible" if len(eligible) else ";".join(sorted(set(part.exclusion_reason)))
+        for name, suffix in (("numeric", "__value"), ("categorical", "__text")):
+            profile.loc[i, "baseline_" + name + "_coverage"] = part.loc[part.source_column.str.endswith(suffix), "pct_nonmissing_baseline"].max() if part.source_column.str.endswith(suffix).any() else 0.
+    profile["clinical_approval_status"] = profile.get("clinically_approved", pd.Series(dtype=str))
+    profile["longitudinal_eligibility"] = profile.get("model_ready", pd.Series(dtype=bool))
+    profile["baseline_graph_eligibility"] = profile.exploratory_graph_eligible
+    return audit
+
+
 def expected_lab_audit(profile: pd.DataFrame, *, registry: dict | None = None) -> pd.DataFrame:
     registry = registry if registry is not None else load_registry()
     stems = set(profile.lab)
@@ -576,6 +625,9 @@ def _sha256(path: Path) -> str:
 
 def run(args: argparse.Namespace) -> pd.DataFrame:
     integrated, output = Path(args.integrated), Path(args.output)
+    if output == DEFAULT_OUTPUT:
+        output = output.parent / "runs" / new_run_id() / output.name
+
     context_path = getattr(args, "context", None)
     if getattr(args, "no_context", False):
         context_path, mode = None, "integrated_only_explicit"
@@ -592,11 +644,13 @@ def run(args: argparse.Namespace) -> pd.DataFrame:
     previous_path = getattr(args, "previous_profile", None)
     inputs = [integrated, registry_path] + ([context_path] if context_path else []) + ([Path(previous_path)] if previous_path else [])
     destinations = [output] + [output.parent / name for name in (EXPECTED_AUDIT_NAME, GRAPH_CANDIDATES_NAME,
-                    SEROLOGY_NAME, TEXT_AUDIT_NAME, IMPACT_NAME, SUMMARY_NAME)]
+                    SEROLOGY_NAME, TEXT_AUDIT_NAME, IMPACT_NAME, SUMMARY_NAME, SELECTION_AUDIT_NAME, NAMESPACE_AUDIT_NAME)]
     if output.suffix.lower() != ".csv" or len(set(p.resolve() for p in destinations)) != len(destinations):
         raise ValueError("--output must be a distinct profile CSV path")
     if any(out.resolve() == inp.resolve() for out in destinations for inp in inputs):
         raise ValueError("Profiling outputs must not overwrite any input")
+    if any(path.exists() for path in destinations):
+        raise FileExistsError("Profiling outputs already exist; choose a new run directory")
     hashes = {path: _sha256(path) for path in inputs}
     registry = load_registry(registry_path)
     master = load_parquet(integrated)
@@ -605,7 +659,8 @@ def run(args: argparse.Namespace) -> pd.DataFrame:
     context = load_parquet(context_path) if context_path else None
     profile = profile_labs(master, context, registry=registry)
     audit = expected_lab_audit(profile, registry=registry)
-    candidates = graph_candidates(profile)
+    selection = exploratory_lab_catalog(master, context, profile, registry, getattr(args, "coverage_threshold", .70), hashes[integrated])
+    candidates = selection.loc[selection.included].copy()
     serology = serology_profile(master)
     impact = downstream_impact(profile, pd.read_csv(previous_path).fillna("") if previous_path else None)
     counts = lambda table, column: {str(k): int(v) for k, v in table[column].value_counts().sort_index().items()} if column in table else {}
@@ -613,7 +668,8 @@ def run(args: argparse.Namespace) -> pd.DataFrame:
               "lab_value_columns": sum(c.startswith("lab__") and c.endswith("__value") for c in master),
               "lab_text_columns": sum(c.startswith("lab__") and c.endswith("__text") for c in master), "serology_columns": len(serology)}
     expected_schema = {"n_columns": 485, "lab_stems": 177, "lab_value_columns": 100, "lab_text_columns": 177, "serology_columns": 36}
-    summary = {"profile_contract_version": CONTRACT_VERSION, "registry_version": registry["registry_version"],
+    summary = {"profile_contract_version": CONTRACT_VERSION, "feature_contract_version": FEATURE_CONTRACT_VERSION,
+               "graph_use_mode": "exploratory", "analysis_mode": "exploratory", "profile_output_name": output.name, "clinical_validation": "not_established", "registry_version": registry["registry_version"],
                "thresholds": registry["thresholds"], "dataset_contract": contract,
                "input_hashes": [{"role": "integrated" if p == integrated else "registry" if p == registry_path else "previous_profile" if previous_path and p == Path(previous_path) else "context", "sha256": sha} for p, sha in hashes.items()],
                "context_mode": mode, "context_audit": profile.attrs["context_audit"],
@@ -631,8 +687,8 @@ def run(args: argparse.Namespace) -> pd.DataFrame:
                "serology_kind_counts": counts(serology, "kind"), "previous_snapshot_available": previous_path is not None,
                "downstream_impact_counts": counts(impact, "impact_pharma01"),
                "downstream_graph_impact_counts": counts(impact, "impact_graph01"),
-               "release_recommendation": "hold_for_clinical_diff_and_temporal_review_no_downstream_reruns_authorized",
-               "blockers": ["review_per_lab_impact_before_downstream_reruns", "pending_assay_approvals_and_metadata",
+               "release_recommendation": "exploratory_baseline_permitted_clinical_release_not_established",
+               "clinical_release_blockers": ["review_per_lab_impact_before_clinical_release", "pending_assay_approvals_and_metadata",
                             "serology_temporal_construction_unverified"] + ([] if previous_path else ["previous_row_level_snapshot_missing"]),
                "privacy": "aggregate_only_free_text_redacted_no_patient_records", "inputs_unchanged": True}
     for path, digest in hashes.items():
@@ -641,14 +697,17 @@ def run(args: argparse.Namespace) -> pd.DataFrame:
     output.parent.mkdir(parents=True, exist_ok=True)
     for table, path in [(profile, output), (audit, output.parent / EXPECTED_AUDIT_NAME),
                         (candidates, output.parent / GRAPH_CANDIDATES_NAME), (serology, output.parent / SEROLOGY_NAME),
-                        (text_code_audit(master), output.parent / TEXT_AUDIT_NAME), (impact, output.parent / IMPACT_NAME)]:
+                        (text_code_audit(master), output.parent / TEXT_AUDIT_NAME), (impact, output.parent / IMPACT_NAME),
+                        (selection, output.parent / SELECTION_AUDIT_NAME), (namespace_audit(master), output.parent / NAMESPACE_AUDIT_NAME)]:
         table.to_csv(path, index=False)
+    summary["output_hashes"] = {p.name: _sha256(p) for p in destinations if p.is_file() and p.name != SUMMARY_NAME}
     (output.parent / SUMMARY_NAME).write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
     print(f"Laboratory metadata mode: {mode}")
     print(f"Lab stems: {len(profile)}; serology fields (separate): {len(serology)}")
     print(f"Recommended use: {summary['new_recommended_use_counts']}")
     print(f"Schema family counts match investigator reference: {summary['schema_matches_reference']}")
-    print(f"Downstream release: HOLD; review {IMPACT_NAME} and {EXPECTED_AUDIT_NAME}")
+    print(f"Clinical release: HOLD; exploratory baseline candidates: {len(candidates)}")
+    print(f"Profile output: {output}")
     return profile
 
 
@@ -660,6 +719,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     context.add_argument("--context", type=Path)
     context.add_argument("--no-context", action="store_true")
     parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
+    parser.add_argument("--coverage-threshold", type=float, default=.70)
     parser.add_argument("--previous-profile", type=Path, help="Archived real profile for row-level downstream drift; never overwritten")
     return parser.parse_args(argv)
 

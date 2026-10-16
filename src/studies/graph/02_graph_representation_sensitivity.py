@@ -31,7 +31,6 @@ from sklearn.metrics import adjusted_rand_score
 from sklearn.preprocessing import RobustScaler
 
 import common
-from src.studies.graph import _lab_contract as LAB
 from src.studies._shared import create_study_dirs, resolve_concept
 
 
@@ -46,6 +45,7 @@ def _load_canonical():
 
 
 CANON = _load_canonical()
+LAB = CANON.LAB
 DEFAULT_LAB_GROUP_MAP = ROOT / "data" / "raw" / "graph_s4_lab_group_map.csv"
 SCENARIOS = {
     "S0": {"coverage": False, "redundancy": False, "balance": False, "lab_group_balance": False},
@@ -54,7 +54,7 @@ SCENARIOS = {
     "S3": {"coverage": True, "redundancy": True, "balance": True, "lab_group_balance": False},
     "S4": {"coverage": True, "redundancy": True, "balance": True, "lab_group_balance": True},
 }
-FAMILY_ORDER = ("LAB", "PRO", "CLINICAL")
+FAMILY_ORDER = ("LAB", "SERO", "PRO", "EXT", "CLINICAL")
 BALANCE_COLUMNS = ["scenario", "level", "block", "n_features", "n_patients",
                    "sigma1_before_weighting", "weight_applied", "nominal_weight",
                    "effective_weight", "status", "n_active_groups"]
@@ -89,7 +89,7 @@ class Representation:
 
 
 def family_name(value: str) -> str:
-    return "LAB" if value == "lab" else "PRO" if value == "pro" else "CLINICAL"
+    return value.upper() if value.upper() in FAMILY_ORDER else "CLINICAL"
 
 
 canonical_lab_name = CANON.canonical_lab_name
@@ -152,7 +152,7 @@ def validate_s4_mapping(values: dict[str, pd.Series], families: dict[str, str],
                 f"LAB feature is missing canonical lab metadata in manifest: {feature}"
             )
         known = lab in indexed.index
-        status = indexed.at[lab, "mapping_status"] if known else "MISSING"
+        status = ("MAPPED" if indexed.at[lab, "mapping_status"] == "MAPPED" else "UNAPPROVED_MAPPING") if known else "MISSING"
         mapped = known and status == "MAPPED"
         rows.append({"feature": feature, "lab": lab,
                      "s4_group": indexed.at[lab, "s4_group"] if known else "",
@@ -166,7 +166,7 @@ def validate_s4_mapping(values: dict[str, pd.Series], families: dict[str, str],
     if audit_path is not None:
         audit.to_csv(audit_path, index=False)
     if require_all and audit.empty:
-        raise MappingError("NO_LABS_FOR_S4: no approved, encodable LAB in bootstrap universe")
+        raise MappingError("NO_LABS_FOR_S4: no technically eligible LAB features")
     bad = audit.loc[(audit["eligible_for_bootstrap"] if require_all else audit["included_S4"])
                     & ~audit["mapped"]]
     if len(bad):
@@ -183,6 +183,8 @@ def coverage_filter(values: dict[str, pd.Series], families: dict[str, str],
         "LAB": float(config["feature_selection"]["lab_minimum_baseline_coverage"]),
         "PRO": float(config["feature_selection"]["pro_minimum_baseline_coverage"]),
         "CLINICAL": float(config["feature_selection"]["clinical_minimum_baseline_coverage"]),
+        "SERO": float(config["feature_selection"].get("sero_minimum_baseline_coverage", .70)),
+        "EXT": float(config["feature_selection"].get("ext_minimum_baseline_coverage", .70)),
     }
     kept, rows = {}, []
     for feature, series in values.items():
@@ -204,6 +206,10 @@ def _priority(feature: str, coverage: dict[str, float]) -> tuple[float, int, str
     # than a percent or calculated estimate; lexical order is the final tie-break.
     stem = feature_stem(feature)
     secondary = int("percent" in stem or "estimated" in stem)
+    if stem.startswith(("ext__ocular_schirmer_", "ext__ocular_tbut_")):
+        secondary = 0 if stem.endswith("_min") else 1
+    if stem.startswith(("ext__ocular_oxford_", "ext__ocular_van_bijsterveld_")):
+        secondary = 0 if stem.endswith("_max") else 1
     return (-coverage[feature], secondary, feature)
 
 
@@ -273,8 +279,6 @@ def select_features(all_values: dict[str, pd.Series], families: dict[str, str],
                                        "n_pairwise", "coverage_kept", "coverage_removed", "reason"])
     if settings["redundancy"]:
         values, redundancy = reduce_redundancy(values, config)
-    if scenario == "S4" and not any(families[name] == "LAB" for name in values):
-        raise BlockNotEstimable("NO_LABS_FOR_S4: no LAB survives coverage/redundancy")
     if len(values) < 2:
         raise ValueError(f"{scenario} has fewer than two features after selection")
     return values, audit, redundancy
@@ -299,7 +303,7 @@ def feature_selection_audit(master: pd.DataFrame, baseline: pd.DataFrame,
     }
     for column in master:
         if (column.startswith("lab__") and column.endswith(("__value", "__text"))
-                and column not in catalog_sources):
+                and column not in catalog_sources and column not in set(manifest.source_column)):
             lab = column.rsplit("__", 1)[0]
             rows.append({"feature": column, "family": "lab", "lab": lab,
                          "source": "integrated_master_uncatalogued",
@@ -318,7 +322,7 @@ def feature_selection_audit(master: pd.DataFrame, baseline: pd.DataFrame,
         is_lab = row["family"] == "lab"
         lab = canonical_lab_name(row["lab"]) if is_lab else ""
         catalogued = is_lab and row["source"] == "pharma_00_graph_lab_candidates"
-        approved = catalogued and row["graph_candidate_status"] in {"include_numeric", "include_categorical"}
+        approved = row.get("clinical_approval_status") == "approved" if "clinical_approval_status" in row else catalogued and row["graph_candidate_status"] in {"include_numeric", "include_categorical"}
         encoded = bool(row["included"])
         eligible = feature in universe
         covered = (bool(coverage_index.at[feature, "included_after_coverage_filter"])
@@ -336,7 +340,7 @@ def feature_selection_audit(master: pd.DataFrame, baseline: pd.DataFrame,
             reason = "approved_but_source_missing" if approved else "not_observed_in_step10"
         elif is_lab and reason == "review_before_graph_not_approved":
             reason = "review_before_graph"
-        elif is_lab and "minimum_baseline_coverage" in str(reason):
+        elif is_lab and "clinical_approval_status" not in row and "minimum_baseline_coverage" in str(reason):
             reason = "approved_but_below_baseline_coverage"
         elif feature in rep.transformed_features:
             reason = "selected_in_pca"
@@ -353,6 +357,15 @@ def feature_selection_audit(master: pd.DataFrame, baseline: pd.DataFrame,
                       "graph_candidate_status": row["graph_candidate_status"],
                       "baseline_coverage": row["pct_nonmissing_baseline"],
                       "representation_type": row["representation_type"],
+                      "source_namespace": row.get("source_namespace", ""),
+                      "clinical_domain": row.get("clinical_domain", ""),
+                      "available": source_column in master,
+                      "observed_n_baseline": row.get("observed_n_baseline", 0),
+                      "parseable": row.get("parseable", encoded),
+                      "technical_eligible": row.get("technical_eligible", encoded),
+                      "coverage_pass": covered, "redundancy_pass": feature not in removed,
+                      "included_pca": feature in rep.transformed_features,
+                      "clinical_approval_status": row.get("clinical_approval_status", "not_established"),
                       "encoded_in_expanded_manifest": encoded,
                       "eligible_in_scenario": eligible, "passed_coverage_filter": covered,
                       "selected_after_redundancy": feature in rep.raw,
@@ -973,24 +986,24 @@ def validate_canonical_config(config: dict, canonical: dict, args) -> None:
         raise LAB.LabContractError("CONTRACT_MISMATCH", "Configured feature policies disagree; keep both configs aligned")
 
 
-def run(args: argparse.Namespace) -> None:
-    config = CANON.load_config(args.config)
+
+def _run(args: argparse.Namespace) -> None:
+    config = CANON.quick_config(CANON.load_config(args.config), args)
     # Validate optional claim criteria before observing results or starting work.
     interpretation_check(pd.DataFrame(columns=["scenario", "n_stable_communities"]), config=config)
-    dirs, run_metadata = LAB.configure_run(args, config, "02_graph_representation_sensitivity", create_study_dirs)
+    dirs = CANON.run_dirs(args, "graph/02_graph_representation_sensitivity")
+    args._active_dirs = dirs
+    mapping_error = None
+    try:
+        lab_group_frame = load_lab_group_map(args.lab_group_map)
+    except (ValueError, FileNotFoundError) as exc:
+        mapping_error = str(exc)
+        lab_group_frame = pd.DataFrame(columns=["lab", "s4_group", "s4_subgroup", "mapping_status"])
+    lab_group_by_lab = lab_group_lookup(lab_group_frame)
     CANON._configure_logging(dirs["logs"] / "02_graph_representation_sensitivity.log")
     logging.info("Environment maintenance: if pandas warns about numexpr, check dependency compatibility "
                  "for numexpr >= 2.8.4 in the executing Python environment; no packages are changed here.")
-    try:
-        paths, provenance, pharma_summary, release, profile = LAB.read_bundle(args)
-        canonical_config = CANON.load_config(args.canonical_config)
-        validate_canonical_config(config, canonical_config, args)
-        lab_group_frame = load_lab_group_map(args.lab_group_map)
-        lab_group_by_lab = lab_group_lookup(lab_group_frame)
-        master, candidates, report = CANON.load_real_inputs(args.integrated, args.graph_lab_candidates, pharma_summary)
-    except (ValueError, OSError) as exc:
-        LAB.write_failure(dirs, "02_graph", run_metadata, exc, args)
-        raise
+    master, candidates, contract = CANON.load_real_inputs(args.integrated, args.graph_lab_candidates, args.analysis_mode)
     baseline = CANON.select_baseline(master)
     pop = baseline[resolve_concept(baseline, "pop")].to_numpy()
     age = CANON.load_age_at_diagnosis(args.baseline_metrics)
@@ -998,76 +1011,95 @@ def run(args: argparse.Namespace) -> None:
     if "age_dx_blockA" in baseline:
         baseline["age_dx"] = baseline.pop("age_dx_blockA")
 
-    # A zero threshold obtains the complete eligible universe. S0 is then rebuilt
-    # with the same symmetric coverage threshold and explicit input policy as Graph 01.
-    full_manifest, full_values, _, _ = CANON.build_feature_manifest(
-        baseline, candidates, 0.0, args.feature_policy, release.get("release_id") if release else None)
+    coverage_threshold = float(config["feature_selection"].get("minimum_baseline_coverage", .70))
+    full_manifest, full_values, _, _ = CANON.build_feature_manifest(baseline, candidates, coverage_threshold,
+        analysis_mode=args.analysis_mode, feature_policy=args.feature_policy,
+        metadata=config.get("feature_metadata", {}), source_hash=contract["input_hash"])
+    full_manifest = full_manifest.loc[full_manifest.source_column.isin(master.columns)].copy()
+    selection_summary = CANON.write_selection_outputs(dirs, "02_graph", master, full_manifest, full_values, contract, args)
+    mode_status = CANON.enforce_lab_mode(full_manifest, analysis_mode=args.analysis_mode,
+        allow_without_lab=args.allow_without_lab, release_path=args.clinical_release,
+        integrated_path=args.integrated, candidates_path=args.graph_lab_candidates)
+    selection_summary.update(mode_status)
+    selection_summary["status"] = "READY_FOR_EXPLORATORY_RUN" if args.analysis_mode == "exploratory" else "READY_FOR_CLINICAL_RELEASE_RUN"
+    CANON.write_json(dirs["tables"] / "02_graph_selection_summary.json", selection_summary)
+    CANON.write_json(dirs["tables"] / "02_graph_preflight.json", selection_summary)
+    CANON.write_json(dirs["tables"] / "02_graph_input_provenance.json", selection_summary)
     feature_to_lab = {
         str(row.feature): canonical_lab_name(str(row.lab))
         for row in full_manifest.loc[
             full_manifest["included"] & full_manifest["family"].eq("lab")
         ].itertuples(index=False)
     }
-    current_manifest, current_values, _, _ = CANON.build_feature_manifest(
-        baseline, candidates, float(canonical_config["feature_selection"]["minimum_baseline_coverage"]),
-        args.feature_policy, release.get("release_id") if release else None)
+    current_manifest, current_values = full_manifest, full_values
     full_families = {row.feature: family_name(row.family)
                      for row in full_manifest.loc[full_manifest.included].itertuples()}
     current_families = {name: full_families[name] for name in current_values}
     mapping_audit_path = dirs["tables"] / "02_graph_S4_lab_group_mapping_audit.csv"
-    report.update(run_metadata, canonical_raw_matrix_sha256=LAB.matrix_fingerprint(pd.DataFrame(current_values)),
-                  n_lab_approved=report["n_approved_labs"], n_lab_mapped=0,
-                  n_lab_selected=None, n_lab_groups_active=None, n_lab_groups_zero_variance=None)
-    blockers = []
-    # Inspect all five selections before fitting ANY scenario, especially S4.
-    try:
-        s4_mapping_audit = validate_s4_mapping(
-            full_values, full_families, lab_group_frame, feature_to_lab,
-            require_all=True, audit_path=mapping_audit_path)
-        preflight_selections = {}
-        aggregate_audits = []
-        for scenario in SCENARIOS:
-            universe = current_values if scenario == "S0" else full_values
-            families = current_families if scenario == "S0" else full_families
-            selected, coverage, redundancy = select_features(universe, families, scenario, config, full_manifest)
-            raw = pd.DataFrame(selected, index=baseline.index)
-            preflight_selections[scenario] = raw
-            # No model has been fit; PCA columns intentionally remain empty.
-            prefit = Representation(raw, families, np.empty((0, 0)), None, [], pd.DataFrame())
-            aggregate_audits.append(feature_selection_audit(
-                master, baseline, candidates, full_manifest, universe, coverage,
-                redundancy, prefit, lab_group_frame, scenario, profile))
-        pd.testing.assert_frame_equal(pd.DataFrame(current_values), preflight_selections["S0"])
-        pd.testing.assert_frame_equal(preflight_selections["S3"], preflight_selections["S4"])
-        s4 = preflight_selections["S4"]
-        selected_labs = [name for name in s4 if full_families[name] == "LAB"]
-        groups = {}
-        for name in selected_labs:
-            groups.setdefault(lab_group_by_lab[feature_to_lab[name]], []).append(name)
-        active = sum(any(s4[name].nunique(dropna=True) > 1 for name in names) for names in groups.values())
-        if not active:
-            raise BlockNotEstimable("S4_LAB_GROUP_NOT_ESTIMABLE: no variable LAB group after selection")
-        report.update(n_lab_approved=report["n_approved_labs"],
-                      n_lab_mapped=int(s4_mapping_audit.loc[s4_mapping_audit.mapped, "lab"].nunique()),
-                      n_lab_selected=len(set(feature_to_lab[name] for name in selected_labs)),
-                      n_lab_groups_active=active, n_lab_groups_zero_variance=len(groups)-active,
-                      scenario_feature_hashes={key: LAB.matrix_fingerprint(raw) for key, raw in preflight_selections.items()},
-                      s0_matches_graph01_raw_matrix=True)
-        s4_mapping_audit["included_S4"] = s4_mapping_audit.feature.isin(s4.columns)
-        s4_mapping_audit.to_csv(mapping_audit_path, index=False)
-        pd.concat(aggregate_audits, ignore_index=True).to_csv(
-            dirs["tables"] / "02_graph_feature_selection_audit.csv", index=False)
-    except (MappingError, BlockNotEstimable, ValueError) as exc:
-        code = ("LAB_GROUP_MAPPING_ERROR" if isinstance(exc, MappingError) else "S4_LAB_GROUP_NOT_ESTIMABLE")
-        if "NO_LABS_FOR_S4" in str(exc):
-            code = "NO_LABS_FOR_S4"
-        if mapping_audit_path.is_file():
-            failed_mapping = pd.read_csv(mapping_audit_path)
-            report["n_lab_mapped"] = int(failed_mapping.loc[failed_mapping.mapped.eq(True), "lab"].nunique())
-        blockers.append({"code": code, "reason": str(exc)})
-    LAB.finish_preflight(args, dirs, "02_graph", report, provenance, release,
-                         candidates, pharma_summary, paths, current_manifest, extra_blockers=blockers)
+    # The full eligible universe can re-enter in a subsample, even if pruned in S4.
+    s4_mapping_audit = validate_s4_mapping(
+        full_values, full_families, lab_group_frame, feature_to_lab,
+        require_all=False, audit_path=mapping_audit_path)
+    # All scenarios share Graph01's safe, policy-filtered canonical universe.
+    # S0 applies no additional pruning; S1 refits coverage within that universe.
+    canonical_config = CANON.quick_config(CANON.load_config(args.canonical_config), args)
+    validate_canonical_config(config, canonical_config, args)
+    _, graph01_values, _, _ = CANON.build_feature_manifest(baseline, candidates,
+        float(canonical_config["feature_selection"]["minimum_baseline_coverage"]),
+        analysis_mode=args.analysis_mode, feature_policy=args.feature_policy,
+        metadata=canonical_config.get("feature_metadata", {}), source_hash=contract["input_hash"])
+    difference = sorted(set(graph01_values) ^ set(full_values))
+    common = sorted(set(graph01_values) & set(full_values))
+    difference += [c for c in common if not graph01_values[c].equals(full_values[c])]
+    preflight_rows, flows, traces, domains = [], [], [], []
+    for scenario in SCENARIOS:
+        selected, coverage, redundancy = select_features(full_values, full_families, scenario, config, full_manifest)
+        if scenario == "S4":
+            try:
+                s4_mapping_audit = validate_s4_mapping(full_values, full_families, lab_group_frame,
+                    feature_to_lab, set(selected), require_all=True, audit_path=mapping_audit_path)
+            except MappingError as exc:
+                mapping_error = mapping_error or str(exc)
+        flows.append(CANON.CATALOG.family_flow(full_manifest, selected, scenario=scenario))
+        domains.append(CANON.CATALOG.domain_flow(full_manifest, selected, scenario=scenario))
+        trace = full_manifest.copy()
+        trace["scenario"] = scenario
+        trace["included_pca"] = trace.feature.isin(selected)
+        trace["coverage_pass"] = trace.feature.map(coverage.set_index("feature").included_after_coverage_filter).eq(True)
+        trace["redundancy_pass"] = ~trace.feature.isin(redundancy.feature_removed)
+        trace.loc[trace.included & ~trace.coverage_pass, "exclusion_reason"] = "scenario_coverage"
+        trace.loc[trace.feature.isin(redundancy.feature_removed), "exclusion_reason"] = "redundancy"
+        traces.append(trace)
+        preflight_rows.extend({"scenario": scenario, "feature": row.feature,
+            "source_column": row.source_column, "family": family_name(row.family),
+            "source_namespace": row.source_namespace, "clinical_domain": row.clinical_domain,
+            "included": row.feature in selected, "exclusion_reason": row.exclusion_reason}
+            for row in trace.itertuples())
+    pd.concat(domains, ignore_index=True).to_csv(dirs["tables"] / "02_graph_multimodal_domain_flow.csv", index=False)
+    pd.concat(flows, ignore_index=True).to_csv(dirs["tables"] / "02_graph_multimodal_family_flow.csv", index=False)
+    combined_trace = pd.concat(traces, ignore_index=True)
+    combined_trace.to_csv(dirs["tables"] / "02_graph_source_to_mapper_trace.csv", index=False)
+    planned_audit = combined_trace.copy()
+    planned_audit["planned_pca"] = planned_audit.included_pca
+    planned_audit["present_in_pca"] = False
+    planned_audit["pca_fit_executed"] = False
+    planned_audit.to_csv(dirs["tables"] / "02_graph_feature_selection_audit.csv", index=False)
+    pd.DataFrame(preflight_rows).to_csv(dirs["tables"] / "02_graph_scenario_feature_sets.csv", index=False)
+    CANON.write_json(dirs["tables"] / "02_graph_input_manifest_alignment.json", {
+        **selection_summary, "shared_builder": "Graph01.build_feature_manifest / _feature_catalog.build_catalog",
+        "s0_matrix_fingerprint": CANON.CATALOG.frame_hash(pd.DataFrame(current_values)),
+        "graph01_reference_matrix_fingerprint": CANON.CATALOG.frame_hash(pd.DataFrame(graph01_values)),
+        "matrix_differences_from_graph01_same_settings": difference,
+        "canonical_config_hash": CANON.CATALOG.file_hash(args.canonical_config),
+        "mfa_blocks": list(FAMILY_ORDER), "s4_blocker": mapping_error,
+        "mfa_normalization": "RobustScaler then inverse first singular value per block; S4 nested LAB subgroup normalization then LAB normalization"})
+    if difference:
+        raise LAB.LabContractError("CONTRACT_MISMATCH", "S0 differs from Graph01; inspect input_manifest_alignment.json")
     if args.preflight_only:
+        CANON.build_baseline_matrix(full_values)
+        if mapping_error:
+            raise MappingError("S0-S3 preflight PASS; only S4 blocked: " + mapping_error)
+        print("S0-S4 preflight PASS; PCA/Mapper not executed")
         return
     lab_group_index = lab_group_frame.set_index("lab")
     results, memberships, stable_ids = {}, {}, {}
@@ -1076,6 +1108,8 @@ def run(args: argparse.Namespace) -> None:
     selection_audits = []
 
     for scenario in SCENARIOS:
+        if scenario == "S4" and mapping_error:
+            raise MappingError("S0-S3 completed; only S4 blocked: " + mapping_error)
         universe = current_values if scenario == "S0" else full_values
         families = current_families if scenario == "S0" else full_families
         selected, coverage, redundancy = select_features(universe, families, scenario, config, full_manifest)
@@ -1091,6 +1125,8 @@ def run(args: argparse.Namespace) -> None:
             map_row = lab_group_index.loc[lab] if lab and lab in lab_group_index.index else None
             feature_rows.append({"scenario": scenario, "feature": feature,
                                  "family": families[feature], "included": feature in raw,
+                                 "source_namespace": full_manifest.set_index("feature").at[feature, "source_namespace"],
+                                 "clinical_domain": full_manifest.set_index("feature").at[feature, "clinical_domain"],
                                  "lab": lab,
                                  "s4_group": (map_row["s4_group"] if map_row is not None else ""),
                                  "s4_subgroup": (map_row["s4_subgroup"] if map_row is not None else ""),
@@ -1100,7 +1136,7 @@ def run(args: argparse.Namespace) -> None:
             rep = fit_embedding(
                 raw, final_families, scenario, config,
                 lab_group_by_lab=lab_group_by_lab, feature_to_lab=feature_to_lab)
-        except (MappingError, LAB.LabContractError):
+        except MappingError:
             raise
         except (ValueError, np.linalg.LinAlgError) as exc:
             getattr(exc, "balance_audit", pd.DataFrame(columns=BALANCE_COLUMNS)).to_csv(
@@ -1110,7 +1146,7 @@ def run(args: argparse.Namespace) -> None:
             dirs["tables"] / f"02_graph_{scenario}_full_fit_balance_audit.csv", index=False)
         selection_audits.append(feature_selection_audit(
             master, baseline, candidates, full_manifest, universe, coverage,
-            redundancy, rep, lab_group_frame, scenario, profile))
+            redundancy, rep, lab_group_frame, scenario))
         pd.concat(selection_audits, ignore_index=True).to_csv(
             dirs["tables"] / "02_graph_feature_selection_audit.csv", index=False)
         mapped = analyze_mapper(rep, config)
@@ -1171,10 +1207,13 @@ def run(args: argparse.Namespace) -> None:
         pca_table(rep).to_csv(dirs["tables"] / f"02_graph_{scenario}_pca_variance.csv", index=False)
         unambiguous = int((covered & ~ties & np.isfinite(hard)).sum())
         missing = int(raw.isna().sum().sum())
-        summary_rows.append({"scenario": scenario, **run_metadata, "graph_release_id": release["release_id"],
-            "feature_matrix_sha256": LAB.matrix_fingerprint(raw), "n_baseline_patients": len(baseline),
+        summary_rows.append({"scenario": scenario, "n_baseline_patients": len(baseline),
             "n_original_features": len(universe), "n_final_features": raw.shape[1],
             "n_lab_features": sum(x == "LAB" for x in final_families.values()),
+            "n_ext_features": sum(x == "EXT" for x in final_families.values()),
+            "n_sero_features": sum(x == "SERO" for x in final_families.values()),
+            "analysis_mode": args.analysis_mode, "feature_policy": args.feature_policy,
+            "clinical_validation": mode_status["clinical_validation"],
             "n_pro_features": sum(x == "PRO" for x in final_families.values()),
             "n_clinical_features": sum(x == "CLINICAL" for x in final_families.values()),
             "n_missing_before_imputation": missing, "pct_missing_before_imputation": missing / raw.size,
@@ -1203,6 +1242,8 @@ def run(args: argparse.Namespace) -> None:
             "h1_total_persistence": ph.get("total_h1_persistence", np.nan),
             "h1_permutation_p": ph.get("permutation_p_value", np.nan)})
         results[scenario] = {"rep": rep, "mapper": mapped, "config": config}
+        pd.DataFrame(summary_rows).to_csv(dirs["tables"] / "02_graph_representation_sensitivity_summary.csv", index=False)
+        memberships[scenario].to_csv(dirs["tables"] / f"02_graph_{scenario}_patient_membership.csv", index=False)
 
     summary = pd.DataFrame(summary_rows)
     s3_features = set(results["S3"]["rep"].raw)
@@ -1231,10 +1272,11 @@ def run(args: argparse.Namespace) -> None:
                    pd.DataFrame(columns=["scenario", "replicate_id", *BALANCE_COLUMNS[1:]]))
     block_audit.to_csv(dirs["tables"] / "02_graph_bootstrap_balance_audit.csv", index=False)
     interpretation = interpretation_check(summary, stable_overlap, cross_ari, config)
+    interpretation.update(analysis_mode=args.analysis_mode, clinical_validation=mode_status["clinical_validation"], feature_policy=args.feature_policy)
     CANON.write_json(dirs["tables"] / "02_graph_interpretation_qc.json", interpretation)
     coverage_all.to_csv(dirs["tables"] / "02_graph_coverage_audit.csv", index=False)
     redundancy_all.to_csv(dirs["tables"] / "02_graph_redundancy_audit.csv", index=False)
-    pd.DataFrame(feature_rows).to_csv(dirs["tables"] / "02_graph_scenario_feature_sets.csv", index=False)
+    # Complete source-to-Mapper scenario table was persisted before fitting.
     stability_all.to_csv(dirs["tables"] / "02_graph_scenario_community_stability.csv", index=False)
     membership_all.to_csv(dirs["tables"] / "02_graph_scenario_patient_membership.csv", index=False)
     crosswalk.to_csv(dirs["tables"] / "02_graph_scenario_community_pop_crosswalk.csv", index=False)
@@ -1304,6 +1346,15 @@ def run(args: argparse.Namespace) -> None:
         print(f"{index}. {name}")
 
 
+def run(args):
+    args._active_dirs = None
+    try:
+        return _run(args)
+    except (ValueError, OSError) as exc:
+        CANON.write_run_failure(args, "02_graph", exc)
+        raise
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     folder = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(description=__doc__)
@@ -1314,10 +1365,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         default=common.INTEGRATED_BASELINE_CSV)
     parser.add_argument("--config", type=Path, default=folder / "config_sensitivity.yaml")
     parser.add_argument("--canonical-config", type=Path, default=folder / "config.yaml")
-    LAB.add_arguments(parser)
     parser.add_argument("--lab-group-map", type=Path, default=DEFAULT_LAB_GROUP_MAP,
                         help="CSV mapping canonical lab stems to S4 clinical laboratory groups")
     parser.add_argument("--dry-run", action="store_true", help="Generate tables but omit figures")
+    CANON.add_catalog_arguments(parser)
     return parser.parse_args(argv)
 
 

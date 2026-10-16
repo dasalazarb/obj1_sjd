@@ -69,6 +69,8 @@ def load_config(path: Path) -> dict:
 
 def load_lab_profile(path: Path) -> pd.DataFrame:
     """Read and minimally validate the laboratory profiler's data contract."""
+    from src.studies.graph._lab_contract import resolve_candidates
+    path = resolve_candidates(path)
     profile = pd.read_csv(path)
     required = {"lab", "recommended_use", "result_source", "value_column"}
     missing = required.difference(profile.columns)

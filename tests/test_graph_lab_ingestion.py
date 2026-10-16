@@ -32,7 +32,7 @@ def test_candidate_contract_encodes_baseline_labs_and_preserves_missingness():
     candidates = pd.DataFrame([
         candidate("lab__numeric"), candidate("lab__antibody", "include_categorical"),
         candidate("lab__review", "review_before_graph")])
-    manifest, values, _, audit = graph.build_feature_manifest(baseline, candidates, .5)
+    manifest, values, _, audit = graph._build_legacy_feature_manifest(baseline, candidates, .5)
     assert {"lab__numeric__value", "lab__antibody__binary"} <= set(values)
     assert np.isnan(values["lab__antibody__binary"].iloc[2])
     assert not audit.loc[audit.lab.eq("lab__review"), "included_in_graph"].item()
@@ -42,7 +42,7 @@ def test_candidate_contract_encodes_baseline_labs_and_preserves_missingness():
 def test_binary_hint_rejects_three_real_categories():
     baseline = pd.DataFrame({"lab__assay__text": ["high", "low", "normal"]})
     with pytest.raises(graph.LAB.LabContractError, match="CONTRACT_MISMATCH"):
-        graph.build_feature_manifest(baseline, pd.DataFrame([candidate("lab__assay", "include_categorical")]), .5)
+        graph._build_legacy_feature_manifest(baseline, pd.DataFrame([candidate("lab__assay", "include_categorical")]), .5)
 
 
 @pytest.mark.parametrize("lab, expected", [
@@ -65,7 +65,7 @@ def test_public_lab_keys_resolve_characterization_extras_without_renaming_featur
     candidates = pd.DataFrame([
         _candidate(f"lab__{lab}", "include_numeric", "continuous", "value_column",
                    value_column=f"lab__{lab}__value") for lab in labs])
-    manifest, values, names, _ = graph.build_feature_manifest(baseline, candidates, .7)
+    manifest, values, names, _ = graph._build_legacy_feature_manifest(baseline, candidates, .7)
     assert names == {lab: f"lab__{lab}__value" for lab in labs}
     assert set(values) == set(baseline) - {"patient_id"}
     assert manifest.loc[manifest.included, "feature"].tolist() == list(values)

@@ -77,7 +77,7 @@ def test_repeated_cli_outputs_are_identical_and_input_hashes_unchanged(tmp_path)
                                "--previous-profile", str(old)])
         mod.run(args)
     names = sorted(p.name for p in (tmp_path / "first").iterdir())
-    assert len(names) == 7
+    assert len(names) == 9
     for name in names:
         assert (tmp_path / "first" / name).read_bytes() == (tmp_path / "second" / name).read_bytes()
         assert "SYNTHETIC_PATIENT_0" not in (tmp_path / "first" / name).read_text()
@@ -144,11 +144,11 @@ def test_actual_pharma_and_graph_readers_consume_only_existing_approved_sources(
     assert [x["column"] for x in categorical] == ["lab__ana_status__text"]
     assert all(x["column"] in frame for x in numeric + categorical)
     write_bundle(integrated, candidates_path, profile=profile)
-    master, candidates, contract = graph.load_real_inputs(integrated, candidates_path)
+    master, candidates, contract = graph.load_real_inputs(integrated, candidates_path, analysis_mode=None)
     assert contract["dataset_contract"]["status"] == "passed"
     assert candidates.lab.str.startswith("lab__").all()
     baseline = master.loc[master.is_clinical_baseline].copy()
-    manifest, values, _, audit = graph.build_feature_manifest(baseline, candidates, 0.)
+    manifest, values, _, audit = graph._build_legacy_feature_manifest(baseline, candidates, 0.)
     assert {"lab__glucose__value", "lab__ana_status__binary"} <= set(values)
     included = manifest.loc[manifest.family.eq("lab") & manifest.included]
     assert included.source_column.isin(frame.columns).all()
@@ -172,4 +172,4 @@ def test_empty_catalog_is_readable_by_both_consumers(tmp_path):
     # Pharma's empty-inventory exporter currently omits v2 headers. Fail closed;
     # a separate Graph test covers a correctly headered empty v2 CSV + summary.
     with pytest.raises(ValueError, match="CONTRACT_MISMATCH"):
-        graph.load_real_inputs(ip, cp)
+        graph.load_real_inputs(ip, cp, analysis_mode=None)
