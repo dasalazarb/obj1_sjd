@@ -140,6 +140,81 @@ def test_run_all_scenarios_with_public_episode_schema(tmp_path, monkeypatch, mod
     assert not features.feature.isin(["pop_status", "pop__status", "essdai_total", "essdai__total", "esspri__total"]).any()
     assert len(list(dirs["figures"].glob("*.png"))) == 3
     assert integrated.read_bytes() == original_parquet
+    selection = pd.read_csv(dirs["tables"] / "02_graph_feature_selection_audit.csv")
+    assert set(selection.scenario) == set(MODULE.SCENARIOS)
+    assert selection.loc[selection.family.eq("LAB"), "present_in_integrated_parquet"].all()
+    assert selection.loc[selection.family.eq("LAB"), "approved_by_pharma00"].all()
+    assert selection.loc[selection.feature.eq("age_dx"), "present_in_pca"].eq(False).all()
+    pd.testing.assert_frame_equal(
+        features[["scenario", "feature", "included"]].sort_values(["scenario", "feature"]).reset_index(drop=True),
+        selection.loc[selection.eligible_in_scenario, ["scenario", "feature", "present_in_pca"]]
+        .rename(columns={"present_in_pca": "included"})
+        .sort_values(["scenario", "feature"]).reset_index(drop=True))
+
+
+def test_five_audited_mappings_preserve_selection_stages():
+    rng = np.random.default_rng(29)
+    labs = ["acute_care_panel__anion_gap_blood", *[
+        f"urinalysis_includes_microscopic__{name}_urinalysis" for name in
+        ("hyalin_casts", "renal_epithelial_cells", "transitional_epith", "unclassified_casts")]]
+    master = pd.DataFrame({
+        "patient_id": [f"p{i}" for i in range(24)], "is_clinical_baseline": True,
+        **{f"lab__{lab}__value": rng.normal(size=24) for lab in labs},
+        "lab__uncatalogued__value": rng.normal(size=24),
+        "pro__sf36_pcs": rng.normal(size=24), "pro__sf36_mcs": rng.normal(size=24),
+    })
+    master[f"lab__{labs[1]}__value"] = [1., 2., 3., 4., 5.] + [np.nan] * 19
+    master[f"lab__{labs[2]}__value"] = master[f"lab__{labs[0]}__value"]
+    master[f"lab__{labs[4]}__value"] = 1.
+    candidates = PHARMA.profile_labs(master)
+    candidates = candidates.loc[~candidates.lab.eq("lab__uncatalogued")].copy()
+    candidates.loc[candidates.lab.eq(f"lab__{labs[3]}"), "graph_candidate_status"] = "review_before_graph"
+    # An approved catalog entry can lose variability in a later baseline extract.
+    candidates.loc[candidates.lab.eq(f"lab__{labs[4]}"),
+                   ["graph_candidate_status", "graph_encoding_hint", "primary_result_source"]] = [
+                       "include_numeric", "continuous", "value_column"]
+    manifest, values, _, _ = MODULE.CANON.build_feature_manifest(master, candidates, 0.0)
+    families = {row.feature: MODULE.family_name(row.family)
+                for row in manifest.loc[manifest.included].itertuples()}
+    feature_to_lab = {row.feature: MODULE.canonical_lab_name(row.lab)
+                      for row in manifest.loc[manifest.family.eq("lab") & manifest.included].itertuples()}
+    mapping = MODULE.load_lab_group_map(MODULE.DEFAULT_LAB_GROUP_MAP)
+    lookup = MODULE.lab_group_lookup(mapping)
+    indexed = mapping.set_index("lab")
+    assert indexed.loc[labs, "mapping_status"].eq("MAPPED").all()
+    assert indexed.loc[labs[0], ["s4_group", "s4_subgroup"]].tolist() == ["METABOLIC_ENDOCRINE", "ELECTROLYTES"]
+    assert indexed.loc[labs[1:], "s4_group"].eq("RENAL_URINARY").all()
+    assert indexed.loc[labs[1:], "s4_subgroup"].eq("URINALYSIS").all()
+    preflight = MODULE.validate_s4_mapping(values, families, mapping, feature_to_lab, require_all=True)
+    assert set(preflight.lab) == set(labs[:3])
+    assert preflight.mapped.all()
+    config = MODULE.CANON.load_config(SCRIPT.with_name("config_sensitivity.yaml"))
+    audits = {}
+    for scenario in ("S3", "S4"):
+        selected, coverage, redundancy = MODULE.select_features(values, families, scenario, config, manifest)
+        rep = MODULE.fit_embedding(pd.DataFrame(selected), families, scenario, config,
+                                   lab_group_by_lab=lookup, feature_to_lab=feature_to_lab)
+        audits[scenario] = MODULE.feature_selection_audit(
+            master, master, candidates, manifest, values, coverage, redundancy, rep, mapping, scenario)
+    audit = audits["S4"].set_index("feature")
+    assert audit.loc[f"lab__{labs[0]}__value", "present_in_pca"]
+    sparse = audit.loc[f"lab__{labs[1]}__value"]
+    assert sparse.encoded_in_expanded_manifest and sparse.eligible_in_scenario and sparse.mapped_s4
+    assert not sparse.passed_coverage_filter and not sparse.present_in_pca
+    redundant = audit.loc[f"lab__{labs[2]}__value"]
+    assert redundant.passed_coverage_filter and not redundant.selected_after_redundancy
+    assert redundant.exclusion_reason == "redundancy"
+    review = audit.loc[f"lab__{labs[3]}__value"]
+    assert review.catalogued_by_pharma00 and not review.approved_by_pharma00 and review.mapped_s4
+    assert not review.eligible_in_scenario and not review.present_in_pca
+    constant = audit.loc[f"lab__{labs[4]}__value"]
+    assert constant.approved_by_pharma00 and not constant.encoded_in_expanded_manifest
+    assert constant.exclusion_reason == "no_baseline_variability"
+    uncatalogued = audit.loc["lab__uncatalogued__value"]
+    assert uncatalogued.present_in_integrated_parquet and not uncatalogued.catalogued_by_pharma00
+    assert not uncatalogued.present_in_pca
+    assert uncatalogued.exclusion_reason == "not_catalogued_by_pharma00"
+    assert audit.present_in_pca.equals(audits["S3"].set_index("feature").present_in_pca)
 
 
 def test_strict_coverage_preserves_full_one_hot_and_missing_values():

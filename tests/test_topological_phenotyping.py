@@ -75,7 +75,7 @@ def test_overlap_feature_respects_evaluability():
     assert values["overlap_baseline"].iloc[4:].isna().all()
 
 
-def test_run_with_public_episode_schema(tmp_path, monkeypatch):
+def test_run_with_public_episode_schema(tmp_path, monkeypatch, caplog):
     rng = np.random.default_rng(17)
     n = 24
     master = pd.DataFrame({
@@ -98,6 +98,14 @@ def test_run_with_public_episode_schema(tmp_path, monkeypatch):
     pd.DataFrame([{"lab": "test", "graph_candidate_status": "include_numeric",
                    "graph_encoding_hint": "continuous", "primary_result_source": "value_column",
                    "value_column": "lab__test__value", "text_column": "",
+                   "reference_status_column": ""},
+                  {"lab": "lab__anti_ro_ssa", "graph_candidate_status": "include_categorical",
+                   "graph_encoding_hint": "binary", "primary_result_source": "text_column",
+                   "value_column": "", "text_column": "lab__anti_ro_ssa__text",
+                   "reference_status_column": ""},
+                  {"lab": "lab__crp", "graph_candidate_status": "review_before_graph",
+                   "graph_encoding_hint": "review", "primary_result_source": "value_column",
+                   "value_column": "lab__crp__value", "text_column": "",
                    "reference_status_column": ""}]).to_csv(candidates, index=False)
     metrics = tmp_path / "baseline.csv"
     master[["patient_id"]].to_csv(metrics, index=False)
@@ -126,6 +134,11 @@ def test_run_with_public_episode_schema(tmp_path, monkeypatch):
     assert summary["n_embedding_features"] == 6
     assert len(list(dirs["figures"].glob("*.png"))) == 5
     assert integrated.read_bytes() == original_parquet
+    expected_warnings = [record.getMessage() for record in caplog.records
+                         if "Expected clinically important approved lab" in record.getMessage()]
+    assert expected_warnings == [
+        "Expected clinically important approved lab lab__anti_ro_ssa was not included: "
+        "candidate_source_column_missing"]
 
 
 @pytest.mark.parametrize("age_column", ["age_dx", "age_at_diagnosis"])
