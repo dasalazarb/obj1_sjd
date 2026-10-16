@@ -1,0 +1,14 @@
+dataset,scenario,community,n_patients_node_union,bootstrap_stability,stability_status,matched_successes,n_bootstrap_requested,n_bootstrap_success,bootstrap_success_fraction,stability_conditional,stability_conservative,bootstrap_qc_status,primary_denominator,matching_object
+SYNTHETIC_QC_ONLY_NOT_CLINICAL,S0,0,21,0.0,provisional,0,1,1,1.0,0.0,0.0,BOOTSTRAP_QC_PASS,n_bootstrap_success_if_qc_pass,mapper_node_union_on_sampled_patients
+SYNTHETIC_QC_ONLY_NOT_CLINICAL,S0,1,11,1.0,stable,1,1,1,1.0,1.0,1.0,BOOTSTRAP_QC_PASS,n_bootstrap_success_if_qc_pass,mapper_node_union_on_sampled_patients
+SYNTHETIC_QC_ONLY_NOT_CLINICAL,S1,0,21,0.0,provisional,0,1,1,1.0,0.0,0.0,BOOTSTRAP_QC_PASS,n_bootstrap_success_if_qc_pass,mapper_node_union_on_sampled_patients
+SYNTHETIC_QC_ONLY_NOT_CLINICAL,S1,1,11,1.0,stable,1,1,1,1.0,1.0,1.0,BOOTSTRAP_QC_PASS,n_bootstrap_success_if_qc_pass,mapper_node_union_on_sampled_patients
+SYNTHETIC_QC_ONLY_NOT_CLINICAL,S2,0,21,0.0,provisional,0,1,1,1.0,0.0,0.0,BOOTSTRAP_QC_PASS,n_bootstrap_success_if_qc_pass,mapper_node_union_on_sampled_patients
+SYNTHETIC_QC_ONLY_NOT_CLINICAL,S2,1,11,1.0,stable,1,1,1,1.0,1.0,1.0,BOOTSTRAP_QC_PASS,n_bootstrap_success_if_qc_pass,mapper_node_union_on_sampled_patients
+SYNTHETIC_QC_ONLY_NOT_CLINICAL,S3,0,18,1.0,stable,1,1,1,1.0,1.0,1.0,BOOTSTRAP_QC_PASS,n_bootstrap_success_if_qc_pass,mapper_node_union_on_sampled_patients
+SYNTHETIC_QC_ONLY_NOT_CLINICAL,S3,1,2,0.0,provisional,0,1,1,1.0,0.0,0.0,BOOTSTRAP_QC_PASS,n_bootstrap_success_if_qc_pass,mapper_node_union_on_sampled_patients
+SYNTHETIC_QC_ONLY_NOT_CLINICAL,S3,2,2,1.0,stable,1,1,1,1.0,1.0,1.0,BOOTSTRAP_QC_PASS,n_bootstrap_success_if_qc_pass,mapper_node_union_on_sampled_patients
+SYNTHETIC_QC_ONLY_NOT_CLINICAL,S3,3,2,0.0,provisional,0,1,1,1.0,0.0,0.0,BOOTSTRAP_QC_PASS,n_bootstrap_success_if_qc_pass,mapper_node_union_on_sampled_patients
+SYNTHETIC_QC_ONLY_NOT_CLINICAL,S4,0,20,1.0,stable,1,1,1,1.0,1.0,1.0,BOOTSTRAP_QC_PASS,n_bootstrap_success_if_qc_pass,mapper_node_union_on_sampled_patients
+SYNTHETIC_QC_ONLY_NOT_CLINICAL,S4,1,4,0.0,provisional,0,1,1,1.0,0.0,0.0,BOOTSTRAP_QC_PASS,n_bootstrap_success_if_qc_pass,mapper_node_union_on_sampled_patients
+SYNTHETIC_QC_ONLY_NOT_CLINICAL,S4,2,2,1.0,stable,1,1,1,1.0,1.0,1.0,BOOTSTRAP_QC_PASS,n_bootstrap_success_if_qc_pass,mapper_node_union_on_sampled_patients

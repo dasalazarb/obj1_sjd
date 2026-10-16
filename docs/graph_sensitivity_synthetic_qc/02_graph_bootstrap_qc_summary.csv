@@ -1,0 +1,6 @@
+dataset,scenario,n_requested,n_attempted,n_success,n_failed,success_fraction,minimum_success_fraction,bootstrap_qc_status,primary_estimator,matching_object,n_failed_MAPPING_ERROR,n_failed_ZERO_VARIANCE_BLOCK,n_failed_FEATURE_SELECTION,n_failed_PCA,n_failed_MAPPER,n_failed_OTHER
+SYNTHETIC_QC_ONLY_NOT_CLINICAL,S0,1,1,1,0,1.0,0.95,BOOTSTRAP_QC_PASS,stability_conditional_if_qc_pass,mapper_node_union_on_sampled_patients,0,0,0,0,0,0
+SYNTHETIC_QC_ONLY_NOT_CLINICAL,S1,1,1,1,0,1.0,0.95,BOOTSTRAP_QC_PASS,stability_conditional_if_qc_pass,mapper_node_union_on_sampled_patients,0,0,0,0,0,0
+SYNTHETIC_QC_ONLY_NOT_CLINICAL,S2,1,1,1,0,1.0,0.95,BOOTSTRAP_QC_PASS,stability_conditional_if_qc_pass,mapper_node_union_on_sampled_patients,0,0,0,0,0,0
+SYNTHETIC_QC_ONLY_NOT_CLINICAL,S3,1,1,1,0,1.0,0.95,BOOTSTRAP_QC_PASS,stability_conditional_if_qc_pass,mapper_node_union_on_sampled_patients,0,0,0,0,0,0
+SYNTHETIC_QC_ONLY_NOT_CLINICAL,S4,1,1,1,0,1.0,0.95,BOOTSTRAP_QC_PASS,stability_conditional_if_qc_pass,mapper_node_union_on_sampled_patients,0,0,0,0,0,0

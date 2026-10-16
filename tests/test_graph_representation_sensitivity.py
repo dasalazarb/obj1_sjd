@@ -1,5 +1,6 @@
 """Focused tests for representation-sensitivity comparison contracts."""
 import importlib.util
+import json
 from pathlib import Path
 
 import numpy as np
@@ -46,7 +47,8 @@ def test_patient_membership_requires_pop_concept():
                                    "covered": [True], "ties": [False], "supported": [True]})
 
 
-def test_run_all_scenarios_with_public_episode_schema(tmp_path, monkeypatch):
+@pytest.mark.parametrize("mode", ["healthy", "invalid_bootstrap", "unmapped"])
+def test_run_all_scenarios_with_public_episode_schema(tmp_path, monkeypatch, mode):
     rng = np.random.default_rng(17)
     n = 24
     master = pd.DataFrame({
@@ -62,6 +64,9 @@ def test_run_all_scenarios_with_public_episode_schema(tmp_path, monkeypatch):
         "lab__acute_care_panel__chloride_blood__value": rng.uniform(90, 110, n),
         "lab__anti_ro_ssa__text": ["positive"] * (n // 2) + ["negative"] * (n // 2),
     })
+    if mode == "unmapped":
+        # Eligible in a subset, but below the full-sample S4 coverage threshold.
+        master["lab__unapproved__value"] = [1., 2., 3., 4., 5.] + [np.nan] * (n - 5)
     integrated = tmp_path / "integrated.parquet"
     master.to_parquet(integrated, index=False)
     original_parquet = integrated.read_bytes()
@@ -71,7 +76,7 @@ def test_run_all_scenarios_with_public_episode_schema(tmp_path, monkeypatch):
     metrics = tmp_path / "baseline.csv"
     master[["patient_id"]].to_csv(metrics, index=False)
     config = MODULE.CANON.load_config(SCRIPT.with_name("config_sensitivity.yaml"))
-    config["bootstrap"]["replicates"] = 1
+    config["bootstrap"]["replicates"] = 0 if mode == "invalid_bootstrap" else 1
     config["permutation"]["ari_replicates"] = 5
     config["persistent_homology"]["enabled"] = False
     config["mapper"].update(n_cubes=2, min_samples=2, minimum_node_support=2)
@@ -83,9 +88,20 @@ def test_run_all_scenarios_with_public_episode_schema(tmp_path, monkeypatch):
         path.mkdir()
     monkeypatch.setattr(MODULE, "create_study_dirs", lambda _: dirs)
 
-    MODULE.run(MODULE.parse_args([
+    args = MODULE.parse_args([
         "--integrated", str(integrated), "--graph-lab-candidates", str(candidates),
-        "--baseline-metrics", str(metrics), "--config", str(config_path)]))
+        "--baseline-metrics", str(metrics), "--config", str(config_path)])
+    if mode == "unmapped":
+        monkeypatch.setattr(MODULE, "bootstrap_stability", lambda *a, **k: pytest.fail("bootstrap started before mapping QC"))
+        with pytest.raises(MODULE.MappingError, match="unapproved"):
+            MODULE.run(args)
+        audit = pd.read_csv(dirs["tables"] / "02_graph_S4_lab_group_mapping_audit.csv")
+        missing = audit.loc[audit.lab.eq("unapproved")].iloc[0]
+        assert missing.eligible_for_bootstrap and not missing.included_S4
+        assert missing.mapping_validation_result == "MAPPING_ERROR"
+        assert not (dirs["tables"] / "02_graph_S0_pca_variance.csv").exists()
+        return
+    MODULE.run(args)
 
     membership = pd.read_csv(dirs["tables"] / "02_graph_scenario_patient_membership.csv")
     assert len(membership) == n * len(MODULE.SCENARIOS)
@@ -96,6 +112,23 @@ def test_run_all_scenarios_with_public_episode_schema(tmp_path, monkeypatch):
     assert summary.n_pro_features.eq(4).all()
     assert summary.n_clinical_features.eq(1).all()
     assert summary.n_lab_features.eq(3).all()
+    qc = pd.read_csv(dirs["tables"] / "02_graph_bootstrap_qc_summary.csv")
+    replicates = pd.read_csv(dirs["tables"] / "02_graph_bootstrap_replicate_audit.csv")
+    stability = pd.read_csv(dirs["tables"] / "02_graph_scenario_community_stability.csv")
+    assert qc.n_requested.eq(qc.n_success + qc.n_failed).all()
+    assert len(replicates) == 5 * config["bootstrap"]["replicates"]
+    assert {"matched_successes", "stability_conditional", "stability_conservative", "bootstrap_qc_status"} <= set(stability)
+    if mode == "invalid_bootstrap":
+        assert summary.n_stable_communities.isna().all()
+        assert summary.bootstrap_qc_status.eq("INVALID_BOOTSTRAP").all()
+        assert stability.bootstrap_stability.isna().all()
+    else:
+        assert qc.bootstrap_qc_status.eq("BOOTSTRAP_QC_PASS").all()
+    report = json.loads((dirs["tables"] / "02_graph_interpretation_qc.json").read_text())
+    assert report["GLOBAL_PARTITION_ROBUSTNESS"] == "NOT_EVALUABLE"
+    assert (dirs["tables"] / "02_graph_common_intersection_ari.csv").exists()
+    assert (dirs["tables"] / "02_graph_stable_core_node_union_overlap.csv").exists()
+    assert (dirs["tables"] / "02_graph_bootstrap_balance_audit.csv").exists()
     mapping_audit = pd.read_csv(dirs["tables"] / "02_graph_S4_lab_group_mapping_audit.csv")
     assert mapping_audit.mapped.all()
     assert set(mapping_audit.lab) == {"albumin", "acute_care_panel__chloride_blood", "anti_ro_ssa"}
