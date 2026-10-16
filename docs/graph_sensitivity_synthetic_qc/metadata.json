@@ -1,0 +1,82 @@
+{
+  "dataset": "SYNTHETIC_QC_ONLY_NOT_CLINICAL",
+  "n_patients": 24,
+  "input_generation_seed": 17,
+  "analysis_seed": 20260831,
+  "bootstrap_requested_per_scenario": 1,
+  "clinical_inputs_available": false,
+  "test": "tests/test_graph_representation_sensitivity.py::test_run_all_scenarios_with_public_episode_schema[healthy]",
+  "purpose": "Execution regression only; budget and fixture Mapper settings cannot validate scientific stability",
+  "fixture_configuration": {
+    "bootstrap": {
+      "branch_match_jaccard": 0.5,
+      "minimum_success_fraction": 0.95,
+      "patient_fraction": 0.8,
+      "replicates": 1,
+      "stable_community_threshold": 0.8
+    },
+    "community_detection": {
+      "edge_weight": "jaccard",
+      "method": "greedy_modularity",
+      "minimum_patients": 2
+    },
+    "comparisons": {
+      "minimum_common_fraction": 0.5,
+      "minimum_common_patients": 20
+    },
+    "contract_version": "clinical_episode_v1",
+    "current_pca": {
+      "max_components": 10,
+      "variance_target": 0.8
+    },
+    "feature_selection": {
+      "clinical_minimum_baseline_coverage": 0.7,
+      "lab_minimum_baseline_coverage": 0.7,
+      "pro_minimum_baseline_coverage": 0.6
+    },
+    "interpretation": {
+      "core_jaccard_threshold": null,
+      "global_ari_threshold": null,
+      "threshold_justification": null
+    },
+    "lab_grouping": {
+      "enabled_scenario": "S4",
+      "group_column": "s4_group",
+      "key_column": "lab",
+      "map_file": "data/raw/graph_s4_lab_group_map.csv",
+      "require_complete_mapping": true,
+      "subgroup_column": "s4_subgroup"
+    },
+    "mapper": {
+      "eps_k_neighbors": 4,
+      "eps_percentile": 65,
+      "min_samples": 2,
+      "minimum_node_support": 2,
+      "n_cubes": 2,
+      "perc_overlap": 0.4,
+      "soft_membership_tau": 1.0
+    },
+    "pca": {
+      "max_components": null,
+      "variance_target": 0.8
+    },
+    "permutation": {
+      "ari_replicates": 5
+    },
+    "persistent_homology": {
+      "enabled": false,
+      "permutation_replicates": 150
+    },
+    "random_seed": 20260831,
+    "redundancy": {
+      "conceptual_pairs": [
+        [
+          "hemoglobin_a1c",
+          "estimated_average_glucose"
+        ]
+      ],
+      "spearman_abs_threshold": 0.95
+    },
+    "study_name": "graph_representation_sensitivity"
+  }
+}

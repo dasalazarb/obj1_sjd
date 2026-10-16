@@ -1,0 +1,11 @@
+dataset,scenario_a,stable_community_a,scenario_b,stable_community_b,n_a,n_b,n_intersection,jaccard,overlap_coefficient,n_patients_total,n_union,coverage_a,coverage_b,matching_object
+SYNTHETIC_QC_ONLY_NOT_CLINICAL,S0,1,S1,1,3,3,3,1.0,1.0,24,3,0.125,0.125,unambiguous_hard_assignment
+SYNTHETIC_QC_ONLY_NOT_CLINICAL,S0,1,S2,1,3,3,3,1.0,1.0,24,3,0.125,0.125,unambiguous_hard_assignment
+SYNTHETIC_QC_ONLY_NOT_CLINICAL,S0,1,S3,0,3,18,1,0.05,0.3333333333333333,24,20,0.125,0.75,unambiguous_hard_assignment
+SYNTHETIC_QC_ONLY_NOT_CLINICAL,S0,1,S4,0,3,18,1,0.05,0.3333333333333333,24,20,0.125,0.75,unambiguous_hard_assignment
+SYNTHETIC_QC_ONLY_NOT_CLINICAL,S1,1,S2,1,3,3,3,1.0,1.0,24,3,0.125,0.125,unambiguous_hard_assignment
+SYNTHETIC_QC_ONLY_NOT_CLINICAL,S1,1,S3,0,3,18,1,0.05,0.3333333333333333,24,20,0.125,0.75,unambiguous_hard_assignment
+SYNTHETIC_QC_ONLY_NOT_CLINICAL,S1,1,S4,0,3,18,1,0.05,0.3333333333333333,24,20,0.125,0.75,unambiguous_hard_assignment
+SYNTHETIC_QC_ONLY_NOT_CLINICAL,S2,1,S3,0,3,18,1,0.05,0.3333333333333333,24,20,0.125,0.75,unambiguous_hard_assignment
+SYNTHETIC_QC_ONLY_NOT_CLINICAL,S2,1,S4,0,3,18,1,0.05,0.3333333333333333,24,20,0.125,0.75,unambiguous_hard_assignment
+SYNTHETIC_QC_ONLY_NOT_CLINICAL,S3,0,S4,0,18,18,18,1.0,1.0,24,18,0.75,0.75,unambiguous_hard_assignment

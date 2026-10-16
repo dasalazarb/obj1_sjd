@@ -47,6 +47,19 @@ bootstrap:
   patient_fraction: 0.80
   branch_match_jaccard: 0.50
   stable_community_threshold: 0.80
+  # Operational execution QC, not a biological validity or stability threshold.
+  minimum_success_fraction: 0.95
+
+comparisons:
+  # Descriptive common-universe ARI needs both an absolute and relative sample floor.
+  minimum_common_patients: 20
+  minimum_common_fraction: 0.50
+
+interpretation:
+  # No retrospective scientific cutoffs: claims remain NOT_EVALUABLE by default.
+  core_jaccard_threshold: null
+  global_ari_threshold: null
+  threshold_justification: null
 
 permutation:
   ari_replicates: 5000
