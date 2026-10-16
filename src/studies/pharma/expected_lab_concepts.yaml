@@ -1,0 +1,322 @@
+# Naming rules do not constitute clinical approval. All initial decisions are pending.
+registry_version: pharma_lab_concepts_v1
+thresholds:
+  min_numeric_episodes: 10
+  min_numeric_patients: 5
+  min_numeric_repeated_dates_patients: 2
+  min_categorical_episodes: 10
+  min_categorical_patients: 5
+  min_categorical_repeated_dates_patients: 2
+  min_numeric_parse_fraction: 0.9
+concepts:
+  anti_ro_ssa:
+    preferred_lab_stem: lab__anti_ro_ssa
+    approved_exact_aliases: []
+    related_not_equivalent:
+    - lab__anti_ro52
+    - lab__anti_ro60
+    concept_family: serology
+    clinical_equivalence_status: pending_review
+    note: Naming priority only; related assays must not be pooled.
+  anti_la_ssb:
+    preferred_lab_stem: lab__anti_la_ssb
+    approved_exact_aliases: []
+    related_not_equivalent: []
+    concept_family: serology
+    clinical_equivalence_status: pending_review
+    note: Naming priority only; related assays must not be pooled.
+  ana:
+    preferred_lab_stem: lab__ana_status
+    approved_exact_aliases: []
+    related_not_equivalent:
+    - lab__ana_hep2_status
+    - lab__ana_hep2_titer
+    - lab__ana_hep2_pattern
+    concept_family: serology
+    clinical_equivalence_status: pending_review
+    note: Naming priority only; related assays must not be pooled.
+  rheumatoid_factor:
+    preferred_lab_stem: lab__rheumatoid_factor
+    approved_exact_aliases: []
+    related_not_equivalent: []
+    concept_family: serology
+    clinical_equivalence_status: pending_review
+    note: Naming priority only; related assays must not be pooled.
+  cryoglobulin:
+    preferred_lab_stem: lab__cryoglobulins
+    approved_exact_aliases: []
+    related_not_equivalent: []
+    concept_family: serology
+    clinical_equivalence_status: pending_review
+    note: Naming priority only; related assays must not be pooled.
+  complement_c3:
+    preferred_lab_stem: lab__complement_c3
+    approved_exact_aliases: []
+    related_not_equivalent: []
+    concept_family: laboratory
+    clinical_equivalence_status: pending_review
+    note: Naming priority only; related assays must not be pooled.
+  complement_c4:
+    preferred_lab_stem: lab__complement_c4
+    approved_exact_aliases: []
+    related_not_equivalent: []
+    concept_family: laboratory
+    clinical_equivalence_status: pending_review
+    note: Naming priority only; related assays must not be pooled.
+  igg:
+    preferred_lab_stem: lab__igg
+    approved_exact_aliases: []
+    related_not_equivalent:
+    - lab__igg_total
+    concept_family: laboratory
+    clinical_equivalence_status: pending_review
+    note: Naming priority only; related assays must not be pooled.
+  iga:
+    preferred_lab_stem: lab__iga
+    approved_exact_aliases: []
+    related_not_equivalent: []
+    concept_family: laboratory
+    clinical_equivalence_status: pending_review
+    note: Naming priority only; related assays must not be pooled.
+  igm:
+    preferred_lab_stem: lab__igm
+    approved_exact_aliases: []
+    related_not_equivalent: []
+    concept_family: laboratory
+    clinical_equivalence_status: pending_review
+    note: Naming priority only; related assays must not be pooled.
+  esr:
+    preferred_lab_stem: lab__esr
+    approved_exact_aliases: []
+    related_not_equivalent: []
+    concept_family: laboratory
+    clinical_equivalence_status: pending_review
+    note: Naming priority only; related assays must not be pooled.
+  crp:
+    preferred_lab_stem: lab__crp_high_sensitivity
+    approved_exact_aliases: []
+    related_not_equivalent:
+    - lab__crp
+    concept_family: laboratory
+    clinical_equivalence_status: pending_review
+    note: hsCRP is method-specific; conventional CRP is related, not interchangeable.
+  wbc:
+    preferred_lab_stem: lab__wbc
+    approved_exact_aliases: []
+    related_not_equivalent:
+    - lab__urine_wbc
+    concept_family: laboratory
+    clinical_equivalence_status: pending_review
+    note: Naming priority only; related assays must not be pooled.
+  hemoglobin:
+    preferred_lab_stem: lab__hemoglobin
+    approved_exact_aliases: []
+    related_not_equivalent:
+    - lab__urine_hemoglobin
+    concept_family: laboratory
+    clinical_equivalence_status: pending_review
+    note: Naming priority only; related assays must not be pooled.
+  hematocrit:
+    preferred_lab_stem: lab__hematocrit
+    approved_exact_aliases: []
+    related_not_equivalent: []
+    concept_family: laboratory
+    clinical_equivalence_status: pending_review
+    note: Naming priority only; related assays must not be pooled.
+  platelet_count:
+    preferred_lab_stem: lab__platelet_count
+    approved_exact_aliases: []
+    related_not_equivalent: []
+    concept_family: laboratory
+    clinical_equivalence_status: pending_review
+    note: Naming priority only; related assays must not be pooled.
+  anc:
+    preferred_lab_stem: lab__anc
+    approved_exact_aliases: []
+    related_not_equivalent: []
+    concept_family: laboratory
+    clinical_equivalence_status: pending_review
+    note: Naming priority only; related assays must not be pooled.
+  lymphocyte_count:
+    preferred_lab_stem: lab__lymphocyte_count
+    approved_exact_aliases: []
+    related_not_equivalent: []
+    concept_family: laboratory
+    clinical_equivalence_status: pending_review
+    note: Naming priority only; related assays must not be pooled.
+  protein_total:
+    preferred_lab_stem: lab__protein_total
+    approved_exact_aliases: []
+    related_not_equivalent: []
+    concept_family: laboratory
+    clinical_equivalence_status: pending_review
+    note: Naming priority only; related assays must not be pooled.
+  albumin:
+    preferred_lab_stem: lab__albumin
+    approved_exact_aliases: []
+    related_not_equivalent: []
+    concept_family: laboratory
+    clinical_equivalence_status: pending_review
+    note: Naming priority only; related assays must not be pooled.
+  gamma_globulin:
+    preferred_lab_stem: lab__gamma_globulin
+    approved_exact_aliases: []
+    related_not_equivalent: []
+    concept_family: laboratory
+    clinical_equivalence_status: pending_review
+    note: Naming priority only; related assays must not be pooled.
+  protein_total_electrophoresis:
+    preferred_lab_stem: lab__protein_total_electrophoresis
+    approved_exact_aliases: []
+    related_not_equivalent: []
+    concept_family: laboratory
+    clinical_equivalence_status: pending_review
+    note: Naming priority only; related assays must not be pooled.
+  creatinine:
+    preferred_lab_stem: lab__creatinine
+    approved_exact_aliases: []
+    related_not_equivalent: []
+    concept_family: laboratory
+    clinical_equivalence_status: pending_review
+    note: Naming priority only; related assays must not be pooled.
+  bun:
+    preferred_lab_stem: lab__bun
+    approved_exact_aliases: []
+    related_not_equivalent: []
+    concept_family: laboratory
+    clinical_equivalence_status: pending_review
+    note: Naming priority only; related assays must not be pooled.
+  ast:
+    preferred_lab_stem: lab__ast
+    approved_exact_aliases: []
+    related_not_equivalent: []
+    concept_family: laboratory
+    clinical_equivalence_status: pending_review
+    note: Naming priority only; related assays must not be pooled.
+  alt:
+    preferred_lab_stem: lab__alt
+    approved_exact_aliases: []
+    related_not_equivalent: []
+    concept_family: laboratory
+    clinical_equivalence_status: pending_review
+    note: Naming priority only; related assays must not be pooled.
+  alkaline_phosphatase:
+    preferred_lab_stem: lab__alkaline_phosphatase
+    approved_exact_aliases: []
+    related_not_equivalent: []
+    concept_family: laboratory
+    clinical_equivalence_status: pending_review
+    note: Naming priority only; related assays must not be pooled.
+  bilirubin_total:
+    preferred_lab_stem: lab__bilirubin_total
+    approved_exact_aliases: []
+    related_not_equivalent: []
+    concept_family: laboratory
+    clinical_equivalence_status: pending_review
+    note: Naming priority only; related assays must not be pooled.
+  glucose:
+    preferred_lab_stem: lab__glucose
+    approved_exact_aliases: []
+    related_not_equivalent:
+    - lab__estimated_average_glucose
+    concept_family: laboratory
+    clinical_equivalence_status: pending_review
+    note: Naming priority only; related assays must not be pooled.
+  hemoglobin_a1c:
+    preferred_lab_stem: lab__hemoglobin_a1c
+    approved_exact_aliases: []
+    related_not_equivalent: []
+    concept_family: laboratory
+    clinical_equivalence_status: pending_review
+    note: Naming priority only; related assays must not be pooled.
+assays:
+  lab__ana_status:
+    approval_status: pending
+    decision_id: ''
+    reviewer: ''
+    evidence: ''
+    numeric_approved: false
+    binary_approved: false
+    ordinal_categories: []
+    allow_unassessed_units: false
+  lab__ana_hep2_status:
+    approval_status: pending
+    decision_id: ''
+    reviewer: ''
+    evidence: ''
+    numeric_approved: false
+    binary_approved: false
+    ordinal_categories: []
+    allow_unassessed_units: false
+  lab__cryoglobulins:
+    approval_status: pending
+    decision_id: ''
+    reviewer: ''
+    evidence: ''
+    numeric_approved: false
+    binary_approved: false
+    ordinal_categories: []
+    allow_unassessed_units: false
+  lab__anti_ccp:
+    approval_status: pending
+    decision_id: ''
+    reviewer: ''
+    evidence: ''
+    numeric_approved: false
+    binary_approved: false
+    ordinal_categories: []
+    allow_unassessed_units: false
+  lab__anti_ro_ssa:
+    approval_status: pending
+    decision_id: ''
+    reviewer: ''
+    evidence: ''
+    numeric_approved: false
+    binary_approved: false
+    ordinal_categories: []
+    allow_unassessed_units: false
+  lab__anti_la_ssb:
+    approval_status: pending
+    decision_id: ''
+    reviewer: ''
+    evidence: ''
+    numeric_approved: false
+    binary_approved: false
+    ordinal_categories: []
+    allow_unassessed_units: false
+  lab__urine_protein_qualitative:
+    approval_status: pending
+    decision_id: ''
+    reviewer: ''
+    evidence: ''
+    numeric_approved: false
+    binary_approved: false
+    ordinal_categories: []
+    allow_unassessed_units: false
+  lab__urine_hemoglobin:
+    approval_status: pending
+    decision_id: ''
+    reviewer: ''
+    evidence: ''
+    numeric_approved: false
+    binary_approved: false
+    ordinal_categories: []
+    allow_unassessed_units: false
+  lab__immunofixation_serum_interpretation:
+    approval_status: pending
+    decision_id: ''
+    reviewer: ''
+    evidence: ''
+    numeric_approved: false
+    binary_approved: false
+    ordinal_categories: []
+    allow_unassessed_units: false
+  lab__hla_drb1:
+    approval_status: pending
+    decision_id: ''
+    reviewer: ''
+    evidence: ''
+    numeric_approved: false
+    binary_approved: false
+    ordinal_categories: []
+    allow_unassessed_units: false

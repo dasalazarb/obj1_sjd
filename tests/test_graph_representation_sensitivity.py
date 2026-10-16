@@ -20,6 +20,33 @@ PHARMA = importlib.util.module_from_spec(PHARMA_SPEC)
 PHARMA_SPEC.loader.exec_module(PHARMA)
 
 
+def _profile_with_synthetic_followups_and_approvals(baseline):
+    """Keep Graph scenario fixtures eligible under Pharma's explicit new gates.
+
+    These are test-only repeated observations and approvals, never production
+    clinical decisions. The Graph input remains the original baseline fixture.
+    """
+    first = baseline.copy()
+    if "clinical_episode_id" not in first:
+        first["clinical_episode_id"] = [f"baseline_{i}" for i in range(len(first))]
+    if "clinical_anchor_date" not in first:
+        first["clinical_anchor_date"] = pd.Timestamp("2020-01-01")
+    followup = first.copy()
+    followup["clinical_episode_id"] = "synthetic_followup_" + followup.clinical_episode_id.astype(str)
+    followup["clinical_anchor_date"] = pd.to_datetime(followup.clinical_anchor_date).astype("datetime64[ns]") + pd.Timedelta(days=365)
+    followup["is_clinical_baseline"] = False
+    repeated = pd.concat([first, followup], ignore_index=True)
+    registry = PHARMA.load_registry()
+    for column in repeated:
+        lab = PHARMA.lab_stem(column)
+        if lab:
+            registry["assays"][lab] = {
+                "approval_status": "approved", "decision_id": "SYNTHETIC_TEST_ONLY",
+                "reviewer": "synthetic_fixture", "evidence": "test_only_not_clinical_approval",
+                "numeric_approved": True, "binary_approved": True, "allow_unassessed_units": True}
+    return PHARMA.profile_labs(repeated, registry=registry)
+
+
 @pytest.mark.parametrize("pop_columns", [
     {"pop__status": ["Pop1", "Pop2", "Pop3"]},
     {"pop_status": ["Pop1", "Pop2", "Pop3"]},
@@ -72,7 +99,7 @@ def test_run_all_scenarios_with_public_episode_schema(tmp_path, monkeypatch, mod
     original_parquet = integrated.read_bytes()
     candidates = tmp_path / "candidates.csv"
     # Exercise the actual Pharma -> Graph boundary, including lab__ in lab keys.
-    PHARMA.profile_labs(master).to_csv(candidates, index=False)
+    _profile_with_synthetic_followups_and_approvals(master).to_csv(candidates, index=False)
     metrics = tmp_path / "baseline.csv"
     master[["patient_id"]].to_csv(metrics, index=False)
     config = MODULE.CANON.load_config(SCRIPT.with_name("config_sensitivity.yaml"))
@@ -166,7 +193,7 @@ def test_five_audited_mappings_preserve_selection_stages():
     master[f"lab__{labs[1]}__value"] = [1., 2., 3., 4., 5.] + [np.nan] * 19
     master[f"lab__{labs[2]}__value"] = master[f"lab__{labs[0]}__value"]
     master[f"lab__{labs[4]}__value"] = 1.
-    candidates = PHARMA.profile_labs(master)
+    candidates = _profile_with_synthetic_followups_and_approvals(master)
     candidates = candidates.loc[~candidates.lab.eq("lab__uncatalogued")].copy()
     candidates.loc[candidates.lab.eq(f"lab__{labs[3]}"), "graph_candidate_status"] = "review_before_graph"
     # An approved catalog entry can lose variability in a later baseline extract.
