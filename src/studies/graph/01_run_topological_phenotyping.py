@@ -39,10 +39,13 @@ from sklearn.preprocessing import RobustScaler
 import statsmodels.formula.api as smf
 
 import common
-from src.studies.graph import _lab_contract as LAB
 from src.studies._shared import (benjamini_hochberg, create_study_dirs,
                                  load_parquet, resolve_concept, validate_integrated_dataset,
                                  write_json)
+
+from src.studies.graph import _lab_contract as LAB
+from src.studies.graph import _feature_catalog as CATALOG
+from src.studies.graph._lab_contract import resolve_candidates, validate_provenance, enforce_lab_mode
 
 POPS = ("Pop1", "Pop2", "Pop3")
 PRO_FEATURES = ("sf36_pcs", "sf36_mcs", "profad_total", "mdafs_global")
@@ -79,18 +82,41 @@ def load_config(path: Path) -> dict:
     return config
 
 
-def load_real_inputs(integrated: Path, candidates_path: Path,
-                     pharma_summary: dict | None = None) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+def load_real_inputs(integrated: Path, candidates_path: Path, analysis_mode: str | None = "exploratory") -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    if analysis_mode is None or isinstance(analysis_mode, dict):
+        summary = analysis_mode if isinstance(analysis_mode, dict) else json.loads(candidates_path.with_name("00_pharma_profile_summary.json").read_text())
+        master = load_parquet(integrated)
+        candidates, report = LAB.validate_graph_lab_contract(master, pd.read_csv(candidates_path), summary,
+            integrated_path=integrated, candidates_path=candidates_path)
+        return master, candidates, report
+    if analysis_mode is not None:
+        candidates_path = resolve_candidates(candidates_path)
+    if not candidates_path.exists():
+        raise FileNotFoundError(
+            f"Graph lab candidate file not found: {candidates_path}. "
+            "Run src/studies/pharma/00_profile_labs.py first"
+        )
     master = load_parquet(integrated)
-    if pharma_summary is None:
-        path = candidates_path.with_name("00_pharma_profile_summary.json")
-        LAB.sha256(path)
-        pharma_summary = json.loads(path.read_text())
-    LAB.sha256(candidates_path)
-    candidates, report = LAB.validate_graph_lab_contract(
-        master, pd.read_csv(candidates_path), pharma_summary,
-        integrated_path=integrated, candidates_path=candidates_path)
-    return master, candidates, report
+    contract = validate_integrated_dataset(master)
+    if analysis_mode is not None:
+        contract.update(validate_provenance(integrated, candidates_path, analysis_mode))
+    candidates = pd.read_csv(candidates_path)
+    if analysis_mode is not None:
+        candidates = pd.read_csv(candidates_path.with_name("00_pharma_graph_lab_selection_audit.csv"))
+        if candidates.source_column.duplicated().any():
+            raise ValueError("Duplicate lab representation source keys")
+        if any(CATALOG.lab_stem(r.source_column) != r.lab for r in candidates.itertuples()):
+            raise ValueError("LAB_REPRESENTATION_KEY_MISMATCH: exact stem/source required")
+        bad = set(candidates.source_column) - set(master.columns)
+        if bad:
+            raise ValueError(f"Candidate sources absent from master: {sorted(bad)}")
+    required = {"lab", "graph_candidate_status", "graph_encoding_hint",
+                "primary_result_source", "value_column", "text_column",
+                "reference_status_column"}
+    missing = required - set(candidates)
+    if missing:
+        raise ValueError(f"Graph lab candidates missing required columns: {sorted(missing)}")
+    return master, candidates, contract
 
 
 def load_age_at_diagnosis(path: Path) -> pd.DataFrame:
@@ -100,10 +126,8 @@ def load_age_at_diagnosis(path: Path) -> pd.DataFrame:
     cannot always derive this feature. Never substitute visit or baseline age.
     """
     if not path.exists():
-        raise FileNotFoundError(
-            f"Baseline metrics file not found: {path}. Run "
-            "src/block_A/11_integrated_baseline_characterization.py first."
-        )
+        logging.warning("Diagnosis age unavailable: %s; continuing without age_dx", path)
+        return pd.DataFrame({"patient_id": pd.Series(dtype="object"), "age_dx": pd.Series(dtype=float)})
     metrics = pd.read_csv(
         path, usecols=lambda column: column in {"patient_id", "age_dx", "age_at_diagnosis"})
     missing = {"patient_id"} - set(metrics)
@@ -129,17 +153,44 @@ def select_baseline(master: pd.DataFrame) -> pd.DataFrame:
     baseline = master.loc[master["is_clinical_baseline"].fillna(False).astype(bool)].copy()
     if baseline["patient_id"].duplicated().any():
         raise ValueError("Clinical baseline must contain at most one row per patient")
+    if baseline.empty:
+        raise ValueError("No clinical baseline observations")
     return baseline.reset_index(drop=True)
 
 
 LEAKAGE_PATTERNS = ("ever_positive", "through_episode", "future", "next_",
                     "delta_", "previous_", "time_to_", "post_baseline")
-BINARY_PAIRS = LAB.BINARY_PAIRS
-BINARY_POSITIVE = LAB.POSITIVE
+UNKNOWN_CATEGORIES = {"", "unknown", "not reported", "not_reported", "n/a", "na",
+                      "uninterpretable", "indeterminate", "not tested", "not_tested"}
+BINARY_PAIRS = ({"positive", "negative"}, {"pos", "neg"},
+                {"reactive", "nonreactive"}, {"detected", "not detected"},
+                {"present", "absent"}, {"high", "normal"}, {"low", "normal"})
+BINARY_POSITIVE = {"positive", "pos", "reactive", "detected", "present", "high", "low"}
 
 
 def normalize_clinical_category(value: object) -> str | None:
-    return LAB.normalize_category(value)
+    """Normalize a reported category without treating missing/unknown as a result."""
+    if pd.isna(value):
+        return None
+    normalized = re.sub(r"\s+", " ", str(value).strip().lower()).replace("non-reactive", "nonreactive")
+    return None if normalized in UNKNOWN_CATEGORIES else normalized
+
+
+def _category_slug(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", value).strip("_")
+
+
+def _candidate_source_column(row: object) -> str:
+    primary = str(getattr(row, "primary_result_source", "")).strip().lower()
+    field = {
+        "reference_status_column": "reference_status_column",
+        "reference_status_categorical": "reference_status_column",
+        "text_column": "text_column", "text_categorical": "text_column",
+        "value_column": "value_column", "value_numeric": "value_column",
+        "value_categorical": "value_column",
+    }.get(primary, "value_column" if getattr(row, "graph_candidate_status", "") == "include_numeric" else "")
+    value = getattr(row, field, "") if field else ""
+    return "" if pd.isna(value) else str(value).strip()
 
 
 def _graph_source_column(frame: pd.DataFrame, feature: str) -> str | None:
@@ -153,7 +204,7 @@ def canonical_lab_name(lab: str) -> str:
     return lab.strip().lower().removeprefix("lab__")
 
 
-def build_feature_manifest(baseline: pd.DataFrame, candidates: pd.DataFrame,
+def _build_legacy_feature_manifest(baseline: pd.DataFrame, candidates: pd.DataFrame,
                            minimum_coverage: float, feature_policy: str = "legacy_with_overlap",
                            graph_release_id: str | None = None) -> tuple[pd.DataFrame, dict[str, pd.Series], dict[str, str], pd.DataFrame]:
     LAB.validate_candidate_rows(baseline, candidates)
@@ -304,6 +355,103 @@ def build_feature_manifest(baseline: pd.DataFrame, candidates: pd.DataFrame,
             "pharma_contract_version", "clinically_approved", "eligibility_reason",
             "feature_policy", "graph_release_id"])
     return pd.DataFrame(rows), values, lab_names, audit_frame
+
+
+def build_feature_manifest(baseline, candidates, minimum_coverage, feature_policy=None,
+                           graph_release_id=None, *, analysis_mode="exploratory", metadata=None, source_hash=""):
+    # Discovery defaults to the shared expanded contract. The explicit None
+    # path is retained only for archived, clinically reviewed v2 consumers.
+    if analysis_mode is None:
+        return _build_legacy_feature_manifest(baseline, candidates, minimum_coverage,
+            feature_policy=feature_policy or "legacy_with_overlap", graph_release_id=graph_release_id)
+    return CATALOG.build_catalog(baseline, candidates, minimum_coverage,
+        analysis_mode=analysis_mode, feature_policy=feature_policy or "phenotype_independent", metadata=metadata, source_hash=source_hash)
+
+
+def write_selection_outputs(dirs, prefix, master, manifest, values, contract, args):
+    manifest.to_csv(dirs["tables"] / f"{prefix}_all_source_columns_audit.csv", index=False)
+    CATALOG.redundancy_audit(manifest, values).to_csv(dirs["tables"] / f"{prefix}_redundancy_audit.csv", index=False)
+    CATALOG.domain_flow(manifest, set(values)).to_csv(dirs["tables"] / f"{prefix}_domain_flow.csv", index=False)
+    flow = CATALOG.family_flow(manifest)
+    flow.to_csv(dirs["tables"] / f"{prefix}_family_flow.csv", index=False)
+    candidate_path = resolve_candidates(args.graph_lab_candidates)
+    input_paths = {"integrated": args.integrated, "config": args.config,
+        "pharma_candidates": candidate_path,
+        "pharma_summary": candidate_path.with_name("00_pharma_profile_summary.json")}
+    for attr in ("baseline_metrics", "canonical_config", "lab_group_map", "clinical_release"):
+        value = getattr(args, attr, None)
+        if value is not None and value.is_file():
+            input_paths[attr] = value
+    provenance = {role: {"path": str(path.resolve()), "sha256": CATALOG.file_hash(path)}
+        for role, path in input_paths.items() if path.is_file()}
+    summary = {**contract, "input_hashes": provenance, "analysis_mode": args.analysis_mode,
+        "clinical_validation": "not_established", "feature_policy": args.feature_policy,
+        "status": "READY_FOR_EXPLORATORY_RUN" if args.analysis_mode == "exploratory" else "PREFLIGHT_PENDING_RELEASE_CHECK",
+        "blockers": [], "config_hash": CATALOG.file_hash(args.config),
+        "run_kind": "quick_exploratory" if args.quick_exploratory else "full_settings",
+        "feature_manifest_hash": CATALOG.frame_hash(manifest),
+        "matrix_fingerprint": CATALOG.frame_hash(pd.DataFrame(values)),
+        "n_episodes": len(master), "n_patients": int(master.patient_id.nunique()),
+        "n_baseline": int(master.is_clinical_baseline.sum()),
+        "n_source_columns": len(master.columns), "namespace_counts": CATALOG.namespace_audit(master).to_dict("records"),
+        "family_counts": flow.to_dict("records"),
+        "empty_families": flow.loc[flow.selected.eq(0), "family"].tolist(),
+        "exclusion_counts": manifest.loc[~manifest.included, "exclusion_reason"].value_counts().to_dict(),
+        "outcome_interpretation": "POP/ESSDAI/ESSPRI external; PRO follow-up trajectories conditional on discovery inputs, not independent validation",
+        "circularity_risk": args.feature_policy == "clinical_inclusive"}
+    raw = pd.DataFrame(values)
+    summary["missing_n_before_imputation"] = int(raw.isna().sum().sum())
+    summary["missing_fraction_before_imputation"] = float(raw.isna().sum().sum() / raw.size) if raw.size else None
+    summary["ocular_selected_features"] = manifest.loc[manifest.included & manifest.clinical_domain.eq("ocular"), "feature"].tolist()
+    summary["schirmer_selection"] = manifest.loc[manifest.source_column.isin({
+        "ext__ocular_schirmer_min", "ext__ocular_schirmer_right", "ext__ocular_schirmer_left"}),
+        ["source_column", "included", "exclusion_reason"]].to_dict("records")
+    write_json(dirs["tables"] / f"{prefix}_selection_summary.json", summary)
+    write_json(dirs["tables"] / f"{prefix}_preflight.json", summary)
+    write_json(dirs["tables"] / f"{prefix}_input_provenance.json", summary)
+    print(json.dumps(summary, default=str, indent=2))
+    return summary
+
+
+def add_catalog_arguments(parser):
+    parser.add_argument("--analysis-mode", choices=("exploratory", "clinical_release"), default="exploratory")
+    parser.add_argument("--feature-policy", choices=(*CATALOG.POLICIES, "without_overlap"), default=None)
+    parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--allow-without-lab", action="store_true")
+    parser.add_argument("--quick-exploratory", action="store_true", help="Label quick run; 2 bootstraps, 19 permutations, no persistent homology")
+    parser.add_argument("--run-id", default=None)
+    parser.add_argument("--output-dir", type=Path, help="New run root; existing directories are refused")
+    parser.add_argument("--clinical-release", "--graph-release", dest="clinical_release", type=Path, default=Path(__file__).with_name("graph_lab_release.yaml"))
+
+
+def run_dirs(args, study):
+    if args.output_dir:
+        args.output_dir.mkdir(parents=True, exist_ok=False)
+        dirs = {name: args.output_dir / name for name in ("analytic", "tables", "figures", "qc", "logs")}
+        for path in dirs.values():
+            path.mkdir()
+        return dirs
+    # IDs are directory components, never arbitrary output paths.
+    run_id = args.run_id or CATALOG.new_run_id()
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", run_id):
+        raise ValueError("Invalid run ID")
+    dirs = create_study_dirs(study + "/runs/" + run_id)
+    with (dirs["tables"] / ".graph_run").open("x") as stream:
+        stream.write(run_id + "\n")
+    return dirs
+
+
+def quick_config(config, args):
+    if config.get("contract_version") != LAB.STUDY_CONTRACT_VERSION:
+        raise LAB.LabContractError("CONTRACT_MISMATCH", "Expected clinical_episode_curated_v2 dataset contract")
+    args.feature_policy = args.feature_policy or config.get("feature_policy", "phenotype_independent")
+    if args.feature_policy == "without_overlap":
+        args.feature_policy = "phenotype_independent"
+    if args.quick_exploratory:
+        config["bootstrap"]["replicates"] = 2
+        config["permutation"]["ari_replicates"] = 19
+        config["persistent_homology"]["enabled"] = False
+    return config
 
 
 def build_baseline_matrix(values: dict[str, pd.Series]) -> tuple[pd.DataFrame, int, float]:
@@ -790,17 +938,13 @@ def _configure_logging(path: Path) -> None:
                         handlers=[logging.FileHandler(path, mode="w"), logging.StreamHandler()])
 
 
-def run(args: argparse.Namespace) -> None:
-    config = load_config(args.config)
-    dirs, run_metadata = LAB.configure_run(args, config, "01_run_topological_phenotyping", create_study_dirs)
+def _run(args: argparse.Namespace) -> None:
+    config = quick_config(load_config(args.config), args)
+    dirs = run_dirs(args, "graph/01_run_topological_phenotyping")
+    args._active_dirs = dirs
     _configure_logging(dirs["logs"] / "01_run_topological_phenotyping.log")
     logging.info("Integrated input: %s", args.integrated)
-    try:
-        paths, provenance, pharma_summary, release, profile = LAB.read_bundle(args)
-        master, candidates, contract = load_real_inputs(args.integrated, args.graph_lab_candidates, pharma_summary)
-    except (ValueError, OSError) as exc:
-        LAB.write_failure(dirs, "01_graph", run_metadata, exc, args)
-        raise
+    master, candidates, contract = load_real_inputs(args.integrated, args.graph_lab_candidates, args.analysis_mode)
     baseline = select_baseline(master)
     pop_column = resolve_concept(baseline, "pop")
     age_dx = load_age_at_diagnosis(args.baseline_metrics)
@@ -812,16 +956,20 @@ def run(args: argparse.Namespace) -> None:
     logging.info("Master episodes=%d patients=%d baseline patients=%d excluded without baseline=%d", len(master), n_master, n_baseline, n_master-n_baseline)
     manifest, numeric_values, lab_names, lab_audit = build_feature_manifest(
         baseline, candidates, float(config["feature_selection"]["minimum_baseline_coverage"]),
-        args.feature_policy, release.get("release_id") if release else None)
+        analysis_mode=args.analysis_mode, feature_policy=args.feature_policy,
+        metadata=config.get("feature_metadata", {}), source_hash=contract["input_hash"])
+    manifest = manifest.loc[manifest.source_column.isin(master.columns)].copy()
+    selection_summary = write_selection_outputs(dirs, "01_graph", master, manifest, numeric_values, contract, args)
     manifest_path = dirs["tables"] / "01_graph_feature_manifest.csv"; manifest.to_csv(manifest_path, index=False)
-    lab_audit = LAB.extend_ingestion_audit(lab_audit, baseline, profile, args.feature_policy, release)
     lab_audit.to_csv(dirs["tables"] / "01_graph_lab_ingestion_audit.csv", index=False)
-    contract.update(run_metadata, canonical_raw_matrix_sha256=LAB.matrix_fingerprint(pd.DataFrame(numeric_values)))
-    contract["baseline_metrics_source"] = provenance["baseline_metrics"]
-    LAB.finish_preflight(args, dirs, "01_graph", contract, provenance, release,
-                         candidates, pharma_summary, paths, manifest)
-    if args.preflight_only:
-        return
+    mode_status = enforce_lab_mode(manifest, analysis_mode=args.analysis_mode,
+        allow_without_lab=args.allow_without_lab, release_path=args.clinical_release,
+        integrated_path=args.integrated, candidates_path=args.graph_lab_candidates)
+    selection_summary.update(mode_status)
+    selection_summary["status"] = "READY_FOR_EXPLORATORY_RUN" if args.analysis_mode == "exploratory" else "READY_FOR_CLINICAL_RELEASE_RUN"
+    write_json(dirs["tables"] / "01_graph_selection_summary.json", selection_summary)
+    write_json(dirs["tables"] / "01_graph_preflight.json", selection_summary)
+    write_json(dirs["tables"] / "01_graph_input_provenance.json", selection_summary)
     included_manifest = manifest.loc[manifest.included].copy()
     family_counts = included_manifest.groupby("family").size().to_dict()
     logging.info("Labs selected from pharma/00: %d", family_counts.get("lab", 0))
@@ -845,6 +993,9 @@ def run(args: argparse.Namespace) -> None:
     logging.info("Missing values before imputation=%d; after imputation=%d",
                  n_imputed, int(matrix.isna().sum().sum()))
     logging.info("Imputed values=%d (%.2f%%)", n_imputed, 100*pct_imputed)
+    if args.preflight_only:
+        print("Preflight PASS; PCA/Mapper not executed")
+        return
     status_counts = candidates.graph_candidate_status.value_counts()
     numeric_labs = lab_audit.loc[lab_audit.graph_candidate_status.eq("include_numeric") & lab_audit.included_in_graph, "lab"].nunique()
     categorical_labs = lab_audit.loc[lab_audit.graph_candidate_status.eq("include_categorical") & lab_audit.included_in_graph, "lab"].nunique()
@@ -852,12 +1003,12 @@ def run(args: argparse.Namespace) -> None:
         lab_audit.lab.map(canonical_lab_name).isin(EXPECTED_LAB_AUDIT)
         & lab_audit.graph_candidate_status.isin({"include_numeric", "include_categorical"})]
     for row in expected_approved.loc[~expected_approved.included_in_graph].itertuples(index=False):
-        logging.warning("Expected clinically important approved lab %s was not included: %s",
+        logging.warning("Expected technically eligible lab %s was not included: %s",
                         row.lab, row.exclusion_reason)
     print("\nGRAPH LAB INGESTION")
     print("\nLab candidates from Pharma 00:")
-    print(f"Numeric approved: {status_counts.get('include_numeric', 0)}")
-    print(f"Categorical approved: {status_counts.get('include_categorical', 0)}")
+    print(f"Numeric technical candidates: {status_counts.get('include_numeric', 0)}")
+    print(f"Categorical technical candidates: {status_counts.get('include_categorical', 0)}")
     print(f"Review-only: {status_counts.get('review_before_graph', 0)}")
     print(f"Excluded: {status_counts.get('exclude', 0)}")
     print(f"\nNumeric labs included in Graph: {numeric_labs}")
@@ -990,10 +1141,10 @@ def run(args: argparse.Namespace) -> None:
     n_covered = int(covered.sum()); n_uncovered = int((~covered).sum())
     n_ambiguous = int(ties.sum())
     n_unambiguous = int((covered & ~ties & np.isfinite(hard)).sum())
-    summary = {"input": str(args.integrated), "contract_validation": contract,
+    summary = {**selection_summary, "input": str(args.integrated), "contract_validation": contract,
                "n_patients_master": int(n_master), "n_baseline_patients": int(n_baseline),
                "n_patients_excluded_no_baseline": int(n_master-n_baseline), "n_embedding_features": len(included),
-               "embedding_feature_families": {family: int(family_counts.get(family, 0)) for family in ("lab", "pro", "overlap", "age_at_diagnosis")},
+               "embedding_feature_families": {family: int(family_counts.get(family, 0)) for family in ("lab", "sero", "pro", "ext", "clinical")},
                "embedding_feature_names": included, "embedding_feature_manifest_file": "01_graph_embedding_feature_set.csv",
                "lab_ingestion": {
                    "candidate_file": str(args.graph_lab_candidates),
@@ -1032,7 +1183,6 @@ def run(args: argparse.Namespace) -> None:
                "administrative_sensitivity": administrative,
                "longitudinal_outcomes_modeled": models.loc[models.model_status.eq("estimated"), "outcome"].tolist() if len(models) else [],
                "persistent_homology": {key: value for key, value in t4.items() if key not in {"diagram", "null"}}}
-    summary.update(run_metadata, graph_release_id=release["release_id"], input_hashes=provenance)
     write_json(dirs["tables"] / "01_graph_results_summary.json", summary)
     if not args.dry_run:
         make_figures(embedding, membership, nerve, nodes, node_to_community, stability, threshold,
@@ -1060,6 +1210,29 @@ def run(args: argparse.Namespace) -> None:
     print(f"\nARI communities vs Pop: {ari_text}\nLongitudinal outcomes modeled: {summary['longitudinal_outcomes_modeled']}")
 
 
+def run(args):
+    args._active_dirs = None
+    try:
+        return _run(args)
+    except (ValueError, OSError) as exc:
+        write_run_failure(args, "01_graph", exc)
+        raise
+
+
+def write_run_failure(args, prefix, exc):
+    dirs = getattr(args, "_active_dirs", None)
+    if dirs is None:
+        return
+    path = dirs["tables"] / f"{prefix}_selection_summary.json"
+    payload = json.loads(path.read_text()) if path.exists() else {
+        "analysis_mode": args.analysis_mode, "clinical_validation": "not_established",
+        "feature_policy": args.feature_policy}
+    payload.update(status="BLOCKED", blockers=[{"code": getattr(exc, "code", str(exc).split(":",1)[0]), "reason": str(exc)}])
+    write_json(path, payload)
+    write_json(dirs["tables"] / f"{prefix}_preflight.json", payload)
+    write_json(dirs["tables"] / f"{prefix}_input_provenance.json", payload)
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     folder = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(description=__doc__)
@@ -1073,7 +1246,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=common.INTEGRATED_BASELINE_CSV)
     parser.add_argument("--config", type=Path, default=folder / "config.yaml")
     parser.add_argument("--dry-run", action="store_true", help="Generate tables/JSON but omit figures")
-    LAB.add_arguments(parser)
+    add_catalog_arguments(parser)
     return parser.parse_args(argv)
 
 

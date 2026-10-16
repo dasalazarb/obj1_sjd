@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import yaml
-from graph_contract_fixtures import candidate, empty_candidates, write_bundle
+from graph_contract_fixtures import empty_candidates
 
 
 SCRIPT = Path(__file__).parents[1] / "src/studies/graph/01_run_topological_phenotyping.py"
@@ -28,7 +28,7 @@ def test_public_features_use_canonical_sources_and_keep_unknown_overlap_missing(
         "essdai__total": [1., 2., 3., 4.], "esspri__total": [2., 3., 4., 5.],
     })
 
-    manifest, values, _, _ = MODULE.build_feature_manifest(baseline, empty_candidates(), .5)
+    manifest, values, _, _ = MODULE._build_legacy_feature_manifest(baseline, empty_candidates(), .5)
 
     assert set(values) == {*MODULE.PRO_FEATURES, "overlap_baseline"}
     assert values["sf36_pcs"].tolist() == [35., 45., 55., 65.]
@@ -70,7 +70,7 @@ def test_overlap_feature_respects_evaluability():
         "ovl__evaluable": pd.Series([True, True, True, True, False, None], dtype="boolean"),
     })
 
-    _, values, _, _ = MODULE.build_feature_manifest(baseline, empty_candidates(), .5)
+    _, values, _, _ = MODULE._build_legacy_feature_manifest(baseline, empty_candidates(), .5)
 
     assert values["overlap_baseline"].iloc[:4].tolist() == [1., 0., 0., 0.]
     assert values["overlap_baseline"].iloc[4:].isna().all()
@@ -96,8 +96,12 @@ def test_run_with_public_episode_schema(tmp_path, monkeypatch, caplog):
     master.to_parquet(integrated, index=False)
     original_parquet = integrated.read_bytes()
     candidates = tmp_path / "candidates.csv"
-    pd.DataFrame([candidate("lab__test"), candidate("lab__crp", "review_before_graph")]).to_csv(candidates, index=False)
-    release_path, _, _, _ = write_bundle(integrated, candidates)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pharma_for_graph01", SCRIPT.parents[1] / "pharma/00_profile_labs.py")
+    pharma = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pharma)
+    pharma.run(pharma.parse_args(["--integrated", str(integrated), "--output", str(tmp_path / "profile.csv")]))
+    candidates = tmp_path / pharma.GRAPH_CANDIDATES_NAME
     metrics = tmp_path / "baseline.csv"
     master[["patient_id"]].to_csv(metrics, index=False)
     config = MODULE.load_config(SCRIPT.with_name("config.yaml"))
@@ -116,20 +120,19 @@ def test_run_with_public_episode_schema(tmp_path, monkeypatch, caplog):
     MODULE.run(MODULE.parse_args([
         "--integrated", str(integrated), "--graph-lab-candidates", str(candidates),
         "--baseline-metrics", str(metrics), "--config", str(config_path),
-        "--graph-release", str(release_path)]))
+        "--feature-policy", "legacy_with_overlap"]))
 
     embedding = pd.read_csv(dirs["tables"] / "01_graph_patient_embedding.csv")
     assert embedding.baseline_pop.tolist() == master["pop__status"].tolist()
     summary = json.loads((dirs["tables"] / "01_graph_results_summary.json").read_text())
     assert summary["embedding_feature_families"] == {
-        "lab": 1, "pro": 4, "overlap": 1, "age_at_diagnosis": 0}
+        "lab": 1, "pro": 4, "clinical": 1, "ext": 0, "sero": 0}
     assert summary["n_embedding_features"] == 6
     assert len(list(dirs["figures"].glob("*.png"))) == 5
     assert integrated.read_bytes() == original_parquet
     expected_warnings = [record.getMessage() for record in caplog.records
                          if "Expected clinically important approved lab" in record.getMessage()]
     assert expected_warnings == []
-
 
 
 @pytest.mark.parametrize("age_column", ["age_dx", "age_at_diagnosis"])
@@ -169,7 +172,7 @@ def test_unavailable_diagnosis_age_is_warned_and_excluded(tmp_path, caplog, incl
     assert "Age at diagnosis unavailable" in caplog.text
 
     baseline = baseline.drop(columns=["age_dx"], errors="ignore").merge(age, on="patient_id")
-    manifest, values, _, _ = MODULE.build_feature_manifest(baseline, empty_candidates(), 0.5)
+    manifest, values, _, _ = MODULE._build_legacy_feature_manifest(baseline, empty_candidates(), 0.5)
     row = manifest.set_index("feature").loc["age_dx"]
     assert not row.included
     assert row.n_nonmissing_baseline == 0
@@ -192,9 +195,8 @@ def test_diagnosis_age_loader_requires_patient_id(tmp_path):
         MODULE.load_age_at_diagnosis(path)
 
 
-def test_diagnosis_age_loader_requires_baseline_file(tmp_path):
-    with pytest.raises(FileNotFoundError, match="Baseline metrics file not found"):
-        MODULE.load_age_at_diagnosis(tmp_path / "missing.csv")
+def test_diagnosis_age_loader_allows_missing_baseline_file(tmp_path):
+    assert MODULE.load_age_at_diagnosis(tmp_path / "missing.csv").empty
 
 
 def test_branch_characterization_calculates_boolean_quartiles():
