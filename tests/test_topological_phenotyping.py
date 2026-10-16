@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import yaml
+from graph_contract_fixtures import candidate, empty_candidates, write_bundle
 
 
 SCRIPT = Path(__file__).parents[1] / "src/studies/graph/01_run_topological_phenotyping.py"
@@ -27,7 +28,7 @@ def test_public_features_use_canonical_sources_and_keep_unknown_overlap_missing(
         "essdai__total": [1., 2., 3., 4.], "esspri__total": [2., 3., 4., 5.],
     })
 
-    manifest, values, _, _ = MODULE.build_feature_manifest(baseline, pd.DataFrame(), .5)
+    manifest, values, _, _ = MODULE.build_feature_manifest(baseline, empty_candidates(), .5)
 
     assert set(values) == {*MODULE.PRO_FEATURES, "overlap_baseline"}
     assert values["sf36_pcs"].tolist() == [35., 45., 55., 65.]
@@ -69,7 +70,7 @@ def test_overlap_feature_respects_evaluability():
         "ovl__evaluable": pd.Series([True, True, True, True, False, None], dtype="boolean"),
     })
 
-    _, values, _, _ = MODULE.build_feature_manifest(baseline, pd.DataFrame(), .5)
+    _, values, _, _ = MODULE.build_feature_manifest(baseline, empty_candidates(), .5)
 
     assert values["overlap_baseline"].iloc[:4].tolist() == [1., 0., 0., 0.]
     assert values["overlap_baseline"].iloc[4:].isna().all()
@@ -95,18 +96,8 @@ def test_run_with_public_episode_schema(tmp_path, monkeypatch, caplog):
     master.to_parquet(integrated, index=False)
     original_parquet = integrated.read_bytes()
     candidates = tmp_path / "candidates.csv"
-    pd.DataFrame([{"lab": "test", "graph_candidate_status": "include_numeric",
-                   "graph_encoding_hint": "continuous", "primary_result_source": "value_column",
-                   "value_column": "lab__test__value", "text_column": "",
-                   "reference_status_column": ""},
-                  {"lab": "lab__anti_ro_ssa", "graph_candidate_status": "include_categorical",
-                   "graph_encoding_hint": "binary", "primary_result_source": "text_column",
-                   "value_column": "", "text_column": "lab__anti_ro_ssa__text",
-                   "reference_status_column": ""},
-                  {"lab": "lab__crp", "graph_candidate_status": "review_before_graph",
-                   "graph_encoding_hint": "review", "primary_result_source": "value_column",
-                   "value_column": "lab__crp__value", "text_column": "",
-                   "reference_status_column": ""}]).to_csv(candidates, index=False)
+    pd.DataFrame([candidate("lab__test"), candidate("lab__crp", "review_before_graph")]).to_csv(candidates, index=False)
+    release_path, _, _, _ = write_bundle(integrated, candidates)
     metrics = tmp_path / "baseline.csv"
     master[["patient_id"]].to_csv(metrics, index=False)
     config = MODULE.load_config(SCRIPT.with_name("config.yaml"))
@@ -124,7 +115,8 @@ def test_run_with_public_episode_schema(tmp_path, monkeypatch, caplog):
 
     MODULE.run(MODULE.parse_args([
         "--integrated", str(integrated), "--graph-lab-candidates", str(candidates),
-        "--baseline-metrics", str(metrics), "--config", str(config_path)]))
+        "--baseline-metrics", str(metrics), "--config", str(config_path),
+        "--graph-release", str(release_path)]))
 
     embedding = pd.read_csv(dirs["tables"] / "01_graph_patient_embedding.csv")
     assert embedding.baseline_pop.tolist() == master["pop__status"].tolist()
@@ -136,9 +128,8 @@ def test_run_with_public_episode_schema(tmp_path, monkeypatch, caplog):
     assert integrated.read_bytes() == original_parquet
     expected_warnings = [record.getMessage() for record in caplog.records
                          if "Expected clinically important approved lab" in record.getMessage()]
-    assert expected_warnings == [
-        "Expected clinically important approved lab lab__anti_ro_ssa was not included: "
-        "candidate_source_column_missing"]
+    assert expected_warnings == []
+
 
 
 @pytest.mark.parametrize("age_column", ["age_dx", "age_at_diagnosis"])
@@ -178,7 +169,7 @@ def test_unavailable_diagnosis_age_is_warned_and_excluded(tmp_path, caplog, incl
     assert "Age at diagnosis unavailable" in caplog.text
 
     baseline = baseline.drop(columns=["age_dx"], errors="ignore").merge(age, on="patient_id")
-    manifest, values, _, _ = MODULE.build_feature_manifest(baseline, pd.DataFrame(), 0.5)
+    manifest, values, _, _ = MODULE.build_feature_manifest(baseline, empty_candidates(), 0.5)
     row = manifest.set_index("feature").loc["age_dx"]
     assert not row.included
     assert row.n_nonmissing_baseline == 0

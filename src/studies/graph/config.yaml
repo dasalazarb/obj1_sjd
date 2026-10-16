@@ -1,5 +1,11 @@
 study_name: graph
-contract_version: clinical_episode_v1
+contract_version: clinical_episode_curated_v2
+feature_policy: legacy_with_overlap
+input_governance:
+  required_pharma_profile_contract: pharma_lab_profile_v2
+  require_clinical_release: true
+  require_nonempty_lab_block: true
+  categorical_baseline_coverage_policy: same_as_numeric
 random_seed: 20260831
 
 feature_selection:

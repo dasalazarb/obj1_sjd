@@ -216,3 +216,12 @@ pandas, inspect dependency compatibility first, for example:
 
 An environment owner must approve any actual package update. This code does not
 modify the NIH environment, user packages, or pandas warning filters.
+# Contrato Pharma 00 v2 y preflight
+
+Graph 01 y 02 ahora requieren el contrato `pharma_lab_profile_v2` y una liberación
+clínica externa para ajustar modelos. Empiece con `--preflight-only` en ambos
+scripts. La plantilla `graph_lab_release.yaml` está pendiente y no autoriza análisis.
+Las políticas `legacy_with_overlap` y `without_overlap` generan outputs separados
+por política y corrida; Graph 02 acepta `--canonical-config` explícito.
+Consulte [la guía del refactor](../../../docs/graph_lab_contract_refactor.md) para
+comandos, hashes, pruebas, linaje y bloqueos conocidos del mapa clínico.

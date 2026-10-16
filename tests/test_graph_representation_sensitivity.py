@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import yaml
+from graph_contract_fixtures import candidate, write_bundle
 
 
 SCRIPT = (Path(__file__).parents[1] / "src/studies/graph" /
@@ -99,7 +100,8 @@ def test_run_all_scenarios_with_public_episode_schema(tmp_path, monkeypatch, mod
     original_parquet = integrated.read_bytes()
     candidates = tmp_path / "candidates.csv"
     # Exercise the actual Pharma -> Graph boundary, including lab__ in lab keys.
-    _profile_with_synthetic_followups_and_approvals(master).to_csv(candidates, index=False)
+    PHARMA.graph_candidates(_profile_with_synthetic_followups_and_approvals(master)).to_csv(candidates, index=False)
+    release_path, _, _, _ = write_bundle(integrated, candidates)
     metrics = tmp_path / "baseline.csv"
     master[["patient_id"]].to_csv(metrics, index=False)
     config = MODULE.CANON.load_config(SCRIPT.with_name("config_sensitivity.yaml"))
@@ -110,6 +112,15 @@ def test_run_all_scenarios_with_public_episode_schema(tmp_path, monkeypatch, mod
     config["community_detection"]["minimum_patients"] = 2
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump(config))
+    canonical = MODULE.CANON.load_config(SCRIPT.with_name("config.yaml"))
+    canonical["mapper"].update(config["mapper"])
+    canonical["community_detection"] = config["community_detection"]
+    canonical_path = tmp_path / "canonical.yaml"
+    canonical_path.write_text(yaml.safe_dump(canonical))
+    # Domain assignments below are synthetic fixtures; production mapping is never rewritten.
+    mapping_path = tmp_path / "synthetic_mapping.csv"
+    pd.DataFrame([dict(lab=lab, s4_group="SYNTHETIC", s4_subgroup="", mapping_status="MAPPED")
+                  for lab in ["albumin", "acute_care_panel__chloride_blood", "anti_ro_ssa"]]).to_csv(mapping_path, index=False)
     dirs = {name: tmp_path / name for name in ("tables", "logs", "figures")}
     for path in dirs.values():
         path.mkdir()
@@ -117,10 +128,12 @@ def test_run_all_scenarios_with_public_episode_schema(tmp_path, monkeypatch, mod
 
     args = MODULE.parse_args([
         "--integrated", str(integrated), "--graph-lab-candidates", str(candidates),
-        "--baseline-metrics", str(metrics), "--config", str(config_path)])
+        "--baseline-metrics", str(metrics), "--config", str(config_path),
+        "--canonical-config", str(canonical_path), "--graph-release", str(release_path),
+        "--lab-group-map", str(mapping_path)])
     if mode == "unmapped":
         monkeypatch.setattr(MODULE, "bootstrap_stability", lambda *a, **k: pytest.fail("bootstrap started before mapping QC"))
-        with pytest.raises(MODULE.MappingError, match="unapproved"):
+        with pytest.raises(MODULE.LAB.LabContractError, match="unapproved"):
             MODULE.run(args)
         audit = pd.read_csv(dirs["tables"] / "02_graph_S4_lab_group_mapping_audit.csv")
         missing = audit.loc[audit.lab.eq("unapproved")].iloc[0]
@@ -193,13 +206,16 @@ def test_five_audited_mappings_preserve_selection_stages():
     master[f"lab__{labs[1]}__value"] = [1., 2., 3., 4., 5.] + [np.nan] * 19
     master[f"lab__{labs[2]}__value"] = master[f"lab__{labs[0]}__value"]
     master[f"lab__{labs[4]}__value"] = 1.
-    candidates = _profile_with_synthetic_followups_and_approvals(master)
+    candidates = PHARMA.graph_candidates(_profile_with_synthetic_followups_and_approvals(master))
     candidates = candidates.loc[~candidates.lab.eq("lab__uncatalogued")].copy()
     candidates.loc[candidates.lab.eq(f"lab__{labs[3]}"), "graph_candidate_status"] = "review_before_graph"
+    candidates.loc[candidates.lab.eq(f"lab__{labs[3]}"), "graph_encoding_hint"] = "review"
     # An approved catalog entry can lose variability in a later baseline extract.
     candidates.loc[candidates.lab.eq(f"lab__{labs[4]}"),
                    ["graph_candidate_status", "graph_encoding_hint", "primary_result_source"]] = [
-                       "include_numeric", "continuous", "value_column"]
+                       "include_numeric", "continuous", "value_numeric"]
+    candidates.loc[candidates.lab.eq(f"lab__{labs[4]}"), "clinically_approved"] = "approved"
+    candidates.loc[candidates.lab.eq(f"lab__{labs[4]}"), "clinical_review_required"] = False
     manifest, values, _, _ = MODULE.CANON.build_feature_manifest(master, candidates, 0.0)
     families = {row.feature: MODULE.family_name(row.family)
                 for row in manifest.loc[manifest.included].itertuples()}
@@ -230,7 +246,7 @@ def test_five_audited_mappings_preserve_selection_stages():
     assert not sparse.passed_coverage_filter and not sparse.present_in_pca
     redundant = audit.loc[f"lab__{labs[2]}__value"]
     assert redundant.passed_coverage_filter and not redundant.selected_after_redundancy
-    assert redundant.exclusion_reason == "redundancy"
+    assert redundant.exclusion_reason == "removed_by_redundancy"
     review = audit.loc[f"lab__{labs[3]}__value"]
     assert review.catalogued_by_pharma00 and not review.approved_by_pharma00 and review.mapped_s4
     assert not review.eligible_in_scenario and not review.present_in_pca

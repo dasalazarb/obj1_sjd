@@ -1,0 +1,17 @@
+# TEMPLATE ONLY: no clinical approval is granted by this file.
+release_id: null
+status: pending_review
+reviewer: null
+review_date: null
+review_evidence: null
+integrated_sha256: null
+pharma_candidates_sha256: null
+pharma_summary_sha256: null
+pharma_expected_audit_sha256: null
+pharma_impact_audit_sha256: null
+approved_lab_stems: []
+analysis_scope: null  # graph01_graph02_baseline
+acknowledged_release_recommendation: null  # Exact original Pharma 00 HOLD value.
+reviewed_expected_lab_audit: false
+reviewed_downstream_impact: false
+schema_drift_reviewed: false
