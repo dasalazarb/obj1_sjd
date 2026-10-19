@@ -187,11 +187,21 @@ ESSDAI_HIGH = ESSDAI_HIGH_CUTOFF
 # Sensitivity thresholds; progression itself is not defined by a single delta.
 ESSDAI_IMPROVEMENT_MCID = -3
 ESSDAI_LEGACY_WORSENING_DELTA = 5
+ESSDAI_WORSENING_DELTA_3 = 3
+ESSDAI_WORSENING_DELTA_5 = 5
+ESSDAI_IMPROVEMENT_DELTA_3 = -3
+ESSDAI_IMPROVEMENT_DELTA_5 = -5
+# Prespecified descriptive/sensitivity thresholds, independent of activity states.
+ESSDAI_ABSOLUTE_CHANGE_THRESHOLDS = (ESSDAI_WORSENING_DELTA_3, ESSDAI_WORSENING_DELTA_5)
 ESSPRI_IMPROVEMENT_ABSOLUTE = -1
 ESSPRI_IMPROVEMENT_RELATIVE = -0.15
 CHANGE_THRESHOLDS = {
     "essdai_improvement": ESSDAI_IMPROVEMENT_MCID,
     "essdai_legacy_worsening": ESSDAI_LEGACY_WORSENING_DELTA,
+    "essdai_worsening_ge3": ESSDAI_WORSENING_DELTA_3,
+    "essdai_worsening_ge5": ESSDAI_WORSENING_DELTA_5,
+    "essdai_improvement_le_minus3": ESSDAI_IMPROVEMENT_DELTA_3,
+    "essdai_improvement_le_minus5": ESSDAI_IMPROVEMENT_DELTA_5,
     "esspri_absolute_improvement": ESSPRI_IMPROVEMENT_ABSOLUTE,
     "esspri_relative_improvement": ESSPRI_IMPROVEMENT_RELATIVE,
 }

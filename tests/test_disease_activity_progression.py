@@ -302,7 +302,21 @@ def test_step13_generates_all_outputs_and_qc(tmp_path):
     tables = tmp_path/"outputs/tables/blockA"/mod.STEM
     qc = tmp_path/"outputs/qc/blockA"/mod.STEM
     figures = tmp_path/"outputs/figures/blockA"/mod.STEM
-    assert len(list(figures.glob('*.pdf'))) == 8
+    old_figures = {"13_essdai_trajectory.pdf", "13_essdai_state_transition_heatmap.pdf",
+        "13_km_low_to_ge5.pdf", "13_km_moderate_to_high.pdf", "13_essdai_domain_activity_heatmap.pdf",
+        "13_essdai_domain_effects_forest.pdf", "13_esspri_trajectory_total.pdf", "13_esspri_trajectory_components.pdf"}
+    new_figures = {"13_essdai_delta_by_baseline_state.pdf", "13_essdai_ever_vs_last_worsening.pdf",
+        "13_essdai_individual_trajectories_delta3.pdf", "13_essdai_individual_trajectories_delta5.pdf"}
+    assert {p.name for p in figures.glob("*.pdf")} == old_figures | new_figures
+    analytic = tmp_path/"data/analytic/blockA"/mod.STEM
+    endpoints = pd.read_parquet(analytic/"13_essdai_patient_delta_endpoints.parquet")
+    assert len(endpoints) == 24 and endpoints.patient_id.is_unique
+    assert set(mod.DELTA_BASE_COLUMNS).issubset(endpoints.columns)
+    assert {"last_status_pm3", "ever_worsened_ge5", "first_observed_worsening_ge3_date"}.issubset(endpoints.columns)
+    for name in ("delta_threshold_summary", "worsening_by_baseline_state", "ever_vs_last_reconciliation", "baseline_last_state_by_delta"):
+        assert not pd.read_csv(tables/f"13_essdai_{name}.csv").empty
+    assert pd.read_csv(qc/"13_essdai_delta_invariants_qc.csv").status.eq("pass").all()
+    assert pd.read_csv(qc/"13_essdai_delta_eligibility_qc.csv").n_patients_evaluable.iloc[0] == 24
     assert all(p.stat().st_size > 1000 for p in figures.glob('*.pdf'))
     primary = pd.read_csv(tables/"13_essdai_longitudinal_model.csv")
     assert not (primary.singular & primary.primary_model_valid).any()
@@ -352,3 +366,169 @@ def test_missing_domain_hard_fails_with_actionable_qc(tmp_path):
                                  overwrite=False, dry_run=False))
     qc = pd.read_csv(tmp_path/"outputs/qc/blockA"/mod.STEM/"13_progression_domain_contract_qc.csv")
     assert qc.set_index("domain").loc["glandular", "status"] == "missing"
+
+
+@pytest.mark.parametrize("delta", [2, 3, 4, 5, -2, -3, -4, -5])
+def test_absolute_change_inclusive_boundaries(delta):
+    row = mod.build_patient_absolute_change_endpoints(episodes([8, 8+delta])).iloc[0]
+    assert row.delta_essdai_last == delta
+    for k in (3, 5):
+        assert row[f"last_worsened_ge{k}"] == (delta >= k)
+        assert row[f"last_improved_ge{k}"] == (delta <= -k)
+        assert row[f"last_stable_pm{k}"] == (-k < delta < k)
+        assert row[f"ever_worsened_ge{k}"] == row[f"last_worsened_ge{k}"]
+        assert row[f"ever_improved_ge{k}"] == row[f"last_improved_ge{k}"]
+
+
+@pytest.mark.parametrize("scores,ever3,ever5,last3,last5", [
+    ([2, 6], True, False, True, False), ([6, 9], True, False, True, False),
+    ([3, 7, 3], True, False, False, False), ([8, 4, 12], True, False, True, False),
+    ([12, 4], False, False, False, False), ([2, 7, 2], True, True, False, False),
+    ([6, 11], True, True, True, True), ([3, 3], False, False, False, False),
+])
+def test_absolute_change_manual_examples_and_state_independence(scores, ever3, ever5, last3, last5):
+    data = episodes(scores)
+    row = mod.build_patient_absolute_change_endpoints(data).iloc[0]
+    legacy = mod.patient_progression(data).iloc[0]
+    assert [row.ever_worsened_ge3, row.ever_worsened_ge5, row.last_worsened_ge3, row.last_worsened_ge5] == [ever3, ever5, last3, last5]
+    assert legacy.delta_essdai == row.delta_essdai_last
+    if scores in ([6, 9], [6, 11]):
+        assert legacy.status == "stable" and not legacy.ever_worsened
+        assert row.last_worsened_ge3
+    if scores == [8, 4, 12]:
+        assert row.ever_improved_ge3 and row.ever_worsened_ge3
+        assert row.first_observed_improvement_ge3_date == pd.Timestamp("2021-01-01")
+        assert row.first_observed_worsening_ge3_date == pd.Timestamp("2022-01-01")
+    if ever3 and not last3:
+        assert row.not_worsened_at_last_after_ever_ge3
+        assert not row.still_worsened_at_last_ge3
+    if not ever5:
+        assert pd.isna(row.first_observed_worsening_ge5_date)
+
+
+def absolute_fixture():
+    rows = []
+    for i, scores in enumerate(([2, 7, 2], [6, 9], [14, 9], [8, 4, 12])):
+        g = episodes(scores)
+        g["patient_id"] = f"p{i}"
+        g["clinical_episode_id"] = [f"p{i}e{j}" for j in range(len(g))]
+        rows.append(g)
+    return pd.concat(rows, ignore_index=True)
+
+
+def delta_products(data):
+    endpoints = mod.build_patient_absolute_change_endpoints(data)
+    return (endpoints, mod.patient_progression(data), mod.summarize_absolute_change_endpoints(endpoints),
+            mod.reconcile_absolute_change_endpoints(endpoints), mod.absolute_change_state_crosstab(endpoints),
+            mod.summarize_worsening_by_baseline_state(endpoints))
+
+
+def test_absolute_change_patient_denominators_and_tables():
+    data = absolute_fixture()
+    endpoints, legacy, summary, reconciliation, crosstab, compact = delta_products(data)
+    assert len(endpoints) == 4 and endpoints.patient_id.is_unique
+    last = summary.query("stratum == 'Overall' and threshold_abs == 3 and assessment == 'baseline_to_last'").set_index("direction")
+    assert last.n_patients_evaluable.eq(4).all()
+    assert last.n_patients_event.to_dict() == {"worsening": 2, "improvement": 1, "stable": 1}
+    assert last.pct_patients.sum() == 100
+    moderate_ever = summary.query("stratum == 'Moderate' and threshold_abs == 3 and assessment == 'ever_observed'")
+    assert moderate_ever.n_patients_evaluable.eq(2).all()
+    assert moderate_ever.pct_patients.sum() == 150  # independent marginal outcomes
+    overall_reconcile = reconciliation.query("stratum == 'Overall' and threshold_abs == 5").set_index("category")
+    assert overall_reconcile.n_patients_event.to_dict() == {"never_ge5": 3, "ever_ge5_not_last": 1, "ever_ge5_and_last": 0}
+    assert crosstab.groupby("threshold_abs").n_patients.sum().eq(4).all()
+    assert compact.query("baseline_state == 'Moderate' and threshold_abs == 3").n_last_worsened.iloc[0] == 2
+    checks = mod.absolute_change_invariants_qc(data, endpoints, legacy, summary, reconciliation, crosstab, compact)
+    assert checks.status.eq("pass").all() and checks.n_failures.eq(0).all()
+    assert summary.loc[summary.n_patients_evaluable.gt(0), "ci95_low"].between(0, 100).all()
+    assert summary.loc[summary.n_patients_evaluable.gt(0), "ci95_high"].between(0, 100).all()
+
+
+def test_absolute_change_order_tied_dates_and_missing_last():
+    data = episodes([2, 9, 4])
+    data.loc[2, "clinical_anchor_date"] = data.loc[1, "clinical_anchor_date"]
+    missing = data.iloc[[2]].assign(clinical_episode_id="e3", clinical_anchor_date=pd.Timestamp("2022-01-01"))
+    missing[mod.ESSDAI] = np.nan
+    data = pd.concat([data, missing], ignore_index=True)
+    expected = mod.build_patient_absolute_change_endpoints(data)
+    actual = mod.build_patient_absolute_change_endpoints(data.sample(frac=1, random_state=42))
+    pd.testing.assert_frame_equal(actual, expected)
+    row = actual.iloc[0]
+    assert row.last_clinical_episode_id == "e2" and row.last_essdai == 4
+    assert row.ever_worsened_ge5 and not row.last_worsened_ge3
+    assert row.n_essdai_followup_assessments == 2 and row.n_distinct_essdai_followup_dates == 1
+    qc = mod.absolute_change_eligibility_qc(data, actual).iloc[0]
+    assert qc.n_same_date_followup_extra_assessments == 1
+
+
+@pytest.mark.parametrize("scores", [[None, 3, 8], [3, None], [3]])
+def test_absolute_change_excludes_missing_baseline_or_followup(scores):
+    data = episodes(scores)
+    result = mod.build_patient_absolute_change_endpoints(data)
+    assert result.empty
+    summary = mod.summarize_absolute_change_endpoints(result)
+    assert summary.n_patients_evaluable.eq(0).all() and summary.pct_patients.isna().all()
+    qc = mod.absolute_change_eligibility_qc(data, result).iloc[0]
+    assert qc.n_baseline_patients == 1 and qc.n_patients_evaluable == 0
+    assert qc.n_valid_baseline_without_followup == (scores[0] is not None)
+
+
+def test_absolute_change_same_baseline_date_is_not_followup():
+    data = episodes([3, 10, 6])
+    data.loc[1, "clinical_anchor_date"] = data.clinical_baseline_date.iloc[0]
+    assert mod.build_patient_absolute_change_endpoints(data.iloc[:2]).empty
+    row = mod.build_patient_absolute_change_endpoints(data).iloc[0]
+    assert row.n_essdai_followup_assessments == 1
+    assert row.ever_worsened_ge3 and not row.ever_worsened_ge5
+    assert row.first_observed_worsening_ge3_date == pd.Timestamp("2022-01-01")
+
+
+def test_absolute_change_missing_middle_is_skipped_without_changing_state_intervals():
+    data = episodes([2, None, 7])
+    row = mod.build_patient_absolute_change_endpoints(data).iloc[0]
+    assert row.ever_worsened_ge5 and row.n_essdai_followup_assessments == 1
+    assert mod.build_state_transitions(data)[1].empty
+
+
+@pytest.mark.parametrize("corruption", ["threshold_flag", "summary", "duplicate_id", "first_event_date"])
+def test_absolute_change_qc_fails_explicitly(corruption):
+    data = absolute_fixture()
+    endpoints, legacy, summary, reconciliation, crosstab, compact = delta_products(data)
+    if corruption == "threshold_flag":
+        endpoints.loc[0, "ever_worsened_ge3"] = False
+    elif corruption == "summary":
+        summary.loc[0, "n_patients_event"] = 99
+    elif corruption == "duplicate_id":
+        endpoints.loc[1, "patient_id"] = endpoints.patient_id.iloc[0]
+    else:
+        endpoints.loc[0, "first_observed_worsening_ge5_date"] = pd.Timestamp("2019-01-01")
+    with pytest.raises(ValueError, match="Absolute-change QC failed"):
+        mod.absolute_change_invariants_qc(data, endpoints, legacy, summary, reconciliation, crosstab, compact)
+    qc = mod.absolute_change_invariants_qc(data, endpoints, legacy, summary, reconciliation, crosstab, compact, hard_fail=False)
+    assert qc.status.eq("fail").any() and qc.loc[qc.status.eq("fail"), "reason"].str.len().gt(0).all()
+
+
+def test_absolute_change_empty_products_and_figures(tmp_path):
+    data = episodes([None, 8])
+    endpoints, legacy, summary, reconciliation, crosstab, compact = delta_products(data)
+    checks = mod.absolute_change_invariants_qc(data, endpoints, legacy, summary, reconciliation, crosstab, compact)
+    assert checks.status.eq("pass").all()
+    mod.write_absolute_change_outputs(data, legacy, tmp_path, tmp_path, tmp_path, tmp_path)
+    assert len(list(tmp_path.glob("*.pdf"))) == 4
+    assert all(p.stat().st_size > 1000 for p in tmp_path.glob("*.pdf"))
+    assert pd.read_parquet(tmp_path/"13_essdai_patient_delta_endpoints.parquet").empty
+
+
+def test_dry_run_preserves_new_outputs(tmp_path):
+    data = longitudinal_fixture(3)
+    source, base = tmp_path/"source.parquet", tmp_path/"baseline.parquet"
+    data.to_parquet(source, index=False)
+    data.loc[data.is_clinical_baseline].to_parquet(base, index=False)
+    figures = tmp_path/"outputs/figures/blockA"/mod.STEM
+    figures.mkdir(parents=True)
+    sentinel = figures/"13_essdai_individual_trajectories_delta3.pdf"
+    sentinel.write_bytes(b"existing output")
+    mod.main(mod.parse_args(["--integrated", str(source), "--baseline", str(base), "--output-root", str(tmp_path), "--dry-run", "--no-overwrite"]))
+    assert sentinel.read_bytes() == b"existing output"
+    assert not list(tmp_path.rglob("13_essdai_patient_delta_endpoints.parquet"))
+    assert not list(tmp_path.rglob("13_essdai_delta_threshold_summary.csv"))

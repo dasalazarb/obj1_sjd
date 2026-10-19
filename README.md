@@ -54,6 +54,14 @@ rerun after updating upstream inputs. Use `--no-overwrite` to protect existing
 outputs; `--dry-run` validates inputs and reports the domain contract without
 fitting the final analyses.
 
+Step 13 also reports observed patient-level absolute ESSDAI changes using both
+±3 and ±5 prespecified descriptive/sensitivity thresholds. Separate ever-observed
+and baseline-to-last endpoints, baseline Low/Moderate/High strata, patient
+reconciliation/crosstabs, eligibility/integrity QC and four complementary PDF
+figures preserve the existing category-transition analyses and Step 14 legacy
++5 sensitivity. See [absolute ESSDAI change definitions and outputs](docs/13_essdai_absolute_change.md)
+for denominators, same-date selection and observation limitations.
+
 Step 14 evaluates associations between earlier clinical, serological, glandular,
 laboratory and ESSDAI-domain characteristics and subsequent progression. It uses
 the official Step 11 baseline, adjacent Step 10 clinical intervals and Step 13
