@@ -894,3 +894,14 @@ def test_to_composition_audit_does_not_overwrite_from_flags():
     assert intervals.to_composition_complete_panel_discordant.iloc[0]
     assert intervals.from_composition_complete_panel_discordant.iloc[1]
     assert not intervals.to_composition_complete_panel_discordant.iloc[1]
+
+
+def test_absolute_change_extension_preserves_legacy_plus5_sensitivity():
+    assert mod.CHANGE_THRESHOLDS["essdai_legacy_worsening"] == 5
+    assert mod.CHANGE_THRESHOLDS["essdai_improvement"] == -3
+    for delta in (3, 4, 5):
+        source, baseline, _, _, _ = datasets(episodes(scores=(6, 6+delta), domains=(0, 1)))
+        result = mod.build_worsening_sensitivity_risk_set(source, baseline)
+        assert result.event.tolist() == [int(delta >= 5)]
+        endpoints = mod.step13.build_patient_absolute_change_endpoints(source)
+        assert endpoints.last_worsened_ge3.tolist() == [True]

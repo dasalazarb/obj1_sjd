@@ -30,7 +30,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 import common  # noqa: E402
-from config import (CHANGE_THRESHOLDS, ESSDAI_HIGH_CUTOFF,
+from config import (CHANGE_THRESHOLDS, ESSDAI_ABSOLUTE_CHANGE_THRESHOLDS, ESSDAI_HIGH_CUTOFF,
                     ESSDAI_MODERATE_OR_HIGH_CUTOFF)  # noqa: E402
 
 LOG = logging.getLogger("disease_activity_progression")
@@ -165,6 +165,332 @@ def patient_progression(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["patient_id", "baseline_essdai", "last_essdai",
         "baseline_state", "last_state", "delta_essdai", "status", "followup_years",
         "ever_worsened", "ever_improved", "maximum_state_reached", "minimum_state_reached"])
+
+
+# Absolute change complements (and never redefines) categorical progression.
+DELTA_STATUSES = ("improved", "stable", "worsened")
+DELTA_COLORS = {"improved": "#0072B2", "stable": "#999999", "worsened": "#D55E00"}
+DELTA_BASE_COLUMNS = ["patient_id", "baseline_clinical_episode_id", "baseline_date",
+    "baseline_essdai", "baseline_state", "last_clinical_episode_id", "last_date",
+    "last_essdai", "last_state", "followup_years", "n_essdai_followup_assessments",
+    "n_distinct_essdai_followup_dates", "delta_essdai_last",
+    "delta_essdai_max_from_baseline", "delta_essdai_min_from_baseline"]
+
+
+def build_patient_absolute_change_endpoints(df: pd.DataFrame) -> pd.DataFrame:
+    """One row per eligible patient; call validate_inputs against Step 11 first.
+
+    Retain canonical episodes on tied dates. The last valid episode in canonical
+    date/episode-ID order supplies the last score; ever uses all valid episodes.
+    Same-day baseline companions are never follow-up. Missing scores are skipped.
+    """
+    columns = list(DELTA_BASE_COLUMNS)
+    for k in ESSDAI_ABSOLUTE_CHANGE_THRESHOLDS:
+        columns += [f"last_status_pm{k}", f"last_stable_pm{k}",
+            f"still_worsened_at_last_ge{k}", f"not_worsened_at_last_after_ever_ge{k}"]
+        for direction in ("worsened", "improved"):
+            columns += [f"ever_{direction}_ge{k}", f"last_{direction}_ge{k}"]
+        for direction in ("worsening", "improvement"):
+            columns.append(f"first_observed_{direction}_ge{k}_date")
+    rows = []
+    ordered = df.sort_values(["patient_id", "clinical_anchor_date", "clinical_episode_id"], kind="stable")
+    for pid, g in ordered.groupby("patient_id", sort=False):
+        base = g.loc[g.is_clinical_baseline.eq(True)]
+        if len(base) != 1:
+            raise ValueError("absolute change requires exactly one official baseline per patient")
+        b = base.iloc[0]
+        if pd.isna(b[ESSDAI]):
+            continue
+        after = g.loc[g.clinical_anchor_date.gt(b.clinical_baseline_date) & g[ESSDAI].notna()]
+        if after.empty:
+            continue
+        last = after.iloc[-1]
+        delta = after[ESSDAI] - b[ESSDAI]
+        row = {"patient_id": pid, "baseline_clinical_episode_id": b.clinical_episode_id,
+            "baseline_date": b.clinical_baseline_date, "baseline_essdai": b[ESSDAI],
+            "baseline_state": classify_essdai_activity(b[ESSDAI]),
+            "last_clinical_episode_id": last.clinical_episode_id,
+            "last_date": last.clinical_anchor_date, "last_essdai": last[ESSDAI],
+            "last_state": classify_essdai_activity(last[ESSDAI]),
+            "followup_years": (last.clinical_anchor_date - b.clinical_baseline_date).days / 365.25,
+            "n_essdai_followup_assessments": len(after),
+            "n_distinct_essdai_followup_dates": after.clinical_anchor_date.nunique(),
+            "delta_essdai_last": delta.iloc[-1], "delta_essdai_max_from_baseline": delta.max(),
+            "delta_essdai_min_from_baseline": delta.min()}
+        for k in ESSDAI_ABSOLUTE_CHANGE_THRESHOLDS:
+            worse, better = delta.ge(k), delta.le(-k)
+            row[f"last_status_pm{k}"] = "worsened" if worse.iloc[-1] else "improved" if better.iloc[-1] else "stable"
+            row[f"last_stable_pm{k}"] = not (worse.iloc[-1] or better.iloc[-1])
+            row[f"still_worsened_at_last_ge{k}"] = bool(worse.any() and worse.iloc[-1])
+            row[f"not_worsened_at_last_after_ever_ge{k}"] = bool(worse.any() and not worse.iloc[-1])
+            for direction, date_label, mask in (("worsened", "worsening", worse), ("improved", "improvement", better)):
+                row[f"ever_{direction}_ge{k}"] = bool(mask.any())
+                row[f"last_{direction}_ge{k}"] = bool(mask.iloc[-1])
+                row[f"first_observed_{date_label}_ge{k}_date"] = after.loc[mask, "clinical_anchor_date"].iloc[0] if mask.any() else pd.NaT
+        rows.append(row)
+    out = pd.DataFrame(rows, columns=columns)
+    for col in columns:
+        if col.endswith("_date") or col in ("baseline_date", "last_date"):
+            out[col] = pd.to_datetime(out[col])
+        elif col.startswith(("ever_", "last_worsened", "last_improved", "last_stable", "still_", "not_worsened")):
+            out[col] = out[col].astype(bool)
+    return out
+
+
+def absolute_change_strata(patient_delta):
+    yield "overall", "Overall", patient_delta
+    for state in STATE_ORDER:
+        yield "baseline_state", state, patient_delta.loc[patient_delta.baseline_state.eq(state)]
+
+
+def _delta_proportion(n_event, n):
+    """Patient proportion with Wilson 95% bounds; empty strata are not estimable."""
+    if not n:
+        return {"pct_patients": np.nan, "ci95_low": np.nan, "ci95_high": np.nan}
+    p, z = n_event / n, norm.ppf(.975)
+    center = (p + z*z/(2*n)) / (1 + z*z/n)
+    half = z * np.sqrt(p*(1-p)/n + z*z/(4*n*n)) / (1 + z*z/n)
+    return {"pct_patients": 100*p, "ci95_low": 100*max(0., center-half), "ci95_high": 100*min(1., center+half)}
+
+
+def summarize_absolute_change_endpoints(patient_delta: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for stype, stratum, g in absolute_change_strata(patient_delta):
+        for k in ESSDAI_ABSOLUTE_CHANGE_THRESHOLDS:
+            for assessment, directions in (("baseline_to_last", ("worsening", "improvement", "stable")),
+                                           ("ever_observed", ("worsening", "improvement"))):
+                for direction in directions:
+                    status = {"worsening": "worsened", "improvement": "improved", "stable": "stable"}[direction]
+                    mask = g[f"last_status_pm{k}"].eq(status) if assessment == "baseline_to_last" else g[f"ever_{status}_ge{k}"]
+                    n_event, n = int(mask.sum()), len(g)
+                    rows.append({"stratum_type": stype, "stratum": stratum, "threshold_abs": k,
+                        "direction": direction, "assessment": assessment, "n_patients_evaluable": n,
+                        "n_patients_event": n_event, **_delta_proportion(n_event, n)})
+    return pd.DataFrame(rows)
+
+
+def reconcile_absolute_change_endpoints(patient_delta):
+    rows = []
+    for stype, stratum, g in absolute_change_strata(patient_delta):
+        for k in ESSDAI_ABSOLUTE_CHANGE_THRESHOLDS:
+            ever, last = g[f"ever_worsened_ge{k}"], g[f"last_worsened_ge{k}"]
+            for category, mask in ((f"never_ge{k}", ~ever), (f"ever_ge{k}_not_last", ever & ~last),
+                                   (f"ever_ge{k}_and_last", ever & last)):
+                n_event = int(mask.sum())
+                rows.append({"stratum_type": stype, "stratum": stratum, "threshold_abs": k,
+                    "category": category, "n_patients_evaluable": len(g), "n_patients_event": n_event,
+                    **_delta_proportion(n_event, len(g))})
+    return pd.DataFrame(rows)
+
+
+def absolute_change_state_crosstab(patient_delta):
+    rows = []
+    for state in STATE_ORDER:
+        g = patient_delta.loc[patient_delta.baseline_state.eq(state)]
+        for k in ESSDAI_ABSOLUTE_CHANGE_THRESHOLDS:
+            for last_state in STATE_ORDER:
+                for status in DELTA_STATUSES:
+                    n = int((g.last_state.eq(last_state) & g[f"last_status_pm{k}"].eq(status)).sum())
+                    rows.append({"baseline_state": state, "last_state": last_state, "threshold_abs": k,
+                        "last_status": status, "n_patients": n, "n_from_baseline_state": len(g),
+                        "pct_within_baseline_state": 100*n/len(g) if len(g) else np.nan})
+    return pd.DataFrame(rows)
+
+
+def summarize_worsening_by_baseline_state(patient_delta):
+    rows = []
+    for stype, state, g in absolute_change_strata(patient_delta):
+        for k in ESSDAI_ABSOLUTE_CHANGE_THRESHOLDS:
+            row = {"stratum_type": stype, "baseline_state": state, "threshold_abs": k, "n_evaluable": len(g)}
+            for assessment, direction in (("ever", "worsened"), ("last", "worsened"), ("last", "improved")):
+                n = int(g[f"{assessment}_{direction}_ge{k}"].sum())
+                row[f"n_{assessment}_{direction}"] = n
+                row[f"pct_{assessment}_{direction}"] = _delta_proportion(n, len(g))["pct_patients"]
+            row["median_followup_years"] = g.followup_years.median() if len(g) else np.nan
+            row["median_n_followup_visits"] = g.n_essdai_followup_assessments.median() if len(g) else np.nan
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def absolute_change_eligibility_qc(df, patient_delta):
+    bases = df.loc[df.is_clinical_baseline.eq(True)]
+    later = df.loc[df.clinical_anchor_date.gt(df.clinical_baseline_date) & df[ESSDAI].notna()]
+    rows = []
+    for stype, state, g in absolute_change_strata(patient_delta):
+        b = bases if state == "Overall" else bases.loc[bases[ESSDAI].map(classify_essdai_activity).eq(state)]
+        obs = later.loc[later.patient_id.isin(b.patient_id)]
+        row = {"stratum_type": stype, "stratum": state, "n_baseline_patients": len(b),
+            "n_baseline_essdai_available": int(b[ESSDAI].notna().sum()),
+            "n_baseline_essdai_missing": int(b[ESSDAI].isna().sum()),
+            "n_with_later_essdai": obs.patient_id.nunique(), "n_patients_evaluable": len(g),
+            "n_valid_baseline_without_followup": int((b[ESSDAI].notna() & ~b.patient_id.isin(obs.patient_id)).sum()),
+            "n_valid_essdai_episodes": int(df.loc[df.patient_id.isin(b.patient_id), ESSDAI].notna().sum()),
+            "n_eligible_followup_assessments": int(g.n_essdai_followup_assessments.sum()),
+            "n_eligible_distinct_followup_dates": int(g.n_distinct_essdai_followup_dates.sum()),
+            "n_same_date_followup_extra_assessments": int((g.n_essdai_followup_assessments - g.n_distinct_essdai_followup_dates).sum()),
+            "n_same_baseline_date_nonbaseline_valid_episodes": int((df.patient_id.isin(b.patient_id) & ~df.is_clinical_baseline.eq(True) & df.clinical_anchor_date.eq(df.clinical_baseline_date) & df[ESSDAI].notna()).sum()),
+            "status": "pass" if len(g) else "not_estimable",
+            "policy": "canonical episodes retained; last valid episode ordered by date then episode ID; only dates > official baseline"}
+        for col, label in (("followup_years", "followup_years"), ("n_essdai_followup_assessments", "n_followup_visits")):
+            for stat, q in (("min", 0), ("q25", .25), ("median", .5), ("q75", .75), ("max", 1)):
+                row[f"{stat}_{label}"] = g[col].quantile(q) if len(g) else np.nan
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def absolute_change_invariants_qc(df, endpoints, legacy, summary, reconciliation, crosstab, compact, hard_fail=True):
+    """Aggregate-only QC. The caller saves failures before raising in production."""
+    rows = []
+    def record(check, count, reason):
+        rows.append({"check": check, "status": "fail" if count else "pass", "n_failures": int(count),
+                     "reason": reason if count else "", "n_patients_evaluable": len(endpoints)})
+    record("unique_patient_ids", endpoints.patient_id.isna().sum() + endpoints.patient_id.duplicated().sum(), "missing or duplicate patient IDs")
+    record("baseline_state_partition", abs(len(endpoints) - endpoints.baseline_state.isin(STATE_ORDER).sum()), "unknown baseline activity state")
+    expected = build_patient_absolute_change_endpoints(df)
+    # This also verifies episode IDs, official dates, strict follow-up, extrema,
+    # first documented dates, same-date selection and all endpoint flags.
+    record("canonical_endpoint_rows", int(not endpoints.reset_index(drop=True).equals(expected)), "endpoints differ from canonical observed episodes")
+    record("positive_followup", (~endpoints.last_date.gt(endpoints.baseline_date)).sum() + endpoints.followup_years.le(0).sum(), "follow-up must be strictly after baseline")
+    cols = ["patient_id", "baseline_essdai", "last_essdai", "baseline_state", "last_state", "delta_essdai"]
+    a = endpoints.rename(columns={"delta_essdai_last": "delta_essdai"})[cols].sort_values("patient_id").reset_index(drop=True)
+    b = legacy[cols].sort_values("patient_id").reset_index(drop=True)
+    record("legacy_patient_progression_agreement", int(not a.equals(b)), "patient population, scores or states differ from legacy progression")
+    for direction in ("worsened", "improved"):
+        for assessment in ("ever", "last"):
+            small, large = sorted(ESSDAI_ABSOLUTE_CHANGE_THRESHOLDS)
+            record(f"{assessment}_{direction}_nested_thresholds", (endpoints[f"{assessment}_{direction}_ge{large}"] & ~endpoints[f"{assessment}_{direction}_ge{small}"]).sum(), "larger absolute change must imply smaller")
+        for k in ESSDAI_ABSOLUTE_CHANGE_THRESHOLDS:
+            record(f"last_implies_ever_{direction}_{k}", (endpoints[f"last_{direction}_ge{k}"] & ~endpoints[f"ever_{direction}_ge{k}"]).sum(), "last event missing from ever event")
+    for k in ESSDAI_ABSOLUTE_CHANGE_THRESHOLDS:
+        partition = endpoints[[f"last_worsened_ge{k}", f"last_stable_pm{k}", f"last_improved_ge{k}"]].sum(axis=1)
+        record(f"last_partition_{k}", partition.ne(1).sum(), "last categories must be exclusive and exhaustive")
+        e, l = endpoints[f"ever_worsened_ge{k}"], endpoints[f"last_worsened_ge{k}"]
+        record(f"ever_reconciliation_{k}", abs(int(e.sum()) - int((e & l).sum()) - int((e & ~l).sum())), "ever must equal ever-and-last plus ever-not-last")
+    for name, actual, rebuilt in (("threshold_summary", summary, summarize_absolute_change_endpoints(endpoints)),
+            ("ever_last_reconciliation", reconciliation, reconcile_absolute_change_endpoints(endpoints)),
+            ("state_crosstab", crosstab, absolute_change_state_crosstab(endpoints)),
+            ("compact_summary", compact, summarize_worsening_by_baseline_state(endpoints))):
+        record(name, int(not actual.equals(rebuilt)), "table counts, denominators or percentages differ from patient endpoints")
+    last = summary.loc[summary.assessment.eq("baseline_to_last")]
+    partitions = last.groupby(["stratum", "threshold_abs"]).agg(events=("n_patients_event", "sum"), n=("n_patients_evaluable", "first"))
+    record("summary_last_partition", partitions.events.ne(partitions.n).sum(), "last category counts do not sum to evaluable patients")
+    record("patient_percentage_bounds", ((summary.pct_patients.notna()) & ~summary.pct_patients.between(0, 100)).sum(), "patient percentages outside 0-100")
+    totals = crosstab.groupby("threshold_abs").n_patients.sum()
+    record("crosstab_patient_totals", totals.ne(len(endpoints)).sum(), "crosstab must count patients once per threshold")
+    out = pd.DataFrame(rows)
+    if hard_fail and out.status.eq("fail").any():
+        raise ValueError("Absolute-change QC failed: " + ", ".join(out.loc[out.status.eq("fail"), "check"]))
+    return out
+
+
+def plot_absolute_change_summary(summary, path):
+    """Render exactly the published baseline-to-last summary rows."""
+    fig, axes = plt.subplots(1, len(ESSDAI_ABSOLUTE_CHANGE_THRESHOLDS), figsize=(12, 5), sharey=True, squeeze=False)
+    for ax, k in zip(axes[0], ESSDAI_ABSOLUTE_CHANGE_THRESHOLDS):
+        data = summary.loc[summary.threshold_abs.eq(k) & summary.assessment.eq("baseline_to_last") & summary.stratum_type.eq("baseline_state")]
+        bottom = np.zeros(len(STATE_ORDER))
+        for status, direction in (("improved", "improvement"), ("stable", "stable"), ("worsened", "worsening")):
+            part = data.loc[data.direction.eq(direction)].set_index("stratum").reindex(STATE_ORDER)
+            heights = part.pct_patients.fillna(0).to_numpy()
+            ax.bar(STATE_ORDER, heights, bottom=bottom, color=DELTA_COLORS[status], label=status.capitalize())
+            for x, (height, n) in enumerate(zip(heights, part.n_patients_event)):
+                if height >= 12:
+                    ax.text(x, bottom[x]+height/2, f"{height:.1f}%\n(n={n})", ha="center", va="center", color="white" if status != "stable" else "black", fontsize=9)
+            bottom += heights
+        denoms = data.groupby("stratum").n_patients_evaluable.first()
+        for x, state in enumerate(STATE_ORDER):
+            n = denoms.loc[state]
+            ax.text(x, 103, f"n={n}" if n else "n=0; not estimable", ha="center", fontsize=9)
+        ax.set(title=f"Baseline-to-last change: ±{k} points", xlabel="Baseline ESSDAI state", ylim=(0, 113))
+        ax.set_yticks([0, 25, 50, 75, 100])
+    axes[0, 0].set_ylabel("Evaluable patients (%)")
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="lower center", ncol=3, bbox_to_anchor=(.5, .07))
+    fig.suptitle("Absolute ESSDAI change from official baseline")
+    fig.text(.5, .025, "Colors describe final absolute change; activity-state transitions are a separate analysis.", ha="center", fontsize=9)
+    fig.tight_layout(rect=(0, .18, 1, .93))
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_ever_vs_last_worsening(summary, path):
+    fig, axes = plt.subplots(1, len(ESSDAI_ABSOLUTE_CHANGE_THRESHOLDS), figsize=(12, 5), sharey=True, squeeze=False)
+    strata = ["Overall", *STATE_ORDER]
+    x = np.arange(len(strata))
+    for ax, k in zip(axes[0], ESSDAI_ABSOLUTE_CHANGE_THRESHOLDS):
+        data = summary.loc[summary.threshold_abs.eq(k) & summary.direction.eq("worsening")]
+        for shift, assessment, label, color in ((-.2, "ever_observed", "Ever observed", "#0072B2"), (.2, "baseline_to_last", "Last assessment", "#D55E00")):
+            part = data.loc[data.assessment.eq(assessment)].set_index("stratum").reindex(strata)
+            heights = part.pct_patients.fillna(0).to_numpy()
+            ax.bar(x+shift, heights, width=.38, label=label, color=color)
+            for xx, height, row in zip(x+shift, heights, part.itertuples()):
+                if row.n_patients_evaluable:
+                    ax.text(xx, height+1.5, f"{row.pct_patients:.1f}%", ha="center", fontsize=8, rotation=90)
+        for xx, state in zip(x, strata):
+            n = int(data.loc[data.stratum.eq(state), "n_patients_evaluable"].iloc[0])
+            ax.text(xx, 119, f"n={n}" if n else "n=0; NE", ha="center", fontsize=9)
+        ax.set(xticks=x, xticklabels=strata, ylim=(0, 128), title=f"Worsening ≥{k} points", xlabel="Baseline ESSDAI state")
+        ax.set_yticks([0, 25, 50, 75, 100])
+    axes[0, 0].set_ylabel("Evaluable patients (%)")
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="lower center", ncol=2, bbox_to_anchor=(.5, .07))
+    fig.suptitle("Observed worsening from official baseline: ever versus last")
+    fig.text(.5, .025, "Identical patient denominators; unequal follow-up and visit frequency affect ever-observed proportions.", ha="center", fontsize=9)
+    fig.tight_layout(rect=(0, .18, 1, .93))
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_individual_absolute_change_trajectories(df, endpoints, k, path):
+    fig, axes = plt.subplots(1, len(STATE_ORDER), figsize=(15, 5), sharey=True, squeeze=False)
+    ordered = df.sort_values(["patient_id", "clinical_anchor_date", "clinical_episode_id"], kind="stable")
+    groups = {pid: g for pid, g in ordered.groupby("patient_id", sort=False)}
+    for ax, state in zip(axes[0], STATE_ORDER):
+        subset = endpoints.loc[endpoints.baseline_state.eq(state)]
+        for row in subset.itertuples():
+            g = groups[row.patient_id]
+            g = g.loc[g[ESSDAI].notna() & (g.clinical_episode_id.eq(row.baseline_clinical_episode_id) | g.clinical_anchor_date.gt(row.baseline_date))]
+            time = (g.clinical_anchor_date - row.baseline_date).dt.total_seconds() / (365.25*86400)
+            ax.plot(time, g[ESSDAI], color=DELTA_COLORS[getattr(row, f"last_status_pm{k}")],
+                    alpha=.6 if len(subset) < 30 else .15, linewidth=.8, marker="o", markersize=2)
+        for cutoff in (ESSDAI_MODERATE_OR_HIGH_CUTOFF, ESSDAI_HIGH_CUTOFF):
+            ax.axhline(cutoff, color="#555555", alpha=.45, linestyle="--", linewidth=.7)
+            ax.text(.98, cutoff, f"ESSDAI {cutoff}", transform=ax.get_yaxis_transform(), ha="right", va="bottom", fontsize=8)
+        counts = subset[f"last_status_pm{k}"].value_counts()
+        labels = ", ".join(f"{s}: {counts.get(s, 0)}" for s in DELTA_STATUSES)
+        followup = f"Median follow-up {subset.followup_years.median():.2f} years" if len(subset) else "Not estimable"
+        ax.set(title=f"Baseline {state}: n={len(subset)}\n{followup}", xlabel="Years since official clinical baseline")
+        ax.text(.5, -.32, labels, transform=ax.transAxes, ha="center", fontsize=9)
+        ax.margins(y=.1)
+    axes[0, 0].set_ylabel("Observed ESSDAI total (points)")
+    handles = [plt.Line2D([0], [0], color=DELTA_COLORS[s], label=s.capitalize()) for s in DELTA_STATUSES]
+    fig.legend(handles=handles, loc="lower center", ncol=3, bbox_to_anchor=(.5, .065))
+    fig.suptitle(f"Individual ESSDAI trajectories; final absolute change ±{k} points")
+    fig.text(.5, .02, "All evaluable patients shown at observed times. Color indicates final change; paths need not be monotonic.", ha="center", fontsize=9)
+    fig.subplots_adjust(left=.06, right=.99, bottom=.32, top=.80, wspace=.08)
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def write_absolute_change_outputs(df, legacy, tables, figures, qc, analytic):
+    endpoints = build_patient_absolute_change_endpoints(df)
+    summary = summarize_absolute_change_endpoints(endpoints)
+    reconciliation = reconcile_absolute_change_endpoints(endpoints)
+    crosstab = absolute_change_state_crosstab(endpoints)
+    compact = summarize_worsening_by_baseline_state(endpoints)
+    absolute_change_eligibility_qc(df, endpoints).to_csv(qc/"13_essdai_delta_eligibility_qc.csv", index=False)
+    checks = absolute_change_invariants_qc(df, endpoints, legacy, summary, reconciliation, crosstab, compact, hard_fail=False)
+    checks.to_csv(qc/"13_essdai_delta_invariants_qc.csv", index=False)
+    if checks.status.eq("fail").any():
+        raise ValueError("Absolute-change integrity failure; inspect 13_essdai_delta_invariants_qc.csv")
+    endpoints.to_parquet(analytic/"13_essdai_patient_delta_endpoints.parquet", index=False)
+    for name, data in (("delta_threshold_summary", summary), ("worsening_by_baseline_state", compact),
+                       ("ever_vs_last_reconciliation", reconciliation), ("baseline_last_state_by_delta", crosstab)):
+        data.to_csv(tables/f"13_essdai_{name}.csv", index=False)
+    plot_absolute_change_summary(summary, figures/"13_essdai_delta_by_baseline_state.pdf")
+    plot_ever_vs_last_worsening(summary, figures/"13_essdai_ever_vs_last_worsening.pdf")
+    for k in ESSDAI_ABSOLUTE_CHANGE_THRESHOLDS:
+        plot_individual_absolute_change_trajectories(df, endpoints, k, figures/f"13_essdai_individual_trajectories_delta{k}.pdf")
 
 
 def build_state_transitions(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -956,6 +1282,7 @@ def main(args=None):
                               figures/"13_essdai_trajectory.pdf", "ESSDAI total")
 
     prog = patient_progression(df)
+    write_absolute_change_outputs(df, prog, tables, figures, qc, analytic)
     prog.to_csv(tables/"13_essdai_baseline_to_last_status.csv", index=False)
     summary = []
     for status in ("worsened", "stable", "improved"):
