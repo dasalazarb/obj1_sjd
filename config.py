@@ -193,6 +193,10 @@ ESSDAI_IMPROVEMENT_DELTA_3 = -3
 ESSDAI_IMPROVEMENT_DELTA_5 = -5
 # Prespecified descriptive/sensitivity thresholds, independent of activity states.
 ESSDAI_ABSOLUTE_CHANGE_THRESHOLDS = (ESSDAI_WORSENING_DELTA_3, ESSDAI_WORSENING_DELTA_5)
+# Existing Step 13 validation ceiling; mathematical opportunity is supplementary.
+ESSDAI_MAX_VALID = 123
+# Observed follow-up, not fixed-horizon risk groups: (0, 2), [2, 5), [5, inf).
+ESSDAI_FOLLOWUP_DURATION_BANDS_YEARS = (2.0, 5.0)
 ESSPRI_IMPROVEMENT_ABSOLUTE = -1
 ESSPRI_IMPROVEMENT_RELATIVE = -0.15
 CHANGE_THRESHOLDS = {

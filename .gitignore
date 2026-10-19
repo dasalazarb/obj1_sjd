@@ -10,6 +10,7 @@ venv/
 env/
 node_modules/
 data/analytic/
+data/raw/
 outputs/
 work/
 dist/

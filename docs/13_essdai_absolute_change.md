@@ -152,7 +152,7 @@ attribution. Report both thresholds; do not select one retrospectively based
 on significance or observed proportions. Real results require execution and
 reconciled QC on the authorized canonical cohort.
 
-## Implementation review and validation record
+## Initial implementation review and validation record
 
 Modified files and purpose:
 
@@ -216,3 +216,147 @@ starting-commit archive. No new regression was detected. The full-suite command
 has the two collection blockers listed above; real-cohort validation remains
 unavailable. `git diff --check` passes. Only source, tests and documentation are
 included in the implementation commit on `codex/step13-essdai-delta3-delta5`.
+
+## Follow-up opportunity and trajectory refinements (2026-10-19)
+
+These additions preserve all primary ±3/±5 endpoints, their patient denominators,
+legacy categorical analyses, Pop definitions, and Step 14 imports. The original
+24 absolute-change invariants run unchanged alongside the new aggregate QC.
+No clinical count from a reviewed run is hardcoded or used as a test fixture.
+
+The existing `13_essdai_individual_trajectories_delta3.pdf` and `...delta5.pdf`
+continue to color by **final absolute change**. The two additional files
+`13_essdai_individual_trajectories_ever_worsening_delta3.pdf` and `...delta5.pdf`
+color by existing worsening flags only:
+
+- `never_observed`: no observed increase ≥k from official baseline.
+- `ever_not_last`: observed ≥k before, but no longer ≥k at the last observed visit.
+- `ever_and_last`: observed ≥k at some follow-up and at the last assessment.
+
+Each figure retains every valid canonical episode, including date ties, in
+patient/date/episode order. Times are actual years from official baseline;
+activity cutoffs 5 and 14 are score references, not delta thresholds. All panels
+share the ESSDAI scale, report n, median follow-up and category counts, and retain
+a complete legend even when categories are absent. Background trajectories are
+drawn first so minority event trajectories remain visible. No IDs or exact dates
+are printed. Connecting lines join intermittent observations; they do not imply
+monotonic change, continuous persistence, or recovery. Rare trajectories can
+still be identifiable: any external disclosure requires institutional review.
+
+The existing ever/last bar plot now shares a dynamic scale across both thresholds,
+capped at 100%, with percentage and event/denominator labels. The final-change
+stacked plot adds an exact-count/percentage table so small segments remain
+readable without placing cramped labels inside them.
+
+### New aggregate products
+
+Paths remain relative to `--output-root`, under the canonical Step 13 directory.
+
+| Location | File | Interpretation |
+| --- | --- | --- |
+| `outputs/tables/blockA/13_disease_activity_progression/` | `13_essdai_observation_opportunity_sensitivity.csv` | Overall and Low/Moderate/High, separately for each threshold and observation band; ever/last counts, percentages, Wilson 95% bounds, ever-not-last counts and median follow-up/assessment/date counts |
+| Same tables directory | `13_essdai_baseline_change_opportunity.csv` | Original all-evaluable rates alongside counts and conditional percentages among patients mathematically able to improve/worsen by k |
+| `outputs/qc/blockA/13_disease_activity_progression/` | `13_essdai_refinement_qc.csv` | Aggregate check/status/failure count/reason; no identifiers, dates or individual row values |
+| `outputs/figures/blockA/13_disease_activity_progression/` | `13_essdai_individual_trajectories_ever_worsening_delta3.pdf`, `...delta5.pdf` | The complementary trajectory categories defined above |
+
+Duration bands default to `(0, 2)`, `[2, 5)`, `[5, ∞)` years and are configured
+through `ESSDAI_FOLLOWUP_DURATION_BANDS_YEARS`. Their CSV labels are `<2y`,
+`2-<5y`, `>=5y`. Assessment-count bands are 1, 2 and ≥3. Counts refer to valid
+canonical episodes; distinct-date medians are reported separately, because
+multiple assessments can occur on one date. Each stratifier partitions the
+entire evaluable population; thresholds have identical band denominators.
+Empty cells retain n=0 and NaN percentages/intervals. `support_note` is
+`not_estimable` for empty cells, `sparse` for n<10, and `descriptive_only`
+otherwise. This is a descriptive support annotation, not an institutional
+small-cell disclosure rule or permission to release aggregates. High remains
+visible; no inferential comparisons are calculated.
+
+Mathematical improvement requires baseline ≥k. Scores 0–2 cannot improve by 3;
+all Low scores (<5) cannot improve by 5. Mathematical worsening requires
+baseline+k ≤ `ESSDAI_MAX_VALID=123`, the unchanged repository validation ceiling.
+High by itself does **not** imply a ceiling. Counts and rates over all evaluable
+patients remain primary. Conditional rates use only the corresponding possible
+count and are NaN if that count is zero. All actual events must be possible;
+the conditional event count must therefore equal its original event count.
+
+The new QC reconciles plot categories with the existing reconciliation table,
+checks mathematical possibility for ever/last flags, validates positive visit
+and date counts, partitions and event totals across bands and baseline states,
+compares Δ5/Δ3 nesting and denominators, and rebuilds both aggregate summaries.
+Failures write aggregate QC then stop the new output writer before publishing
+its endpoint Parquet, tables or figures. The existing `--dry-run` early return
+and `--no-overwrite` guard also protect all new products.
+
+### Interpretation that accompanies these products
+
+Observed follow-up duration and assessment counts are **post-baseline** strata.
+The percentages are observed proportions conditional on that follow-up history,
+not standardized cumulative incidences, risks at 2 or 5 years, or annual rates.
+Longer or more frequent observation increases opportunity to detect change;
+it may also reflect severity, clinical selection and treatment. Early worsening
+followed by loss to follow-up can enter a short-duration band. No observed
+event does not establish absence of progression. Comparisons across activity
+states or observation bands support no causal conclusions.
+
+Ever-not-last does not imply remission or a clinically acceptable last value;
+ever-and-last does not estimate **persistent worsening** between assessments.
+Visits are irregular and can miss events. Fixed-horizon risk would require a
+separate censoring/first-event specification accounting for irregular visits
+and possible interval censoring; no new simplified Kaplan–Meier analysis is
+introduced here. Floor effects, regression to the mean, treatment and selection
+can all influence observed improvements. A small High group cannot establish
+spontaneous recovery or treatment efficacy.
+
+### Methods text
+
+We summarized observed changes in total ESSDAI relative to the official clinical
+baseline using absolute thresholds of three and five points. In addition to
+changes between baseline and the last observed assessment, we identified whether
+worsening had been observed at any subsequent assessment and whether the
+threshold was still met at the last assessment. Because patients differed in
+follow-up duration and assessment frequency, we also provided descriptive
+summaries stratified by observed follow-up duration and number of ESSDAI
+assessments. These comparisons reflect opportunities for observing change and
+are not standardized cumulative incidence estimates. We further documented
+whether a change of a given magnitude was mathematically possible from each
+patient's baseline ESSDAI score, while preserving the original evaluable-patient
+denominators for primary summaries.
+
+### Refinement validation record
+
+On current `main` (`efeb23e`, before this refinement), the combined Step 13/14
+regression command produced **131 passed, 2 failed**. After this change it
+produces **152 passed, 2 failed**: Step 13 has **81 passing tests**, and Step 14
+has **71 passing tests** plus the same two existing failures:
+
+- `test_weighted_other_domain_adjustments_aliases_missing_and_inconsistent_panels`
+- `test_to_negative_subtraction_and_discordance_fail_closed_without_clipping`
+
+Both still expect articular contribution 8 where the configured score/weight
+produces 4. Their failures were reproduced before editing; Step 14 source and
+tests are unchanged. They are not new regressions. Dependency warnings remain.
+
+New synthetic tests cover the three trajectory categories and drawing order,
+canonical date ties and distinct-date counts, duration boundaries
+1.999/2/4.999/5, assessment counts 1/2/3/4, configurable duration bands,
+Wilson intervals, threshold nesting and totals, improvement floor and worsening
+ceiling, High worsening, empty schemas/NaN percentages, aggregate CSV privacy,
+QC failure injection, adaptive axes including 0%/100%, and protection of new
+outputs under dry-run/no-overwrite. A separate synthetic preview passed all
+**61 refinement checks**. All **24 original invariants** still pass.
+
+An AST comparison with current `main` confirms all existing endpoint, summary,
+reconciliation and model functions are unchanged. Existing function edits are
+limited to naming the same validation ceiling in configuration, the two plot
+presentation refinements, and wiring the new outputs into the existing writer.
+Direct comparison against the prior implementation on four synthetic fixtures
+confirms identical endpoint tables and all four pre-existing aggregate tables.
+The four revised/new PDFs were rasterized and visually inspected, including
+dense Low trajectories, all categories, counts, legends, axes and small cells.
+
+The canonical `--dry-run` was attempted and stops at missing Step 11 baseline
+input; Step 10 input is also unavailable. Thus real-cohort execution, the
+provided 143-patient counts, and real-data QC remain **NOT RUN: input
+unavailable**. No cohort results are inferred from synthetic tests, and no
+patient data were requested, exported or committed. Generated outputs, previews
+and logs remain ignored; `.gitignore` now also explicitly excludes `data/raw/`.
