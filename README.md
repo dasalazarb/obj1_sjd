@@ -62,6 +62,15 @@ figures preserve the existing category-transition analyses and Step 14 legacy
 +5 sensitivity. See [absolute ESSDAI change definitions and outputs](docs/13_essdai_absolute_change.md)
 for denominators, same-date selection and observation limitations.
 
+Additional Step 13 products include trajectories colored by never / ever-not-last /
+ever-and-last observed worsening, aggregate Wilson summaries by follow-up duration
+and assessment count, mathematical baseline change opportunity, and refinement QC.
+The original final-change trajectories and primary denominators are preserved.
+Follow-up bands describe post-baseline observation opportunity, not fixed-horizon
+risk or causal differences. Ever-and-last does not estimate persistent worsening;
+ever-not-last does not establish remission. No patient-level data or trajectory
+figures should be published without the applicable institutional disclosure review.
+
 Step 14 evaluates associations between earlier clinical, serological, glandular,
 laboratory and ESSDAI-domain characteristics and subsequent progression. It uses
 the official Step 11 baseline, adjacent Step 10 clinical intervals and Step 13
