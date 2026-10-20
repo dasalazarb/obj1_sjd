@@ -1,0 +1,107 @@
+{
+  "audited_main": "06b492c2904f59d8ce557e61e186593a90cafd38",
+  "branch": "codex/step13-step14-explain-why",
+  "source_verification": "GitHub main commit independently matched local HEAD; cached origin/main was stale",
+  "prechange_scientific_contract_sha256": {
+    "README.md": "28b9880aa7bcaabc5998ff43348246e6b1e3096a898127da3868f1163827e847",
+    "config.py": "3cff452f4a25ed2b3badf43da75222ec50cfd913ddf9eb8dcb19cb27c2142226",
+    "src/block_A/10_build_integrated_longitudinal_dataset.py": "41f7ecb882fdb17546c4f045302b45b2ed22fc6c85fd080307559dba67dbea4c",
+    "src/block_A/10_pop_transitions.py": "1d4e6085597aa387d24679f02127d5d398a5ad74c9c6f7377d7ef0ba1ce23f9b",
+    "src/block_A/11_integrated_baseline_characterization.py": "95a358b0ab9e54470623f3a9acee089e02a9d4bcef56170b1d40a32dbc969bef",
+    "src/block_A/13_disease_activity_progression.py": "e2c4dc2e53c08dd11a03ad19af98f1c688c84255771c0b8b13ab6726c8b41e3f",
+    "src/block_A/14_risk_factors_progression.py": "799d2bb516caa40c67cd8c7064e44b7c729fc0051c88937f8b4da063a2df0d8b",
+    "docs/13_essdai_absolute_change.md": "fc033a472bea9b5a16dbedf0bd55c7eb72a056fdfa8ff7219edcef7a87d47b93",
+    "docs/14_risk_factors_progression.md": "b82a5c4655c49e278f4626d039b380d78270129953feea886c45f7ca1defa8ec",
+    "docs/14_step14_closure_validation.md": "a92c07a67ec3ad2e2bea338edd610eca4c54aed9efc2bfad399feeb4aaaa52f9",
+    "docs/14_step14_refactor_validation.md": "0dd4a2d105538d23a382c65263b43a36dbaa3d198424f724919c4e9ec56f1cf5",
+    "tests/test_disease_activity_progression.py": "f7f187630cd21f21e5763d21ab8fa2acb6f39f87aa6d929f9be1fc96042e75ce",
+    "tests/test_risk_factors_progression.py": "079f31c2cb6792c73a53d1a199fcb40308cddc05780570a578378cadc8b865a6",
+    "tests/test_integrated_baseline_characterization.py": "e779bf717ca0605be177fecb5cd149b24177975ba61c133e32b3fba8de165ccd",
+    "tests/test_integrated_longitudinal_dataset.py": "51e7beec5766864975d74d10cb3bdc54ecd3bae37fc44e574cfc4d62c517fe58"
+  },
+  "dependencies": {
+    "pandas": "2.3.3",
+    "numpy": "2.5.3",
+    "scipy": "1.18.1",
+    "statsmodels": "0.15.0",
+    "patsy": "1.0.3",
+    "pyarrow": "25.0.1",
+    "lifelines": "0.30.3",
+    "pytest": "9.1.1"
+  },
+  "canonical_execution": {
+    "status": "PENDING / NOT RUN \u2014 canonical inputs unavailable",
+    "step10_integrated": "unavailable",
+    "step10_context": "unavailable",
+    "step10_variable_registry": "unavailable",
+    "step11_baseline": "unavailable",
+    "step13_products": "unavailable",
+    "productive_before_after_comparison": "NOT_RUN"
+  },
+  "prechange_focused_tests": {
+    "passed": 200,
+    "failed": 2,
+    "input_origin": "synthetic fixtures"
+  },
+  "final_extension_tests": {
+    "passed": 39,
+    "failed": 0,
+    "input_origin": "synthetic_validation"
+  },
+  "known_preexisting_failures": [
+    "test_weighted_other_domain_adjustments_aliases_missing_and_inconsistent_panels",
+    "test_to_negative_subtraction_and_discordance_fail_closed_without_clipping"
+  ],
+  "full_suite_collection": {
+    "status": "BLOCKED_PREEXISTING",
+    "missing_modules": [
+      "src/20_btris_visit_date_match_report.py",
+      "src/studies/pharma/01_run_pharma.py"
+    ],
+    "confirmed_absent_in_audited_main": true
+  },
+  "regression": {
+    "existing_functions_classes_except_main_parse_args": "AST_IDENTICAL",
+    "step10_step11_config_pharma_graph_longitudinal_graph": "UNCHANGED",
+    "primary_step14_tasks_FDR_adjustments": "UNCHANGED"
+  },
+  "new_module_sha256": {
+    "src/block_A/observed_patterns.py": "0de8ee9f2ae9286d6b45dfa650932893f1423659eedb098e8146cc5958dfc033",
+    "src/block_A/explainwhy_feasibility.py": "13627ea3348da61023aaae9d95c03d8e80e978afdc9e493814b620fe04594af2"
+  },
+  "synthetic_aggregate_pdf": {
+    "rendered_and_visually_inspected": true,
+    "input_origin": "synthetic_validation"
+  },
+  "gates": {
+    "G0": "BLOCKED_UPSTREAM",
+    "G1": "TESTED_SYNTHETIC; canonical class support NOT_RUN",
+    "G2": "BLOCKED; delta3 association models NOT_IMPLEMENTED",
+    "G3": "BLOCKED_UPSTREAM; canonical treatment contract preserved",
+    "G4": "BLOCKED_UPSTREAM; clinical modality pairs NOT_RUN"
+  },
+  "clinical_status": "PENDING_CLINICAL_REVIEW",
+  "scientific_closure": "CONDITIONAL",
+  "new_clinical_models_fitted": 0,
+  "status_vocabulary": {
+    "IMPLEMENTED": "E0 audit and E1 descriptive software",
+    "TESTED_SYNTHETIC": "new contracts and existing integration fixtures",
+    "EXECUTED_CANONICAL": "none",
+    "NOT_ESTIMABLE": "not assigned; no new clinical models attempted",
+    "BLOCKED_UPSTREAM": "canonical Step 10/11 inputs missing",
+    "NOT_IMPLEMENTED": "gated E2 models and molecular work",
+    "PENDING_CLINICAL_REVIEW": "real cohort, class support, scientific and disclosure review"
+  },
+  "combined_regression_run": {
+    "passed": 238,
+    "failed": 2,
+    "command": "python -m pytest -q tests/test_disease_activity_progression.py tests/test_risk_factors_progression.py tests/test_integrated_longitudinal_dataset.py tests/test_integrated_baseline_characterization.py tests/test_explainwhy_extension.py",
+    "note": "All original focused tests and 38 extension tests. Final conservative scope/ID normalization changes were separately checked by the 39-test final extension suite."
+  },
+  "audit_execution": {
+    "canonical_availability_only": "executed, G0 BLOCKED, exit code 2 as designed",
+    "new_models_fitted": 0,
+    "output_manifest_hashes": "verified in synthetic tests",
+    "diff_check": "PASS"
+  }
+}

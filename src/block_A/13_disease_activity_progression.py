@@ -1421,6 +1421,8 @@ def parse_args(argv=None):
     p.add_argument("--overwrite", action=argparse.BooleanOptionalAction, default=True,
                    help="Regenerate existing Step 13 outputs (default); --no-overwrite protects them")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--input-origin", choices=("canonical", "synthetic_validation"), default="canonical",
+                   help="Label new observed-pattern manifests; synthetic validation is never clinical closure")
     return p.parse_args(argv)
 
 
@@ -1500,6 +1502,9 @@ def main(args=None):
 
     prog = patient_progression(df)
     write_absolute_change_outputs(df, prog, tables, figures, qc, analytic)
+    from src.block_A.observed_patterns import write_observed_pattern_outputs
+    write_observed_pattern_outputs(df, baseline, build_patient_absolute_change_endpoints(df),
+        tables, figures, qc, analytic, getattr(args, "input_origin", "canonical"))
     prog.to_csv(tables/"13_essdai_baseline_to_last_status.csv", index=False)
     summary = []
     for status in ("worsened", "stable", "improved"):

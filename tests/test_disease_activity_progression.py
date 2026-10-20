@@ -306,12 +306,16 @@ def test_step13_generates_all_outputs_and_qc(tmp_path):
         "13_km_low_to_ge5.pdf", "13_km_moderate_to_high.pdf", "13_essdai_domain_activity_heatmap.pdf",
         "13_essdai_domain_effects_forest.pdf", "13_esspri_trajectory_total.pdf", "13_esspri_trajectory_components.pdf"}
     new_figures = {"13_essdai_delta_by_baseline_state.pdf", "13_essdai_ever_vs_last_worsening.pdf",
+        "13_essdai_observed_pattern_aggregate.pdf",
         "13_essdai_individual_trajectories_delta3.pdf", "13_essdai_individual_trajectories_delta5.pdf",
         "13_essdai_individual_trajectories_ever_worsening_delta3.pdf",
         "13_essdai_individual_trajectories_ever_worsening_delta5.pdf"}
     assert {p.name for p in figures.glob("*.pdf")} == old_figures | new_figures
     analytic = tmp_path/"data/analytic/blockA"/mod.STEM
     endpoints = pd.read_parquet(analytic/"13_essdai_patient_delta_endpoints.parquet")
+    patterns = pd.read_parquet(analytic/"13_essdai_patient_observed_patterns.parquet")
+    assert len(patterns) == 48 and not patterns.duplicated(["patient_id", "threshold_abs"]).any()
+    assert not pd.read_csv(qc/"13_essdai_observed_pattern_qc.csv").status.eq("fail").any()
     assert len(endpoints) == 24 and endpoints.patient_id.is_unique
     assert set(mod.DELTA_BASE_COLUMNS).issubset(endpoints.columns)
     assert {"last_status_pm3", "ever_worsened_ge5", "first_observed_worsening_ge3_date"}.issubset(endpoints.columns)

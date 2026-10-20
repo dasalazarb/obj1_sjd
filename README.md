@@ -81,6 +81,14 @@ outputs, temporal QC and FDR families. See
 Run `python src/block_A/14_risk_factors_progression.py --dry-run` to validate
 contracts and inspect feasibility before fitting the associations.
 
+The explain-why extension adds versioned Step 13 observed-pattern descriptions
+(including insufficient dates and discordant-date sensitivity), preserving all
+original endpoints. Run Step 14 with `--explainwhy-audit-only` for a separate
+availability/feasibility bundle without fitting models. Missing canonical inputs
+are reported explicitly; new delta3 association models remain gated. See the
+[protocol and reproduction guide](docs/13_14_explain_why_extension.md) and
+[implementation/validation log](docs/13_14_explain_why_implementation_log.md).
+
 ## Key folders
 
 - `data/`: project data files
