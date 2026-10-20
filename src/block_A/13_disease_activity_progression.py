@@ -1421,6 +1421,8 @@ def parse_args(argv=None):
     p.add_argument("--overwrite", action=argparse.BooleanOptionalAction, default=True,
                    help="Regenerate existing Step 13 outputs (default); --no-overwrite protects them")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--observed-patterns-v2", action="store_true",
+                   help="Run only the isolated observed-patterns v2 bundle; preserve all legacy products")
     p.add_argument("--input-origin", choices=("canonical", "synthetic_validation"), default="canonical",
                    help="Label new observed-pattern manifests; synthetic validation is never clinical closure")
     return p.parse_args(argv)
@@ -1428,6 +1430,9 @@ def parse_args(argv=None):
 
 def main(args=None):
     args = parse_args() if args is None else args
+    if getattr(args, "observed_patterns_v2", False):
+        from src.block_A.observed_patterns_v2 import run_observed_patterns_v2
+        return run_observed_patterns_v2(args, sys.modules[__name__])
     tables = args.output_root/"outputs/tables/blockA"/STEM
     figures = args.output_root/"outputs/figures/blockA"/STEM
     qc = args.output_root/"outputs/qc/blockA"/STEM
