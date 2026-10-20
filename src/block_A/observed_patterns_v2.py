@@ -504,6 +504,8 @@ def write_observed_pattern_outputs_v2(df, baseline, endpoints, output_root, *,
         csv("tables", "pattern_legacy_bridge", legacy_bridge_v2(df, endpoints, audit))
         csv("qc", "observed_pattern_qc", checks)
         plot_patterns_v2(audit, staging["figures"]/"13_essdai_observed_pattern_aggregate_v2.pdf", input_origin)
+        from src.block_A.observed_patterns_v2_figures import make_companion_figures
+        make_companion_figures(audit, sequence, staging["figures"])
         paths = sorted(p for d in staging.values() for p in d.iterdir())
         artifacts = [{"path": str(p.relative_to(stage)), "sha256": sha256(p)} for p in paths]
         manifest = dict(definition_version=DEFINITION_VERSION, input_origin=input_origin, code_commit=commit,
