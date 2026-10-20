@@ -1764,6 +1764,8 @@ def parse_args(argv=None):
     parser.add_argument("--minimum-events", type=int, default=MIN_EVENTS_COX)
     parser.add_argument("--overwrite", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--explainwhy-audit-only", action="store_true",
+                        help="Write isolated explain-why availability/feasibility QC; never fit models")
     args = parser.parse_args(argv)
     if args.minimum_events < MIN_EVENTS_COX:
         parser.error(f"--minimum-events must be >= {MIN_EVENTS_COX}; safeguards cannot be lowered")
@@ -2089,6 +2091,13 @@ def write_output_manifest(dirs, root):
 
 def main(args=None):
     args = args or parse_args()
+    if getattr(args, "explainwhy_audit_only", False):
+        from src.block_A.explainwhy_feasibility import run_feasibility_audit
+        decisions = run_feasibility_audit(args, sys.modules[__name__])
+        print(decisions.to_string(index=False))
+        if decisions.loc[decisions.gate.eq("G0"), "status"].eq("BLOCKED").any():
+            raise SystemExit(2)
+        return
     if args.minimum_events < MIN_EVENTS_COX:
         raise ValueError(f"minimum_events cannot be below {MIN_EVENTS_COX}")
     dirs = output_directories(args.output_root)
