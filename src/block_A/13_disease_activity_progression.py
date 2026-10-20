@@ -1422,7 +1422,9 @@ def parse_args(argv=None):
                    help="Regenerate existing Step 13 outputs (default); --no-overwrite protects them")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--observed-patterns-v2", action="store_true",
-                   help="Run only the isolated observed-patterns v2 bundle; preserve all legacy products")
+                   help="Run only observed patterns v2; standard execution generates legacy and v2 products")
+    p.add_argument("--legacy-only", action="store_true",
+                   help="Explicit historical reproduction: do not generate v2 products")
     p.add_argument("--input-origin", choices=("canonical", "synthetic_validation"), default="canonical",
                    help="Label new observed-pattern manifests; synthetic validation is never clinical closure")
     return p.parse_args(argv)
@@ -1430,6 +1432,8 @@ def parse_args(argv=None):
 
 def main(args=None):
     args = parse_args() if args is None else args
+    if getattr(args, "observed_patterns_v2", False) and getattr(args, "legacy_only", False):
+        raise ValueError("--observed-patterns-v2 and --legacy-only cannot be combined")
     if getattr(args, "observed_patterns_v2", False):
         from src.block_A.observed_patterns_v2 import run_observed_patterns_v2
         return run_observed_patterns_v2(args, sys.modules[__name__])
@@ -1638,6 +1642,13 @@ def main(args=None):
         "n_negative_times": int(df[TIME].lt(0).sum()), "n_invalid_times": int(df[TIME].isna().sum()),
         "n_official_baselines": len(base_rows), "baseline_essdai_available": int(base_rows[ESSDAI].notna().sum()),
         "baseline_essdai_missing": int(base_rows[ESSDAI].isna().sum()), **pop_checks}]).to_csv(qc/"13_progression_qc.csv", index=False)
+    if not getattr(args, "legacy_only", False):
+        from src.block_A.observed_patterns_v2 import write_observed_pattern_outputs_v2
+        write_observed_pattern_outputs_v2(
+            df, baseline, build_patient_absolute_change_endpoints(df), args.output_root,
+            input_origin=getattr(args, "input_origin", "canonical"),
+            input_paths={"step10": args.integrated, "step11": args.baseline},
+            overwrite=args.overwrite, dry_run=False)
     LOG.info("Completed: %d rows, %d patients, 12/12 domains", len(df), df.patient_id.nunique())
     print("ORDER TO REVIEW DISEASE ACTIVITY PROGRESSION OUTPUTS\n"
           "1. Domain contract / structural QC\n2. Cohort flow / sequential attrition\n"
