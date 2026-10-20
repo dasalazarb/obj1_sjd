@@ -258,7 +258,7 @@ def test_complete_bundle_hashes_controlled_privacy_backup_and_no_overwrite(tmp_p
     assert checks.status.isin(["PASS", "INFO"]).all()
     dirs = v2.output_directories(tmp_path)
     manifest = json.loads((dirs["qc"]/"13_essdai_observed_pattern_manifest_v2.json").read_text())
-    assert len(manifest["artifacts"]) == 13
+    assert len(manifest["artifacts"]) == 19  # current main includes six companion figures
     for artifact in manifest["artifacts"]:
         assert v2.sha256(tmp_path/artifact["path"]) == artifact["sha256"]
     for source in manifest["inputs"]:
@@ -339,13 +339,14 @@ def test_v1_endpoints_outputs_and_step14_source_are_unchanged(tmp_path):
         assert (tmp_path/path).read_bytes() == content
     pd.testing.assert_frame_equal(before, step13.build_patient_absolute_change_endpoints(df))
     pd.testing.assert_frame_equal(original, v1.build_observed_patterns(df, before))
-    for relative in ("src/block_A/observed_patterns.py", "src/block_A/14_risk_factors_progression.py",
+    for relative in ("src/block_A/observed_patterns.py",
                      "src/block_A/10_build_integrated_longitudinal_dataset.py", "src/block_A/11_integrated_baseline_characterization.py", "config.py"):
         assert subprocess.check_output(["git", "show", BASE+":"+relative], cwd=ROOT) == (ROOT/relative).read_bytes()
-    relative = "src/block_A/13_disease_activity_progression.py"
     def funcs(source):
         return {node.name: ast.dump(node) for node in ast.parse(source).body if isinstance(node, ast.FunctionDef) and node.name not in {"main", "parse_args"}}
-    assert funcs(subprocess.check_output(["git", "show", BASE+":"+relative], cwd=ROOT)) == funcs((ROOT/relative).read_text())
+    # Both scripts have isolated opt-in dispatch. Scientific functions stay exact.
+    for relative in ("src/block_A/13_disease_activity_progression.py", "src/block_A/14_risk_factors_progression.py"):
+        assert funcs(subprocess.check_output(["git", "show", BASE+":"+relative], cwd=ROOT)) == funcs((ROOT/relative).read_text())
 
 
 def test_cli_v2_only_dryrun_and_missing_input_do_not_touch_legacy(tmp_path, monkeypatch):

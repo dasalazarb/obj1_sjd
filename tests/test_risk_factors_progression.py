@@ -550,20 +550,21 @@ def test_weighted_other_domain_adjustments_aliases_missing_and_inconsistent_pane
     _, _, intervals, _, _ = datasets(source)
     assert intervals.from_essdai_other_domains_articular.isna().all()
     assert intervals.to_essdai_other_domains_articular.isna().all()
-    assert intervals.from_domain_weighted_contribution_raw_articular.eq(8).all()
+    assert intervals.from_domain_weighted_contribution_raw_articular.eq(4).all()  # canonical articular weight is 2
     for domain in mod.DOMAINS:
         source[mod.step13.DOMAIN_ALIASES[domain][0]] = 0
     source["essdai__articular_ordinal_score"] = 2
     source["essdai__biological_ordinal_score"] = 2
     source[mod.step13.DOMAIN_ALIASES["glandular"][0]] = 1
+    source[mod.ESSDAI] = 8  # 2*articular(2) + 2*biological(1) + glandular(2)
     _, _, intervals, _, _ = datasets(source)
-    assert intervals.from_domain_contribution_articular.eq(8).all()
+    assert intervals.from_domain_contribution_articular.eq(4).all()
     assert intervals.from_essdai_other_domains_articular.eq(4).all()
     assert intervals.from_domain_contribution_biological.eq(2).all()
-    assert intervals.from_essdai_other_domains_biological.eq(10).all()
-    assert intervals.from_essdai_other_domains_glandular.eq(10).all()
+    assert intervals.from_essdai_other_domains_biological.eq(6).all()
+    assert intervals.from_essdai_other_domains_glandular.eq(6).all()
     assert intervals.to_essdai_other_domains_articular.eq(4).all()
-    assert intervals.to_essdai_other_domains_biological.eq(10).all()
+    assert intervals.to_essdai_other_domains_biological.eq(6).all()
     assert mod.canonical_domain_weights()["glandular"] == 2
     assert mod.canonical_domain_weights()["pns"] == mod.ESSDAI_DOMAIN_WEIGHTS["neuro_periph"] == 5
     source[mod.ESSDAI] = 3
@@ -668,7 +669,7 @@ def test_to_negative_subtraction_and_discordance_fail_closed_without_clipping():
     source.loc[2, mod.ESSDAI] += 1
     _, _, intervals, _, _ = datasets(source)
     assert pd.isna(intervals.to_essdai_other_domains_articular.iloc[0])
-    assert intervals.to_domain_weighted_contribution_raw_articular.iloc[0] == 8
+    assert intervals.to_domain_weighted_contribution_raw_articular.iloc[0] == 4
     assert intervals.to_composition_category_articular.iloc[0] == "invalid_subtraction"
     assert intervals.to_composition_category_biological.iloc[1] == "complete_panel_discordant"
     assert intervals.to_essdai_other_domains_biological.iloc[:2].isna().all()
