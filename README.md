@@ -142,6 +142,13 @@ endpoint definitions; its cohort must not be silently extended.
 
 ## Key folders
 
+Step 14 now also offers an explicitly isolated inclusive ESSDAI-index analysis
+with `--explainwhy-inclusive-main`. Both eligible Step 13 v2 index routes are
+primary in this new family; historical Step 14 remains unchanged by default.
+See [the input contracts, invocation, sensitivities and validation status](docs/14_explainwhy_inclusive_v2.md).
+Canonical clinical inputs were unavailable during implementation; software
+validation does not establish real-cohort or institutional closure.
+
 - `data/`: project data files
 - `src/`: analysis and processing scripts
 - `outputs/`: generated results

@@ -1766,7 +1766,20 @@ def parse_args(argv=None):
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--explainwhy-audit-only", action="store_true",
                         help="Write isolated explain-why availability/feasibility QC; never fit models")
+    parser.add_argument("--explainwhy-inclusive-main", action="store_true",
+                        help="Isolated inclusive ESSDAI-index v2 family; preserve historical outputs")
+    parser.add_argument("--patterns-v2", type=Path, help="Explicit v2 eligible patient Parquet")
+    parser.add_argument("--selected-dates-v2", type=Path, help="Explicit v2 selected-date Parquet")
+    parser.add_argument("--eligibility-v2", type=Path, help="Explicit complete v2 eligibility Parquet")
+    parser.add_argument("--pattern-manifest-v2", type=Path, help="Explicit v2 producer manifest")
+    parser.add_argument("--legacy-endpoints", type=Path, help="Step 13 original patient delta endpoints for bridge QC")
+    parser.add_argument("--lab-max-age-days", type=int, nargs="*", default=[],
+                        help="Prespecified nonnegative index-lab age windows for sensitivity only; primary is same-date")
     args = parser.parse_args(argv)
+    if args.explainwhy_inclusive_main and args.explainwhy_audit_only:
+        parser.error("inclusive-main and audit-only are separate entrypoints")
+    if any(days < 0 for days in args.lab_max_age_days) or len(set(args.lab_max_age_days)) != len(args.lab_max_age_days):
+        parser.error("lab age windows must be distinct nonnegative days")
     if args.minimum_events < MIN_EVENTS_COX:
         parser.error(f"--minimum-events must be >= {MIN_EVENTS_COX}; safeguards cannot be lowered")
     return args
@@ -2091,6 +2104,9 @@ def write_output_manifest(dirs, root):
 
 def main(args=None):
     args = args or parse_args()
+    if getattr(args, "explainwhy_inclusive_main", False):
+        from src.block_A.explainwhy_inclusive_run import run_inclusive
+        return run_inclusive(args, sys.modules[__name__])
     if getattr(args, "explainwhy_audit_only", False):
         from src.block_A.explainwhy_feasibility import run_feasibility_audit
         decisions = run_feasibility_audit(args, sys.modules[__name__])

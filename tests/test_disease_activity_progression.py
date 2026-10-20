@@ -310,7 +310,11 @@ def test_step13_generates_all_outputs_and_qc(tmp_path):
         "13_essdai_individual_trajectories_delta3.pdf", "13_essdai_individual_trajectories_delta5.pdf",
         "13_essdai_individual_trajectories_ever_worsening_delta3.pdf",
         "13_essdai_individual_trajectories_ever_worsening_delta5.pdf"}
-    assert {p.name for p in figures.glob("*.pdf")} == old_figures | new_figures
+    v2_figures = {"13_essdai_observed_pattern_aggregate_v2.pdf", "13_essdai_index_support_v2.pdf",
+        "13_essdai_pattern_by_index_source_v2.pdf", "13_essdai_pattern_by_index_state_v2.pdf",
+        "13_essdai_pattern_by_baseline_pop_v2.pdf", "13_essdai_individual_trajectories_delta3_v2.pdf",
+        "13_essdai_individual_trajectories_delta5_v2.pdf"}
+    assert {p.name for p in figures.glob("*.pdf")} == old_figures | new_figures | v2_figures
     analytic = tmp_path/"data/analytic/blockA"/mod.STEM
     endpoints = pd.read_parquet(analytic/"13_essdai_patient_delta_endpoints.parquet")
     patterns = pd.read_parquet(analytic/"13_essdai_patient_observed_patterns.parquet")

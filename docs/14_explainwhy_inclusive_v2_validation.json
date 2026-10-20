@@ -1,0 +1,45 @@
+{
+  "implementation_base_commit": "dc56d303a2c9379e8b3193accb615fd9ae8f91ee",
+  "implementation_status": "IMPLEMENTED",
+  "validation_scope": "synthetic software contracts and required regression suite only",
+  "pytest_result": "336 passed",
+  "new_synthetic_cases": 28,
+  "canonical_execution": "BLOCKED_REQUIRED_CLINICAL_INPUTS_UNAVAILABLE",
+  "clinical_review": "PENDING_CLINICAL_REVIEW",
+  "privacy_review": "PENDING_INSTITUTIONAL_REVIEW",
+  "institutional_closure": "CONDITIONAL",
+  "tests": [
+    "tests/test_explainwhy_inclusive_v2.py",
+    "tests/test_observed_patterns_v2.py",
+    "tests/test_disease_activity_progression.py",
+    "tests/test_risk_factors_progression.py",
+    "tests/test_explainwhy_extension.py",
+    "tests/test_integrated_longitudinal_dataset.py",
+    "tests/test_integrated_baseline_characterization.py"
+  ],
+  "preexisting_failures_reproduced_on_unmodified_base": [
+    "test_complete_bundle_hashes_controlled_privacy_backup_and_no_overwrite: six companion figures absent from old expectation",
+    "test_step13_generates_all_outputs_and_qc: current main v2 figures absent from old expectation",
+    "test_weighted_other_domain_adjustments_aliases_missing_and_inconsistent_panels: stale articular weight/fixture total",
+    "test_to_negative_subtraction_and_discordance_fail_closed_without_clipping: stale articular weight"
+  ],
+  "historical_step14_science": "AST-identical outside parse_args/main; canonical upstream sources byte-identical",
+  "protected_sources_sha256": {
+    "config.py": "3cff452f4a25ed2b3badf43da75222ec50cfd913ddf9eb8dcb19cb27c2142226",
+    "src/block_A/10_build_integrated_longitudinal_dataset.py": "41f7ecb882fdb17546c4f045302b45b2ed22fc6c85fd080307559dba67dbea4c",
+    "src/block_A/11_integrated_baseline_characterization.py": "95a358b0ab9e54470623f3a9acee089e02a9d4bcef56170b1d40a32dbc969bef",
+    "src/block_A/13_disease_activity_progression.py": "d1123c5dddfa615b6324e6443e28a3ce3ef48ce00548ac273c71d961fcb77781",
+    "src/block_A/observed_patterns.py": "0de8ee9f2ae9286d6b45dfa650932893f1423659eedb098e8146cc5958dfc033",
+    "src/block_A/observed_patterns_v2.py": "1a5fb33485e48ad751a87a5c6dd762443d9401e0fe288e48fcaddf5d9ef6de27",
+    "src/block_A/explainwhy_feasibility.py": "13627ea3348da61023aaae9d95c03d8e80e978afdc9e493814b620fe04594af2"
+  },
+  "new_modules_sha256": {
+    "src/block_A/explainwhy_inclusive.py": "e7b5bc5abf7d8d3356b0172d39748f22a07391f55db7c21e530247f14cd7af58",
+    "src/block_A/explainwhy_inclusive_figures.py": "49a9d9fef9193fa57a844436d38a58d86c4def2cff4d798ad35e4db7ea82f1b1",
+    "src/block_A/explainwhy_inclusive_models.py": "d37b26495b3a4d8f02f988fd41f6cf08d041e380b2b17336c4d3c2aef898f3d2",
+    "src/block_A/explainwhy_inclusive_run.py": "d4f4d0f5c1654fca3a464de5c5227f24d6197e41a99375683fe44e3f29100241"
+  },
+  "visual_qc": "synthetic artist counts tested; both clock previews inspected; one index x per eligible fallback",
+  "outputs_in_git": "source, documentation and synthetic tests only; no clinical records or generated clinical outputs",
+  "canonical_counts_and_estimates": null
+}
