@@ -89,6 +89,22 @@ are reported explicitly; new delta3 association models remain gated. See the
 [protocol and reproduction guide](docs/13_14_explain_why_extension.md) and
 [implementation/validation log](docs/13_14_explain_why_implementation_log.md).
 
+Step 13 has an isolated opt-in observed-patterns v2 mode. It preserves the
+official clinical baseline and all historical products, permits a later ESSDAI
+observation index when the official score is missing, and classifies direction
+from two distinct dates with provisional evidence. Intermittence requires at
+least three dates. Step 14 remains unchanged. Run:
+
+```bash
+python src/block_A/13_disease_activity_progression.py --observed-patterns-v2 --dry-run
+python src/block_A/13_disease_activity_progression.py --observed-patterns-v2 --no-overwrite
+```
+
+This mode writes only versioned v2 products; deliberate `--overwrite` reruns
+back up prior v2 files. See the [v2 definitions, dictionary, QC and validation](docs/13_essdai_observed_patterns_v2.md).
+Canonical inputs were unavailable during implementation: real-cohort validation
+and clinical/disclosure review remain pending.
+
 ## Key folders
 
 - `data/`: project data files

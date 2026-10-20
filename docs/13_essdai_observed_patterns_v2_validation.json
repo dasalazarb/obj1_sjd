@@ -1,0 +1,103 @@
+{
+  "definition_version": "observed-essdai-pattern-v2",
+  "status": "CONDITIONAL — real-cohort validation pending",
+  "input_origin": "synthetic_validation",
+  "base_commit": "e96f18955cc5d41208fdb3aa66122b20f25a249a",
+  "live_main_verification": "Connected GitHub branches/main API, 2026-10-20; independently confirmed with git ls-remote",
+  "implementation_branch": "codex/step13-observed-patterns-v2",
+  "canonical_input_status": "NOT RUN — canonical inputs unavailable",
+  "canonical_inputs": [
+    {
+      "role": "step10",
+      "path": "data/analytic/10_build_integrated_longitudinal_dataset/10_integrated_longitudinal_clinical_episode.parquet",
+      "available": false,
+      "sha256": null
+    },
+    {
+      "role": "step11",
+      "path": "data/analytic/blockA/11_integrated_baseline_characterization/11_integrated_baseline_patient_level.parquet",
+      "available": false,
+      "sha256": null
+    }
+  ],
+  "historical_generated_products": {
+    "available": false,
+    "comparison": "NOT RUN — historical products unavailable"
+  },
+  "real_cohort_counts": {
+    "step11": null,
+    "official": null,
+    "fallback_candidates": null,
+    "fallback_eligible": null,
+    "extended": null,
+    "insufficient": null
+  },
+  "tests": {
+    "new_v2": {
+      "passed": 67,
+      "failed": 0,
+      "evidence": "Final standalone run: 67 passed in 12.96s; also included in relevant integration run",
+      "command": "python -m pytest -q -W ignore tests/test_observed_patterns_v2.py"
+    },
+    "base_relevant": {
+      "passed": 239,
+      "failed": 2,
+      "command": "python -m pytest -q tests/test_explainwhy_extension.py tests/test_disease_activity_progression.py tests/test_risk_factors_progression.py tests/test_integrated_longitudinal_dataset.py tests/test_integrated_baseline_characterization.py"
+    },
+    "final_relevant": {
+      "passed": 324,
+      "failed": 2,
+      "command": "python -m pytest -q -W ignore tests/test_observed_patterns_v2.py tests/test_explainwhy_extension.py tests/test_disease_activity_progression.py tests/test_risk_factors_progression.py tests/test_integrated_longitudinal_dataset.py tests/test_integrated_baseline_characterization.py tests/test_followup_characterization.py"
+    },
+    "preexisting_failures": [
+      {
+        "test": "tests/test_risk_factors_progression.py::test_weighted_other_domain_adjustments_aliases_missing_and_inconsistent_panels",
+        "reason": "Expected raw Articular contribution 8; unchanged configured weight yields 4.0",
+        "reproduced_on_detached_base": true
+      },
+      {
+        "test": "tests/test_risk_factors_progression.py::test_to_negative_subtraction_and_discordance_fail_closed_without_clipping",
+        "reason": "Expected raw Articular contribution 8; unchanged configured weight yields 4.0",
+        "reproduced_on_detached_base": true
+      }
+    ],
+    "full_suite": {
+      "status": "BLOCKED during collection on both base and implementation",
+      "collection_errors": 2,
+      "missing_files": [
+        "src/20_btris_visit_date_match_report.py",
+        "src/studies/pharma/01_run_pharma.py"
+      ],
+      "command": "python -m pytest -q -W ignore"
+    },
+    "regressions_detected": 0
+  },
+  "synthetic_bundle": {
+    "blocking_qc_passed": 35,
+    "informational_checks": 1,
+    "artifacts_hashed": 13,
+    "artifact_hashes_verified": true,
+    "pdf_rendered_and_visually_reviewed": true,
+    "empty_bundle": "PASS",
+    "no_clinical_results": true,
+    "source_hashes_verified": true
+  },
+  "compatibility": {
+    "v1_module_unchanged": true,
+    "step10_unchanged": true,
+    "step11_unchanged": true,
+    "step12_unchanged": true,
+    "step14_unchanged": true,
+    "config_unchanged": true,
+    "legacy_step13_function_AST_preserved_except_CLI": true
+  },
+  "clinical_review": "PENDING_CLINICAL_REVIEW",
+  "privacy": "No real inputs, patient products or generated clinical outputs committed. Controlled aggregates require institutional disclosure review.",
+  "remaining_closure_criteria": [
+    "Authorized canonical Step 10/11 inputs and SHA-256",
+    "Real cohort attrition and source reconciliation",
+    "Real bundle blocking QC and legacy bridge PASS",
+    "Clinical review",
+    "Institutional disclosure review before external sharing"
+  ]
+}
