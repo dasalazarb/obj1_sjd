@@ -105,6 +105,41 @@ back up prior v2 files. See the [v2 definitions, dictionary, QC and validation](
 Canonical inputs were unavailable during implementation: real-cohort validation
 and clinical/disclosure review remain pending.
 
+## Step 13 primary observed-pattern workflow (v2)
+
+A standard Step 13 run now produces the established official-baseline analyses **and**
+the v2 observed ESSDAI pattern bundle in the same run:
+
+```bash
+python src/block_A/13_disease_activity_progression.py
+```
+
+v2 is the **primary presentation** for the four observed pattern labels and
+expanded ESSDAI-index cohort. Older official-baseline results remain separately
+named and retain their historical denominators; they are not renamed or
+silently relabeled as extended-cohort estimates. The new v2 figures appear in
+`outputs/figures/blockA/13_disease_activity_progression/`:
+
+- `13_essdai_observed_pattern_aggregate_v2.pdf`
+- `13_essdai_index_support_v2.pdf`
+- `13_essdai_pattern_by_index_source_v2.pdf`
+- `13_essdai_pattern_by_index_state_v2.pdf`
+- `13_essdai_pattern_by_baseline_pop_v2.pdf`
+- `13_essdai_individual_trajectories_delta3_v2.pdf`
+- `13_essdai_individual_trajectories_delta5_v2.pdf`
+
+`--observed-patterns-v2` remains a fast **v2-only** execution path when
+the legacy analysis need not be recomputed. `--legacy-only` explicitly
+reproduces the old run without publishing v2. Never compare the legacy
+143-patient official-baseline figures with the 153-patient extended v2
+figures as if they used the same index or estimand. These are **reference
+counts from one reviewed run**, not hardcoded cohort expectations.
+The v2 plot of individual paths is privacy-sensitive and must not be
+disclosed without institutional review. Both 2-date direction labels and
+3+-date intermittence labels are observational, not biological persistence.
+Step 14 still consumes official Step 11 baselines and unchanged Step 13
+endpoint definitions; its cohort must not be silently extended.
+
 ## Key folders
 
 - `data/`: project data files
