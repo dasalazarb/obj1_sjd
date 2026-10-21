@@ -21,6 +21,28 @@ workspace. Each future run records available physical inputs, old products,
 branch, commit, working-tree status, scientific diff, code fingerprint and
 package versions in its own prechange snapshot.
 
+## One-command clinical run (new default)
+
+From the repository root, with the existing canonical Step 10/11 and Step 13 v2 inputs:
+
+```bash
+python src/block_A/14_risk_factors_progression.py
+```
+
+No flags are required. This invokes the inclusive v2 extension and resolves
+all seven companion input locations using the repository layout. Inputs are
+still verified against the Step 13 v2 producer manifest, including SHA-256
+hashes and QC; missing or incompatible files **block** the run instead of
+silently changing the cohort. The script writes the
+`14_explainwhy_inclusive_v2_*` output family under the normal Step 14
+outputs directories.
+
+For the original historical Step 14 models, use
+`python src/block_A/14_risk_factors_progression.py --historical-main`.
+The `--explainwhy-audit-only` and `--explainwhy-inclusive-main` entrypoints
+remain available for reproducibility and custom explicit paths. The simple
+command does **not** imply clinical or institutional review is complete.
+
 ## Execution
 
 Supply all consumed v2 products and their producer manifest explicitly. The

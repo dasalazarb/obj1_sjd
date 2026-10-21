@@ -1749,6 +1749,9 @@ def output_directories(root):
 
 
 def parse_args(argv=None):
+    # Running the entrypoint with no arguments selects the reviewed inclusive
+    # ESSDAI-index extension. Explicit legacy/audit modes remain available.
+    invoked_without_flags = len(sys.argv[1:] if argv is None else argv) == 0
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--integrated", type=Path, default=common.INTEGRATED_LONGITUDINAL_PARQUET)
     parser.add_argument("--baseline", type=Path, default=common.INTEGRATED_BASELINE_PARQUET)
@@ -1767,7 +1770,9 @@ def parse_args(argv=None):
     parser.add_argument("--explainwhy-audit-only", action="store_true",
                         help="Write isolated explain-why availability/feasibility QC; never fit models")
     parser.add_argument("--explainwhy-inclusive-main", action="store_true",
-                        help="Isolated inclusive ESSDAI-index v2 family; preserve historical outputs")
+                        help="Inclusive ESSDAI-index v2 family (also the no-arguments default)")
+    parser.add_argument("--historical-main", action="store_true",
+                        help="Run the original Step 14 analysis instead of the no-arguments inclusive default")
     parser.add_argument("--patterns-v2", type=Path, help="Explicit v2 eligible patient Parquet")
     parser.add_argument("--selected-dates-v2", type=Path, help="Explicit v2 selected-date Parquet")
     parser.add_argument("--eligibility-v2", type=Path, help="Explicit complete v2 eligibility Parquet")
@@ -1776,8 +1781,31 @@ def parse_args(argv=None):
     parser.add_argument("--lab-max-age-days", type=int, nargs="*", default=[],
                         help="Prespecified nonnegative index-lab age windows for sensitivity only; primary is same-date")
     args = parser.parse_args(argv)
-    if args.explainwhy_inclusive_main and args.explainwhy_audit_only:
-        parser.error("inclusive-main and audit-only are separate entrypoints")
+    if invoked_without_flags:
+        args.explainwhy_inclusive_main = True
+    if sum(bool(x) for x in (args.explainwhy_inclusive_main, args.explainwhy_audit_only,
+                             args.historical_main)) > 1:
+        parser.error("inclusive-main, audit-only, and historical-main are mutually exclusive")
+    if args.explainwhy_inclusive_main:
+        # Derive context/registry from the selected canonical Step 10 file and
+        # resolve v2 producer artifacts relative to this repository. These
+        # defaults only apply to the inclusive mode; historical CLI behavior
+        # and explicitly supplied locations are not modified.
+        step13_v2_dir = ROOT / "data/analytic/blockA/13_disease_activity_progression"
+        step13_v2_qc = ROOT / "outputs/qc/blockA/13_disease_activity_progression"
+        if args.context is None:
+            args.context = args.integrated.with_name("10_integrated_longitudinal_context.parquet")
+        if args.variable_registry is None:
+            args.variable_registry = args.integrated.with_name("10_variable_registry.csv")
+        for name, default in (
+            ("patterns_v2", step13_v2_dir / "13_essdai_patient_observed_patterns_v2.parquet"),
+            ("selected_dates_v2", step13_v2_dir / "13_essdai_pattern_selected_dates_v2.parquet"),
+            ("eligibility_v2", step13_v2_dir / "13_essdai_pattern_patient_eligibility_v2.parquet"),
+            ("pattern_manifest_v2", step13_v2_qc / "13_essdai_observed_pattern_manifest_v2.json"),
+            ("legacy_endpoints", step13_v2_dir / "13_essdai_patient_delta_endpoints.parquet"),
+        ):
+            if getattr(args, name) is None:
+                setattr(args, name, default)
     if any(days < 0 for days in args.lab_max_age_days) or len(set(args.lab_max_age_days)) != len(args.lab_max_age_days):
         parser.error("lab age windows must be distinct nonnegative days")
     if args.minimum_events < MIN_EVENTS_COX:
