@@ -163,7 +163,7 @@ def serology_patient_id_match(value):
         text, representation = raw(value), "source_text"
         # Textual float artifacts must only be treated as decimal integers if
         # the exact string has a zero-only fractional part.
-        if re.fullmatch(r"\\d+\\.0+", text.strip()):
+        if re.fullmatch(r"\d+\.0+", text.strip()):
             text, representation = text.strip().split(".", 1)[0], "text_integer_decimal"
     match = re.sub(r"^0+", "", re.sub(r"[-/\\\s]", "", text.strip()))
     if match in {"", "nan", "None"}:
