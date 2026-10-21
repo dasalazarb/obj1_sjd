@@ -16,6 +16,7 @@ from src.block_A import explainwhy_inclusive_models as models
 from src.block_A import explainwhy_inclusive_run as runner
 from src.block_A import explainwhy_inclusive_figures as figures
 from src.block_A import observed_patterns_v2 as v2
+from src.block_A import explainwhy_inclusive_composition as composition
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("inclusive_step14", ROOT/"src/block_A/14_risk_factors_progression.py")
@@ -288,6 +289,15 @@ def test_dryrun_no_writes_and_full_synthetic_bundle_preserves_history(bundle, mo
     assert manifest["canonical_execution"] == "SYNTHETIC_VALIDATION_ONLY"
     assert historic.read_bytes() == b"historical result bytes\n"
     dirs = runner.directories(args.output_root)
+    for name in ("composition_version_source_audit.csv", "composition_interval_gate_qc.csv",
+                 "leave_source_support_qc.csv", "composition_provenance_decision.json"):
+        assert (dirs["qc"]/(inc.PREFIX+name)).is_file()
+    decision = json.loads((dirs["qc"]/(inc.PREFIX+"composition_provenance_decision.json")).read_text())
+    assert decision["status"] == "UNVERIFIED"
+    support = pd.read_csv(dirs["qc"]/(inc.PREFIX+"leave_source_support_qc.csv"))
+    assert support.status.eq("NOT_ESTIMABLE").all()
+    assert support.n_fitted.eq(0).all()
+    assert support.qc_rule_version.eq(composition.QC_RULE_VERSION).all()
     for area in dirs:
         assert list(dirs[area].glob(inc.PREFIX+"*"))
     for artifact in manifest["artifacts"]:
@@ -421,3 +431,235 @@ def test_discordant_fallback_index_reselected_only_in_explicit_sensitivity():
     risk = inc.first_event_riskset(inc.index_cohort(audit), selected)
     assert risk.essdai_index_score.iloc[0] == 5 and risk.event.iloc[0] == 1
     assert risk.essdai_index_date.iloc[0] > cohort.essdai_index_date.iloc[0]
+
+
+def composition_fixture():
+    raw = episodes([2., 4., 2.])
+    raw[step14.step13.DOMAIN_ALIASES["articular"][0]] = [1., 2., 1.]
+    raw["_essdai_version"] = "domain-r1"
+    raw["_essdai_total_version"] = "total-r7"
+    policy = dict(domain_version_field="_essdai_version", source_fields=list(raw),
+        compatible_versions=[dict(domain_version="domain-r1", total_version="total-r7", scoring_system="ESSDAI-canonical")])
+    return raw, policy
+
+
+def composition_parts(raw, policy=None):
+    clean, baseline, cohort, sequence, patterns, risks = build(frame=raw)
+    registry = pd.DataFrame([dict(public_variable=s.time_varying_column,
+        producer_script="synthetic_episode_producer", temporal_scope="episode")
+        for s in step14.build_predictor_registry() if s.family == "essdai_domain"])
+    predictors, specs, _ = inc.build_index_predictors(clean, baseline, cohort, step14, registry)
+    intervals, qc = inc.build_lagged_intervals(clean, cohort, sequence, risks[3], specs, step14, registry, policy)
+    return intervals, qc, (clean, baseline, cohort, sequence, patterns, risks, registry, predictors, specs)
+
+
+def test_semantically_certified_matrix_allows_different_tokens_and_exact_subtraction():
+    raw, policy = composition_fixture()
+    intervals, qc, _ = composition_parts(raw, policy)
+    assert intervals.composition_pair_gate_articular.eq("compatible_verified").all()
+    assert intervals.from_essdai_other_domains_articular.eq(0).all()
+    assert intervals.to_essdai_other_domains_articular.eq(0).all()
+    assert intervals.from_essdai.to_list() == [2., 4.]
+    assert qc.n_post_version_eligible.eq(2).all()
+    assert qc.n_pair_post_version_eligible.eq(2).all()
+
+
+@pytest.mark.parametrize("mutation,expected,endpoint", [
+    ("missing_domain_version", "missing_version_evidence", "both"),
+    ("missing_total_version", "missing_version_evidence", "both"),
+    ("equal_but_unverified", "producer_identity_unverified", "both"),
+    ("incompatible", "incompatible_scoring_versions", "both"),
+    ("same_arithmetic_other_version", "incompatible_scoring_versions", "both"),
+    ("missing_panel", "incomplete_domain_panel", "both"),
+    ("missing_target", "missing_total_or_domain", "both"),
+    ("discordant", "nonconcordant_total", "both"),
+    ("unknown_to", "missing_version_evidence", "to"),
+])
+def test_composition_fail_closed_with_exclusive_reasons(mutation, expected, endpoint):
+    raw, policy = composition_fixture()
+    if mutation == "missing_domain_version":
+        raw = raw.drop(columns="_essdai_version")
+    elif mutation == "missing_total_version":
+        raw = raw.drop(columns="_essdai_total_version")
+    elif mutation == "equal_but_unverified":
+        raw["_essdai_total_version"] = raw._essdai_version
+        policy = None
+    elif mutation in {"incompatible", "same_arithmetic_other_version"}:
+        raw["_essdai_total_version"] = "different-total"
+    elif mutation in {"missing_panel", "missing_target"}:
+        domain = "pulmonary" if mutation == "missing_panel" else "articular"
+        raw[step14.step13.DOMAIN_ALIASES[domain][0]] = np.nan
+    elif mutation == "discordant":
+        raw[inc.SCORE] += 1
+    elif mutation == "unknown_to":
+        raw.loc[1, "_essdai_total_version"] = pd.NA
+    intervals, qc, parts = composition_parts(raw, policy)
+    first = intervals.iloc[0]
+    assert first.composition_pair_gate_articular == expected
+    if endpoint == "to":
+        assert first.from_composition_gate_articular == "compatible_verified"
+        assert first.to_composition_gate_articular == expected
+    assert not (intervals.from_essdai_other_domains_articular.notna() & intervals.to_essdai_other_domains_articular.notna()).any()
+    clean, _, cohort, *_ = parts
+    gates = composition.interval_gate_qc(intervals, clean, cohort, ["articular"])
+    categories = gates.loc[gates.stage.eq("exclusive_failure_category") & gates.index_source.eq("all") & gates.side.eq("both")]
+    assert categories.n_intervals.sum() == len(intervals)
+
+
+def test_cross_endpoint_scoring_systems_must_also_be_compatible():
+    raw, policy = composition_fixture()
+    raw.loc[1, "_essdai_total_version"] = "total-r8"
+    policy["compatible_versions"].append(dict(domain_version="domain-r1", total_version="total-r8", scoring_system="different-system"))
+    intervals, _, _ = composition_parts(raw, policy)
+    assert intervals.from_composition_version_status.eq("compatible_verified").all()
+    assert intervals.to_composition_version_status.eq("compatible_verified").all()
+    assert intervals.composition_pair_gate_articular.eq("incompatible_scoring_versions").all()
+    assert intervals.to_essdai_other_domains_articular.isna().all()
+
+
+def test_duplicate_provenance_keys_and_collisions_block_before_interval_building():
+    raw, policy = composition_fixture()
+    clean, baseline, cohort, sequence, _, risks = build(frame=raw)
+    context = clean[v2.KEYS+["_essdai_total_version"]].copy()
+    with pytest.raises(ValueError, match="duplicate episode keys"):
+        step14.attach_episode_context(clean, baseline, pd.concat([context, context.iloc[:1]]))
+    context["_essdai_total_version"] = "conflicting"
+    with pytest.raises(ValueError, match="conflicts with source"):
+        step14.attach_episode_context(clean, baseline, context)
+    with pytest.raises(ValueError, match="duplicate canonical episode keys"):
+        inc.build_lagged_intervals(pd.concat([clean, clean.iloc[:1]]), cohort, sequence, risks[3], [], step14, pd.DataFrame(), policy)
+
+
+def test_authorization_requires_physical_hashes_semantics_and_explicit_matrix(bundle):
+    args, paths = bundle
+    manifest = json.loads(paths["manifest"].read_text())
+    assert composition.load_authorization(manifest, paths, ROOT, step14)[1]["status"] == "UNVERIFIED"
+    producer_rel = "src/block_A/observed_patterns_v2.py"
+    auth = dict(author="synthetic-test-author", protocol="synthetic-only-contract", source_role="step10",
+        source_sha256=inc.sha256(paths["step10"]), producer_path=producer_rel,
+        producer_sha256=inc.sha256(ROOT/producer_rel), producer_commit=manifest["code_commit"],
+        domain_version_field="_essdai_version", total_version_field="_essdai_total_version",
+        domain_semantics="all_12_domain_scoring_algorithm", total_semantics="recorded_total_scoring_algorithm",
+        temporal_policy="episode_as_of_no_future_information", weights=step14.canonical_domain_weights(),
+        compatible_versions=[dict(domain_version="A", total_version="B", scoring_system="canonical")])
+    manifest["composition_provenance"] = auth
+    policy, decision = composition.load_authorization(manifest, paths, ROOT, step14)
+    assert decision["status"] == "VERIFIED_AUTHORIZATION"
+    # A valid authorization cannot manufacture physically absent columns.
+    side = pd.DataFrame(dict(from_essdai_version=["A"], from_essdai_total_version=["B"]))
+    assert composition.certify_versions(side, "from", policy)[0].iloc[0] == "producer_identity_unverified"
+    auth["domain_semantics"] = "row_resolution_schema"
+    with pytest.raises(ValueError, match="semantics"):
+        composition.load_authorization(manifest, paths, ROOT, step14)
+    auth["domain_semantics"] = "all_12_domain_scoring_algorithm"
+    auth["source_sha256"] = "0"*64
+    with pytest.raises(ValueError, match="hash"):
+        composition.load_authorization(manifest, paths, ROOT, step14)
+
+
+def test_verified_tasks_use_from_predictor_other_domain_state_and_matched_total():
+    raw, policy = composition_fixture()
+    intervals, _, parts = composition_parts(raw, policy)
+    clean, _, cohort, sequence, _, risks, _, predictors, specs = parts
+    tasks = models.build_tasks(clean, cohort, sequence, risks, predictors, intervals, specs, step14, include_secondary=False)
+    pair = [t for t in tasks if t.spec.name == "domain_articular" and t.comparison_role]
+    assert [t.comparison_role for t in pair] == ["other_domains", "matched_total"]
+    assert pair[0].state_covariate == "from_essdai_other_domains_articular"
+    assert pair[0].data.y.eq(0).all()
+    pd.testing.assert_series_equal(pair[0].data.pred__domain_articular, intervals.from_domain_articular, check_names=False)
+    assert pair[0].data.patient_id.to_list() == pair[1].data.patient_id.to_list()
+    results, _, _ = models.fit_models(pair, cohort, step14, 10)
+    assert results.fdr_eligibility.eq(False).all()
+    assert results.q_value_outcome_wide.isna().all()
+    assert results.loc[results.population.ne("official_only"), "selected_adjustment_level"].nunique() == 1
+
+
+def test_ten_fallback_markers_titles_and_both_real_clocks(tmp_path):
+    raw = pd.concat([episodes([None, 2, 4], pid=f"fallback-{i}") for i in range(10)]+
+                    [episodes([2, 4, 2], pid="official")], ignore_index=True)
+    _, _, cohort, sequence, patterns, risks = build(frame=raw)
+    for clinical in (False, True):
+        fig, qc = figures.plot_trajectories(cohort, sequence, clinical, "synthetic_validation")
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        assert qc["n_observed_x"] == qc["n_expected_x"] == 10
+        assert fig._suptitle is None
+        title = fig.axes[0].title.get_window_extent(renderer)
+        for text in fig.texts:
+            assert not title.overlaps(text.get_window_extent(renderer))
+        assert cohort.loc[cohort.index_source.eq(v2.FALLBACK)].index_delay_days.eq(365).all()
+        plt.close(fig)
+    empty = pd.DataFrame(columns=["population", "analysis_type", "outcome", "sensitivity", "predictor", "predictor_label"])
+    markers = figures.make_figures(cohort, sequence, patterns, empty, inc.event_summary(risks), tmp_path, "synthetic_validation")
+    marker = markers.loc[markers.check.eq("scatter_unique_patients")].iloc[0]
+    assert marker.n_expected_x == marker.n_observed_x == 10 and marker.status == "PASS"
+    missing = patterns.loc[patterns.patient_id.ne("fallback-0")]
+    markers = figures.make_figures(cohort, sequence, missing, empty, inc.event_summary(risks), tmp_path, "synthetic_validation")
+    assert markers.loc[markers.check.eq("scatter_unique_patients"), "status"].iloc[0] == "FAIL"
+
+
+def test_forest_catalog_is_aligned_including_unsupported_rows_and_model_counts():
+    records = []
+    for population in ("inclusive_primary", "official_only"):
+        for name, valid in (("alpha", True), ("beta", population == "inclusive_primary")):
+            records.append(dict(population=population, analysis_type="baseline", outcome="first_delta3",
+                predictor=name, predictor_label=name+" long readable label", valid_for_inference=valid,
+                sensitivity="none" if population == "inclusive_primary" else "official_only:none",
+                estimate=2. if valid else np.nan, ci95_low=.1 if valid else np.nan, ci95_high=50. if valid else np.nan,
+                n_fitted=41 if valid else 0, n_events=12 if valid else 0, n_fitted_fallback=3 if population == "inclusive_primary" else 0,
+                p_value=.03 if valid else np.nan, q_value_family=.12 if valid else np.nan, q_value_outcome_wide=np.nan))
+    fig, qc = figures.plot_delta3_forest(pd.DataFrame(records), "synthetic_validation")
+    fig.canvas.draw()
+    a, b = fig.axes
+    assert [t.get_text() for t in a.get_yticklabels()] == [t.get_text() for t in b.get_yticklabels()]
+    assert a.get_xlim() == b.get_xlim() and a.get_xlim()[0] < .1 and a.get_xlim()[1] > 50
+    assert len(a.containers) == 2 and len(b.containers) == 1
+    assert any("N=41; E=12; alt=3" in t.get_text() for t in a.texts)
+    assert any(t.get_text() == "not estimable" for t in b.texts)
+    assert all(row["status"] == "PASS" for row in qc)
+    plt.close(fig)
+
+
+def test_primary_interval_contract_is_exactly_preserved_against_reviewed_base():
+    import types
+    source = subprocess.check_output(["git", "show", "08d542923870472d601581fda9ce65ab770467ec:src/block_A/explainwhy_inclusive.py"], cwd=ROOT)
+    previous = types.ModuleType("previous_inclusive")
+    exec(compile(source, "previous_inclusive.py", "exec"), previous.__dict__)
+    raw, _ = composition_fixture()
+    intervals, _, parts = composition_parts(raw)
+    clean, baseline, cohort, sequence, _, risks, registry, _, specs = parts
+    old, _ = previous.build_lagged_intervals(clean, cohort, sequence, risks[3], specs, step14, registry)
+    unchanged = [c for c in old if "_essdai_other_domains_" not in c]
+    pd.testing.assert_frame_equal(intervals[unchanged], old[unchanged], check_exact=True)
+    for k in (3, 5):
+        pd.testing.assert_frame_equal(risks[k], previous.first_event_riskset(cohort, sequence, k), check_exact=True)
+
+
+def test_prior_result_regression_checks_hashes_counts_and_declared_tolerance(tmp_path):
+    dirs = runner.directories(tmp_path)
+    dirs["tables"].mkdir(parents=True)
+    dirs["qc"].mkdir(parents=True)
+    rows = []
+    products = ("delta3_models", "delta5_sensitivity_models", "lagged_models", "trajectory_models")
+    for name in products:
+        row = dict(population="inclusive_primary", analysis_type="baseline", outcome=name,
+            predictor="synthetic", sensitivity="none", n_patients=40, n_intervals=100, n_events=12,
+            n_complete_cases=100, n_fitted=40, n_fitted_fallback=4, model_status="ok",
+            valid_for_inference=True, selected_adjustment_level="Minimal", formula="y ~ x + state",
+            estimate=.7, standard_error=.1, ci95_low=.5, ci95_high=.9, p_value=.01,
+            q_value_family=.04, q_value_outcome_wide=.05)
+        rows.append(row)
+        pd.DataFrame([row]).to_csv(dirs["tables"]/(inc.PREFIX+name+".csv"), index=False)
+    results = pd.DataFrame(rows)
+    hashes, packages = {"step10": "synthetic-hash"}, {"pandas": pd.__version__}
+    (dirs["qc"]/(inc.PREFIX+"manifest.json")).write_text(json.dumps(dict(input_hashes=hashes, snapshot=dict(packages=packages))))
+    before = dict(packages=packages, inclusive_products_before={str(p.relative_to(tmp_path)): inc.sha256(p) for p in dirs["tables"].glob("*.csv")})
+    assert runner._primary_regression(tmp_path, results, before, hashes).status.eq("PASS").all()
+    results.loc[0, "estimate"] += 1e-12
+    assert runner._primary_regression(tmp_path, results, before, hashes).status.eq("PASS").all()
+    results.loc[0, "n_fitted"] += 1
+    with pytest.raises(ValueError, match="regression mismatch"):
+        runner._primary_regression(tmp_path, results, before, hashes)
+    (dirs["tables"]/(inc.PREFIX+products[0]+".csv")).write_text("changed bytes")
+    with pytest.raises(ValueError, match="bytes changed"):
+        runner._primary_regression(tmp_path, results, before, hashes)

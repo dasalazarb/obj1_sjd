@@ -1,29 +1,14 @@
 {
-  "implementation_base_commit": "dc56d303a2c9379e8b3193accb615fd9ae8f91ee",
+  "implementation_base_commit": "08d542923870472d601581fda9ce65ab770467ec",
+  "branch": "codex/step14-composition-qc-figures-20261021",
   "implementation_status": "IMPLEMENTED",
-  "validation_scope": "synthetic software contracts and required regression suite only",
-  "pytest_result": "336 passed",
-  "new_synthetic_cases": 28,
+  "validation_scope": "synthetic software contracts; canonical files unavailable",
+  "pytest_result": "354 passed across required (158) and upstream (196) regression suites",
   "canonical_execution": "BLOCKED_REQUIRED_CLINICAL_INPUTS_UNAVAILABLE",
   "clinical_review": "PENDING_CLINICAL_REVIEW",
   "privacy_review": "PENDING_INSTITUTIONAL_REVIEW",
   "institutional_closure": "CONDITIONAL",
-  "tests": [
-    "tests/test_explainwhy_inclusive_v2.py",
-    "tests/test_observed_patterns_v2.py",
-    "tests/test_disease_activity_progression.py",
-    "tests/test_risk_factors_progression.py",
-    "tests/test_explainwhy_extension.py",
-    "tests/test_integrated_longitudinal_dataset.py",
-    "tests/test_integrated_baseline_characterization.py"
-  ],
-  "preexisting_failures_reproduced_on_unmodified_base": [
-    "test_complete_bundle_hashes_controlled_privacy_backup_and_no_overwrite: six companion figures absent from old expectation",
-    "test_step13_generates_all_outputs_and_qc: current main v2 figures absent from old expectation",
-    "test_weighted_other_domain_adjustments_aliases_missing_and_inconsistent_panels: stale articular weight/fixture total",
-    "test_to_negative_subtraction_and_discordance_fail_closed_without_clipping: stale articular weight"
-  ],
-  "historical_step14_science": "AST-identical outside parse_args/main; canonical upstream sources byte-identical",
+  "clinical_counts_or_estimates": null,
   "protected_sources_sha256": {
     "config.py": "3cff452f4a25ed2b3badf43da75222ec50cfd913ddf9eb8dcb19cb27c2142226",
     "src/block_A/10_build_integrated_longitudinal_dataset.py": "41f7ecb882fdb17546c4f045302b45b2ed22fc6c85fd080307559dba67dbea4c",
@@ -33,13 +18,160 @@
     "src/block_A/observed_patterns_v2.py": "1a5fb33485e48ad751a87a5c6dd762443d9401e0fe288e48fcaddf5d9ef6de27",
     "src/block_A/explainwhy_feasibility.py": "13627ea3348da61023aaae9d95c03d8e80e978afdc9e493814b620fe04594af2"
   },
-  "new_modules_sha256": {
-    "src/block_A/explainwhy_inclusive.py": "e7b5bc5abf7d8d3356b0172d39748f22a07391f55db7c21e530247f14cd7af58",
-    "src/block_A/explainwhy_inclusive_figures.py": "49a9d9fef9193fa57a844436d38a58d86c4def2cff4d798ad35e4db7ea82f1b1",
-    "src/block_A/explainwhy_inclusive_models.py": "d37b26495b3a4d8f02f988fd41f6cf08d041e380b2b17336c4d3c2aef898f3d2",
-    "src/block_A/explainwhy_inclusive_run.py": "d4f4d0f5c1654fca3a464de5c5227f24d6197e41a99375683fe44e3f29100241"
+  "upstream_source_review": {
+    "repository": "dasalazarb/eda_sjd",
+    "commit": "ffe59ecc5711b9e2e0bf4e611e32e8feffc5e2b4",
+    "path": "src/09d_finalize_clinical_episode_dataset.py",
+    "git_blob_sha": "eeb9467e602612c85d8e990e2e19c38728eaeee4",
+    "finding": "_essdai_version overwritten per variable with r/legacy form source; not all-domain scoring version"
   },
-  "visual_qc": "synthetic artist counts tested; both clock previews inspected; one index x per eligible fallback",
-  "outputs_in_git": "source, documentation and synthetic tests only; no clinical records or generated clinical outputs",
-  "canonical_counts_and_estimates": null
+  "physical_clinical_inputs_present": false,
+  "primary_models": "protected scientific functions unchanged; primary interval/event contract tested against reviewed base",
+  "outputs_in_git": "source, documentation and synthetic tests only",
+  "prior_validation_reference": {
+    "implementation_base_commit": "dc56d303a2c9379e8b3193accb615fd9ae8f91ee",
+    "implementation_status": "IMPLEMENTED",
+    "validation_scope": "synthetic software contracts and required regression suite only",
+    "pytest_result": "336 passed",
+    "new_synthetic_cases": 28,
+    "canonical_execution": "BLOCKED_REQUIRED_CLINICAL_INPUTS_UNAVAILABLE",
+    "clinical_review": "PENDING_CLINICAL_REVIEW",
+    "privacy_review": "PENDING_INSTITUTIONAL_REVIEW",
+    "institutional_closure": "CONDITIONAL",
+    "tests": [
+      "tests/test_explainwhy_inclusive_v2.py",
+      "tests/test_observed_patterns_v2.py",
+      "tests/test_disease_activity_progression.py",
+      "tests/test_risk_factors_progression.py",
+      "tests/test_explainwhy_extension.py",
+      "tests/test_integrated_longitudinal_dataset.py",
+      "tests/test_integrated_baseline_characterization.py"
+    ],
+    "preexisting_failures_reproduced_on_unmodified_base": [
+      "test_complete_bundle_hashes_controlled_privacy_backup_and_no_overwrite: six companion figures absent from old expectation",
+      "test_step13_generates_all_outputs_and_qc: current main v2 figures absent from old expectation",
+      "test_weighted_other_domain_adjustments_aliases_missing_and_inconsistent_panels: stale articular weight/fixture total",
+      "test_to_negative_subtraction_and_discordance_fail_closed_without_clipping: stale articular weight"
+    ],
+    "historical_step14_science": "AST-identical outside parse_args/main; canonical upstream sources byte-identical",
+    "protected_sources_sha256": {
+      "config.py": "3cff452f4a25ed2b3badf43da75222ec50cfd913ddf9eb8dcb19cb27c2142226",
+      "src/block_A/10_build_integrated_longitudinal_dataset.py": "41f7ecb882fdb17546c4f045302b45b2ed22fc6c85fd080307559dba67dbea4c",
+      "src/block_A/11_integrated_baseline_characterization.py": "95a358b0ab9e54470623f3a9acee089e02a9d4bcef56170b1d40a32dbc969bef",
+      "src/block_A/13_disease_activity_progression.py": "d1123c5dddfa615b6324e6443e28a3ce3ef48ce00548ac273c71d961fcb77781",
+      "src/block_A/observed_patterns.py": "0de8ee9f2ae9286d6b45dfa650932893f1423659eedb098e8146cc5958dfc033",
+      "src/block_A/observed_patterns_v2.py": "1a5fb33485e48ad751a87a5c6dd762443d9401e0fe288e48fcaddf5d9ef6de27",
+      "src/block_A/explainwhy_feasibility.py": "13627ea3348da61023aaae9d95c03d8e80e978afdc9e493814b620fe04594af2"
+    },
+    "new_modules_sha256": {
+      "src/block_A/explainwhy_inclusive.py": "e7b5bc5abf7d8d3356b0172d39748f22a07391f55db7c21e530247f14cd7af58",
+      "src/block_A/explainwhy_inclusive_figures.py": "49a9d9fef9193fa57a844436d38a58d86c4def2cff4d798ad35e4db7ea82f1b1",
+      "src/block_A/explainwhy_inclusive_models.py": "d37b26495b3a4d8f02f988fd41f6cf08d041e380b2b17336c4d3c2aef898f3d2",
+      "src/block_A/explainwhy_inclusive_run.py": "d4f4d0f5c1654fca3a464de5c5227f24d6197e41a99375683fe44e3f29100241"
+    },
+    "visual_qc": "synthetic artist counts tested; both clock previews inspected; one index x per eligible fallback",
+    "outputs_in_git": "source, documentation and synthetic tests only; no clinical records or generated clinical outputs",
+    "canonical_counts_and_estimates": null
+  },
+  "python_version": "3.12.14",
+  "packages": {
+    "pandas": "2.3.3",
+    "numpy": "2.5.3",
+    "statsmodels": "0.15.0",
+    "lifelines": "0.30.3",
+    "pyarrow": "25.0.1",
+    "matplotlib": "3.11.2",
+    "pytest": "9.1.1"
+  },
+  "source_hashes": {
+    "src/block_A/explainwhy_inclusive.py": "07178a2ac687cbd620129d1d89c303ba392ad316b585d9ac297a51c1283f5343",
+    "src/block_A/explainwhy_inclusive_composition.py": "34d57998878eee9430b722755bdc76e35fdbb3ffd858d6398e26bbda687579e0",
+    "src/block_A/explainwhy_inclusive_figures.py": "db068be6812b0924c2aec13bb7ccf88923c2bbdf0ac456f9c0fd8a16ce4e9120",
+    "src/block_A/explainwhy_inclusive_models.py": "faa0ba0ad6a03e41b64ce9d4e948b361d2c95c6bec9e7e7f97872f36a51aedfb",
+    "src/block_A/explainwhy_inclusive_run.py": "e8aaa335ecb99bd7252d38f5b49c4df6a482e4f51a478744cbbd98084965b24e"
+  },
+  "canonical_command": "python src/block_A/14_risk_factors_progression.py",
+  "canonical_command_exit_code": 1,
+  "canonical_blocking_reason": "NOT RUN \u2014 required canonical inputs unavailable: step10=/workspace/obj1_sjd/data/analytic/10_build_integrated_longitudinal_dataset/10_integrated_longitudinal_clinical_episode.parquet, step11=/workspace/obj1_sjd/data/analytic/blockA/11_integrated_baseline_characterization/11_integrated_baseline_patient_level.parquet, context=/workspace/obj1_sjd/data/analytic/10_build_integrated_longitudinal_dataset/10_integrated_longitudinal_context.parquet, registry=/workspace/obj1_sjd/data/analytic/10_build_integrated_longitudinal_dataset/10_variable_registry.csv, patterns=/workspace/obj1_sjd/data/analytic/blockA/13_disease_activity_progression/13_essdai_patient_observed_patterns_v2.parquet, sequence=/workspace/obj1_sjd/data/analytic/blockA/13_disease_activity_progression/13_essdai_pattern_selected_dates_v2.parquet, eligibility=/workspace/obj1_sjd/data/analytic/blockA/13_disease_activity_progression/13_essdai_pattern_patient_eligibility_v2.parquet, manifest=/workspace/obj1_sjd/outputs/qc/blockA/13_disease_activity_progression/13_essdai_observed_pattern_manifest_v2.json, legacy=/workspace/obj1_sjd/data/analytic/blockA/13_disease_activity_progression/13_essdai_patient_delta_endpoints.parquet",
+  "missing_canonical_inputs": [
+    {
+      "role": "step10",
+      "path": "/workspace/obj1_sjd/data/analytic/10_build_integrated_longitudinal_dataset/10_integrated_longitudinal_clinical_episode.parquet"
+    },
+    {
+      "role": "step11",
+      "path": "/workspace/obj1_sjd/data/analytic/blockA/11_integrated_baseline_characterization/11_integrated_baseline_patient_level.parquet"
+    },
+    {
+      "role": "context",
+      "path": "/workspace/obj1_sjd/data/analytic/10_build_integrated_longitudinal_dataset/10_integrated_longitudinal_context.parquet"
+    },
+    {
+      "role": "registry",
+      "path": "/workspace/obj1_sjd/data/analytic/10_build_integrated_longitudinal_dataset/10_variable_registry.csv"
+    },
+    {
+      "role": "patterns",
+      "path": "/workspace/obj1_sjd/data/analytic/blockA/13_disease_activity_progression/13_essdai_patient_observed_patterns_v2.parquet"
+    },
+    {
+      "role": "sequence",
+      "path": "/workspace/obj1_sjd/data/analytic/blockA/13_disease_activity_progression/13_essdai_pattern_selected_dates_v2.parquet"
+    },
+    {
+      "role": "eligibility",
+      "path": "/workspace/obj1_sjd/data/analytic/blockA/13_disease_activity_progression/13_essdai_pattern_patient_eligibility_v2.parquet"
+    },
+    {
+      "role": "manifest",
+      "path": "/workspace/obj1_sjd/outputs/qc/blockA/13_disease_activity_progression/13_essdai_observed_pattern_manifest_v2.json"
+    },
+    {
+      "role": "legacy",
+      "path": "/workspace/obj1_sjd/data/analytic/blockA/13_disease_activity_progression/13_essdai_patient_delta_endpoints.parquet"
+    }
+  ],
+  "visual_qc": {
+    "scope": "synthetic only; PDFs rendered with pdftoppm and inspected",
+    "index_clock_crosses": 10,
+    "clinical_clock_crosses": 10,
+    "forest_catalog_rows_per_panel": 35,
+    "scatter_and_negative_coverage_test": "2 passed with prior-result regression test",
+    "clinical_pdfs_reproduced": false
+  },
+  "upstream_regression": {
+    "command": "python -m pytest -q tests/test_observed_patterns_v2.py tests/test_disease_activity_progression.py tests/test_integrated_longitudinal_dataset.py tests/test_integrated_baseline_characterization.py",
+    "result": "196 passed, 1880 warnings in 556.41s",
+    "exit_code": 0,
+    "warnings": [
+      "NumPy timedelta generic-unit deprecation in existing fixtures",
+      "pandas empty/all-NA concat future behavior in existing fixtures",
+      "existing observed_patterns_v2_figures tight-layout warning for empty cohorts"
+    ]
+  },
+  "technical_status": "PASS",
+  "required_regression": {
+    "command": "python -m pytest -q tests/test_explainwhy_inclusive_v2.py tests/test_risk_factors_progression.py tests/test_explainwhy_extension.py",
+    "result": "158 passed, 1324 warnings in 1072.71s",
+    "exit_code": 0,
+    "thread_limits": "OPENBLAS_NUM_THREADS=1; OMP_NUM_THREADS=1",
+    "warnings": [
+      "DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.",
+      "UserWarning: Tight layout not applied. tight_layout cannot make Axes width small enough to accommodate all Axes decorations"
+    ]
+  },
+  "test_source_sha256": "69eec5a8faa2c9bd4e16a3fa1a94c54ff1e6970e6096459a77979f412a6ba593",
+  "protected_step14_entrypoint_sha256": "4c6d3c655aa3f14da996beddeb215d100a55fc9ff5b47f5b42d7406d9af25154",
+  "modified_files": [
+    "docs/14_composition_provenance_review.md",
+    "docs/14_explainwhy_inclusive_v2.md",
+    "docs/14_explainwhy_inclusive_v2_validation.json",
+    "src/block_A/explainwhy_inclusive.py",
+    "src/block_A/explainwhy_inclusive_composition.py",
+    "src/block_A/explainwhy_inclusive_figures.py",
+    "src/block_A/explainwhy_inclusive_models.py",
+    "src/block_A/explainwhy_inclusive_run.py",
+    "tests/test_explainwhy_inclusive_v2.py"
+  ],
+  "development_fixture_fix": "Synthetic domain predictors explicitly registered with producer and episode timing; production temporal restrictions unchanged."
 }

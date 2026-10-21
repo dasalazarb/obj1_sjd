@@ -208,8 +208,11 @@ def build_index_predictors(integrated, baseline, cohort, step14, registry, max_a
     return out, specs, pd.DataFrame(availability)
 
 
-def build_lagged_intervals(integrated, cohort, sequence, risks, specs, step14, registry):
+def build_lagged_intervals(integrated, cohort, sequence, risks, specs, step14, registry, provenance_policy=None):
     """Shift the full clinical spine before any outcome/predictor filtering."""
+    from src.block_A.explainwhy_inclusive_composition import VERSION_FIELDS, side_field, apply_composition_gate
+    if integrated[KEYS].isna().any().any() or integrated.duplicated(KEYS).any():
+        raise ValueError("inclusive intervals: missing or duplicate canonical episode keys")
     selected = set(map(tuple, sequence[KEYS].astype(str).to_numpy()))
     risk_lookup = risks.set_index("patient_id")
     values = {s.name: strict_predictor_values(integrated, s, step14, registry)
@@ -265,8 +268,8 @@ def build_lagged_intervals(integrated, cohort, sequence, risks, specs, step14, r
                 row["at_risk_new_"+d] = bool(risk)
                 row["event_new_domain_"+d] = float(to > 0) if risk else np.nan
             for side, episode in (("from", a), ("to", z)):
-                row[side+"_essdai_version"] = episode.get("_essdai_version", pd.NA)
-                row[side+"_essdai_total_version"] = episode.get("_essdai_total_version", pd.NA)
+                for field in VERSION_FIELDS:
+                    row[side_field(side, field)] = episode.get(field, pd.NA)
             rows.append(row)
     columns = ["patient_id", "index_source", "index_time_origin", "essdai_index_date", "essdai_index_episode_id",
         "essdai_index_score", "baseline_essdai", "from_clinical_episode_id", "to_clinical_episode_id", "from_date", "to_date",
@@ -275,17 +278,10 @@ def build_lagged_intervals(integrated, cohort, sequence, risks, specs, step14, r
     columns += ["pred__"+s.name for s in specs if s.primary_role != "adjustment"]
     columns += ["pred_unit__"+s.name for s in specs if s.family == "laboratory"]
     columns += [prefix+d for d in step14.DOMAINS for prefix in ("from_domain_", "to_domain_", "at_risk_new_", "event_new_domain_")]
-    columns += [side+field for side in ("from", "to") for field in ("_essdai_version", "_essdai_total_version")]
+    columns += [side_field(side, field) for side in ("from", "to") for field in VERSION_FIELDS]
     out = pd.DataFrame(rows, columns=columns)
     out, composition = step14.derive_other_domain_adjustments(out, specs)
-    # Composition requires explicit concordant scoring versions as well as arithmetic.
-    for d in step14.DOMAINS:
-        for side in ("from", "to"):
-            version = out[side+"_essdai_version"].astype("string")
-            total_version = out[side+"_essdai_total_version"].astype("string")
-            valid = version.notna() & total_version.notna() & version.eq(total_version)
-            out[side+"_essdai_other_domains_"+d] = out[side+"_essdai_other_domains_"+d].where(valid)
-    return out, composition
+    return apply_composition_gate(out, composition, step14.DOMAINS, provenance_policy)
 
 
 def legacy_bridge(integrated, risksets, legacy, step14):
@@ -349,7 +345,7 @@ def cohort_flow(cohort):
     return pd.DataFrame(rows)
 
 
-def temporal_qc(integrated, baseline, cohort, sequence, risks, intervals, predictors, specs, step14, registry):
+def temporal_qc(integrated, baseline, cohort, sequence, risks, intervals, predictors, specs, step14, registry, provenance_policy=None):
     """Reuse unchanged legacy QC on its own official-baseline estimand first.
 
     Then validate the separate index clock and strict predictor rules. Neither
@@ -379,7 +375,7 @@ def temporal_qc(integrated, baseline, cohort, sequence, risks, intervals, predic
         check(f"delta{k}:ordered_onset_bounds", (~event.last_known_non_event_date.lt(event.first_event_date)).sum())
     expected_predictors, _, _ = build_index_predictors(integrated, baseline, cohort, step14, registry)
     _same_frame(predictors, expected_predictors, ["patient_id"], "inclusive index-time predictors")
-    expected_intervals, _ = build_lagged_intervals(integrated, cohort, sequence, risks[3], specs, step14, registry)
+    expected_intervals, _ = build_lagged_intervals(integrated, cohort, sequence, risks[3], specs, step14, registry, provenance_policy)
     _same_frame(intervals, expected_intervals, ["patient_id", "from_clinical_episode_id", "to_clinical_episode_id"], "inclusive intervals")
     check("inclusive:post_index_intervals", (~intervals.from_date.ge(intervals.essdai_index_date)).sum())
     check("inclusive:positive_adjacent_intervals", (~intervals.to_date.gt(intervals.from_date)).sum())
