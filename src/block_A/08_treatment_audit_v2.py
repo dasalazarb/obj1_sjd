@@ -843,7 +843,7 @@ def feasibility(orders, linkage, infos):
 
 def write_private_table(path, table):
     # All vocabularies and row-level files are restricted, even if some are aggregate.
-    with path.open("xb") as stream:
+    with path.open("wb") as stream:
         os.chmod(path, 0o600)
         if path.suffix == ".parquet":
             table.to_parquet(stream, index=False)
@@ -898,9 +898,10 @@ def report_markdown(summary):
 
 def run(args):
     output = args.output_dir.resolve()
-    # No output may replace an input, an existing run, v1 products or master data.
-    if output.exists() and (not output.is_dir() or any(output.iterdir())):
-        raise ValueError("Output directory must be new or empty; audit 1.0 and prior v2 runs are preserved")
+    # Preliminary audit: reuse this dedicated v2 directory and overwrite only
+    # explicitly named v2 artifacts, never input files or v1/master outputs.
+    if output.exists() and not output.is_dir():
+        raise ValueError("Output path exists and is not a directory")
     if "08_treatment_audit" in output.parts or any(p in output.parts for p in ("raw", "analytic", "intermediate")):
         raise ValueError("Use a separate protected audit 2.0 directory, outside master data and v1 outputs")
     for path in (args.input, args.eligibility, args.btris_11d, args.btris_15d):
@@ -937,15 +938,25 @@ def run(args):
             raise ValueError("Previous summary must be a JSON object")
     if args.pseudonym_key_file:
         infos["pseudonym_key"] = file_fingerprint(args.pseudonym_key_file)
-    secret = args.pseudonym_key_file.read_bytes() if args.pseudonym_key_file else os.urandom(32)
+    key_path = output / "restricted" / ".pseudonym_key"
+    if not args.pseudonym_key_file and key_path.exists() and not key_path.is_file():
+        raise ValueError("Existing pseudonym key path is not a file")
+    # Preserve the original pseudonymization key across preliminary reruns, so
+    # the same patients retain the same pseudonymous IDs in compared outputs.
+    if args.pseudonym_key_file:
+        secret = args.pseudonym_key_file.read_bytes()
+    elif key_path.is_file():
+        secret = key_path.read_bytes()
+    else:
+        secret = os.urandom(32)
     if len(secret) < 32:
         raise ValueError("Pseudonym key must contain at least 32 bytes")
     output.mkdir(parents=True, mode=0o700, exist_ok=True)
     os.chmod(output, 0o700)
     restricted = output / "restricted"
-    restricted.mkdir(mode=0o700)
-    if not args.pseudonym_key_file:
-        key_path = restricted / ".pseudonym_key"
+    restricted.mkdir(mode=0o700, exist_ok=True)
+    os.chmod(restricted, 0o700)
+    if not args.pseudonym_key_file and not key_path.exists():
         with key_path.open("xb") as stream:
             os.chmod(key_path, 0o600)
             stream.write(secret)
@@ -1066,10 +1077,10 @@ def run(args):
                                                selected=str(args.input.resolve()),
                                                reason="explicit CLI input or common.DEFAULT_ANALYTIC_DATASET; no fallback search")))
     write_json(output / "08_treatment_audit_v2_summary.json", summary)
-    with (output / "08_treatment_audit_v2_report.md").open("x") as stream:
+    with (output / "08_treatment_audit_v2_report.md").open("w") as stream:
         os.chmod(stream.name, 0o600)
         stream.write(report_markdown(summary))
-    print(f"Audit 2.0: {summary['status']}; protected output: {output}")
+    print(f"Audit 2.0: {summary['status']}; output (overwrite enabled): {output}")
     return summary
 
 
@@ -1086,7 +1097,7 @@ def clean_json(value):
 
 
 def write_json(path, value):
-    with path.open("x") as stream:
+    with path.open("w") as stream:
         os.chmod(path, 0o600)
         json.dump(clean_json(value), stream, indent=2, ensure_ascii=False, allow_nan=False)
         stream.write("\n")
@@ -1132,7 +1143,7 @@ def main(argv=None):
     try:
         summary = run(args)
     except (OSError, ValueError, KeyError, TypeError) as exc:
-        parser.exit(2, f"Audit blocked: {type(exc).__name__}; verify explicit paths, keys and a fresh output directory.\n")
+        parser.exit(2, f"Audit blocked: {type(exc).__name__}; verify explicit paths, keys and write permissions.\n")
     return 2 if summary["status"] == "blocked" else 0
 
 
