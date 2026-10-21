@@ -345,9 +345,23 @@ def test_historical_scientific_functions_and_inputs_remain_exact():
 
 
 def test_cli_modes_and_support_guards():
-    assert not step14.parse_args([]).explainwhy_inclusive_main
+    default = step14.parse_args([])
+    assert default.explainwhy_inclusive_main
+    assert not default.historical_main
+    assert default.patterns_v2 == step14.ROOT / "data/analytic/blockA/13_disease_activity_progression/13_essdai_patient_observed_patterns_v2.parquet"
+    assert default.selected_dates_v2 == step14.ROOT / "data/analytic/blockA/13_disease_activity_progression/13_essdai_pattern_selected_dates_v2.parquet"
+    assert default.eligibility_v2 == step14.ROOT / "data/analytic/blockA/13_disease_activity_progression/13_essdai_pattern_patient_eligibility_v2.parquet"
+    assert default.pattern_manifest_v2 == step14.ROOT / "outputs/qc/blockA/13_disease_activity_progression/13_essdai_observed_pattern_manifest_v2.json"
+    assert default.legacy_endpoints == step14.ROOT / "data/analytic/blockA/13_disease_activity_progression/13_essdai_patient_delta_endpoints.parquet"
+    assert default.context == default.integrated.with_name("10_integrated_longitudinal_context.parquet")
+    assert default.variable_registry == default.integrated.with_name("10_variable_registry.csv")
+    historical = step14.parse_args(["--historical-main"])
+    assert historical.historical_main and not historical.explainwhy_inclusive_main
+    inclusive = step14.parse_args(["--explainwhy-inclusive-main"])
+    assert inclusive.explainwhy_inclusive_main and inclusive.patterns_v2 == default.patterns_v2
     for args in (["--minimum-events", "9"], ["--lab-max-age-days", "-1"],
-        ["--lab-max-age-days", "30", "30"], ["--explainwhy-inclusive-main", "--explainwhy-audit-only"]):
+        ["--lab-max-age-days", "30", "30"], ["--explainwhy-inclusive-main", "--explainwhy-audit-only"],
+        ["--historical-main", "--explainwhy-inclusive-main"]):
         with pytest.raises(SystemExit):
             step14.parse_args(args)
 
