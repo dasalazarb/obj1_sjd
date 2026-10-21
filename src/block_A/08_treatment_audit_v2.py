@@ -12,6 +12,8 @@ import hashlib
 import hmac
 import importlib.util
 import json
+import math
+import numbers
 import os
 import re
 import sys
@@ -138,6 +140,109 @@ def mrn_audit_identity(value, secret):
         return "", "missing"
     typed_value = f"{type(value).__name__}:{raw(value).strip()}"
     return pseudonym(secret, "mrn_nontext_unverified", typed_value), "nontext_unverified"
+
+
+def serology_patient_id_match(value):
+    """Match the normalization in 01_serological_profile._normalize_patient_id.
+
+    For Parquet numeric MRNs only, first obtain an exact integral string. This
+    is necessary because pandas converts numeric values to strings like '123.0'.
+    Never round nonintegral values, use identifiers beyond float exactness, or
+    use names/DOB/protocol as patient matching keys.
+    """
+    if not present(value) or isinstance(value, bool):
+        return "", "missing_or_invalid"
+    if isinstance(value, numbers.Integral):
+        text, representation = str(int(value)), "integral_numeric"
+    elif isinstance(value, numbers.Real):
+        numeric = float(value)
+        if not math.isfinite(numeric) or not numeric.is_integer() or abs(numeric) > 2 ** 53:
+            return "", "unsafe_numeric_mrn"
+        text, representation = str(int(numeric)), "integral_float"
+    else:
+        text, representation = raw(value), "source_text"
+        # Textual float artifacts must only be treated as decimal integers if
+        # the exact string has a zero-only fractional part.
+        if re.fullmatch(r"\\d+\\.0+", text.strip()):
+            text, representation = text.strip().split(".", 1)[0], "text_integer_decimal"
+    match = re.sub(r"^0+", "", re.sub(r"[-/\\\\\\s]", "", text.strip()))
+    if match in {"", "nan", "None"}:
+        return "", "missing_after_normalization"
+    return match, representation
+
+
+def validate_serology_style_linkage(frames, ctdb, eligible):
+    """Audit-only patient matching following Step 01 normalized-ID semantics.
+
+    The normalized eligible ID is the authority; do not require every patient
+    to have a BTRIS order. Refuse ambiguous CTDB IDs or unsafe BTRIS MRNs.
+    Folder/protocol must never be used as a surrogate person identifier.
+    """
+    result = dict(status="blocked_linkage", reason="NORMALIZED_ID_LINKAGE_NOT_VALIDATED",
+                  mode="serology_normalized_id", mapping={}, normalized_mapping={},
+                  ambiguous_mrns=set(), ambiguous_patients=set(), invalid_rows=0,
+                  n_crosswalk_pairs=None, complete_eligible_mapping=False,
+                  n_btris_rows_matched=0, n_btris_rows_outside_eligibility=0,
+                  n_btris_rows_unsafe_id=0, n_btris_distinct_matching_keys=0,
+                  n_ctdb_normalization_collisions=0)
+    if ctdb is None or CTDB_PATIENT_ID not in ctdb or not eligible:
+        result["reason"] = "CTDB_OR_ELIGIBILITY_UNAVAILABLE"
+        return result
+    canonical = {}
+    collisions = set()
+    for patient in sorted(eligible):
+        norm, quality = serology_patient_id_match(patient)
+        if not norm or quality == "unsafe_numeric_mrn":
+            result["invalid_rows"] += 1
+            continue
+        if norm in canonical and canonical[norm] != patient:
+            collisions.add(norm)
+        canonical[norm] = patient
+    source_ids = set(ctdb[CTDB_PATIENT_ID].map(key)) - {""}
+    for patient in source_ids:
+        norm, _ = serology_patient_id_match(patient)
+        if norm in canonical and canonical[norm] != patient:
+            collisions.add(norm)
+    result["n_ctdb_normalization_collisions"] = len(collisions)
+    if collisions or result["invalid_rows"]:
+        result["reason"] = "CTDB_NORMALIZATION_COLLISIONS_OR_INVALID_IDS"
+        return result
+    if not source_ids.issuperset(eligible):
+        result["reason"] = "ELIGIBLE_IDS_MISSING_FROM_CTDB"
+        return result
+    matching = set()
+    unsafe = 0
+    outside = 0
+    rows_matched = 0
+    for frame in frames.values():
+        if frame is None or "MRN" not in frame:
+            result["reason"] = "BTRIS_SOURCE_OR_MRN_UNAVAILABLE"
+            return result
+        for value in frame["MRN"]:
+            norm, quality = serology_patient_id_match(value)
+            if not norm:
+                unsafe += 1
+            elif norm in canonical:
+                matching.add(norm)
+                rows_matched += 1
+            else:
+                outside += 1
+    result.update(n_btris_rows_matched=rows_matched,
+                  n_btris_rows_outside_eligibility=outside,
+                  n_btris_rows_unsafe_id=unsafe,
+                  n_btris_distinct_matching_keys=len(matching),
+                  n_crosswalk_pairs=len(matching),
+                  complete_eligible_mapping=True,
+                  normalized_mapping={k: canonical[k] for k in matching})
+    if unsafe:
+        result["reason"] = "UNSAFE_OR_MISSING_BTRIS_MRN_ROWS"
+        return result
+    if not matching:
+        result["reason"] = "NO_BTRIS_KEYS_MATCH_ELIGIBLE_PATIENT_IDS"
+        return result
+    result.update(status="validated",
+                  reason="serology_style_normalization_collision_checked_same_identifier_assumption")
+    return result
 
 
 def pseudonym(secret, namespace, value):
@@ -408,7 +513,10 @@ def linkage_qc(frames, ctdb, eligible, linkage, secret):
             if (token, quality) in seen:
                 continue
             seen.add((token, quality))
-            patient = linkage["mapping"].get(mrn, "")
+            patient = (linkage.get("normalized_mapping", {}).get(
+                serology_patient_id_match(value)[0], "")
+                if linkage.get("mode") == "serology_normalized_id"
+                else linkage["mapping"].get(mrn, ""))
             status = ("linked_one_to_one" if patient else
                       "ambiguous_key" if mrn in linkage["ambiguous_mrns"] else
                       "unmatched_btris" if mrn else
@@ -422,7 +530,10 @@ def linkage_qc(frames, ctdb, eligible, linkage, secret):
     ctdb_ids = set(ctdb[CTDB_PATIENT_ID].map(key)) if ctdb is not None and CTDB_PATIENT_ID in ctdb else set()
     for patient in sorted(eligible | ctdb_ids):
         status = ("invalid_key" if not patient else "ambiguous_key" if patient in linkage["ambiguous_patients"]
-                  else "linked_one_to_one" if patient in linkage["mapping"].values() else "unmatched_ctdb")
+                  else "linked_one_to_one" if patient in (
+                      linkage.get("normalized_mapping", {}).values()
+                      if linkage.get("mode") == "serology_normalized_id"
+                      else linkage["mapping"].values()) else "unmatched_ctdb")
         rows.append(dict(source="CTDB", patient_id_pseudonymous=pseudonym(secret, "patient", patient),
                          status=status, eligible=patient in eligible, observed_in_ctdb=patient in ctdb_ids))
     return pd.DataFrame(rows)
@@ -485,7 +596,10 @@ def btris_records(frame, source, linkage, eligible, secret):
     for position, (_, row) in enumerate(frame.iterrows()):
         mrn = key(row.get("MRN"), mrn=True)
         mrn_token, mrn_identity_quality = mrn_audit_identity(row.get("MRN"), secret)
-        patient = linkage["mapping"].get(mrn, "")
+        patient = (linkage.get("normalized_mapping", {}).get(
+            serology_patient_id_match(row.get("MRN"))[0], "")
+            if linkage.get("mode") == "serology_normalized_id"
+            else linkage["mapping"].get(mrn, ""))
         start, end = (parse_date(row.get(c)) for c in BTRIS_TIME_FIELDS)
         flags = date_flags(start, end) + _dose_flags(row)
         if not mrn:
@@ -970,8 +1084,13 @@ def run(args):
             cw_spec = manifest
             crosswalk, infos["crosswalk"] = load_source(manifest["path"], [manifest["mrn_column"], manifest["patient_column"]])
             authorized = bool(manifest["authorization_evidence"].strip())
-    linkage = validate_linkage(crosswalk, eligible, mrn_column=cw_spec.get("mrn_column", "MRN"),
-                               patient_column=cw_spec.get("patient_column", "patient_id"), authorized=authorized)
+    if args.crosswalk_manifest:
+        linkage = validate_linkage(crosswalk, eligible, mrn_column=cw_spec.get("mrn_column", "MRN"),
+                                   patient_column=cw_spec.get("patient_column", "patient_id"), authorized=authorized)
+    elif getattr(args, "linkage_mode", "crosswalk_only") == "serology_normalized_id":
+        linkage = validate_serology_style_linkage(frames, ctdb, eligible)
+    else:
+        linkage = validate_linkage(None, eligible)
     previous = None
     if args.previous_summary:
         infos["previous_summary"] = file_fingerprint(args.previous_summary)
@@ -1106,7 +1225,8 @@ def run(args):
             n_duplicate_valid_keys=int(eligibility.loc[eligibility[ELIGIBILITY_PATIENT_ID].map(key).ne(""), ELIGIBILITY_PATIENT_ID].map(key).duplicated().sum()) if eligibility is not None and ELIGIBILITY_PATIENT_ID in eligibility else None,
             n_ctdb_eligible_visit_rows=int(ctdb[CTDB_PATIENT_ID].map(key).isin(eligible).sum()) if ctdb is not None and CTDB_PATIENT_ID in ctdb and eligible else None,
             n_ctdb_rows_outside_eligibility=int((~ctdb[CTDB_PATIENT_ID].map(key).isin(eligible)).sum()) if ctdb is not None and CTDB_PATIENT_ID in ctdb and eligible else None),
-        linkage={k: v for k, v in linkage.items() if k not in {"mapping", "ambiguous_mrns", "ambiguous_patients"}},
+        linkage={k: v for k, v in linkage.items()
+                 if k not in {"mapping", "normalized_mapping", "ambiguous_mrns", "ambiguous_patients"}},
         n_ambiguous_mrn_keys=len(linkage["ambiguous_mrns"]), n_ambiguous_patient_keys=len(linkage["ambiguous_patients"]),
         overlap=clean_json(overlaps.to_dict(orient="records")), v1_comparison=comparison, blockers=blockers,
         gates=dict(actual_exposure="pending_direct_evidence", treatment_episode="not_approved",
@@ -1132,7 +1252,7 @@ def run(args):
     with (output / "08_treatment_audit_v2_report.md").open("w") as stream:
         os.chmod(stream.name, 0o600)
         stream.write(report_markdown(summary))
-    print(f"Audit 2.0: {summary['status']}; output (overwrite enabled): {output}")
+    print(f"Audit 2.0: {summary['status']}; linkage={summary['linkage']['status']}; output (overwrite enabled): {output}")
     return summary
 
 
@@ -1185,7 +1305,10 @@ def main(argv=None):
     parser.add_argument("--eligibility", type=Path, default=v1.common.LONGITUDINAL_ID_LIST)
     parser.add_argument("--btris-11d", type=Path, default=BTRIS_MEDICATION_PATHS["11D"])
     parser.add_argument("--btris-15d", type=Path, default=BTRIS_MEDICATION_PATHS["15D"])
-    parser.add_argument("--crosswalk-manifest", type=Path, help="Explicit authorized MRN-to-eligible-patient crosswalk configuration")
+    parser.add_argument("--crosswalk-manifest", type=Path, help="Explicit authorized MRN-to-eligible-patient crosswalk configuration; overrides normalized matching")
+    parser.add_argument("--linkage-mode", choices=["serology_normalized_id", "crosswalk_only"],
+                        default="serology_normalized_id",
+                        help="Use Step 01 collision-checked patient ID normalization for audit-only matching (default), or require an explicit crosswalk")
     parser.add_argument("--ctdb-protocol-column", help="Existing documented provenance column; never inferred from form presence")
     parser.add_argument("--ctdb-index-column", help="Existing documented index date; pre-index history is retained")
     parser.add_argument("--previous-summary", type=Path, help="Optional read-only audit 1.0 summary for numeric reconciliation")
