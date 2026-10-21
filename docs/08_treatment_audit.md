@@ -1,5 +1,9 @@
 # Step 08: isolated treatment audit
 
+For the separate CTDB + BTRIS audit 2.0, use
+[`08_treatment_audit_v2.md`](08_treatment_audit_v2.md). The v1 entry point and
+outputs documented below remain unchanged.
+
 `src/block_A/08_treatment_audit.py` inventories medication documentation and
 creates reviewable audit artifacts. No scientific Step 08 script existed at the
 implementation base, so this is a new standalone entry point. No existing script,
