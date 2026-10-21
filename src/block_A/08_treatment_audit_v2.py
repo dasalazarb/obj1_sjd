@@ -165,7 +165,7 @@ def serology_patient_id_match(value):
         # the exact string has a zero-only fractional part.
         if re.fullmatch(r"\\d+\\.0+", text.strip()):
             text, representation = text.strip().split(".", 1)[0], "text_integer_decimal"
-    match = re.sub(r"^0+", "", re.sub(r"[-/\\\\\\s]", "", text.strip()))
+    match = re.sub(r"^0+", "", re.sub(r"[-/\\\s]", "", text.strip()))
     if match in {"", "nan", "None"}:
         return "", "missing_after_normalization"
     return match, representation
