@@ -1,11 +1,15 @@
 # Step 14: isolated inclusive ESSDAI-index extension
 
+The [2026-10-21 composition provenance review](14_composition_provenance_review.md)
+documents the source semantics, new QC, safe version gate and figure changes.
+
 The 2026-10-20 inclusive specification supersedes the earlier official-only
 policy **for this new extension**. Both Step 13 v2 index routes enter the primary
 ESSDAI cohort when longitudinally eligible. Cohort size is reconstructed, never
 forced to the investigator's reference counts. Official-only is a robustness
-comparison. Historical Step 14 remains the default invocation, with its original
-functions, thresholds, estimators, formulas, FDR and outputs preserved.
+comparison. Inclusive v2 is the no-flags default; historical Step 14 remains
+available with `--historical-main`, preserving its scientific functions,
+thresholds, estimators, formulas, FDR and outputs.
 
 **IMPLEMENTED / TESTED_SYNTHETIC; canonical execution BLOCKED.** Canonical Step
 10/11, context/registry and Step 13 v2 clinical products were not present in the
@@ -45,8 +49,9 @@ command does **not** imply clinical or institutional review is complete.
 
 ## Execution
 
-Supply all consumed v2 products and their producer manifest explicitly. The
-extension never discovers an unversioned pattern file or reconstructs an index
+The no-flags command resolves canonical locations automatically. Explicit paths
+remain available for controlled reproduction. The extension never discovers an
+unversioned pattern file or reconstructs an index
 as a substitute for missing products. The following paths illustrate the
 repository layout; replace them with authorized input locations as needed:
 
@@ -157,7 +162,8 @@ complete-case N, fitted N and fallback attrition.
 
 Domain-total composition is explicit. Leave-source-domain lagged sensitivities
 reuse the original subtraction only on complete, arithmetic-concordant FROM/TO
-panels with explicit compatible scoring versions. They are not a +3 extra-
+panels with semantically certified compatible scoring versions. Equal source
+strings do not certify this. They are not a +3 extra-
 domain event. Recorded total ESSDAI is never reconstructed or replaced.
 
 Each new family has its own BH-FDR; canonical primary hypotheses additionally

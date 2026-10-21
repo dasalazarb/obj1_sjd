@@ -76,9 +76,23 @@ def build_tasks(integrated, cohort, sequence, risks, predictors, intervals, spec
             state = "from_essdai_other_domains_"+domain
             target = "to_essdai_other_domains_"+domain
             compositional = subsequent.loc[subsequent[state].notna() & subsequent[target].notna()].assign(y=lambda d: d[target])
+            reason = ""
+            if compositional.empty:
+                gate = subsequent.get("composition_pair_gate_"+domain, pd.Series(dtype="string"))
+                failures = sorted(gate.dropna().unique())
+                provenance = {"missing_version_evidence", "producer_identity_unverified", "incompatible_scoring_versions"}
+                reason = ("not_estimable_version_provenance_unverified" if provenance.intersection(failures)
+                          else "not_estimable_composition_support")
+                reason += ": " + (", ".join(failures) or "no_adjacent_evaluable_intervals")
             tasks.append(step14.ModelTask(spec, compositional, "timevarying", "subsequent_essdai", "lagged",
                 step14.LEAVE_SOURCE_SENSITIVITY if sensitivity == "none" else sensitivity+":"+step14.LEAVE_SOURCE_SENSITIVITY,
-                state_covariate=state))
+                state_covariate=state, support_exclusion=reason,
+                comparison_role="other_domains" if not compositional.empty else ""))
+            if not compositional.empty:
+                tasks.append(step14.ModelTask(spec, compositional.assign(y=lambda d: d.to_essdai),
+                    "timevarying", "subsequent_essdai", "lagged",
+                    ("" if sensitivity == "none" else sensitivity+":")+"matched_total_leave_source_domain_outcome",
+                    state_covariate="from_essdai", comparison_role="matched_total"))
         if not include_secondary:
             continue
         for outcome in ["essdai_ge5", "high_activity", "new_domain_any", *["new_domain_"+d for d in step14.DOMAINS]]:
@@ -108,10 +122,14 @@ def fit_models(tasks, cohort, step14, minimum_events, official_comparison=True, 
     never selects a different adjustment or rescales the predictor.
     """
     rows, attempts = [], []
+    composition_references = {}
     official_ids = set(cohort.loc[cohort.eligible & cohort.index_source.eq(v2.OFFICIAL), "patient_id"])
     fallback_ids = set(cohort.loc[cohort.eligible & cohort.index_source.eq(v2.FALLBACK), "patient_id"])
     for task in tasks:
         task.data = task.data.copy()
+        if task.comparison_role == "matched_total":
+            source = composition_references[task.spec.name]
+            task = replace(task, fixed_adjustment_level=source["adjustment_status"])
         reference = None
         reporting_spec = task.spec
         if reference_results is not None:
@@ -129,6 +147,10 @@ def fit_models(tasks, cohort, step14, minimum_events, official_comparison=True, 
         # Trajectory selected-date product has no source column; index metadata
         # are attached once, and never used as an exposure.
         data, meta = step14.prepare_model(task, int(cohort.eligible.sum()), minimum_events)
+        if task.comparison_role == "other_domains":
+            composition_references[task.spec.name] = meta
+        if task.comparison_role == "matched_total" and meta["analysis_sample_hash"] != source["analysis_sample_hash"]:
+            raise ValueError("composition matched total: complete-case interval sample differs")
         if reference is not None:
             task.spec = reporting_spec
             meta.update(standardization_mean=reference.standardization_mean, standardization_sd=reference.standardization_sd)
@@ -179,6 +201,8 @@ def fit_models(tasks, cohort, step14, minimum_events, official_comparison=True, 
                     pd.Series(np.nan, index=current.data.index)).notna() & current.data.patient_id.isin(fallback_ids), "patient_id"].nunique(),
                 structural_note="biological/domain composition can be algebraically coupled to total ESSDAI; association only"
                     if current.spec.family in {"laboratory", "essdai_domain", "serology"} else "association only")
+            if step14.LEAVE_SOURCE_SENSITIVITY in current.sensitivity and current.comparison_role != "matched_total":
+                result["estimand"] = "observational association with future ESSDAI outside the source domain; not a first-delta3 outcome"
             result["fdr_family"] = FAMILY+"__"+result["fdr_family"]
             rows.append(result)
     out = pd.DataFrame(rows)
