@@ -119,10 +119,25 @@ def present(value):
 
 
 def key(value, *, mrn=False):
-    """No numeric MRNs: lost leading zeroes cannot be recovered by casting."""
+    """Only exact text MRNs qualify for validated patient linkage."""
     if not present(value) or (mrn and not isinstance(value, str)):
         return ""
     return raw(value).strip()
+
+
+def mrn_audit_identity(value, secret):
+    """Pseudonymize non-text source MRNs for QC only, NEVER for linkage.
+
+    Numeric parquet values may already have lost leading zeros. Their distinct
+    representations must not be advertised as validated unique patients.
+    """
+    exact = key(value, mrn=True)
+    if exact:
+        return pseudonym(secret, "mrn", exact), "text_exact"
+    if not present(value):
+        return "", "missing"
+    typed_value = f"{type(value).__name__}:{raw(value).strip()}"
+    return pseudonym(secret, "mrn_nontext_unverified", typed_value), "nontext_unverified"
 
 
 def pseudonym(secret, namespace, value):
@@ -283,8 +298,12 @@ def file_fingerprint(path):
                 sha256=v1.file_hash(path))
 
 
-def load_source(path, expected, *, parquet_only=False):
-    """Metadata first; count all rows. Never represent an unreadable file as empty."""
+def load_source(path, expected, *, parquet_only=False, required_columns=None):
+    """Count rows and audit optional columns without blocking a usable source.
+
+    All headers remain audited; only missing indispensable columns block input.
+    """
+    required_columns = list(expected) if required_columns is None else list(required_columns)
     path = Path(path)
     info = dict(path=str(path.resolve()), status="BLOCKED_SOURCE_UNAVAILABLE", n_rows=None,
                 missing_columns=list(expected), unexpected_columns=[], error="source_not_accessible")
@@ -304,8 +323,11 @@ def load_source(path, expected, *, parquet_only=False):
         if not frame.columns.is_unique:
             raise ValueError("duplicate_column_headers")
         info.update(n_rows=len(frame), missing_columns=[c for c in expected if c not in frame],
+                    missing_required_columns=[c for c in required_columns if c not in frame],
                     unexpected_columns=[c for c in frame if c not in expected], error="")
-        info["status"] = "BLOCKED_SCHEMA" if info["missing_columns"] else "available"
+        info["status"] = ("BLOCKED_SCHEMA" if info["missing_required_columns"]
+                          else "available_partial_schema" if info["missing_columns"]
+                          else "available")
         return frame, info
     except (OSError, ValueError, TypeError, KeyError) as exc:
         info.update(status="BLOCKED_SOURCE_UNAVAILABLE", n_rows=None,
@@ -379,14 +401,24 @@ def linkage_qc(frames, ctdb, eligible, linkage, secret):
         if frame is None:
             rows.append(dict(source=source, status="BLOCKED_SOURCE_UNAVAILABLE", n_rows=None))
             continue
-        for value in frame.get("MRN", pd.Series([None] * len(frame))).map(lambda v: key(v, mrn=True)).unique():
-            patient = linkage["mapping"].get(value, "")
-            status = ("invalid_key" if not value else "ambiguous_key" if value in linkage["ambiguous_mrns"]
-                      else "linked_one_to_one" if patient else "unmatched_btris")
-            rows.append(dict(source=source, patient_id_pseudonymous=pseudonym(secret, "mrn", value),
+        seen = set()
+        for value in frame.get("MRN", pd.Series([None] * len(frame))):
+            mrn = key(value, mrn=True)
+            token, quality = mrn_audit_identity(value, secret)
+            if (token, quality) in seen:
+                continue
+            seen.add((token, quality))
+            patient = linkage["mapping"].get(mrn, "")
+            status = ("linked_one_to_one" if patient else
+                      "ambiguous_key" if mrn in linkage["ambiguous_mrns"] else
+                      "unmatched_btris" if mrn else
+                      "nontext_unverified" if token else "invalid_key")
+            rows.append(dict(source=source, patient_id_pseudonymous=token,
+                             mrn_identity_quality=quality,
                              linked_id_pseudonymous=pseudonym(secret, "patient", patient),
                              status=status, eligible=patient in eligible if patient else None,
-                             cardinality_status="linked_one_to_many_requires_review" if status == "ambiguous_key" else status))
+                             cardinality_status="linked_one_to_many_requires_review"
+                             if status == "ambiguous_key" else status))
     ctdb_ids = set(ctdb[CTDB_PATIENT_ID].map(key)) if ctdb is not None and CTDB_PATIENT_ID in ctdb else set()
     for patient in sorted(eligible | ctdb_ids):
         status = ("invalid_key" if not patient else "ambiguous_key" if patient in linkage["ambiguous_patients"]
@@ -394,7 +426,6 @@ def linkage_qc(frames, ctdb, eligible, linkage, secret):
         rows.append(dict(source="CTDB", patient_id_pseudonymous=pseudonym(secret, "patient", patient),
                          status=status, eligible=patient in eligible, observed_in_ctdb=patient in ctdb_ids))
     return pd.DataFrame(rows)
-
 
 def date_fields(start, end):
     return {f"{prefix}_{name}": value for prefix, parsed in (("start", start), ("end", end))
@@ -453,11 +484,12 @@ def btris_records(frame, source, linkage, eligible, secret):
         return records
     for position, (_, row) in enumerate(frame.iterrows()):
         mrn = key(row.get("MRN"), mrn=True)
+        mrn_token, mrn_identity_quality = mrn_audit_identity(row.get("MRN"), secret)
         patient = linkage["mapping"].get(mrn, "")
         start, end = (parse_date(row.get(c)) for c in BTRIS_TIME_FIELDS)
         flags = date_flags(start, end) + _dose_flags(row)
         if not mrn:
-            flags.append("invalid_or_missing_mrn_no_name_linkage")
+            flags.append("nontext_mrn_not_linkable" if mrn_token else "missing_mrn_not_linkable")
         if mrn in linkage["ambiguous_mrns"]:
             flags.append("ambiguous_key")
         if protocol(row.get("Protocol Number")) != BTRIS_PROTOCOL_EXPECTED[source]:
@@ -479,10 +511,13 @@ def btris_records(frame, source, linkage, eligible, secret):
             audit_record_id=f"{source}:{position}", source_kind="BTRIS", source=source,
             source_protocol_folder=source, protocol_number_raw=raw(row.get("Protocol Number")),
             protocol=protocol(row.get("Protocol Number")), source_row=position, source_row_or_order_id=position,
-            patient_id_pseudonymous=pseudonym(secret, "patient", patient) if patient else pseudonym(secret, "mrn", mrn),
-            source_patient_pseudonymous=pseudonym(secret, "mrn", mrn),
+            patient_id_pseudonymous=pseudonym(secret, "patient", patient) if patient else mrn_token,
+            source_patient_pseudonymous=mrn_token, mrn_identity_quality=mrn_identity_quality,
             linked_patient_pseudonymous=pseudonym(secret, "patient", patient),
-            linkage_status="linked_one_to_one" if patient else "ambiguous_key" if mrn in linkage["ambiguous_mrns"] else "unmatched_btris" if mrn else "invalid_key",
+            linkage_status=("linked_one_to_one" if patient else
+                            "ambiguous_key" if mrn in linkage["ambiguous_mrns"] else
+                            "unmatched_btris" if mrn else
+                            "nontext_unverified" if mrn_token else "invalid_key"),
             eligible_linked=bool(patient and patient in eligible), order_id_pseudonymous=pseudonym(secret, "order", order_id),
             order_identity=pseudonym(secret, "order_identity", json.dumps([mrn, order_id, raw(row.get("Data Source"))])) if mrn and order_id else "",
             content_signature=full, cross_protocol_signature=signature(row, secret, exclude_protocol=True),
@@ -664,6 +699,9 @@ def source_profile(frames, infos, orders):
         end_uppers = part.loc[part.end_status.eq("valid"), "end_upper_bound"]
         rows.append(dict(
             source=source, status=info["status"], n_rows=len(frame), n_patients=count_patients(part),
+            patient_count_semantics="distinct_source_MRN_representations_not_validated_patients",
+            n_nontext_unverified_mrn_rows=int(part.mrn_identity_quality.eq("nontext_unverified").sum()) if len(part) else 0,
+            n_text_mrn_rows=int(part.mrn_identity_quality.eq("text_exact").sum()) if len(part) else 0,
             n_orders_with_id=int(valid_ids.sum()), n_order_ids=int(part.loc[valid_ids, "order_id_pseudonymous"].nunique()) if len(part) else 0,
             n_missing_order_id=int((~valid_ids).sum()),
             n_exact_duplicate_rows=int(part.qc_flags.str.contains("exact_reexport_duplicate_retained").sum()),
@@ -855,7 +893,7 @@ def report_markdown(summary):
     lines = ["# Step 08 CTDB + BTRIS audit 2.0", "", f"Rules: `{RULES_VERSION}`. Audit only.", "",
              "Orders document prescribing records, not administration, dispensing, ingestion or SjD indication.", "",
              f"Eligible-patient denominator: {summary['n_eligible_patients'] if summary['n_eligible_patients'] is not None else 'unavailable'}.", "",
-             "| Source | Status | Input rows | Patients with valid source identity |", "| --- | --- | ---: | ---: |"]
+             "| Source | Status | Input rows | Source identity tokens (BTRIS unverified) |", "| --- | --- | ---: | ---: |"]
     for source in ("CTDB", "11D", "15D"):
         item = summary["source_counts"][source]
         lines.append(f"| {source} | {item['status']} | {item.get('n_rows')} | {item.get('n_patients')} |")
@@ -914,7 +952,11 @@ def run(args):
     for source, path in (("11D", args.btris_11d), ("15D", args.btris_15d)):
         frames[source], infos[source] = load_source(path, BTRIS_MEDICATION_COLUMNS, parquet_only=True)
         schema += schema_audit(frames[source], infos[source], BTRIS_MEDICATION_COLUMNS, source)
-    ctdb, infos["CTDB"] = load_source(args.input, expected_ctdb)
+    ctdb, infos["CTDB"] = load_source(args.input, expected_ctdb,
+                                     required_columns=[CTDB_PATIENT_ID, CTDB_VISIT_DATE])
+    if ctdb is not None and not any(col in ctdb.columns for col in CTDB_RX_NAMES):
+        infos["CTDB"]["status"] = "BLOCKED_SCHEMA"
+        infos["CTDB"]["error"] = "all_current_medication_name_columns_absent"
     eligibility, infos["eligibility"] = load_source(args.eligibility, [ELIGIBILITY_PATIENT_ID])
     eligible = set(eligibility[ELIGIBILITY_PATIENT_ID].map(key)) - {""} if eligibility is not None and ELIGIBILITY_PATIENT_ID in eligibility else set()
     if not eligible:
@@ -970,7 +1012,8 @@ def run(args):
         records["source_sha256"] = records.source.map(lambda s: infos[s].get("sha256", ""))
     all_records = pd.concat([orders, current], ignore_index=True)
     named = all_records.loc[all_records.name_present.fillna(False).astype(bool)].copy()
-    source_ok = {source: infos[source]["status"] == "available" for source in ("CTDB", "11D", "15D")}
+    source_ok = {source: infos[source]["status"] in {"available", "available_partial_schema"}
+                 for source in ("CTDB", "11D", "15D")}
     overlaps = overlap_summary(current, orders, eligible, linkage, source_ok, secret)
     profiles = source_profile(frames, infos, orders)
     tables = {
@@ -1011,7 +1054,7 @@ def run(args):
             if not info["preserved"]:
                 changed.append(name)
     blockers = [
-        "P0: CROSS_SOURCE_LINKAGE_NOT_VALIDATED" if linkage["status"] != "validated" else "P0: Complete eligible crosswalk supplied; retain source identity/protocol QC.",
+        "P0: CROSS_SOURCE_LINKAGE_NOT_VALIDATED (does not block source-level audit)" if linkage["status"] != "validated" else "P0: Complete eligible crosswalk supplied; retain source identity/protocol QC.",
         "P0: PMH RX slots are quarantined as unverified possible allergies; do not count as treatment.",
         "P1: All observed BTRIS statuses require source-owner semantic validation; no status is interpreted as administered exposure.",
         "P1: Candidate drug mappings, ingredient conflicts and unmapped vocabulary require review.",
@@ -1019,12 +1062,18 @@ def run(args):
         "P2: Actual exposure, treatment episodes, indication and pre/post clinical analyses are not approved by this audit.",
     ]
     for source in ("CTDB", "11D", "15D", "eligibility"):
-        if infos[source]["status"] != "available":
+        if infos[source]["status"] not in {"available", "available_partial_schema"}:
             blockers.append(f"P0: {source} {infos[source]['status']}; unavailable information is not zero treatment.")
+        elif infos[source]["status"] == "available_partial_schema":
+            blockers.append(f"P1: {source} optional columns missing; inspect schema QC without treating absence as zero.")
+    if any(orders.mrn_identity_quality.eq("nontext_unverified")):
+        blockers.append("P0: BTRIS MRN contains non-text representations. Counted for source inventory only; no patient linkage without validated crosswalk and identifier precision review.")
     if changed:
         blockers.append("P0: SOURCE_CHANGED_DURING_AUDIT; all derived results require rerun.")
     source_counts = {source: {k: clean_json(v) for k, v in profiles[profiles.source.eq(source)].iloc[0].to_dict().items()
-                               if k in {"status", "n_rows", "n_patients", "n_eligible_linked_patients"}} for source in ("11D", "15D")}
+                               if k in {"status", "n_rows", "n_patients", "n_eligible_linked_patients",
+                                        "patient_count_semantics", "n_nontext_unverified_mrn_rows",
+                                        "n_text_mrn_rows"}} for source in ("11D", "15D")}
     source_counts["CTDB"] = dict(status=infos["CTDB"]["status"], n_rows=infos["CTDB"]["n_rows"],
                                  n_patients=int(ctdb[CTDB_PATIENT_ID].map(key).replace("", pd.NA).nunique()) if ctdb is not None and CTDB_PATIENT_ID in ctdb else None)
     if linkage["status"] != "validated":
@@ -1045,6 +1094,9 @@ def run(args):
         rules_version=RULES_VERSION, mapping_version=MAPPING_VERSION, audit_only=True,
         status="blocked" if changed or not all(source_ok.values()) or not eligible else "completed_with_review_gates",
         n_eligible_patients=len(eligible) if eligible else None, source_counts=source_counts,
+        ctdb_schema_qc=dict(missing_optional_columns=infos["CTDB"].get("missing_columns", []),
+                            missing_required_columns=infos["CTDB"].get("missing_required_columns", [])),
+        audit_completion_note="Source-level audit can complete while clinical linkage remains unvalidated.",
         n_ctdb_named_slots=len(named_ctdb) if ctdb is not None and eligible else None,
         n_ctdb_possible_allergy_slots=len(corrections) if ctdb is not None and eligible else None,
         n_ctdb_patients_with_current_names=count_patients(named_ctdb) if ctdb is not None and eligible else None,
