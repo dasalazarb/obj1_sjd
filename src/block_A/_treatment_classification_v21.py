@@ -12,7 +12,7 @@ from datetime import datetime
 
 import pandas as pd
 
-VERSION = '08-classification-2.1.0'
+VERSION = '08-classification-2.1.1'
 RULE_SOURCE = 'investigator specification 2026-10-21 §3; candidate nomenclature, not institutional validation'
 SYSTEMIC = 'sjd_systemic_candidate'
 OCULAR = 'sjd_ocular_symptomatic_candidate'
@@ -21,6 +21,30 @@ GENERAL = 'concomitant_or_general'
 PROCEDURE = 'procedure_or_diagnostic_candidate'
 DENTAL = 'dental_or_local_support'
 INDETERMINATE = 'indeterminate'
+
+# Five-category clinical grouping requested by the investigator. These are
+# potential pharmacological roles, NOT patient-specific SjD indications.
+PRIMARY_SYSTEMIC = 'systemic_sjd'
+PRIMARY_SYMPTOMATIC = 'symptomatic_sjd'
+PRIMARY_CONCOMITANT = 'concomitant'
+PRIMARY_PROCEDURE = 'procedure_related'
+PRIMARY_INDETERMINATE = 'indeterminate'
+PRIMARY_CATEGORIES = (
+    PRIMARY_SYSTEMIC, PRIMARY_SYMPTOMATIC, PRIMARY_CONCOMITANT,
+    PRIMARY_PROCEDURE, PRIMARY_INDETERMINATE,
+)
+PRIMARY_FROM_RELEVANCE = {
+    SYSTEMIC: PRIMARY_SYSTEMIC,
+    OCULAR: PRIMARY_SYMPTOMATIC,
+    ORAL: PRIMARY_SYMPTOMATIC,
+    GENERAL: PRIMARY_CONCOMITANT,
+    PROCEDURE: PRIMARY_PROCEDURE,
+    # Dental fluoride without verified clinical indication is local supportive
+    # care, NOT automatically SjD symptomatic treatment.
+    DENTAL: PRIMARY_INDETERMINATE,
+    INDETERMINATE: PRIMARY_INDETERMINATE,
+    'device_or_non_drug': PRIMARY_INDETERMINATE,
+}
 
 # Only explicit ingredient/brand aliases. Strengths and formulation tokens are
 # anchored and cannot swallow an arbitrary unrecognized second ingredient.
@@ -206,7 +230,11 @@ def classify(drug, ingredient, route, legacy_rules):
     strength = ' | '.join(re.sub(r'\s+', ' ', value.casefold()).strip() for value in strengths)
     product_canonical = ' | '.join([identity or special if families else '', canonical_route, formulation, strength]) if families else ''
     confidence = 'unmapped' if not families else 'candidate_review' if flags else 'high_exact'
-    return dict(ingredient_canonical=identity, ingredients_canonical=json.dumps(ingredients),
+    primary_category = PRIMARY_FROM_RELEVANCE.get(relevance, PRIMARY_INDETERMINATE)
+    return dict(clinical_category_primary=primary_category,
+                clinical_category_detail=relevance,
+                clinical_category_validation='candidate_only_indication_unconfirmed',
+                ingredient_canonical=identity, ingredients_canonical=json.dumps(ingredients),
                 product_canonical=product_canonical, route_canonical=canonical_route,
                 formulation_canonical=formulation, strength_canonical=strength, pharmacologic_family='|'.join(sorted(families)) or 'unmapped',
                 clinical_relevance_candidate=relevance, clinical_indication_confirmed=False,
@@ -261,9 +289,23 @@ def enrich(records, legacy_rules, linkage):
         if column not in result:
             result[column] = ''
         result[column] = result[column].fillna('')
-    procedure = result.order_set_raw.str.contains(r'\b(?:procedure|visit|test|biopsy|sialometry)\b', case=False, regex=True)
-    result['order_set_procedure_context'] = procedure.map({True: 'candidate', False: 'unresolved'})
-    result['order_set_context_rule_id'] = procedure.map({True: f'{VERSION}:order_set_explicit_context_token', False: 'none'})
+    # Generic "Core Visit"/"Focused Visits" describe visits, not necessarily
+    # drug administration or a diagnostic procedure.
+    procedure = result.order_set_raw.str.contains(
+        r'\b(?:procedure|test|biopsy|sialometry|pft|pulmonary function tests?)\b',
+        case=False, regex=True,
+    )
+    visit_only = (~procedure & result.order_set_raw.str.contains(
+        r'\bvisits?\b', case=False, regex=True))
+    result['order_set_procedure_context'] = [
+        'candidate' if p else 'visit_context_only' if v else 'unresolved'
+        for p, v in zip(procedure, visit_only)
+    ]
+    result['order_set_context_rule_id'] = [
+        f'{VERSION}:order_set_explicit_procedure_token' if p
+        else f'{VERSION}:visit_only_not_procedure' if v else 'none'
+        for p, v in zip(procedure, visit_only)
+    ]
     result['clinical_relevance_secondary'] = [json.dumps([PROCEDURE] if p and r != PROCEDURE else [])
                                               for p, r in zip(procedure, result.clinical_relevance_candidate)]
     for column, token in (
@@ -302,6 +344,10 @@ def coverage(records, eligible, linkage, source_ok):
         'any_sjd_oral_candidate_documentation': lambda f: f.clinical_relevance_candidate.eq(ORAL),
         'any_procedure_candidate_order': lambda f: f.source_kind.eq('BTRIS') & (f.clinical_relevance_candidate.eq(PROCEDURE) | f.order_set_procedure_context.eq('candidate')),
         'any_unmapped_order': lambda f: f.source_kind.eq('BTRIS') & f.classification_confidence.eq('unmapped'),
+        **{f'any_primary_{category}_candidate_documentation':
+           (lambda frame, category=category: frame.clinical_category_primary.eq(category)
+            & (frame.source_kind.eq('BTRIS') | frame.name_present.astype(bool)))
+           for category in PRIMARY_CATEGORIES},
         'any_record_with_full_order_datetime': lambda f: f.source_kind.eq('BTRIS') & f.start_precision.eq('datetime') & f.start_status.eq('valid'),
         'any_identified_route_and_valid_start': lambda f: f.ingredient_canonical.ne('') & f.route_canonical.ne('unresolved') & f.start_status.eq('valid'),
     }
@@ -360,8 +406,28 @@ def artifacts(records, legacy_rules, eligible, linkage, source_ok):
                                   proposal_status='pending_review'))
     priority = pd.DataFrame(priority_rows, columns=dims + ['source_provenance', 'n_order_rows', 'n_record_rows', 'n_distinct_eligible_patients', 'proposed_ingredient', 'suggested_action', 'proposal_status'])
     priority = priority.sort_values(['n_order_rows', 'n_record_rows', 'drug_raw', 'ingredient_raw'], ascending=[False, False, True, True])
+    # Preserve the pre-existing broad QC inventory for backward compatibility.
+    # An order-level identity/status warning affects every BTRIS row and must
+    # NOT turn the targeted pharmacological conflict list into the entire cohort.
     conflicts = records[records.requires_manual_review.astype(bool) | records.source_kind.eq('BTRIS') | records.qc_flags.ne('')].copy()
     conflicts['status_review_reason'] = conflicts.source_kind.map({'BTRIS': 'status_semantics_unvalidated', 'CTDB': 'not_applicable'})
+    important_qc = (r'end_definitely_before_start|ingredient_product_conflict|'
+                    r'formulation_route_conflict|protocol_folder_not_confirmed_by_value|'
+                    r'cross_protocol_possible_duplicate_retained|'
+                    r'same_order_id_revision_or_discordance_retained')
+    targeted = records[
+        records.requires_manual_review.astype(bool)
+        | records.qc_flags.str.contains(important_qc, regex=True, na=False)
+    ].copy()
+    targeted['targeted_review_reason'] = [
+        '|'.join(filter(None, [
+            row.review_reasons, '|'.join(
+                flag for flag in row.qc_flags.split('|')
+                if re.fullmatch(important_qc, flag)
+            ),
+        ]))
+        for row in targeted.itertuples()
+    ]
     reference = orders[['status_code_raw', 'order_type_raw', 'data_source_raw']].drop_duplicates().rename(columns={'data_source_raw': 'source_system'})
     for column, value in {
         'effective_from': '', 'effective_to': '', 'meaning_in_system': 'unvalidated',
@@ -378,6 +444,7 @@ def artifacts(records, legacy_rules, eligible, linkage, source_ok):
         '08_btris_order_set_context_qc.csv': context,
         '08_treatment_coverage_by_evidence.csv': coverage(records, eligible, linkage, source_ok),
         '08_treatment_classification_conflicts_qc.csv': conflicts,
+        '08_treatment_targeted_review_qc.csv': targeted,
         '08_btris_status_semantic_reference.csv': reference,
     }
 
@@ -409,6 +476,14 @@ def summary(records, tables, source_ok, linkage, fingerprints, drift):
     reconciliation['source_rows_sum_equals_union'] = sum(len(orders[orders.source.eq(s)]) for s in ('11D', '15D')) == len(orders)
     reconciliation['audit_record_ids_unique'] = records.audit_record_id.is_unique
     return dict(classification_version=VERSION, rule_source=RULE_SOURCE, audit_only=True, downstream_integration='NO_GO',
+                clinical_category_primary_definitions={
+                    PRIMARY_SYSTEMIC: 'candidate systemic SjD-relevant pharmacology; indication unconfirmed',
+                    PRIMARY_SYMPTOMATIC: 'candidate oral or ocular SjD symptoms; indication unconfirmed',
+                    PRIMARY_CONCOMITANT: 'general/concomitant documented medication',
+                    PRIMARY_PROCEDURE: 'procedure/diagnostic candidate only; context unvalidated',
+                    PRIMARY_INDETERMINATE: 'unknown role, unvalidated dental support or non-drug device',
+                },
+                targeted_review_rows=len(tables['08_treatment_targeted_review_qc.csv']),
                 source_counts=counts, coverage_metrics=metrics,
                 n_order_rows=len(orders) if complete else None,
                 n_orders_classified=classified if complete else None,
@@ -438,7 +513,11 @@ def report(summary):
               '| Metric | Patients |', '| --- | ---: |']
     for key, value in summary['coverage_metrics'].items():
         lines.append(f'| {key} | {value} |')
-    lines += ['', '## Pending review and QC', '',
+    lines += ['', '## Five primary clinical categories (candidate only)', '',
+              'systemic_sjd, symptomatic_sjd, concomitant, procedure_related and indeterminate are mutually exclusive at record level, but patient coverage overlaps across categories. Detailed oral, ocular and dental labels remain preserved.', '',
+              'Dental/local support remains indeterminate until its SjD-specific purpose is supported. Core Visit is a visit context, not in itself a procedure.', '',
+              f"Targeted review rows: {summary['targeted_review_rows']} (restricted/08_treatment_targeted_review_qc.csv).", '',
+              '## Pending review and QC', '',
               'All observed status codes and order types remain unvalidated. No institutional dictionary is available to this implementation.', '',
               '| Observed status | Order rows |', '| --- | ---: |']
     # Raw vocabularies remain restricted; status priority is available in the private matrix.
