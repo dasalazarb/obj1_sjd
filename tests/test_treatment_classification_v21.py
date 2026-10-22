@@ -345,3 +345,20 @@ def test_v213_targeted_only_actionable_conflicts_not_every_mapping_candidate():
     assert 'end_definitely_before_start' in review.targeted_review_reason.iloc[0]
     assert tables['08_treatment_unmapped_priority.csv'].drug_raw.eq(
         'unresolved product').any()
+
+
+def test_v214_oral_balance_gel_is_mucosal_review_candidate():
+    out = classify('Oral Balance Gel', route='topically')
+    assert out['clinical_category_primary'] == classification.PRIMARY_SYMPTOMATIC
+    assert out['route_canonical'] == 'topical'
+    assert 'formulation_route_conflict' not in out['review_reasons']
+    assert 'composition_pending_validation' in out['review_reasons']
+    assert out['ingredient_canonical'] == ''
+    assert not out['clinical_indication_confirmed']
+
+
+def test_v214_ophthalmic_ointment_abbreviation_not_a_component_separator():
+    out = classify('White Petrolatum/Mineral Oil Ophth Oint -', route='ophthalmic')
+    assert out['route_canonical'] == 'ophthalmic'
+    assert out['clinical_indication_confirmed'] is False
+    assert out['clinical_category_primary'] in classification.PRIMARY_CATEGORIES
