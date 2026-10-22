@@ -12,7 +12,7 @@ from datetime import datetime
 
 import pandas as pd
 
-VERSION = '08-classification-2.1.2'
+VERSION = '08-classification-2.1.3'
 RULE_SOURCE = 'investigator specification 2026-10-21 §3; candidate nomenclature, not institutional validation'
 SYSTEMIC = 'sjd_systemic_candidate'
 OCULAR = 'sjd_ocular_symptomatic_candidate'
@@ -114,8 +114,11 @@ def _matches(value, vocabulary):
         for alias in sorted(aliases, key=len, reverse=True):
             if text == alias or (text.startswith(alias) and SUFFIX.fullmatch(text[len(alias):])):
                 return [(ingredient, family, alias)]
-    # mg/ml is a concentration, never an ingredient separator.
-    parts = re.split(r'\s*(?:\+|;|\band\b)\s*|(?<!\d)\s*/\s*(?!ml\b)', text)
+    # Split component names, never strength/unit expressions (mg/mL, Units/gram).
+    parts = re.split(
+        r'\s*(?:\+|;|\band\b)\s*|(?<!\d)\s*/\s*(?!\d|ml\b|gram\b|g\b|l\b)',
+        text,
+    )
     if len(parts) > 1:
         matches = [_matches(part, vocabulary) for part in parts]
         if all(matches):
@@ -124,11 +127,16 @@ def _matches(value, vocabulary):
 
 
 def _route(value):
-    return {'po': 'oral', 'oral': 'oral', 'ophthalmic': 'ophthalmic',
-            'ophth': 'ophthalmic', 'ocular': 'ophthalmic', 'eye': 'ophthalmic',
-            'topical': 'topical', 'dental': 'topical', 'iv': 'iv',
-            'intravenous': 'iv', 'im': 'other', 'sc': 'other',
-            'inhaled': 'other', 'intranasal': 'other'}.get(_text(value).strip().casefold(), 'unresolved')
+    text = re.sub(r'\s+', ' ', _text(value).strip().casefold())
+    exact = {'po': 'oral', 'oral': 'oral', 'by mouth': 'oral',
+             'ophthalmic': 'ophthalmic', 'ophth': 'ophthalmic',
+             'ocular': 'ophthalmic', 'eye': 'ophthalmic',
+             'in both eyes': 'ophthalmic', 'in left eye': 'ophthalmic',
+             'in right eye': 'ophthalmic',
+             'topical': 'topical', 'topically': 'topical', 'dental': 'topical',
+             'iv': 'iv', 'intravenous': 'iv', 'im': 'other', 'sc': 'other',
+             'inhaled': 'other', 'intranasal': 'other'}
+    return exact.get(text, 'unresolved')
 
 
 def classify(drug, ingredient, route, legacy_rules):
@@ -142,10 +150,12 @@ def classify(drug, ingredient, route, legacy_rules):
         flags.append('ingredient_product_conflict')
     if _text(ingredient).strip() and not components:
         flags.append('ingredient_unresolved')
-    if not product and re.search(r'\+|;|\band\b|(?<!\d)/(?!ml\b)', _text(drug), re.I):
+    if not product and re.search(r'\+|;|\band\b|(?<!\d)\s*/\s*(?!\d|ml\b|gram\b|g\b|l\b)', _text(drug), re.I):
         flags.append('product_components_unresolved')
     chosen = components or product
-    text = f'{_text(drug)} {_text(ingredient)}'.casefold()
+    # Ingredient ontology descriptors such as "Glycerin Topical" do not
+    # override explicitly documented product formulation or administration route.
+    text = _text(drug).casefold()
     explicit_route = _route(route)
     hints = set()
     if re.search(r'\b(ophthalmic|ophth|ocular|restasis|cequa|refresh plus|artificial tears|refresh tears|systane)\b', text):
@@ -154,11 +164,18 @@ def classify(drug, ingredient, route, legacy_rules):
         hints.add('oral')
     if re.search(r'\b(topical|dental|cream)\b', text):
         hints.add('topical')
-    route_conflict = len(hints) > 1 or bool(hints and explicit_route != 'unresolved' and explicit_route not in hints)
+    generic_topical_eye = hints == {'ophthalmic'} and explicit_route == 'topical'
+    route_conflict = len(hints) > 1 or bool(
+        hints and explicit_route != 'unresolved' and explicit_route not in hints
+        and not generic_topical_eye)
     if route_conflict:
         flags.append('formulation_route_conflict')
+    if generic_topical_eye:
+        flags.append('ophthalmic_formulation_generic_topical_route_review')
     canonical_route = 'unresolved' if route_conflict else explicit_route
-    if canonical_route == 'unresolved' and len(hints) == 1 and not route_conflict:
+    if generic_topical_eye:
+        canonical_route = 'ophthalmic'
+    elif canonical_route == 'unresolved' and len(hints) == 1 and not route_conflict:
         canonical_route = next(iter(hints))
     formulation = 'unresolved'
     for expression, label in (
@@ -416,18 +433,28 @@ def artifacts(records, legacy_rules, eligible, linkage, source_ok):
                     r'formulation_route_conflict|protocol_folder_not_confirmed_by_value|'
                     r'cross_protocol_possible_duplicate_retained|'
                     r'same_order_id_revision_or_discordance_retained')
+    # Ordinary unknown ingredients remain in the frequency-weighted unmapped
+    # review file. This table is for actionable inconsistencies only.
+    critical_reasons = (
+        r'ingredient_product_conflict|formulation_route_conflict|'
+        r'route_required|glucocorticoid_route_requires_review')
     targeted = records[
-        records.requires_manual_review.astype(bool)
+        records.review_reasons.str.contains(critical_reasons, regex=True, na=False)
         | records.qc_flags.str.contains(important_qc, regex=True, na=False)
     ].copy()
     targeted['targeted_review_reason'] = [
         '|'.join(filter(None, [
-            row.review_reasons, '|'.join(
-                flag for flag in row.qc_flags.split('|')
-                if re.fullmatch(important_qc, flag)
-            ),
-        ]))
-        for row in targeted.itertuples()
+            '|'.join(x for x in row.review_reasons.split('|')
+                     if re.fullmatch(critical_reasons, x)),
+            '|'.join(x for x in row.qc_flags.split('|')
+                     if re.fullmatch(important_qc, x)),
+        ])) for row in targeted.itertuples()
+    ]
+    targeted['review_priority'] = [
+        ('high' if any(flag in reason for flag in (
+            'ingredient_product_conflict', 'formulation_route_conflict',
+            'end_definitely_before_start')) else 'medium')
+        for reason in targeted.targeted_review_reason
     ]
     reference = orders[['status_code_raw', 'order_type_raw', 'data_source_raw']].drop_duplicates().rename(columns={'data_source_raw': 'source_system'})
     for column, value in {
