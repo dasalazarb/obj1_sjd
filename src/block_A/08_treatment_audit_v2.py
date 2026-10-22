@@ -281,6 +281,15 @@ def parse_date(value, *, slash_order="MDY"):
         elif re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
             lower = upper = date.fromisoformat(text)
             result.update(parsed=lower.isoformat(), precision="day", parse_rule="YYYY-MM-DD")
+        elif re.fullmatch(r"\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}(?::\d{2})?", text):
+            if slash_order != "MDY":
+                result.update(status="ambiguous_format", parse_rule="slash_datetime_not_authorized")
+                return result
+            fmt = "%m/%d/%Y %H:%M:%S" if text.count(":") == 2 else "%m/%d/%Y %H:%M"
+            stamp = datetime.strptime(text, fmt)
+            result.update(parsed=stamp.isoformat(), precision="datetime",
+                          parse_rule="MM/DD/YYYY HH:MM" if text.count(":") == 1 else "MM/DD/YYYY HH:MM:SS")
+            lower = upper = stamp.date()
         elif re.fullmatch(r"\d{1,2}/\d{1,2}/\d{4}", text):
             if slash_order != "MDY":
                 result.update(status="ambiguous_format", parse_rule="slash_format_not_authorized")
@@ -603,7 +612,10 @@ def btris_records(frame, source, linkage, eligible, secret):
         start, end = (parse_date(row.get(c)) for c in BTRIS_TIME_FIELDS)
         flags = date_flags(start, end) + _dose_flags(row)
         if not mrn:
-            flags.append("nontext_mrn_not_linkable" if mrn_token else "missing_mrn_not_linkable")
+            if patient and mrn_token:
+                flags.append("nontext_mrn_normalized_match_requires_identifier_review")
+            else:
+                flags.append("nontext_mrn_not_linkable" if mrn_token else "missing_mrn_not_linkable")
         if mrn in linkage["ambiguous_mrns"]:
             flags.append("ambiguous_key")
         if protocol(row.get("Protocol Number")) != BTRIS_PROTOCOL_EXPECTED[source]:
