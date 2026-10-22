@@ -12,7 +12,7 @@ from datetime import datetime
 
 import pandas as pd
 
-VERSION = '08-classification-2.1.3'
+VERSION = '08-classification-2.1.4'
 RULE_SOURCE = 'investigator specification 2026-10-21 §3; candidate nomenclature, not institutional validation'
 SYSTEMIC = 'sjd_systemic_candidate'
 OCULAR = 'sjd_ocular_symptomatic_candidate'
@@ -63,7 +63,7 @@ EXTRA_RULES = (
 SUFFIX = re.compile(
     r'(?:\s|[(),.\-]|\d+(?:\.\d+)?\s*(?:mg|mcg|g|ml|%|units?)|'
     r'tablets?|tabs?|capsules?|caps?|oral|ophthalmic|ophth|ocular|topical|'
-    r'solution|suspension|emulsions?|injection|cream|ointment|drops|gel|delayed|release|'
+    r'solution|suspension|emulsions?|injection|cream|ointment|oint|drops|gel|delayed|release|'
     r'po|iv|im|sc|hfa|\(refresh plus\))+', re.I)
 
 
@@ -93,6 +93,7 @@ def dictionary(legacy_rules):
                              pending_clinical_review=True))
     for alias, family, relevance in (
         ('mouth kote dry mouth treatment', 'oral_moisturizer', ORAL),
+        ('oral balance gel', 'oral_moisturizer', ORAL),
         ('aerochamber', 'device', 'device_or_non_drug'),
     ):
         rows.append(dict(classification_rule_id=f'{VERSION}:{alias}', exact_alias=alias,
@@ -156,6 +157,7 @@ def classify(drug, ingredient, route, legacy_rules):
     # Ingredient ontology descriptors such as "Glycerin Topical" do not
     # override explicitly documented product formulation or administration route.
     text = _text(drug).casefold()
+    special = text.strip()
     explicit_route = _route(route)
     hints = set()
     if re.search(r'\b(ophthalmic|ophth|ocular|restasis|cequa|refresh plus|artificial tears|refresh tears|systane)\b', text):
@@ -164,6 +166,10 @@ def classify(drug, ingredient, route, legacy_rules):
         hints.add('oral')
     if re.search(r'\b(topical|dental|cream)\b', text):
         hints.add('topical')
+    # Oral Balance Gel is applied to the oral cavity. A recorded topical route
+    # is not proof of an oral-swallowed medication or a conflicting route.
+    if special == 'oral balance gel' and explicit_route == 'topical':
+        hints.discard('oral')
     generic_topical_eye = hints == {'ophthalmic'} and explicit_route == 'topical'
     route_conflict = len(hints) > 1 or bool(
         hints and explicit_route != 'unresolved' and explicit_route not in hints
@@ -228,8 +234,10 @@ def classify(drug, ingredient, route, legacy_rules):
         relevance = PROCEDURE
     if 'antifungal' in families:
         relevance = INDETERMINATE
-    special = _text(drug).strip().casefold()
     if special == 'mouth kote dry mouth treatment':
+        families, relevance = ['oral_moisturizer'], ORAL
+        flags.append('composition_pending_validation')
+    if special == 'oral balance gel':
         families, relevance = ['oral_moisturizer'], ORAL
         flags.append('composition_pending_validation')
     if special == 'aerochamber':
