@@ -12,7 +12,7 @@ from datetime import datetime
 
 import pandas as pd
 
-VERSION = '08-classification-2.1.4'
+VERSION = '08-classification-2.1.5'
 RULE_SOURCE = 'investigator specification 2026-10-21 §3; candidate nomenclature, not institutional validation'
 SYSTEMIC = 'sjd_systemic_candidate'
 OCULAR = 'sjd_ocular_symptomatic_candidate'
@@ -140,6 +140,42 @@ def _route(value):
     return exact.get(text, 'unresolved')
 
 
+def _drug_short_label(ingredients, route, original_name, families, *, uncertain=False):
+    """Display only; never an exposure identity or medication grouping key.
+
+    Preserve the full original name and the separate ingredient/route/formulation
+    fields. Unmapped and contradictory identities have no short label.
+    """
+    if uncertain:
+        return ''
+    if ingredients:
+        label = ' + '.join(i[:1].upper() + i[1:] for i in ingredients)
+        route_sensitive = bool(set(ingredients) & {
+            'cyclosporine', 'pilocarpine', 'prednisolone', 'dexamethasone',
+            'methylprednisolone', 'sodium fluoride',
+        })
+        if route in {'ophthalmic', 'topical', 'iv', 'other'}:
+            return f'{label} ({route})'
+        if route == 'oral' and route_sensitive:
+            return f'{label} (oral)'
+        if route == 'unresolved' and route_sensitive:
+            return f'{label} (route unresolved)'
+        return label
+    # A product can be identifiable while its precise ingredient composition is
+    # not established. Its branded display label must carry that uncertainty.
+    aliases = {
+        'mouth kote dry mouth treatment': 'Mouth Kote',
+        'oral balance gel': 'Oral Balance Gel',
+        'artificial tears': 'Artificial tears',
+        'systane': 'Systane',
+        'refresh tears': 'Refresh Tears',
+    }
+    name = _text(original_name).strip().casefold()
+    if families and name in aliases:
+        return aliases[name] + ' (composition unverified)'
+    return ''
+
+
 def classify(drug, ingredient, route, legacy_rules):
     vocabulary = rules(legacy_rules)
     product = _matches(drug, vocabulary)
@@ -185,7 +221,7 @@ def classify(drug, ingredient, route, legacy_rules):
         canonical_route = next(iter(hints))
     formulation = 'unresolved'
     for expression, label in (
-        (r'\bointment\b', 'ointment'), (r'\bdrops?\b', 'drops'),
+        (r'\b(?:ointment|oint)\b', 'ointment'), (r'\bdrops?\b', 'drops'),
         (r'\bsolution\b', 'solution'), (r'\bsuspension\b', 'suspension'),
         (r'\bemulsions?\b', 'emulsion'),
         (r'\bgel\b', 'gel'), (r'\bcream\b', 'cream'),
@@ -257,7 +293,12 @@ def classify(drug, ingredient, route, legacy_rules):
     product_canonical = ' | '.join([identity or special if families else '', canonical_route, formulation, strength]) if families else ''
     confidence = 'unmapped' if not families else 'candidate_review' if flags else 'high_exact'
     primary_category = PRIMARY_FROM_RELEVANCE.get(relevance, PRIMARY_INDETERMINATE)
-    return dict(clinical_category_primary=primary_category,
+    short_label = _drug_short_label(
+        ingredients, canonical_route, drug, families,
+        uncertain=bool(conflict or route_conflict or
+                       'product_components_unresolved' in flags))
+    return dict(drug_short_label=short_label,
+                clinical_category_primary=primary_category,
                 clinical_category_detail=relevance,
                 clinical_category_validation='candidate_only_indication_unconfirmed',
                 ingredient_canonical=identity, ingredients_canonical=json.dumps(ingredients),
@@ -428,9 +469,10 @@ def artifacts(records, legacy_rules, eligible, linkage, source_ok):
         priority_rows.append(dict(zip(dims, values), source_provenance='|'.join(sorted(set(part.source))), n_order_rows=int(part.source_kind.eq('BTRIS').sum()),
                                   n_record_rows=len(part), n_distinct_eligible_patients=part.loc[part.eligible_linked, 'linked_patient_pseudonymous'].replace('', pd.NA).nunique() if ok else None,
                                   proposed_ingredient=part.ingredient_canonical.iloc[0],
+                                  drug_short_label=part.drug_short_label.iloc[0],
                                   suggested_action='verify exact source ingredient/formulation; no automatic mapping approval',
                                   proposal_status='pending_review'))
-    priority = pd.DataFrame(priority_rows, columns=dims + ['source_provenance', 'n_order_rows', 'n_record_rows', 'n_distinct_eligible_patients', 'proposed_ingredient', 'suggested_action', 'proposal_status'])
+    priority = pd.DataFrame(priority_rows, columns=dims + ['source_provenance', 'n_order_rows', 'n_record_rows', 'n_distinct_eligible_patients', 'proposed_ingredient', 'drug_short_label', 'suggested_action', 'proposal_status'])
     priority = priority.sort_values(['n_order_rows', 'n_record_rows', 'drug_raw', 'ingredient_raw'], ascending=[False, False, True, True])
     # Preserve the pre-existing broad QC inventory for backward compatibility.
     # An order-level identity/status warning affects every BTRIS row and must
@@ -525,6 +567,7 @@ def summary(records, tables, source_ok, linkage, fingerprints, drift):
                     PRIMARY_INDETERMINATE: 'unknown role, unvalidated dental support or non-drug device',
                 },
                 targeted_review_rows=len(tables['08_treatment_targeted_review_qc.csv']),
+                short_label_policy='display_only; canonical identity and original name retained; empty if unresolved or contradictory',
                 source_counts=counts, coverage_metrics=metrics,
                 n_order_rows=len(orders) if complete else None,
                 n_orders_classified=classified if complete else None,
@@ -557,6 +600,7 @@ def report(summary):
     lines += ['', '## Five primary clinical categories (candidate only)', '',
               'systemic_sjd, symptomatic_sjd, concomitant, procedure_related and indeterminate are mutually exclusive at record level, but patient coverage overlaps across categories. Detailed oral, ocular and dental labels remain preserved.', '',
               'Dental/local support remains indeterminate until its SjD-specific purpose is supported. Core Visit is a visit context, not in itself a procedure.', '',
+              'drug_short_label is display-only. It does not determine grouping, route equivalence, actual exposure or SjD indication. Empty labels require source review.', '',
               f"Targeted review rows: {summary['targeted_review_rows']} (restricted/08_treatment_targeted_review_qc.csv).", '',
               '## Pending review and QC', '',
               'All observed status codes and order types remain unvalidated. No institutional dictionary is available to this implementation.', '',
