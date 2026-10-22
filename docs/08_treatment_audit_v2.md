@@ -1,184 +1,255 @@
-# Step 08: CTDB + BTRIS audit 2.0
+# Step 08: CTDB + BTRIS audit v2.1
 
-`src/block_A/08_treatment_audit_v2.py` adds a separate, read-only audit of CTDB
-visit medications and both BTRIS medication-order exports. The v1 entry point,
-rules, interfaces and outputs remain unchanged. This implementation does not
-create exposures or modify Step 10, Step 14, Step 15, studies or master datasets.
+`src/block_A/08_treatment_audit_v2.py` is the only entrypoint. Its private helper
+`_treatment_classification_v21.py` extends the existing v2 audit with conservative
+product axes, observed order-context matrices and patient coverage by evidence.
+It creates no therapeutic episodes or integrated clinical dataset.
+`downstream_integration` remains exactly `NO_GO`. Step 08 v1, Step 10/14/15,
+Block B, studies, common paths and master sources remain unchanged.
 
-## Run
+## Run and permitted writes
 
-Use the project's Python environment with pandas and pyarrow installed:
+Use the project's Python environment with pandas and pyarrow:
 
 ```bash
 python src/block_A/08_treatment_audit_v2.py
 ```
 
-The defaults are:
+Defaults read only:
 
 - CTDB: `common.DEFAULT_ANALYTIC_DATASET`, currently
   `/data/salazarda/data/obj1_sjd/data/raw/visits_long_collapsed_by_interval_codebook_corrected.parquet`.
-- Eligibility: `common.LONGITUDINAL_ID_LIST`, currently
-  `<repository>/data/raw/list_ids_longitudinal.csv`, with exact key `patient_id`.
+- Eligibility: `common.LONGITUDINAL_ID_LIST`, column `patient_id`.
 - BTRIS 11D: `/data/salazarda/data/eda_sjd/data_analytic/BTRIS/11D/medication_records.parquet`.
 - BTRIS 15D: `/data/salazarda/data/eda_sjd/data_analytic/BTRIS/15D/medication_records.parquet`.
-- New output directory: `outputs/audit/08_treatments_v2/`.
 
-These follow the current repository's CTDB/eligibility conventions, rather than
-silently searching the previous audit's `/vf/users/...` location. The selected
-paths, SHA256, size, mtime, Parquet metadata and missing/unexpected columns are
-recorded in the restricted input manifest. No fallback source or cohort is used.
-Verify that the selected eligibility file is the approved list before running.
-
-Override paths explicitly, and use a fresh output directory on subsequent runs:
+Writes default exclusively to `outputs/audit/08_treatments_v2/`. Preliminary
+reruns overwrite only known artifact names and retain unrelated files and the
+existing `restricted/.pseudonym_key`. They never delete the directory or v1
+outputs. Source paths can be explicitly overridden for protected executions or
+synthetic tests; no alternate source or cohort is searched automatically.
 
 ```bash
 python src/block_A/08_treatment_audit_v2.py \
   --input /protected/visits.parquet \
   --eligibility /protected/list_ids_longitudinal.csv \
   --btris-11d /protected/BTRIS/11D/medication_records.parquet \
-  --btris-15d /protected/BTRIS/15D/medication_records.parquet \
-  --crosswalk-manifest /protected/approved_crosswalk.json \
-  --previous-summary /protected/audit_v1/08_treatment_audit_summary.json \
-  --output-dir /protected/audits/08_treatments_v2/run_02
+  --btris-15d /protected/BTRIS/15D/medication_records.parquet
 ```
 
-The output directory must be new or empty and outside master-data directories
-and v1 outputs. Unreadable/corrupt sources generate `BLOCKED_SOURCE_UNAVAILABLE`
-and null counts, while readable empty files generate zero observed records.
-Both are distinguishable from missing exact schema columns (`BLOCKED_SCHEMA`).
-The remaining source audits continue. A blocked source, schema or eligibility
-returns CLI exit code 2 **after** writing the diagnostic artifacts. Crosswalk
-failure alone permits source inventories to finish with explicit review gates.
+Missing/unreadable sources produce `BLOCKED_SOURCE_UNAVAILABLE` and null counts;
+readable empty sources produce zero observed rows. Missing required columns
+produce `BLOCKED_SCHEMA`. Partial optional CTDB schema remains usable and is
+reported separately. Blocked source/eligibility runs write diagnostic artifacts
+and return CLI exit code 2. A linkage failure alone allows source inventory.
+Input paths, SHA256, size, mtime and schema remain in the restricted manifest.
 
-## Authorized identity linkage
+## Identity, provenance and counting units
 
-No name/DOB matching or implicit equivalence of MRN and CTDB patient number is
-implemented. Supply an existing authorized crosswalk via a JSON manifest:
+The default `--linkage-mode serology_normalized_id` reuses the existing Step 01
+normalization precedent: strip approved separators/leading zeros, safely accept
+integral numeric Parquet MRNs, and reject unsafe floats, invalid IDs and CTDB
+normalization collisions. It does not rewrite the linkage algorithm or match on
+name, DOB, sex, age or protocol. `validated` is a technical gate; the assumption
+that the two systems use the same identifier still requires external semantic
+validation. New row-level fields expose `linkage_method`, `id_precision_qc` and
+`linkage_semantic_validation=external_validation_pending`.
+
+`--linkage-mode crosswalk_only` instead requires an existing authorized
+crosswalk. An explicit `--crosswalk-manifest` overrides normalized matching:
 
 ```json
 {
   "path": "existing_approved_crosswalk.csv",
   "mrn_column": "MRN",
   "patient_column": "patient_id",
-  "authorization_evidence": "Reference to the approved linkage source and review"
+  "authorization_evidence": "Existing approval reference"
 }
 ```
 
-`authorization_evidence` records the operator's assertion; the program cannot
-independently establish institutional authorization. It is not a prompt for the
-software to invent an identity link. Relative paths resolve against the manifest.
-CSV keys are read as strings; numeric Parquet MRNs are invalid because leading
-zeroes may already have been lost. Whitespace is trimmed, with no zero stripping,
-case folding, fuzzy matching or numeric key conversion.
+Relative paths resolve against the manifest. Crosswalk keys require exact text,
+trim whitespace only, and reject numeric MRNs. Repeated identical pairs are
+harmless; every edge touching an identity conflict is excluded. This mode
+requires a complete unambiguous eligible crosswalk for combined coverage.
+No institutional authorization is inferred from the supplied string.
 
-Repeated identical pairs are harmless. Any edge touching a one-to-many or
-many-to-one conflict is excluded. Individual safe links may be inspected, but
-**combined coverage requires a complete, unambiguous mapping of every eligible
-patient**, readable sources and complete expected source schemas. This deliberately
-conservative gate prevents an unmatched patient from being assigned to “neither.”
-Without it, combined counts are null with `blocked_linkage` or `blocked_source`.
-Full-universe MRN-token counts are distinguished from validated patient counts.
+BTRIS counts use **order rows**, CTDB uses **current RX slots/visit rows**, and
+coverage uses **sets of unique eligible patient pseudonyms**. All BTRIS rows,
+including unmatched/outside-eligibility records, unknown products, possible
+reexports and revisions, remain in inventory. No drug-name deduplication occurs.
+Order-ID revision matching requires source folder, source MRN token and source
+system; cross-folder candidates also require technical identity linkage and the
+same source system. Numeric MRNs retain pseudonymous order identity for QC.
+Counts of raw distinct order IDs are descriptive, not a deduplicated order total.
 
-The overlap scopes `11D`, `15D` and `union` describe extraction sources, not
-protocol-specific eligible enrollment cohorts. There is no authorized
-per-protocol cohort denominator in the supplied schema. CTDB protocol remains
-`protocol_provenance_unavailable` unless an existing documented column is passed
-through `--ctdb-protocol-column`. BTRIS folder provenance and observed protocol
-values are retained separately; mismatches are flagged, not filtered.
+Folder 11D/15D is extraction provenance, never exclusive enrollment or POP.
+Actual `Protocol Number`, source system, category, drug type, order set and type
+remain separate. Without an approved POP column, the stratum is
+`population_stratum_not_available`; no downstream data is imported.
 
-## Rules and units
+CTDB keeps literal v1 field names, including frequency underscores in slots
+3/5/6 and `anticogaulant_1_dose`. Existing nonempty/orphan/negative slot records
+remain traceable. Column availability is distinct from an empty cell in schema
+QC and `start_column_available` / `end_column_available`. PMH RX names remain
+quarantined possible allergies, excluded from all current-medication counts.
+Unassigned doses stay separate.
 
-- All 28 BTRIS headers are literal. Missing near-matches are reported without
-  substitution. All 66 CTDB names are reused from v1's literal schema, including
-  the frequency underscores in slots 3/5/6 and `anticogaulant_1_dose`.
-- BTRIS counts use order rows; CTDB extraction uses visit rows and current RX
-  slots. Cross-source coverage uses unique eligible patients. Global BTRIS
-  inventories retain records outside eligibility and records with invalid IDs.
-- A BTRIS order, its end date, take-home flag and authorized refills do not
-  establish administration, discontinuation, adherence or SjD indication.
-  Every observed order status/type/source label remains unvalidated until source
-  owners review it. Cancelled/completed/active labels and revisions are preserved.
-- Exact signatures include all source columns and distinguish nulls from blank
-  strings. Same-ID discordance, exact reexports and possible cross-protocol
-  reexports remain separate flags; records are never deduplicated or fused.
-  Cross-protocol candidate matching requires an unambiguous crosswalk identity.
-- PMH RX names are quarantined as `unverified_possible_allergy`; comparison with
-  the allergy field is QC, not proof of medication history. Unassigned CTDB doses
-  remain separate and are never attached to RX slots.
-- Candidate normalization rules are versioned in code. Complete recognizable
-  ingredients take precedence; product conflicts and unverified ingredients
-  require review. Combinations retain components, Myfortic remains distinct from
-  MMF, ocular cyclosporine remains distinct from systemic cyclosporine and local
-  steroids are not counted as systemic glucocorticoids. Unmapped names remain in
-  the complete restricted inventory, ordered for review by frequency/priority.
-- MDY is an explicit parser rule, including `06/08/2015` and `03/27/2015`.
-  Calendar errors are flagged. Month/year dates have calendar bounds and an
-  empty observed `parsed` date; no observed day is fabricated. Native/ISO
-  datetimes retain time and timezone. Bounds are compared as calendar dates;
-  timezone differences do not establish intraday chronological order.
-- Preconsent, pre-index and out-of-window orders remain visible. An optional
-  existing `--ctdb-index-column` enables pre-index QC without downstream reads.
-  Concatenated visit dates stay intact. Overlapping documented intervals are
-  flagged without creating treatment courses or calculating durations.
-- Prescription completeness is a structural count: name, full date, route,
-  dose/strength, units and frequency. PRN/titration/loading/infusion/refill
-  ambiguities have separate QC flags. Completeness does not validate dose
-  intensity, daily dose or actual exposure. Original free text remains in the
-  immutable source; the canonical audit copies presence flags rather than
-  duplicating instructions or non-formulary narrative.
-- The overlap definitions are an observed current CTDB name vs at least one
-  BTRIS order record. “Neither documented” does not mean untreated. Incremental
-  full dates, route, frequency, dose and recognized drugs are documentation gains.
-  Union drug/class counts deduplicate validated patient IDs while retaining
-  distinct evidence types and all source observations.
+## Classification axes and uncertainty
 
-## Outputs and protection
+Existing v2 normalization columns and files are preserved. New axes are additive
+and versioned as `08-classification-2.1.0`:
 
-All outputs are audit-only and generated under a fresh directory with mode 0700.
-Files have mode 0600. This supplements the operator's existing protected storage;
-the tool does not turn an arbitrary external location into approved storage.
+- Ingredient scalar plus stable JSON ingredient list, product, strength tokens,
+  route, formulation and pharmacologic family. Product identity retains route,
+  formulation and observed strength; no dose equivalence is asserted.
+- Potential SjD systemic, ocular or oral relevance; general/concomitant,
+  procedure/diagnostic, dental/local, device or indeterminate candidates.
+- Original order type/context and a separate procedure-context candidate based
+  only on explicit `procedure`, `visit`, `test`, `biopsy` or `sialometry` order-set
+  tokens. The rule ID and original restricted text remain inspectable. Secondary
+  context labels do not multiply order counts.
+- Evidence source (`ctdb_reported_current_medication` or
+  `btris_documented_order`), rule IDs, identity confidence and review reasons.
 
-The run root contains an aggregate summary and human-readable report:
+Rules accept exact aliases with an anchored strength/formulation suffix, never
+fuzzy similarity. Complete recognized combinations retain every ingredient.
+Unknown extra components cannot yield a single-agent exact mapping. Generic
+artificial tears/Systane identify a lubricant product, with composition pending
+and no asserted chemical ingredient. Conflicting
+product/ingredient identities keep both original fields, clear the asserted
+canonical ingredient and flag review. Route conflicts are unresolved.
+`high_exact` describes identity matching only; it does not confirm clinical use.
+`candidate_review` and `unmapped` are pending review. Clinical indication is
+always false; administration and dispensing are always `not_established`.
 
-- `08_treatment_audit_v2_summary.json`
-- `08_treatment_audit_v2_report.md`
+The observed priority vocabulary has explicit conservative rules:
 
-`restricted/` contains the 13 required CSV/Parquet products named in the
-specification: BTRIS schema, source profile, status dictionary, full drug
-inventory, date QC, dose/route QC and canonical orders; linkage QC, overlap,
-normalization review, CTDB corrections, combined coverage and feasibility.
-Additional restricted products provide the CTDB schema, current-slot Parquet,
-unassigned-dose table, pairwise concordance, date availability and input manifest.
-Raw vocabularies and dates remain restricted even in frequency tables. The
-shareable report/summary contain fixed labels and aggregate numbers, with paths
-and full input metadata available through the restricted manifest pointer.
+| Product | Candidate treatment of the record |
+| --- | --- |
+| Citric Acid Monohydrate oral solution | Procedure/diagnostic candidate; use pending; never systemic SjD therapy |
+| Sodium fluoride topical gel | Dental/local support |
+| Ibuprofen / acetaminophen | General/concomitant symptomatic product |
+| Carboxymethylcellulose ophthalmic | Ocular support, distinct from oral/generic formulations |
+| Cevimeline / oral pilocarpine | Oral symptomatic candidate; no individual indication assigned |
+| Mouth Kote Dry Mouth Treatment | Oral support candidate; composition unresolved |
+| Ophthalmic cyclosporine / Restasis / Cequa | Ocular candidate, distinct from oral/systemic cyclosporine |
+| Myfortic vs CellCept | Separate molecules; no dose collapse |
+| Antifungals | Specific family; SjD relevance indeterminate |
+| Contrast / AeroChamber | Procedure or device, never systemic SjD by default |
 
-Patient identifiers use keyed HMAC pseudonyms with separate namespaces for MRN,
-eligible patient and order identity. A random per-run key is stored as
-`restricted/.pseudonym_key`. For repeatable pseudonyms, pass an approved protected
-key of at least 32 bytes with `--pseudonym-key-file`; it is never printed or
-committed. Source row positions are zero-based before eligibility filtering.
-Source hashes and mtimes are checked again at the end. A source change blocks
-the run and requires a new run; input files are never modified.
+Local, ophthalmic and systemic glucocorticoids are separate; an unresolved route
+requires review. Salt/brand expansions are limited to declared aliases. The
+restricted dictionary enumerates aliases, versions, route/formulation policy,
+rule provenance and confidence policy. Investigator-provided nomenclature is a
+candidate rule source, not an independently validated institutional dictionary.
 
-The report ends with the decision table and a NO-GO for downstream integration
-until a separate scientific review. Clinical pre/post ESSDAI is explicitly
-`not_evaluated_in_this_audit`, never a count of zero eligible patients.
+## Order semantics and temporal QC
 
-## Validation and outstanding clinical execution
+All observed status codes, including AUC1, CANP, OPCMP, DISC, OPODC, OPOA, AUA1,
+COMPT and unknown future codes, remain `unvalidated`, with evidence `none`.
+OnSite, Take Home and Home Med never establish administration or dispensing.
+The generated semantic-reference template contains the requested effective-date,
+source-system, clinical-support and reviewer/documentation fields, all pending.
+No external calls or protected dictionary loads occur. Institutional semantic
+validation is a separate future input; this iteration supplies no approved map.
+
+MDY parsing explicitly supports `MM/DD/YYYY HH:MM` and `MM/DD/YYYY HH:MM:SS`.
+Intraday reversals use the original timestamps. ISO/native timestamps retain
+precision and timezone. Month/year inputs retain calendar uncertainty bounds
+and an empty observed date; no day is imputed. Dates are never corrected.
+
+`order_interval_qc` definitions:
+
+| Label | Administrative interval definition |
+| --- | --- |
+| reverse | Exact end precedes exact start |
+| zero | Exact endpoints equal |
+| short | Positive interval below 24 hours |
+| plausible | Interval at least 24 hours; label is not clinical validation |
+| missing | At least one endpoint missing |
+| uncertain | Partial/unparsed endpoint or incompatible timezone awareness |
+
+`order_start_semantics=order_or_start_unresolved` and
+`order_end_semantics=order_validity_end_not_confirmed_discontinuation` apply to
+BTRIS. Preconsent records, inversions, repeated intervals and overlaps remain
+visible. No exposure, received dose, treatment duration, adherence or episodes
+are derived.
+
+## Outputs, privacy and reconciliation
+
+Directories are 0700 and generated files 0600. All detailed vocabularies,
+patient-level pseudonyms and row-level records remain under `restricted/`.
+Raw MRN, subject name, DOB and free-text order instructions/non-formulary notes
+are never copied to the canonical rows. HMAC namespaces distinguish patients,
+source MRNs, orders and signatures. The pseudonym key is reused across reruns,
+or an existing protected >=32-byte key can be supplied explicitly.
+No outputs or keys are committed to Git.
+
+All legacy v2 products continue to be generated, including source/schema/status,
+drug/date/dose inventories, order/slot Parquets, linkage, overlap, concordance,
+coverage, allergy quarantine, feasibility and the input manifest. New products:
+
+| File | Scope |
+| --- | --- |
+| `restricted/08_treatment_classification_dictionary.csv` | Exact aliases and reproducible rule metadata |
+| `restricted/08_treatment_record_classification_audit.parquet` | One row per existing BTRIS order or CTDB current/orphan slot |
+| `restricted/08_treatment_unmapped_priority.csv` | Pending vocabulary, sorted by BTRIS row weight; first 20 are review priorities |
+| `restricted/08_btris_status_type_matrix.csv` | Five labeled matrices; each separately reconciles to loaded order rows |
+| `restricted/08_btris_order_set_context_qc.csv` | Order set/type/category/product context and counts |
+| `restricted/08_treatment_coverage_by_evidence.csv` | Unique eligible patients by source, evidence level, route and union |
+| `restricted/08_treatment_classification_conflicts_qc.csv` | Identity/route/manual/status/duplicate/temporal review rows |
+| `restricted/08_btris_status_semantic_reference.csv` | Observed code/type/source combinations, pending institutional review |
+| `08_treatment_classification_v21_summary.json` | Aggregate counts, coverage, reconciliation, fingerprints and NO_GO |
+| `08_treatment_classification_v21_report.md` | Scientific review narrative and decision table |
+
+Matrices cover folder/protocol/status/type; status/type/take-home/source;
+status/type/category/drug-type; status/date precision/temporal flags; and
+order-type/relevance/family. Each group has `n_order_rows`, raw distinct
+pseudonymous order IDs, technically linked eligible patients (null if linkage
+blocked), and valid-start counts. Do not sum different matrices together.
+Ingredients are never exploded to compute an order-row metric.
+
+Coverage includes any documentation, identifiable ingredient, systemic/ocular/
+oral candidates, procedure candidates, unmapped orders, full order datetimes,
+identified route + valid start, and route strata. Each scope uses only the
+approved full eligible denominator; no cohort size is hard-coded. Cross-source
+counts are null if linkage or required sources are blocked. Patients appearing
+in both folders count once in the union. Clinical subcategories overlap and
+must not be summed. Missing documentation never establishes untreated status.
+
+Summary checks reconcile source row sums, classified + pending order rows,
+status matrix totals and record identity uniqueness. `n_orders_classified`
+means `high_exact`; pending includes `candidate_review` and `unmapped`.
+Ingredient mentions are a separate count and may exceed order rows. The v2
+summary additionally retains the four overlap categories and their denominator.
+Prior investigator numbers are reconciliation references, never constants.
+
+On rerun the manifest is read before overwriting. Source SHA changes and changes
+to the versioned dictionary fingerprint are reported in `fingerprint_drift`;
+manual edits to the previous generated dictionary are also detected;
+a first run has `no_previous_manifest`. The manifest stores the dictionary
+fingerprint; original source hashes/mtimes are rechecked at the end. A change
+during execution blocks the run. Previously generated summaries are not reused
+as current scientific results.
+
+## Validation and remaining NIH execution
 
 ```bash
-python -m pytest -q tests/test_treatment_audit.py tests/test_treatment_audit_v2.py
+python -m pytest -q \
+  tests/test_treatment_audit.py tests/test_treatment_audit_v2.py \
+  tests/test_treatment_classification_v21.py
 ```
 
-Tests use synthetic CSV/Parquet fixtures, including both protocols, missing and
-corrupt sources, all four overlap categories, empty tables, absent/ambiguous
-crosswalks, PHI-bearing source text, schema exceptions, partial dates, order
-revisions and immutable inputs/legacy scripts. No synthetic results are shipped.
-The combined v1/v2 verification passes 97 tests. An invocation with the default
-source locations was also checked: it writes the blocked-source diagnostics and
-returns exit code 2, with unknown clinical counts left null.
-The implementation environment has no actual CTDB/eligibility/BTRIS inputs or
-authorized crosswalk; real coverage, observed vocabulary and clinical source
-semantics remain unmeasured. Run the command in the protected BTRIS environment
-to obtain the real inventories and pending-decision report.
+Synthetic tests cover priority vocabulary, all observed status codes and three
+order types, combinations, conflicts, local/systemic routes, Myfortic/CellCept,
+1,208 synthetic retained rows (not a new clinical result), intraday inversions,
+identity safety/collisions, overlapping patient coverage, privacy, source and
+protected-code hashes, repeatable outputs/key and input/dictionary drift.
+
+The implementation environment has no actual NIH CTDB, eligibility, BTRIS or
+prior audit files. Synthetic tests do not update the investigator's reference
+counts. Run this entrypoint in the protected NIH environment to obtain real raw
+and unique counts, the top 20 unresolved products, status/type distributions and
+coverage/QC reconciliation. Until then those clinical results remain pending.
+Stop at audit outputs and scientific review: no downstream integration is
+approved by this implementation.
