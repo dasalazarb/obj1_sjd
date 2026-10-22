@@ -302,3 +302,46 @@ def test_ophthalmic_emulsion_suffix_exact_matching_and_adversarial_names():
                  'cyclosporine ophthalmic emulsion + unknown',
                  'cyclosporine ophthalmic emulsion 0.05% plus unknown'):
         assert classify(name, route='ophthalmic')['classification_confidence'] == 'unmapped'
+
+
+def test_v213_ophthalmic_routes_and_review_scope():
+    eye = classify('Restasis eye drops', 'cyclosporine', 'Topical')
+    assert eye['clinical_category_primary'] == classification.PRIMARY_SYMPTOMATIC
+    assert eye['route_canonical'] == 'ophthalmic'
+    assert 'formulation_route_conflict' not in eye['review_reasons']
+    assert 'ophthalmic_formulation_generic_topical_route_review' in eye['review_reasons']
+    conflict = classify('Refresh plus', '', 'PO')
+    assert conflict['clinical_category_primary'] == classification.PRIMARY_INDETERMINATE
+    assert 'formulation_route_conflict' in conflict['review_reasons']
+    assert classification._route('in both EYEs') == 'ophthalmic'
+    assert classification._route('by mouth') == 'oral'
+    glycerin = classify(
+        'Carboxymethylcellulose/Glycerin/Polysorbate 80 Ophth Drops 0.5%/1%/0.5%',
+        'Ophthalmic Lubricant, Polysorbate 80, Glycerin, Carboxymethylcellulose, Glycerin Topical',
+        'in both EYEs')
+    assert glycerin['route_canonical'] == 'ophthalmic'
+    assert 'formulation_route_conflict' not in glycerin['review_reasons']
+    assert 'product_components_unresolved' not in classify(
+        'Nystatin Topical Ointment 100,000 Units/gram',
+        'Nystatin', 'topical')['review_reasons']
+
+
+def test_v213_targeted_only_actionable_conflicts_not_every_mapping_candidate():
+    rows = records([
+        btris(**{'Medication Name': 'unresolved product', 'Drug Ingredient': '',
+                 'Order End Date': '06/09/2015',
+                 'Order Date/Start Date': '06/08/2015'}),
+        btris(**{'Medication Name': 'Plaquenil', 'Drug Ingredient': 'methotrexate',
+                 'Order End Date': '06/08/2015 08:30',
+                 'Order Date/Start Date': '06/08/2015 09:30'}),
+    ])
+    enriched = classification.enrich(rows, audit.DRUG_RULES, link())
+    tables = classification.artifacts(enriched, audit.DRUG_RULES, {'p1'}, link(),
+                                      {'CTDB': True, '11D': True, '15D': True})
+    review = tables['08_treatment_targeted_review_qc.csv']
+    assert len(review) == 1
+    assert review.review_priority.iloc[0] == 'high'
+    assert 'ingredient_product_conflict' in review.targeted_review_reason.iloc[0]
+    assert 'end_definitely_before_start' in review.targeted_review_reason.iloc[0]
+    assert tables['08_treatment_unmapped_priority.csv'].drug_raw.eq(
+        'unresolved product').any()
