@@ -12,7 +12,7 @@ from datetime import datetime
 
 import pandas as pd
 
-VERSION = '08-classification-2.1.1'
+VERSION = '08-classification-2.1.2'
 RULE_SOURCE = 'investigator specification 2026-10-21 §3; candidate nomenclature, not institutional validation'
 SYSTEMIC = 'sjd_systemic_candidate'
 OCULAR = 'sjd_ocular_symptomatic_candidate'
@@ -63,7 +63,7 @@ EXTRA_RULES = (
 SUFFIX = re.compile(
     r'(?:\s|[(),.\-]|\d+(?:\.\d+)?\s*(?:mg|mcg|g|ml|%|units?)|'
     r'tablets?|tabs?|capsules?|caps?|oral|ophthalmic|ophth|ocular|topical|'
-    r'solution|suspension|injection|cream|ointment|drops|gel|delayed|release|'
+    r'solution|suspension|emulsions?|injection|cream|ointment|drops|gel|delayed|release|'
     r'po|iv|im|sc|hfa|\(refresh plus\))+', re.I)
 
 
@@ -164,6 +164,7 @@ def classify(drug, ingredient, route, legacy_rules):
     for expression, label in (
         (r'\bointment\b', 'ointment'), (r'\bdrops?\b', 'drops'),
         (r'\bsolution\b', 'solution'), (r'\bsuspension\b', 'suspension'),
+        (r'\bemulsions?\b', 'emulsion'),
         (r'\bgel\b', 'gel'), (r'\bcream\b', 'cream'),
         (r'\btablets?\b', 'tablet'), (r'\bcapsules?\b', 'capsule'),
         (r'\binjection\b', 'injection'),
@@ -171,7 +172,7 @@ def classify(drug, ingredient, route, legacy_rules):
         if re.search(expression, text):
             formulation = label
             break
-    if formulation in {'drops', 'ointment', 'solution', 'gel'} and canonical_route != 'unresolved':
+    if formulation in {'drops', 'ointment', 'solution', 'gel', 'emulsion'} and canonical_route != 'unresolved':
         formulation = canonical_route + '_' + formulation
     ingredients = sorted({x[0] for x in chosen}) if not conflict else []
     families = sorted({x[1] for x in chosen})
