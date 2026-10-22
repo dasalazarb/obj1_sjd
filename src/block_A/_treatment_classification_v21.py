@@ -438,9 +438,14 @@ def artifacts(records, legacy_rules, eligible, linkage, source_ok):
     critical_reasons = (
         r'ingredient_product_conflict|formulation_route_conflict|'
         r'route_required|glucocorticoid_route_requires_review')
-    targeted = records[
-        records.review_reasons.str.contains(critical_reasons, regex=True, na=False)
-        | records.qc_flags.str.contains(important_qc, regex=True, na=False)
+    # Empty input frames can give these all-empty columns a float64 dtype.
+    # Normalize only the QC selectors to nullable strings before using .str.
+    # Keep the original audit columns, values and row grain unchanged.
+    review_text = records["review_reasons"].astype("string").fillna("")
+    qc_text = records["qc_flags"].astype("string").fillna("")
+    targeted = records.loc[
+        review_text.str.contains(critical_reasons, regex=True, na=False)
+        | qc_text.str.contains(important_qc, regex=True, na=False)
     ].copy()
     targeted['targeted_review_reason'] = [
         '|'.join(filter(None, [
