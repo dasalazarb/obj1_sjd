@@ -362,3 +362,24 @@ def test_v214_ophthalmic_ointment_abbreviation_not_a_component_separator():
     assert out['route_canonical'] == 'ophthalmic'
     assert out['clinical_indication_confirmed'] is False
     assert out['clinical_category_primary'] in classification.PRIMARY_CATEGORIES
+
+
+def test_v215_short_labels_do_not_collapse_routes_or_unverified_products():
+    eye = classify('cycloSPORINE Ophthalmic Emulsion 0.05%', route='ophthalmic')
+    oral = classify('cyclosporine oral emulsion', route='oral')
+    assert eye['drug_short_label'] == 'Cyclosporine (ophthalmic)'
+    assert oral['drug_short_label'] == 'Cyclosporine (oral)'
+    assert eye['drug_short_label'] != oral['drug_short_label']
+    assert classify('Ibuprofen 400 mg tablet', route='oral')['drug_short_label'] == 'Ibuprofen'
+    assert classify('Plaquenil', ingredient='methotrexate', route='oral')['drug_short_label'] == ''
+    assert classify('unknown product')['drug_short_label'] == ''
+    assert classify('Mouth Kote Dry Mouth Treatment')['drug_short_label'] == 'Mouth Kote (composition unverified)'
+
+
+def test_v215_ophthalmic_oint_abbreviation_preserves_combination_identity():
+    out = classify('White Petrolatum/Mineral Oil Ophth Oint -', route='ophthalmic')
+    assert out['formulation_canonical'] == 'ophthalmic_ointment'
+    assert out['ingredient_canonical'] == 'mineral oil + petrolatum'
+    assert out['clinical_category_primary'] == classification.PRIMARY_SYMPTOMATIC
+    assert out['drug_short_label'] == 'Mineral oil + Petrolatum (ophthalmic)'
+    assert not out['clinical_indication_confirmed']
