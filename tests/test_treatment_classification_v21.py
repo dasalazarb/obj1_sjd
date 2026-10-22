@@ -286,3 +286,19 @@ def test_generic_visit_not_marked_procedure_and_targeted_qc_excludes_generic_war
                                          {'CTDB': True, '11D': True, '15D': True})
     assert len(artifacts['08_treatment_targeted_review_qc.csv']) == 0
     assert len(artifacts['08_treatment_classification_conflicts_qc.csv']) == 2
+
+
+def test_ophthalmic_emulsion_suffix_exact_matching_and_adversarial_names():
+    eye = classify('cycloSPORINE Ophthalmic Emulsion 0.05%', route='ophthalmic')
+    assert eye['ingredient_canonical'] == 'cyclosporine'
+    assert eye['clinical_category_primary'] == classification.PRIMARY_SYMPTOMATIC
+    assert eye['route_canonical'] == 'ophthalmic'
+    assert eye['formulation_canonical'] == 'ophthalmic_emulsion'
+    assert not eye['clinical_indication_confirmed']
+    systemic = classify('cyclosporine oral emulsion', route='oral')
+    assert systemic['clinical_category_primary'] == classification.PRIMARY_SYSTEMIC
+    assert systemic['formulation_canonical'] == 'oral_emulsion'
+    for name in ('cyclosporine ophthalmic emulsifying agent',
+                 'cyclosporine ophthalmic emulsion + unknown',
+                 'cyclosporine ophthalmic emulsion 0.05% plus unknown'):
+        assert classify(name, route='ophthalmic')['classification_confidence'] == 'unmapped'
