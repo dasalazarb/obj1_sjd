@@ -1,0 +1,475 @@
+"""Conservative Step 08 product axes and descriptive QC; no exposure inference.
+
+Private implementation helper for 08_treatment_audit_v2.py, never an entrypoint.
+All source row units survive; ingredient lists are never exploded for order counts.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from datetime import datetime
+
+import pandas as pd
+
+VERSION = '08-classification-2.1.0'
+RULE_SOURCE = 'investigator specification 2026-10-21 §3; candidate nomenclature, not institutional validation'
+SYSTEMIC = 'sjd_systemic_candidate'
+OCULAR = 'sjd_ocular_symptomatic_candidate'
+ORAL = 'sjd_oral_symptomatic_candidate'
+GENERAL = 'concomitant_or_general'
+PROCEDURE = 'procedure_or_diagnostic_candidate'
+DENTAL = 'dental_or_local_support'
+INDETERMINATE = 'indeterminate'
+
+# Only explicit ingredient/brand aliases. Strengths and formulation tokens are
+# anchored and cannot swallow an arbitrary unrecognized second ingredient.
+EXTRA_RULES = (
+    ('citric acid monohydrate', 'diagnostic_or_local_agent', ('citric acid monohydrate',)),
+    ('sodium fluoride', 'dental_fluoride', ('sodium fluoride',)),
+    ('ibuprofen', 'nsaid', ('ibuprofen', 'advil', 'motrin')),
+    ('carboxymethylcellulose', 'lubricant', ('carboxymethylcellulose', 'carboxymethylcellulose sodium', 'refresh plus')),
+    ('mineral oil', 'lubricant', ('mineral oil',)),
+    ('petrolatum', 'lubricant', ('petrolatum', 'white petrolatum')),
+    ('codeine', 'opioid_analgesic', ('codeine', 'codeine phosphate')),
+    ('fluconazole', 'antifungal', ('fluconazole', 'diflucan')),
+    ('nystatin', 'antifungal', ('nystatin',)),
+    ('iopamidol', 'radiologic_contrast', ('iopamidol', 'isovue')),
+)
+SUFFIX = re.compile(
+    r'(?:\s|[(),.\-]|\d+(?:\.\d+)?\s*(?:mg|mcg|g|ml|%|units?)|'
+    r'tablets?|tabs?|capsules?|caps?|oral|ophthalmic|ophth|ocular|topical|'
+    r'solution|suspension|injection|cream|ointment|drops|gel|delayed|release|'
+    r'po|iv|im|sc|hfa|\(refresh plus\))+', re.I)
+
+
+def rules(legacy_rules):
+    return tuple(legacy_rules) + EXTRA_RULES
+
+
+def family_label(family):
+    return {'needs_review': 'calcineurin_inhibitor',
+            'symptomatic_sjd_oral': 'secretagogue',
+            'symptomatic_sjd_ocular': 'ocular_lubricant_product',
+            'other_symptomatic': 'general_analgesic',
+            'concomitant_other': 'concomitant_medication'}.get(family, family)
+
+
+def dictionary(legacy_rules):
+    rows = []
+    for ingredient, family, aliases in rules(legacy_rules):
+        for alias in aliases:
+            rows.append(dict(classification_rule_id=f'{VERSION}:{ingredient}:{alias}',
+                             exact_alias=alias, ingredient_canonical=ingredient,
+                             pharmacologic_family=family_label(family), route_requirement='explicit_or_unequivocal_brand',
+                             formulation_requirement='retain_observed_tokens',
+                             relevance_rule='route_and_family_axes_v21',
+                             rule_source=RULE_SOURCE, classification_version=VERSION,
+                             confidence_policy='high_exact_identity_only; clinical_relevance_is_candidate',
+                             pending_clinical_review=True))
+    for alias, family, relevance in (
+        ('mouth kote dry mouth treatment', 'oral_moisturizer', ORAL),
+        ('aerochamber', 'device', 'device_or_non_drug'),
+    ):
+        rows.append(dict(classification_rule_id=f'{VERSION}:{alias}', exact_alias=alias,
+                         ingredient_canonical='', pharmacologic_family=family,
+                         route_requirement='unresolved', formulation_requirement='unresolved',
+                         relevance_rule=relevance, rule_source=RULE_SOURCE,
+                         classification_version=VERSION, confidence_policy='candidate_review',
+                         pending_clinical_review=True))
+    return pd.DataFrame(rows)
+
+
+def _text(value):
+    return '' if value is None or pd.isna(value) else str(value)
+
+
+def _matches(value, vocabulary):
+    text = _text(value).strip().casefold()
+    for ingredient, family, aliases in vocabulary:
+        for alias in sorted(aliases, key=len, reverse=True):
+            if text == alias or (text.startswith(alias) and SUFFIX.fullmatch(text[len(alias):])):
+                return [(ingredient, family, alias)]
+    # mg/ml is a concentration, never an ingredient separator.
+    parts = re.split(r'\s*(?:\+|;|\band\b)\s*|(?<!\d)\s*/\s*(?!ml\b)', text)
+    if len(parts) > 1:
+        matches = [_matches(part, vocabulary) for part in parts]
+        if all(matches):
+            return [item for match in matches for item in match]
+    return []
+
+
+def _route(value):
+    return {'po': 'oral', 'oral': 'oral', 'ophthalmic': 'ophthalmic',
+            'ophth': 'ophthalmic', 'ocular': 'ophthalmic', 'eye': 'ophthalmic',
+            'topical': 'topical', 'dental': 'topical', 'iv': 'iv',
+            'intravenous': 'iv', 'im': 'other', 'sc': 'other',
+            'inhaled': 'other', 'intranasal': 'other'}.get(_text(value).strip().casefold(), 'unresolved')
+
+
+def classify(drug, ingredient, route, legacy_rules):
+    vocabulary = rules(legacy_rules)
+    product = _matches(drug, vocabulary)
+    components = _matches(ingredient, vocabulary)
+    flags = []
+    product_ids, ingredient_ids = {x[0] for x in product}, {x[0] for x in components}
+    conflict = bool(product_ids and ingredient_ids and product_ids != ingredient_ids)
+    if conflict:
+        flags.append('ingredient_product_conflict')
+    if _text(ingredient).strip() and not components:
+        flags.append('ingredient_unresolved')
+    if not product and re.search(r'\+|;|\band\b|(?<!\d)/(?!ml\b)', _text(drug), re.I):
+        flags.append('product_components_unresolved')
+    chosen = components or product
+    text = f'{_text(drug)} {_text(ingredient)}'.casefold()
+    explicit_route = _route(route)
+    hints = set()
+    if re.search(r'\b(ophthalmic|ophth|ocular|restasis|cequa|refresh plus|artificial tears|refresh tears|systane)\b', text):
+        hints.add('ophthalmic')
+    if re.search(r'\b(oral|tablet|tablets|capsule|capsules|salagen|evoxac|neoral|sandimmune|myfortic|cellcept)\b', text):
+        hints.add('oral')
+    if re.search(r'\b(topical|dental|cream)\b', text):
+        hints.add('topical')
+    route_conflict = len(hints) > 1 or bool(hints and explicit_route != 'unresolved' and explicit_route not in hints)
+    if route_conflict:
+        flags.append('formulation_route_conflict')
+    canonical_route = 'unresolved' if route_conflict else explicit_route
+    if canonical_route == 'unresolved' and len(hints) == 1 and not route_conflict:
+        canonical_route = next(iter(hints))
+    formulation = 'unresolved'
+    for expression, label in (
+        (r'\bointment\b', 'ointment'), (r'\bdrops?\b', 'drops'),
+        (r'\bsolution\b', 'solution'), (r'\bsuspension\b', 'suspension'),
+        (r'\bgel\b', 'gel'), (r'\bcream\b', 'cream'),
+        (r'\btablets?\b', 'tablet'), (r'\bcapsules?\b', 'capsule'),
+        (r'\binjection\b', 'injection'),
+    ):
+        if re.search(expression, text):
+            formulation = label
+            break
+    if formulation in {'drops', 'ointment', 'solution', 'gel'} and canonical_route != 'unresolved':
+        formulation = canonical_route + '_' + formulation
+    ingredients = sorted({x[0] for x in chosen}) if not conflict else []
+    families = sorted({x[1] for x in chosen})
+    relevance = INDETERMINATE
+    if ingredients:
+        relevance = GENERAL
+    if any(f in {'nonbiologic_systemic', 'biologic'} for f in families):
+        relevance = SYSTEMIC
+    if set(ingredients) & {'cyclosporine', 'pilocarpine'}:
+        relevance = (OCULAR if canonical_route == 'ophthalmic' and 'cyclosporine' in ingredients
+                     else ORAL if canonical_route == 'oral' and 'pilocarpine' in ingredients
+                     else SYSTEMIC if canonical_route == 'oral' and 'cyclosporine' in ingredients
+                     else INDETERMINATE)
+        if canonical_route == 'unresolved':
+            flags.append('route_required')
+    if 'cevimeline' in ingredients:
+        relevance = ORAL if canonical_route == 'oral' else INDETERMINATE
+        if canonical_route == 'unresolved':
+            flags.append('route_required')
+    if any(f in {'lubricant', 'symptomatic_sjd_ocular'} for f in families):
+        relevance = OCULAR if canonical_route == 'ophthalmic' else GENERAL
+    if 'systemic_glucocorticoid' in families:
+        families = [f for f in families if f != 'systemic_glucocorticoid'] + [
+            'systemic_glucocorticoid' if canonical_route in {'oral', 'iv'} else
+            'ophthalmic_glucocorticoid' if canonical_route == 'ophthalmic' else
+            'local_glucocorticoid' if canonical_route == 'topical' else 'glucocorticoid_route_unresolved']
+        relevance = SYSTEMIC if canonical_route in {'oral', 'iv'} else INDETERMINATE
+        if canonical_route == 'unresolved':
+            flags.append('glucocorticoid_route_requires_review')
+    if 'sodium fluoride' in ingredients:
+        relevance = DENTAL if canonical_route == 'topical' else INDETERMINATE
+    if 'citric acid monohydrate' in ingredients:
+        relevance = PROCEDURE
+        flags.append('citric_acid_use_pending_validation')
+    if 'iopamidol' in ingredients:
+        relevance = PROCEDURE
+    if 'antifungal' in families:
+        relevance = INDETERMINATE
+    special = _text(drug).strip().casefold()
+    if special == 'mouth kote dry mouth treatment':
+        families, relevance = ['oral_moisturizer'], ORAL
+        flags.append('composition_pending_validation')
+    if special == 'aerochamber':
+        families, relevance = ['device'], 'device_or_non_drug'
+        flags.append('device_product_review')
+    if ingredients == ['artificial tears']:
+        ingredients = []
+        flags.append('composition_pending_validation')
+    families = [family_label(family) for family in families]
+    if conflict or route_conflict or 'product_components_unresolved' in flags:
+        relevance = INDETERMINATE
+    if not ingredients and not families:
+        flags.append('no_unambiguous_identity_rule')
+    identity = ' + '.join(ingredients)
+    strengths = re.findall(r'\b\d+(?:\.\d+)?\s*(?:mg|mcg|g|ml|units?)\b|\b\d+(?:\.\d+)?\s*%', _text(drug), re.I)
+    strength = ' | '.join(re.sub(r'\s+', ' ', value.casefold()).strip() for value in strengths)
+    product_canonical = ' | '.join([identity or special if families else '', canonical_route, formulation, strength]) if families else ''
+    confidence = 'unmapped' if not families else 'candidate_review' if flags else 'high_exact'
+    return dict(ingredient_canonical=identity, ingredients_canonical=json.dumps(ingredients),
+                product_canonical=product_canonical, route_canonical=canonical_route,
+                formulation_canonical=formulation, strength_canonical=strength, pharmacologic_family='|'.join(sorted(families)) or 'unmapped',
+                clinical_relevance_candidate=relevance, clinical_indication_confirmed=False,
+                classification_rule_id='|'.join(sorted(f'{VERSION}:{x[0]}:{x[2]}' for x in chosen)) or
+                (f'{VERSION}:{special}' if families else f'{VERSION}:unmapped'),
+                classification_confidence=confidence, requires_manual_review=bool(flags),
+                review_reasons='|'.join(sorted(flags)), classification_version=VERSION)
+
+
+def _interval(row):
+    if row.start_status == 'missing' or row.end_status == 'missing':
+        return 'missing'
+    if row.start_status != 'valid' or row.end_status != 'valid':
+        return 'uncertain'
+    if row.start_precision not in {'datetime', 'day'} or row.end_precision not in {'datetime', 'day'}:
+        return 'uncertain'
+    start, end = datetime.fromisoformat(row.start_parsed), datetime.fromisoformat(row.end_parsed)
+    try:
+        seconds = (end - start).total_seconds()
+    except TypeError:
+        return 'uncertain'
+    if seconds < 0:
+        return 'reverse'
+    if seconds == 0:
+        return 'zero'
+    return 'short' if seconds < 86400 else 'plausible'
+
+
+def enrich(records, legacy_rules, linkage):
+    result = records.copy()
+    axes = [classify(row.drug_raw if row.name_present else '', row.ingredient_raw if row.name_present else '',
+                     row.route, legacy_rules) for row in result.itertuples()]
+    # Stable schema also when every source is unavailable.
+    empty = classify('', '', '', legacy_rules)
+    for column in empty:
+        result[column] = [item[column] for item in axes]
+    result['status_code_raw'] = result.order_status_raw
+    result['status_semantic_interpretation'] = 'unvalidated'
+    result['status_semantic_evidence'] = 'none'
+    result['administration_evidence'] = 'not_established'
+    result['dispense_evidence'] = 'not_established'
+    result['evidence_source_type'] = result.source_kind.map({
+        'CTDB': 'ctdb_reported_current_medication', 'BTRIS': 'btris_documented_order'})
+    result['order_context_candidate'] = result.get('order_type_raw', pd.Series('', index=result.index)).fillna('')
+    result['order_interval_qc'] = [_interval(row) for row in result.itertuples()]
+    result['order_start_semantics'] = result.time_semantics
+    result['order_end_semantics'] = result.end_semantics
+    result['linkage_method'] = linkage.get('mode', 'authorized_crosswalk')
+    result['id_precision_qc'] = result.get('mrn_identity_quality', pd.Series('', index=result.index)).fillna('ctdb_exact_key')
+    result['linkage_semantic_validation'] = 'external_validation_pending'
+    for column in ('order_type_raw', 'order_set_raw', 'take_home_raw', 'data_source_raw', 'category_raw', 'drug_type_raw'):
+        if column not in result:
+            result[column] = ''
+        result[column] = result[column].fillna('')
+    procedure = result.order_set_raw.str.contains(r'\b(?:procedure|visit|test|biopsy|sialometry)\b', case=False, regex=True)
+    result['order_set_procedure_context'] = procedure.map({True: 'candidate', False: 'unresolved'})
+    result['order_set_context_rule_id'] = procedure.map({True: f'{VERSION}:order_set_explicit_context_token', False: 'none'})
+    result['clinical_relevance_secondary'] = [json.dumps([PROCEDURE] if p and r != PROCEDURE else [])
+                                              for p, r in zip(procedure, result.clinical_relevance_candidate)]
+    for column, token in (
+        ('possible_duplicate_order', 'exact_reexport_duplicate_retained'),
+        ('possible_revision', 'same_order_id_revision_or_discordance_retained'),
+        ('possible_cross_protocol_reexport', 'cross_protocol_possible_duplicate_retained'),
+    ):
+        result[column] = result.qc_flags.str.contains(token, regex=False)
+    return result
+
+
+COUNT_COLUMNS = ['n_order_rows', 'n_distinct_order_ids', 'n_distinct_eligible_patients', 'n_orders_with_valid_start_date']
+
+
+def cross_tab(orders, columns, linkage_ok):
+    rows = []
+    for values, part in orders.groupby(columns, dropna=False, sort=True):
+        if len(columns) == 1 and not isinstance(values, tuple):
+            values = (values,)
+        rows.append(dict(zip(columns, values), n_order_rows=len(part),
+                         n_distinct_order_ids=part.loc[part.order_id_pseudonymous.ne(''), 'order_id_pseudonymous'].nunique(),
+                         n_distinct_eligible_patients=part.loc[part.eligible_linked, 'linked_patient_pseudonymous'].replace('', pd.NA).nunique() if linkage_ok else None,
+                         n_orders_with_valid_start_date=int(part.start_status.eq('valid').sum())))
+    return pd.DataFrame(rows, columns=columns + COUNT_COLUMNS)
+
+
+def coverage(records, eligible, linkage, source_ok):
+    rows = []
+    scopes = {'CTDB': ['CTDB'], '11D': ['11D'], '15D': ['15D'],
+              'BTRIS': ['11D', '15D'], 'union': ['CTDB', '11D', '15D']}
+    metrics = {
+        'any_documentation': lambda f: f.source_kind.eq('BTRIS') | f.name_present.astype(bool),
+        'any_identifiable_drug': lambda f: f.ingredient_canonical.ne(''),
+        'any_sjd_systemic_candidate_documentation': lambda f: f.clinical_relevance_candidate.eq(SYSTEMIC),
+        'any_sjd_ocular_candidate_documentation': lambda f: f.clinical_relevance_candidate.eq(OCULAR),
+        'any_sjd_oral_candidate_documentation': lambda f: f.clinical_relevance_candidate.eq(ORAL),
+        'any_procedure_candidate_order': lambda f: f.source_kind.eq('BTRIS') & (f.clinical_relevance_candidate.eq(PROCEDURE) | f.order_set_procedure_context.eq('candidate')),
+        'any_unmapped_order': lambda f: f.source_kind.eq('BTRIS') & f.classification_confidence.eq('unmapped'),
+        'any_record_with_full_order_datetime': lambda f: f.source_kind.eq('BTRIS') & f.start_precision.eq('datetime') & f.start_status.eq('valid'),
+        'any_identified_route_and_valid_start': lambda f: f.ingredient_canonical.ne('') & f.route_canonical.ne('unresolved') & f.start_status.eq('valid'),
+    }
+    for scope, sources in scopes.items():
+        available = bool(eligible) and all(source_ok[s] for s in sources)
+        valid = available and (scope == 'CTDB' or linkage['status'] == 'validated')
+        status = 'available_technical_linkage_semantics_pending' if valid else 'blocked_source' if not available else 'blocked_linkage'
+        part = records[records.source.isin(sources)]
+        for metric, selector in metrics.items():
+            selected = part.loc[selector(part)]
+            n = selected.loc[selected.eligible_linked, 'linked_patient_pseudonymous'].replace('', pd.NA).nunique() if valid else None
+            if valid and n > len(eligible):
+                raise ValueError('Coverage exceeds eligible denominator')
+            rows.append(dict(scope=scope, metric=metric, n_patients=n, denominator=len(eligible) or None,
+                             percent_eligible=100*n/len(eligible) if valid else None,
+                             n_record_rows=len(selected) if available else None, status=status,
+                             population_stratum='population_stratum_not_available',
+                             definition='unique eligible IDs; documentation only; categories overlap'))
+        for route in ('oral', 'ophthalmic', 'topical', 'iv', 'other', 'unresolved'):
+            selected = part[(part.source_kind.eq('BTRIS') | part.name_present.astype(bool)) & part.route_canonical.eq(route)]
+            rows.append(dict(scope=scope, metric=f'any_documentation_route_{route}',
+                             n_patients=selected.loc[selected.eligible_linked, 'linked_patient_pseudonymous'].replace('', pd.NA).nunique() if valid else None,
+                             denominator=len(eligible) or None, percent_eligible=None,
+                             n_record_rows=len(selected) if available else None, status=status,
+                             population_stratum='population_stratum_not_available', definition='documented route; no administration inference'))
+    return pd.DataFrame(rows)
+
+
+def artifacts(records, legacy_rules, eligible, linkage, source_ok):
+    orders = records[records.source_kind.eq('BTRIS')].copy()
+    ok = linkage['status'] == 'validated'
+    dimensions = {
+        'folder_protocol_status_type': ['source', 'protocol_number_raw', 'status_code_raw', 'order_type_raw'],
+        'status_type_takehome_source': ['status_code_raw', 'order_type_raw', 'take_home_raw', 'data_source_raw'],
+        'status_type_category_drugtype': ['status_code_raw', 'order_type_raw', 'category_raw', 'drug_type_raw'],
+        'status_dates_qc': ['status_code_raw', 'start_precision', 'end_precision', 'order_interval_qc', 'qc_flags'],
+        'type_relevance_family': ['order_type_raw', 'clinical_relevance_candidate', 'pharmacologic_family'],
+    }
+    matrices = []
+    for name, columns in dimensions.items():
+        table = cross_tab(orders, columns, ok)
+        table['matrix'] = name
+        table['status_semantic_interpretation'] = 'unvalidated'
+        table['status_semantic_evidence'] = 'none'
+        matrices.append(table)
+    context = cross_tab(orders, ['order_set_raw', 'order_type_raw', 'category_raw', 'drug_type_raw',
+                                'drug_raw', 'ingredient_raw', 'order_set_procedure_context', 'order_set_context_rule_id'], ok)
+    unresolved = records[records.name_present.astype(bool) & records.classification_confidence.ne('high_exact')]
+    priority_rows = []
+    dims = ['drug_raw', 'ingredient_raw', 'route_canonical', 'clinical_relevance_candidate', 'review_reasons']
+    for values, part in unresolved.groupby(dims, dropna=False, sort=True):
+        priority_rows.append(dict(zip(dims, values), source_provenance='|'.join(sorted(set(part.source))), n_order_rows=int(part.source_kind.eq('BTRIS').sum()),
+                                  n_record_rows=len(part), n_distinct_eligible_patients=part.loc[part.eligible_linked, 'linked_patient_pseudonymous'].replace('', pd.NA).nunique() if ok else None,
+                                  proposed_ingredient=part.ingredient_canonical.iloc[0],
+                                  suggested_action='verify exact source ingredient/formulation; no automatic mapping approval',
+                                  proposal_status='pending_review'))
+    priority = pd.DataFrame(priority_rows, columns=dims + ['source_provenance', 'n_order_rows', 'n_record_rows', 'n_distinct_eligible_patients', 'proposed_ingredient', 'suggested_action', 'proposal_status'])
+    priority = priority.sort_values(['n_order_rows', 'n_record_rows', 'drug_raw', 'ingredient_raw'], ascending=[False, False, True, True])
+    conflicts = records[records.requires_manual_review.astype(bool) | records.source_kind.eq('BTRIS') | records.qc_flags.ne('')].copy()
+    conflicts['status_review_reason'] = conflicts.source_kind.map({'BTRIS': 'status_semantics_unvalidated', 'CTDB': 'not_applicable'})
+    reference = orders[['status_code_raw', 'order_type_raw', 'data_source_raw']].drop_duplicates().rename(columns={'data_source_raw': 'source_system'})
+    for column, value in {
+        'effective_from': '', 'effective_to': '', 'meaning_in_system': 'unvalidated',
+        'supports_prescribed_order': 'unknown', 'supports_dispense': 'not_established',
+        'supports_administered': 'not_established', 'supports_discontinued': 'not_established',
+        'verified_by': '', 'documentation_reference': 'none', 'review_date': '', 'status': 'pending_review',
+    }.items():
+        reference[column] = value
+    return {
+        '08_treatment_classification_dictionary.csv': dictionary(legacy_rules),
+        '08_treatment_record_classification_audit.parquet': records,
+        '08_treatment_unmapped_priority.csv': priority,
+        '08_btris_status_type_matrix.csv': pd.concat(matrices, ignore_index=True),
+        '08_btris_order_set_context_qc.csv': context,
+        '08_treatment_coverage_by_evidence.csv': coverage(records, eligible, linkage, source_ok),
+        '08_treatment_classification_conflicts_qc.csv': conflicts,
+        '08_btris_status_semantic_reference.csv': reference,
+    }
+
+
+def summary(records, tables, source_ok, linkage, fingerprints, drift):
+    orders = records[records.source_kind.eq('BTRIS')]
+    counts = []
+    for source in ('CTDB', '11D', '15D'):
+        part = records[records.source.eq(source)]
+        counts.append(dict(source=source, n_record_rows=len(part) if source_ok[source] else None,
+                           n_named_rows=int(part.name_present.astype(bool).sum()) if source_ok[source] else None,
+                           n_identified_rows=int(part.ingredient_canonical.ne('').sum()) if source_ok[source] else None,
+                           n_unmapped_rows=int(part.classification_confidence.eq('unmapped').sum()) if source_ok[source] else None,
+                           n_distinct_order_ids=part.loc[part.order_id_pseudonymous.ne(''), 'order_id_pseudonymous'].nunique() if source_ok[source] and source != 'CTDB' else None,
+                           n_distinct_eligible_patients=part.loc[part.eligible_linked, 'linked_patient_pseudonymous'].replace('', pd.NA).nunique() if source_ok[source] and (source == 'CTDB' or linkage['status'] == 'validated') else None))
+    c = tables['08_treatment_coverage_by_evidence.csv']
+    lookup = {(row.scope, row.metric): row.n_patients for row in c.itertuples()}
+    metrics = {'n_patients_any_ctdb_current_name': lookup['CTDB', 'any_documentation'],
+               'n_patients_any_btris_order': lookup['BTRIS', 'any_documentation'],
+               'n_patients_any_documentation_union': lookup['union', 'any_documentation']}
+    for row in c[c.scope.eq('union')].itertuples():
+        if row.metric != 'any_documentation':
+            metrics['n_patients_' + row.metric] = row.n_patients
+    complete = all(source_ok[s] for s in ('11D', '15D'))
+    classified = int(orders.classification_confidence.eq('high_exact').sum())
+    matrix = tables['08_btris_status_type_matrix.csv']
+    reconciliation = {name: int(part.n_order_rows.sum()) == len(orders) for name, part in matrix.groupby('matrix')}
+    reconciliation['classified_plus_pending_equals_order_rows'] = classified + int(orders.classification_confidence.ne('high_exact').sum()) == len(orders)
+    reconciliation['source_rows_sum_equals_union'] = sum(len(orders[orders.source.eq(s)]) for s in ('11D', '15D')) == len(orders)
+    reconciliation['audit_record_ids_unique'] = records.audit_record_id.is_unique
+    return dict(classification_version=VERSION, rule_source=RULE_SOURCE, audit_only=True, downstream_integration='NO_GO',
+                source_counts=counts, coverage_metrics=metrics,
+                n_order_rows=len(orders) if complete else None,
+                n_orders_classified=classified if complete else None,
+                n_orders_pending=int(orders.classification_confidence.ne('high_exact').sum()) if complete else None,
+                n_ingredient_mentions=int(orders.ingredients_canonical.map(json.loads).map(len).sum()) if complete else None,
+                classification_count_definition='classified means high_exact identity; pending includes candidate_review and unmapped; no clinical approval; ingredient mentions can exceed order rows',
+                order_interval_qc=orders.order_interval_qc.value_counts().to_dict() if complete else None,
+                status_priority_location='restricted/08_btris_status_type_matrix.csv', status_semantics='all_unvalidated',
+                reconciliation=reconciliation, reconciliation_scope='loaded_records_only; missing sources do not establish completeness',
+                fingerprints=fingerprints, fingerprint_drift=drift,
+                top20_unresolved_location='restricted/08_treatment_unmapped_priority.csv (first 20 rows)',
+                population_stratum='population_stratum_not_available',
+                clinical_evidence='no confirmed indication, prescription semantics, administration, dispensing, adherence or discontinuation')
+
+
+def report(summary):
+    lines = ['# Step 08 pharmacological classification v2.1', '',
+             'Documentation of products and orders only. Potential SjD relevance is a candidate, never an individual indication or exposure.', '',
+             f"Downstream integration: **{summary['downstream_integration']}**.", '',
+             '| Source | Record rows | Named rows | Identified rows | Unmapped rows | Eligible patients (technical linkage) |',
+             '| --- | ---: | ---: | ---: | ---: | ---: |']
+    for row in summary['source_counts']:
+        lines.append('| ' + ' | '.join(str(row[k]) for k in ('source', 'n_record_rows', 'n_named_rows', 'n_identified_rows', 'n_unmapped_rows', 'n_distinct_eligible_patients')) + ' |')
+    lines += ['', 'Missing sources produce null clinical counts. No real-data reconciliation is claimed from synthetic validation.', '',
+              '## Coverage of pharmacological documentation of any nature', '',
+              'Unique eligible patients; systemic, ocular, oral and procedure candidates overlap and must not be summed.', '',
+              '| Metric | Patients |', '| --- | ---: |']
+    for key, value in summary['coverage_metrics'].items():
+        lines.append(f'| {key} | {value} |')
+    lines += ['', '## Pending review and QC', '',
+              'All observed status codes and order types remain unvalidated. No institutional dictionary is available to this implementation.', '',
+              '| Observed status | Order rows |', '| --- | ---: |']
+    # Raw vocabularies remain restricted; status priority is available in the private matrix.
+    lines += ['| See restricted status/type matrix | See matrix |', '',
+              'The first 20 rows of restricted/08_treatment_unmapped_priority.csv provide observed vocabulary, row weights, patient counts and pending proposals. They are intentionally restricted.', '',
+              'Interval QC: reverse < 0 seconds; zero = 0; short > 0 and < 24 hours; plausible >= 24 hours; missing = absent endpoint; uncertain = partial/unparsed endpoint or incompatible timezone awareness. These are administrative interval labels, not clinically validated durations.', '',
+              'Original rows, dates and all duplicate/revision candidates are retained. No therapeutic episodes are constructed.',
+              'Route, product and ingredient conflicts require review; Citric Acid use and Mouth Kote composition remain pending.', '',
+              f"Fingerprint comparison: `{summary['fingerprint_drift']}`.",
+              f"Reconciliation (loaded records only): `{summary['reconciliation']}`.", '',
+              '| Decision | Status |', '| --- | --- |',
+              '| General inventory | Report with source traceability |',
+              '| Ingredient/product identity | Report with confidence and conflicts |',
+              '| Potential clinical relevance | Candidate only |',
+              '| Prescription | Source semantics require institutional validation |',
+              '| Administration, received dose, duration, adherence, interruption, response, causality | Not approved |',
+              '| Integration to Step 10/14/15 or studies | NO_GO |', '']
+    return '\n'.join(lines)
+
+
+def fingerprint_drift(previous_manifest, infos, dictionary_sha256):
+    if previous_manifest is None:
+        return dict(status='no_previous_manifest', changed_inputs=[], dictionary_changed=None)
+    previous = previous_manifest.get('inputs', {})
+    changed = [name for name, info in infos.items() if name in previous and
+               previous[name].get('sha256') != info.get('sha256')]
+    prior_dictionary = previous_manifest.get('classification_dictionary_sha256')
+    return dict(status='changed' if changed or (prior_dictionary and prior_dictionary != dictionary_sha256) else 'unchanged' if prior_dictionary else 'previous_dictionary_unavailable',
+                changed_inputs=changed, dictionary_changed=prior_dictionary != dictionary_sha256 if prior_dictionary else None)
+
+
+def dictionary_hash(legacy_rules):
+    payload = dictionary(legacy_rules).to_csv(index=False)
+    return hashlib.sha256(payload.encode()).hexdigest()

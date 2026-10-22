@@ -144,7 +144,7 @@ def test_null_blank_token_and_absent_header_are_distinguished(tmp_path):
 def test_identity_preserves_zeroes_and_never_links_using_names():
     data = records([btris(), btris(**{"MRN": None, "Subject Name": "Same Person"}), btris(**{"MRN": 123})])
     assert data.eligible_linked.tolist() == [True, False, False]
-    assert data.linkage_status.tolist() == ["linked_one_to_one", "invalid_key", "invalid_key"]
+    assert data.linkage_status.tolist() == ["linked_one_to_one", "invalid_key", "nontext_unverified"]
     assert data.iloc[0].source_patient_pseudonymous == audit.pseudonym(SECRET, "mrn", "00123")
     assert audit.key("00123", mrn=True) != audit.key("123", mrn=True)
     assert not {"MRN", "Subject Name", "Date of Birth"} & set(data.columns)
@@ -317,8 +317,7 @@ def test_end_to_end_preservation_private_permissions_and_no_shared_phi(tmp_path)
             assert all(value not in content for value in ["PRIVATE PERSON NAME", "01/02/1900", "00123", "PRIVATE IDENTIFIABLE INSTRUCTION", "PRIVATE FREE TEXT"])
     assert summary["gates"]["clinical_prepost_ESSDAI"] == "not_evaluated_in_this_audit"
     assert summary["restrictions"]["no_master_data_changes"]
-    with pytest.raises(ValueError, match="new or empty"):
-        audit.run(args)
+    audit.run(args)  # Preliminary v2 reruns overwrite known artifacts only.
 
 
 def test_blocked_source_run_still_delivers_all_required_artifacts_and_exit_two(tmp_path):

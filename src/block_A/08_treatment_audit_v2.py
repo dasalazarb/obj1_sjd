@@ -29,7 +29,12 @@ _spec = importlib.util.spec_from_file_location(
 v1 = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(v1)
 
-RULES_VERSION = "08-treatment-audit-2.0.0"
+_classification_spec = importlib.util.spec_from_file_location(
+    "_step08_classification", Path(__file__).with_name("_treatment_classification_v21.py"))
+classification = importlib.util.module_from_spec(_classification_spec)
+_classification_spec.loader.exec_module(classification)
+
+RULES_VERSION = "08-treatment-audit-2.1.0"
 MAPPING_VERSION = "08-drug-candidates-2.0.0"
 DEFAULT_OUTPUT = v1.common.OUTPUTS_DIR / "audit" / "08_treatments_v2"
 BTRIS_MEDICATION_PATHS = {
@@ -660,11 +665,13 @@ def btris_records(frame, source, linkage, eligible, secret):
                             "unmatched_btris" if mrn else
                             "nontext_unverified" if mrn_token else "invalid_key"),
             eligible_linked=bool(patient and patient in eligible), order_id_pseudonymous=pseudonym(secret, "order", order_id),
-            order_identity=pseudonym(secret, "order_identity", json.dumps([mrn, order_id, raw(row.get("Data Source"))])) if mrn and order_id else "",
+            order_identity=pseudonym(secret, "order_identity", json.dumps([mrn_token, order_id, raw(row.get("Data Source"))])) if mrn_token and order_id else "",
             content_signature=full, cross_protocol_signature=signature(row, secret, exclude_protocol=True),
             order_type_raw=raw(row.get("Order Type")), order_status_raw=raw(row.get("Order Status")),
             data_source_raw=raw(row.get("Data Source")), order_set_raw=raw(row.get("Order Set Name")),
             take_home_raw=raw(row.get("Take Home Indicator")),
+            category_raw=raw(row.get("Category")), drug_type_raw=raw(row.get("Drug Type")),
+            refills_raw=raw(row.get("Order No. of Refills")),
             order_semantic_class="unvalidated_observed_value", matching_confidence="exact_crosswalk" if patient else "unvalidated",
             time_semantics="order_or_start_unresolved", end_semantics="order_validity_end_not_confirmed_discontinuation",
             dose_raw=raw(row.get("Order Dose/Strength")), uom_raw=raw(row.get("Order UOM")),
@@ -695,7 +702,7 @@ def duplicate_qc(orders):
                 flags[i].add("same_order_id_revision_or_discordance_retained")
     # Same valid source MRN and order ID are required for possible cross-export matches.
     validated = orders[orders.order_id_pseudonymous.ne("") & orders.linkage_status.eq("linked_one_to_one")]
-    for _, group in validated.groupby(["source_patient_pseudonymous", "order_id_pseudonymous"]):
+    for _, group in validated.groupby(["source_patient_pseudonymous", "order_id_pseudonymous", "data_source_raw"]):
         if group.source.nunique() > 1:
             for i in group.index:
                 flags[i].add("cross_protocol_possible_duplicate_retained")
@@ -765,6 +772,8 @@ def ctdb_records(frame, eligible, secret, *, protocol_column=None, index_column=
                 flags.append("pre_index_historical_record_retained")
             item = dict(base, audit_record_id=f"CTDB:{position}:rx:{slot}", slot=slot, source_row_or_order_id=position,
                         name_column=column, name_present=name_present, visit_raw=visit, visit_semantics=visit_semantics,
+                        start_column_available=CTDB_RX_START_BY_SLOT[slot] in frame.columns,
+                        end_column_available=CTDB_RX_STOP_BY_SLOT[slot] in frame.columns,
                         route_raw=raw(route_raw), frequency_raw=raw(frequency_raw), frequency_normalized=frequency,
                         route_parse_status=route_status, frequency_parse_status=frequency_status,
                         time_semantics="reported_medication_dates_unvalidated", end_semantics="reported_stop_date_unvalidated",
@@ -790,7 +799,7 @@ def ctdb_records(frame, eligible, secret, *, protocol_column=None, index_column=
 CANONICAL_COLUMNS = [
     "audit_record_id", "source_kind", "source", "source_protocol_folder", "protocol",
     "protocol_number_raw", "source_row", "source_row_or_order_id", "patient_id_pseudonymous",
-    "source_patient_pseudonymous", "linked_patient_pseudonymous", "eligible_linked", "name_present",
+    "source_patient_pseudonymous", "linked_patient_pseudonymous", "mrn_identity_quality", "eligible_linked", "name_present",
     "drug_raw", "ingredient_raw", "drug_normalized", "ingredient_normalized", "brand", "formulation",
     "route", "drug_class", "mapping_rule", "mapping_confidence", "mapping_version", "indication",
     "normalization_flags", "order_status_raw", "time_semantics", "end_semantics", "dose_raw", "uom_raw",
@@ -1089,6 +1098,10 @@ def run(args):
     for column in (args.ctdb_protocol_column, args.ctdb_index_column):
         if column and column not in expected_ctdb:
             expected_ctdb.append(column)
+    prior_manifest_path = output / "restricted" / "08_treatment_input_manifest.json"
+    prior_manifest = json.loads(prior_manifest_path.read_text()) if prior_manifest_path.is_file() else None
+    prior_dictionary = output / "restricted" / "08_treatment_classification_dictionary.csv"
+    prior_dictionary_sha = v1.file_hash(prior_dictionary) if prior_dictionary.is_file() else None
     frames, infos, schema = {}, {}, []
     for source, path in (("11D", args.btris_11d), ("15D", args.btris_15d)):
         frames[source], infos[source] = load_source(path, BTRIS_MEDICATION_COLUMNS, parquet_only=True)
@@ -1156,6 +1169,8 @@ def run(args):
     for records in (orders, current):
         records["source_file"] = records.source.map(lambda s: infos[s]["path"])
         records["source_sha256"] = records.source.map(lambda s: infos[s].get("sha256", ""))
+    orders = classification.enrich(orders, DRUG_RULES, linkage)
+    current = classification.enrich(current, DRUG_RULES, linkage)
     all_records = pd.concat([orders, current], ignore_index=True)
     named = all_records.loc[all_records.name_present.fillna(False).astype(bool)].copy()
     source_ok = {source: infos[source]["status"] in {"available", "available_partial_schema"}
@@ -1186,6 +1201,15 @@ def run(args):
     review = tables["08_treatment_normalization_review.csv"]
     review["review_priority"] = review.drug_class.map(lambda c: "P0_review" if c == "needs_review" else "P1_unmapped" if c == "unmapped" else "P2_candidate")
     tables["08_treatment_normalization_review.csv"] = review.sort_values(["review_priority", "n_records"], ascending=[True, False])
+    classification_tables = classification.artifacts(all_records, DRUG_RULES, eligible, linkage, source_ok)
+    tables.update(classification_tables)
+    dictionary_sha256 = classification.dictionary_hash(DRUG_RULES)
+    drift = classification.fingerprint_drift(prior_manifest, infos, dictionary_sha256)
+    expected_prior_dictionary = (prior_manifest or {}).get("classification_dictionary_sha256")
+    drift["previous_dictionary_file_modified"] = (prior_dictionary_sha != expected_prior_dictionary
+                                                  if expected_prior_dictionary else None)
+    if drift["previous_dictionary_file_modified"]:
+        drift["status"] = "changed"
     for filename, table in tables.items():
         write_private_table(restricted / filename, table)
     # Hash and mtime are checked again after all source-dependent work.
@@ -1200,7 +1224,7 @@ def run(args):
             if not info["preserved"]:
                 changed.append(name)
     blockers = [
-        "P0: CROSS_SOURCE_LINKAGE_NOT_VALIDATED (does not block source-level audit)" if linkage["status"] != "validated" else "P0: Complete eligible crosswalk supplied; retain source identity/protocol QC.",
+        "P0: CROSS_SOURCE_LINKAGE_NOT_VALIDATED (does not block source-level audit)" if linkage["status"] != "validated" else "P0: Technical linkage passed; identifier equivalence still requires external semantic validation.",
         "P0: PMH RX slots are quarantined as unverified possible allergies; do not count as treatment.",
         "P1: All observed BTRIS statuses require source-owner semantic validation; no status is interpreted as administered exposure.",
         "P1: Candidate drug mappings, ingredient conflicts and unmapped vocabulary require review.",
@@ -1213,7 +1237,7 @@ def run(args):
         elif infos[source]["status"] == "available_partial_schema":
             blockers.append(f"P1: {source} optional columns missing; inspect schema QC without treating absence as zero.")
     if any(orders.mrn_identity_quality.eq("nontext_unverified")):
-        blockers.append("P0: BTRIS MRN contains non-text representations. Counted for source inventory only; no patient linkage without validated crosswalk and identifier precision review.")
+        blockers.append("P0: BTRIS MRN contains non-text representations; inspect linkage method, numeric precision and collisions. Normalized technical matches still require external identifier-equivalence validation.")
     if changed:
         blockers.append("P0: SOURCE_CHANGED_DURING_AUDIT; all derived results require rerun.")
     source_counts = {source: {k: clean_json(v) for k, v in profiles[profiles.source.eq(source)].iloc[0].to_dict().items()
@@ -1237,7 +1261,7 @@ def run(args):
             comparison.append(dict(metric=metric, previous=old if isinstance(old, (int, float)) else None,
                                    current=value, difference=value-old if value is not None and isinstance(old, (int, float)) else None))
     summary = dict(
-        rules_version=RULES_VERSION, mapping_version=MAPPING_VERSION, audit_only=True,
+        rules_version=RULES_VERSION, mapping_version=MAPPING_VERSION, audit_only=True, downstream_integration="NO_GO",
         status="blocked" if changed or not all(source_ok.values()) or not eligible else "completed_with_review_gates",
         n_eligible_patients=len(eligible) if eligible else None, source_counts=source_counts,
         ctdb_schema_qc=dict(missing_optional_columns=infos["CTDB"].get("missing_columns", []),
@@ -1271,10 +1295,21 @@ def run(args):
         artifacts={name: dict(classification="restricted", rows=len(table)) for name, table in tables.items()},
         input_manifest="restricted/08_treatment_input_manifest.json",
     )
-    write_json(restricted / "08_treatment_input_manifest.json", dict(inputs=infos, crosswalk_configuration=cw_spec,
+    write_json(restricted / "08_treatment_input_manifest.json", dict(inputs=infos, crosswalk_configuration=cw_spec, classification_dictionary_sha256=dictionary_sha256,
                 ctdb_default_substitution=dict(previous_prefix="/vf/users/salazarda/data/obj1_sjd/data/raw/",
                                                selected=str(args.input.resolve()),
                                                reason="explicit CLI input or common.DEFAULT_ANALYTIC_DATASET; no fallback search")))
+    class_summary = classification.summary(all_records, classification_tables, source_ok, linkage,
+                                           summary["input_fingerprints"], drift)
+    class_summary["denominator"] = len(eligible) or None
+    class_summary["run_status"] = summary["status"]
+    class_summary["overlap"] = summary["overlap"]
+    class_summary["source_preservation"] = {name: info.get("preserved") for name, info in infos.items()}
+    summary["classification_v21"] = class_summary
+    write_json(output / "08_treatment_classification_v21_summary.json", class_summary)
+    with (output / "08_treatment_classification_v21_report.md").open("w") as stream:
+        os.chmod(stream.name, 0o600)
+        stream.write(classification.report(clean_json(class_summary)))
     write_json(output / "08_treatment_audit_v2_summary.json", summary)
     with (output / "08_treatment_audit_v2_report.md").open("w") as stream:
         os.chmod(stream.name, 0o600)
