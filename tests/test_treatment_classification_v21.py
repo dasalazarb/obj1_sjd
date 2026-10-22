@@ -253,3 +253,36 @@ def test_ctdb_slots_and_allergies_stay_separate_and_conflicts_keep_originals(tmp
     conflict = classified[classified.source.eq('11D')].iloc[0]
     assert conflict.drug_raw == 'Plaquenil' and conflict.ingredient_raw == 'methotrexate'
     assert 'ingredient_product_conflict' in conflict.review_reasons
+
+
+@pytest.mark.parametrize('name,route,primary', [
+    ('Hydroxychloroquine Sulfate 200 mg tablet', 'oral', classification.PRIMARY_SYSTEMIC),
+    ('Cevimeline 30 mg capsule', 'oral', classification.PRIMARY_SYMPTOMATIC),
+    ('cycloSPORINE Ophthalmic Emulsion 0.05%', 'ophthalmic', classification.PRIMARY_SYMPTOMATIC),
+    ('Ibuprofen 400 mg tablet', 'oral', classification.PRIMARY_CONCOMITANT),
+    ('Citric Acid Monohydrate 2% Oral Solution', 'oral', classification.PRIMARY_PROCEDURE),
+    ('Sodium Fluoride Topical Gel 1.1%', 'topical', classification.PRIMARY_INDETERMINATE),
+    ('unknown product', 'oral', classification.PRIMARY_INDETERMINATE),
+])
+def test_five_primary_candidate_categories_preserve_detail(name, route, primary):
+    out = classify(name, route=route)
+    assert out['clinical_category_primary'] == primary
+    assert out['clinical_category_detail'] == out['clinical_relevance_candidate']
+    assert out['clinical_category_validation'] == 'candidate_only_indication_unconfirmed'
+    assert not out['clinical_indication_confirmed']
+
+
+def test_generic_visit_not_marked_procedure_and_targeted_qc_excludes_generic_warning():
+    visits = records([btris(**{'Order Set Name': '11-D-0172 Core Visit',
+                               'Medication Name': 'Ibuprofen 400 mg tablet',
+                               'Drug Ingredient': 'ibuprofen'}),
+                      btris(**{'Order Set Name': 'PFT - Pulmonary Function Tests',
+                               'Medication Name': 'Ibuprofen 400 mg tablet',
+                               'Drug Ingredient': 'ibuprofen'})])
+    enriched = classification.enrich(visits, audit.DRUG_RULES, link())
+    assert enriched.order_set_procedure_context.tolist() == ['visit_context_only', 'candidate']
+    assert enriched.clinical_category_primary.eq(classification.PRIMARY_CONCOMITANT).all()
+    artifacts = classification.artifacts(enriched, audit.DRUG_RULES, {'p1'}, link(),
+                                         {'CTDB': True, '11D': True, '15D': True})
+    assert len(artifacts['08_treatment_targeted_review_qc.csv']) == 0
+    assert len(artifacts['08_treatment_classification_conflicts_qc.csv']) == 2
