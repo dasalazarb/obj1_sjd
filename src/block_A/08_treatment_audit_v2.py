@@ -562,10 +562,25 @@ def date_flags(start, end):
     if end["status"] == "missing":
         flags.append("end_missing_open_or_undocumented")
     if start["status"] == end["status"] == "valid":
-        if end["upper_bound"] < start["lower_bound"]:
-            flags.append("end_definitely_before_start")
-        elif end["lower_bound"] < start["upper_bound"]:
-            flags.append("temporal_order_uncertain")
+        # Compare exact timestamps when BOTH source values include time.
+        # Day-level uncertainty bounds would miss reverse ordering within a day.
+        ordered_at_time = False
+        if (start["precision"] == end["precision"] == "datetime"
+                and start["parsed"] and end["parsed"]):
+            try:
+                start_stamp = datetime.fromisoformat(start["parsed"])
+                end_stamp = datetime.fromisoformat(end["parsed"])
+                if (start_stamp.tzinfo is None) == (end_stamp.tzinfo is None):
+                    ordered_at_time = True
+                    if end_stamp < start_stamp:
+                        flags.append("end_definitely_before_start")
+            except (ValueError, TypeError):
+                pass
+        if not ordered_at_time:
+            if end["upper_bound"] < start["lower_bound"]:
+                flags.append("end_definitely_before_start")
+            elif end["lower_bound"] < start["upper_bound"]:
+                flags.append("temporal_order_uncertain")
         if start["parsed"] and start["parsed"] == end["parsed"]:
             flags.append("start_end_identical")
     return flags
