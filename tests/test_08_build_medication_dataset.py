@@ -158,3 +158,49 @@ def test_v101_true_product_conflict_remains_quarantined():
     assert len(dated) == 1
     assert len(normalized) == 0
     assert not catalog.iloc[0].documentation_dated_usable
+
+
+def test_v110_month_only_ctdb_reported_start_retained_as_window():
+    rec = pd.DataFrame([row(
+        audit_record_id="CTDB:0:rx:1", source="CTDB", source_kind="CTDB",
+        start_status="valid", start_precision="month", start_parsed="",
+        start_lower_bound="2021-02-01", start_upper_bound="2021-02-28",
+        visit_raw="", source_sha256="ctdbsha")])
+    summary = source_summary(0)
+    summary["fingerprints"] = {"CTDB": {"sha256": "ctdbsha"}}
+    catalog, dated, normalized, *_ = release.build_medication_release(rec, summary)
+    item = catalog.iloc[0]
+    assert item.date_of_documentation == ""
+    assert item.documentation_window_lower_bound == "2021-02-01"
+    assert item.documentation_window_upper_bound == "2021-02-28"
+    assert item.documentation_window_precision == "month"
+    assert item.eligible_for_future_month_window_pairing
+    assert len(dated) == len(normalized) == 0
+
+
+def test_v110_year_only_is_not_eligible_for_month_pairing():
+    rec = pd.DataFrame([row(
+        audit_record_id="CTDB:0:rx:1", source="CTDB", source_kind="CTDB",
+        start_status="valid", start_precision="year", start_parsed="",
+        start_lower_bound="2020-01-01", start_upper_bound="2020-12-31",
+        visit_raw="", source_sha256="ctdbsha")])
+    summary = source_summary(0)
+    summary["fingerprints"] = {"CTDB": {"sha256": "ctdbsha"}}
+    catalog, *_ = release.build_medication_release(rec, summary)
+    assert catalog.iloc[0].documentation_window_precision == "year"
+    assert not catalog.iloc[0].eligible_for_future_month_window_pairing
+
+
+def test_v110_no_arbitrary_date_for_multi_visit_ctdb():
+    rec = pd.DataFrame([row(
+        audit_record_id="CTDB:0:rx:1", source="CTDB", source_kind="CTDB",
+        start_status="missing", start_precision="", start_parsed="",
+        visit_raw="2020-01-01 | 2021-05-15",
+        visit_semantics="concatenated_visits_no_arbitrary_date",
+        source_sha256="ctdbsha")])
+    summary = source_summary(0)
+    summary["fingerprints"] = {"CTDB": {"sha256": "ctdbsha"}}
+    catalog, *_ = release.build_medication_release(rec, summary)
+    assert catalog.iloc[0].documentation_window_lower_bound == ""
+    assert catalog.iloc[0].ctdb_temporal_triage_reason == "ctdb_concatenated_visit_dates"
+    assert not catalog.iloc[0].eligible_for_future_month_window_pairing
