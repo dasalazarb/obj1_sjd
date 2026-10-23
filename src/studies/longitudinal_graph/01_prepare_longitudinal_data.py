@@ -31,6 +31,7 @@ def load_config(path):
 
 def forbidden_reason(column: str, external: set[str], patterns: list[str]) -> str:
     low = column.lower()
+    if low.startswith(("meddoc__", "meddoc_prior__")): return "medication_documentation_not_embedding_input"
     if column in STRUCTURAL or low in TIME_NAMES or low.startswith("time_since_"): return "administrative"
     if column in external or low.startswith(EXTERNAL_PREFIXES): return "external_characterizer"
     if any(marker in low for marker in HISTORY_MARKERS): return "historical_accumulator"
