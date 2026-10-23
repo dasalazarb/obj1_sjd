@@ -7,6 +7,7 @@ observed column and emits a small analytic master, scientific context, registry,
 and compact audit products.  It never reconstructs clinical facts.
 """
 import argparse
+import importlib.util
 import json
 import sys
 from dataclasses import asdict, dataclass
@@ -1030,6 +1031,67 @@ def _write_audits(build: CuratedBuild, output: Path, qc_dir: Path) -> dict:
     return qc
 
 
+def _integrate_medication_context(build: CuratedBuild, *, audit_root: Path,
+                                  clinical_spine_path: Path) -> tuple[CuratedBuild, dict]:
+    """Add visit/episode medication DOCUMENTATION only to scientific context."""
+    module_path = Path(__file__).with_name("_10_medication_documentation.py")
+    spec = importlib.util.spec_from_file_location("_10_medication_documentation", module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Step10 medication adapter unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    episode_counts, medication_qc = module.load_and_aggregate(
+        build.analytic[KEYS + ["clinical_anchor_date", "episode_start_date",
+                                "episode_end_date", "clinical_visit"]],
+        audit_root, clinical_spine_path)
+    if len(episode_counts) != len(build.context):
+        raise CurationContractError("Step10 medication episode count mismatch")
+    if any(col in build.analytic or col in build.context for col in episode_counts
+           if col not in KEYS):
+        raise CurationContractError("Medication documentation public variable collision")
+    # Many-to-many source links collapse to exactly ONE medication context row
+    # per canonical episode. Only descriptive features are added to context.
+    merged = build.context.merge(episode_counts, on=KEYS, how="left",
+                                 validate="one_to_one", sort=False)
+    if len(merged) != len(build.context) or merged[KEYS].duplicated().any():
+        raise CurationContractError("Step10 medication context changed episode grain")
+    rows = []
+    for col in [*module.COUNT_COLUMNS, module.FLAG]:
+        rows.append(ColumnClassification(
+            variable=col, source="medication_documentation", family="medication_documentation",
+            role="CONTEXT", destination="context", canonical_variable=col,
+            classification_rule="step08.primary_many_to_many_documentation",
+            classification_reason="Aggregated recorded orders/CTDB current-medication mentions; "
+                                  "not administered or continuous drug exposure",
+            present_in_input=True, included_in_context=True,
+            dtype=str(episode_counts[col].dtype), n_nonmissing=len(episode_counts),
+            pct_nonmissing=100.0,
+            n_unique=int(episode_counts[col].nunique()),
+            notes="Zero=no linked documentation observed; multiple episode associations "
+                  "do not mean multiple source orders. Month tolerance excluded.",
+            producer_script="08_build_medication_episode_links.py",
+            original_variable=col, canonical_concept=col,
+            clinical_domain="medication_documentation",
+            public_variable=col, temporal_scope="within_authoritative_episode"))
+    registry = pd.concat([build.registry, pd.DataFrame([asdict(r) for r in rows])],
+                         ignore_index=True)
+    medication_qc["destination"] = "scientific_context_only"
+    medication_qc["analytic_master_unchanged"] = True
+    return CuratedBuild(build.analytic, merged, build.coverage, registry,
+                        [*build.source_summaries, {
+                            "source": "medication_documentation",
+                            "n_rows": len(episode_counts),
+                            "n_columns": len(episode_counts.columns),
+                            "n_patients": int(episode_counts.patient_id.nunique()),
+                            "n_unique_patient_episode": len(episode_counts),
+                            "n_duplicates": 0, "n_missing_spine_keys": 0,
+                            "n_extra_keys": 0, "structural_discrepancies": 0,
+                            "n_inherited_spine_columns": 0,
+                        }],
+                        build.key_mismatches, build.structural_discrepancies,
+                        build.redundancy_audit), medication_qc
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--spine", type=Path, default=common.CLINICAL_VISIT_SPINE_PARQUET)
@@ -1039,6 +1101,9 @@ def main() -> None:
     parser.add_argument("--pros", type=Path, default=common.PROS_LONGITUDINAL_PARQUET)
     parser.add_argument("--extended-clinical", type=Path, default=common.EXTENDED_CLINICAL_LONGITUDINAL_PARQUET)
     parser.add_argument("--output", type=Path, default=common.INTEGRATED_LONGITUDINAL_PARQUET)
+    parser.add_argument("--medication-audit-root", type=Path, default=None,
+                        help="Opt in to protected Step 08 medication documentation "
+                             "aggregation in Step 10 scientific context only")
     args = parser.parse_args()
     common.ensure_output_dirs()
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -1053,7 +1118,15 @@ def main() -> None:
     if not unclassified.empty:
         details = unclassified[["source", "variable", "dtype", "n_nonmissing"]].to_dict("records")
         raise CurationContractError(f"unclassified upstream variables: {details[:20]}")
+    medication_qc = None
+    if args.medication_audit_root is not None:
+        build, medication_qc = _integrate_medication_context(
+            build, audit_root=args.medication_audit_root,
+            clinical_spine_path=args.spine)
     qc = _write_audits(build, args.output, qc_dir)
+    if medication_qc is not None:
+        (qc_dir / "10_medication_documentation_qc.json").write_text(
+            json.dumps(medication_qc, indent=2, sort_keys=True), encoding="utf-8")
     if qc["zero_block_qc"]["zero_block_baseline_present"]:
         print("WARNING: clinical baseline episodes exist with zero integrated data blocks; review before Step 11.")
     print(f"Wrote {len(build.analytic):,} curated clinical episodes to {args.output}")
