@@ -1143,6 +1143,8 @@ def main() -> None:
     parser.add_argument("--pros", type=Path, default=common.PROS_LONGITUDINAL_PARQUET)
     parser.add_argument("--extended-clinical", type=Path, default=common.EXTENDED_CLINICAL_LONGITUDINAL_PARQUET)
     parser.add_argument("--output", type=Path, default=common.INTEGRATED_LONGITUDINAL_PARQUET)
+    parser.add_argument("--qc-dir", type=Path, default=None,
+                        help="Optional isolated QC folder for a staged integration")
     parser.add_argument("--medication-audit-root", type=Path, default=None,
                         help="Add protected Step 08 descriptive medication-documentation "
                              "counts to BOTH the clinical-episode master and scientific context; "
@@ -1150,7 +1152,7 @@ def main() -> None:
     args = parser.parse_args()
     common.ensure_output_dirs()
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    qc_dir = common.BLOCKA_QC_DIR / "10_build_integrated_longitudinal_dataset"
+    qc_dir = args.qc_dir if args.qc_dir is not None else (common.BLOCKA_QC_DIR / "10_build_integrated_longitudinal_dataset")
     qc_dir.mkdir(parents=True, exist_ok=True)
     frames = [pd.read_parquet(path) for path in [args.spine, args.pop, args.labs, args.overlap, args.pros, args.extended_clinical]]
     # Classify once without raising so contract failures still leave actionable audit files.
