@@ -1115,7 +1115,9 @@ def _integrate_medication_context(build: CuratedBuild, *, audit_root: Path,
                          ignore_index=True)
     medication_qc["destination"] = "descriptive_analytic_master_and_scientific_context"
     medication_qc["analytic_master_unchanged"] = False
-    medication_qc["n_descriptive_medication_columns_added_to_master"] = len(medication_columns)\n    medication_qc["protected_medication_detail_path"] = str(module.write_protected_detail(medication_detail, audit_root))
+    medication_qc["n_descriptive_medication_columns_added_to_master"] = len(medication_columns)
+    medication_qc["protected_medication_detail_path"] = str(
+        module.write_protected_detail(medication_detail, audit_root))
     medication_qc["pre_anchor_treatment_exposure_established"] = False
     return CuratedBuild(merged_analytic, merged_context, build.coverage, registry,
                         [*build.source_summaries, {
