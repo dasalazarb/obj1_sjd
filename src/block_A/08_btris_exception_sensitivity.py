@@ -31,6 +31,12 @@ def _sha(path):
 
 def build(medications,spine,key,consolidated_summary,original_status,original_candidates,
           original_match_summary,exception_review):
+    required={"documentation_record_id","source_kind","documentation_dated_usable",
+              "qc_flags","review_reasons","classification_confidence",
+              "date_of_documentation"}
+    missing=sorted(required.difference(medications.columns))
+    if missing:
+        raise ValueError("missing_required_medication_columns:"+",".join(missing))
     if original_match_summary.get("version")!="08-btris-episode-candidate-match-1.0.0":
         raise ValueError("unexpected_prior_match_version")
     if original_match_summary.get("n_btris_orders") != len(original_status):
