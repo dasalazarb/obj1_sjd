@@ -12,7 +12,7 @@ from datetime import datetime
 
 import pandas as pd
 
-VERSION = '08-classification-2.1.7'
+VERSION = '08-classification-2.1.8'
 RULE_SOURCE = 'investigator specification 2026-10-21 §3; candidate nomenclature, not institutional validation'
 SYSTEMIC = 'sjd_systemic_candidate'
 OCULAR = 'sjd_ocular_symptomatic_candidate'
@@ -33,6 +33,13 @@ PRIMARY_CATEGORIES = (
     PRIMARY_SYSTEMIC, PRIMARY_SYMPTOMATIC, PRIMARY_CONCOMITANT,
     PRIMARY_PROCEDURE, PRIMARY_INDETERMINATE,
 )
+# Investigator-approved STUDY CATEGORY rules, not patient-specific clinical
+# indication, procedure confirmation, product composition or exposure evidence.
+# Keep classification_confidence and review_reasons on their separate axes.
+CATEGORY_RULE_SIGNOFF = {
+    'citric acid monohydrate': (PRIMARY_PROCEDURE, 'investigator_decision_2026-10-22'),
+    'mouth kote dry mouth treatment': (PRIMARY_SYMPTOMATIC, 'investigator_decision_2026-10-22'),
+}
 PRIMARY_FROM_RELEVANCE = {
     SYSTEMIC: PRIMARY_SYSTEMIC,
     OCULAR: PRIMARY_SYMPTOMATIC,
@@ -124,7 +131,20 @@ def dictionary(legacy_rules):
                          relevance_rule=relevance, rule_source=RULE_SOURCE,
                          classification_version=VERSION, confidence_policy='candidate_review',
                          pending_clinical_review=True))
-    return pd.DataFrame(rows)
+    result = pd.DataFrame(rows)
+    result['study_category_rule_status'] = [
+        'approved_by_investigator' if (
+            row.ingredient_canonical == 'citric acid monohydrate' or
+            row.exact_alias == 'mouth kote dry mouth treatment'
+        ) else 'candidate_not_adjudicated'
+        for row in result.itertuples()
+    ]
+    result['study_category_rule_decision_ref'] = [
+        'investigator_decision_2026-10-22'
+        if approved else ''
+        for approved in result.study_category_rule_status.eq('approved_by_investigator')
+    ]
+    return result
 
 
 def _text(value):
@@ -341,11 +361,24 @@ def classify(drug, ingredient, route, legacy_rules):
     product_canonical = ' | '.join([identity or special if families else '', canonical_route, formulation, strength]) if families else ''
     confidence = 'unmapped' if not families else 'candidate_review' if flags else 'high_exact'
     primary_category = PRIMARY_FROM_RELEVANCE.get(relevance, PRIMARY_INDETERMINATE)
+    approved_key = (
+        'citric acid monohydrate' if ingredients == ['citric acid monohydrate']
+        else 'mouth kote dry mouth treatment' if special == 'mouth kote dry mouth treatment'
+        else ''
+    )
+    approved = CATEGORY_RULE_SIGNOFF.get(approved_key)
+    # A rule-level decision must never override contradictory patient records.
+    category_rule_approved = bool(
+        approved and approved[0] == primary_category and not conflict and
+        not route_conflict and 'product_components_unresolved' not in flags)
     short_label = _drug_short_label(
         ingredients, canonical_route, drug, families,
         uncertain=bool(conflict or route_conflict or
                        'product_components_unresolved' in flags))
     return dict(source_ingredient_annotation_rule_id=annotation_rule_id,
+                study_category_rule_status=('approved_by_investigator' if category_rule_approved
+                                            else 'candidate_not_adjudicated'),
+                study_category_rule_decision_ref=(approved[1] if category_rule_approved else ''),
                 drug_short_label=short_label,
                 clinical_category_primary=primary_category,
                 clinical_category_detail=relevance,
@@ -657,6 +690,13 @@ def summary(records, tables, source_ok, linkage, fingerprints, drift):
                     PRIMARY_INDETERMINATE: 'unknown role, unvalidated dental support or non-drug device',
                 },
                 targeted_review_rows=len(tables['08_treatment_targeted_review_qc.csv']),
+                study_category_rule_decisions={
+                    'citric_acid_monohydrate': 'procedure_related: approved category rule only',
+                    'mouth_kote_dry_mouth_treatment': 'symptomatic_sjd: oral: approved category rule only',
+                    'scope': 'not patient-specific indication, composition, administration or confirmed exposure',
+                    'n_btris_orders_with_approved_category_rule': int(
+                        orders.study_category_rule_status.eq('approved_by_investigator').sum()),
+                },
                 short_label_policy='display_only; canonical identity and original name retained; empty if unresolved or contradictory',
                 review_aggregates='restricted/08_treatment_review_summary_aggregate.csv; restricted/08_treatment_pending_summary_aggregate.csv',
                 free_text_precaution='free-text contact information masked in priority review; untouched originals restricted to row-level audit; not deidentified',
@@ -692,6 +732,7 @@ def report(summary):
     lines += ['', '## Five primary clinical categories (candidate only)', '',
               'systemic_sjd, symptomatic_sjd, concomitant, procedure_related and indeterminate are mutually exclusive at record level, but patient coverage overlaps across categories. Detailed oral, ocular and dental labels remain preserved.', '',
               'Dental/local support remains indeterminate until its SjD-specific purpose is supported. Core Visit is a visit context, not in itself a procedure.', '',
+              'Investigator-approved study CATEGORY rules: citric acid monohydrate -> procedure_related; Mouth Kote -> symptomatic_sjd (oral). These do not validate patient-specific indication, composition or exposure. Product identity review flags remain unchanged.', '',
               'drug_short_label is display-only. It does not determine grouping, route equivalence, actual exposure or SjD indication. Empty labels require source review.', '',
               f"Targeted review rows: {summary['targeted_review_rows']} (restricted/08_treatment_targeted_review_qc.csv).", '',
               '## Pending review and QC', '',
