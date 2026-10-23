@@ -55,10 +55,16 @@ def protected_unassigned(audit_root):
     out=protected/"patient_level_unassigned_medications"
     out.mkdir(parents=True,exist_ok=True,mode=0o700)
     os.chmod(out,0o700)
+    # All named documentation is retained at protected patient level, even
+    # if a separate primary episode edge also exists.
+    all_file=out/"08_all_patient_medication_documentation.parquet"
+    combined.to_parquet(all_file,index=False)
+    os.chmod(all_file,0o600)
     file=out/"08_unassigned_medication_documentation.parquet"
     missing.to_parquet(file,index=False)
     os.chmod(file,0o600)
     counts={
+        "n_total_patient_level_medication_documents":int(len(combined)),
         "n_unassigned_medication_documents":int(len(missing)),
         "n_btris_unassigned":int(missing.source_kind.eq("BTRIS_order").sum()),
         "n_undated_unassigned":int(
