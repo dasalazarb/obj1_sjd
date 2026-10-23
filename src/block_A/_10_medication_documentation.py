@@ -321,7 +321,7 @@ def _attach_btris_prescription_fields(detail, audit, release):
         release.audit_record_id.duplicated().any()):
         raise ValueError("Step08_BTRIS_audit_or_release_duplicate_ids")
     if (btris.source_audit_record_id.isna().any() or
-        ~btris.documentation_record_id.eq("BTRIS:"+btris.source_audit_record_id).all()):
+        not btris.documentation_record_id.eq("BTRIS:"+btris.source_audit_record_id).all()):
         raise ValueError("Step08_BTRIS_source_audit_identifier_mismatch")
     a=audit.loc[audit.source.isin(["11D","15D"]),[
         "audit_record_id","source","dose_raw","uom_raw","frequency_raw"
