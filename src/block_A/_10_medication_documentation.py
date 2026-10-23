@@ -13,16 +13,23 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 from pathlib import Path
 
 import pandas as pd
 
-VERSION = "10-medication-documentation-context-1.0.0"
+VERSION = "10-medication-documentation-context-1.1.0"
 UPSTREAM_VERSION = "08-medication-episode-links-1.0.0"
 CATALOG = "medication_documentation_consolidated/08_medications_consolidated_documentation.parquet"
 LINKS = "medication_episode_documentation_links/08_medication_episode_primary_links.parquet"
 RECORD_STATUS = "medication_episode_documentation_links/08_medication_documentation_record_status.parquet"
 SUMMARY = "medication_episode_documentation_links/08_medication_episode_link_summary.json"
+CONSOLIDATED_SUMMARY = "medication_documentation_consolidated/08_medications_consolidated_summary.json"
+BTRIS_AUDIT = "08_treatment_record_classification_audit.parquet"
+BTRIS_RELEASE = "medication_documentation_release/08_medications_documented_catalog.parquet"
+DETAIL_DIR = "step10_medication_episode_details"
+DETAIL_FILE = "10_medication_documentation_episode_detail.parquet"
+NAME_FIELD = "meddoc__medication_names"
 CATEGORIES = {
     "systemic_sjd": "meddoc__n_systemic_sjd_candidate_documents",
     "symptomatic_sjd": "meddoc__n_symptomatic_sjd_candidate_documents",
@@ -67,7 +74,19 @@ def _token(key, identifier):
     return hmac.new(key, ("patient\0"+str(identifier).strip()).encode(),
                     hashlib.sha256).hexdigest()
 
-def aggregate(spine, documentation, primary, status, summary, secret):
+def _canonical_name(value):
+    """Publish only mapped ingredient names, not source free text, in master."""
+    if pd.isna(value):
+        return ""
+    name = " ".join(str(value).strip().split())
+    if name.lower() in {"", "nan", "none", "null", "unknown", "unmapped", "indeterminate"}:
+        return ""
+    # Avoid injecting delimiters or line breaks into an episode-level CSV cell.
+    return name.replace(";", ",").replace("|", "/")[:160]
+
+
+def aggregate(spine, documentation, primary, status, summary, secret,
+              *, include_details=False):
     """Return a fully keyed episode-level CONTEXT frame and aggregate QC."""
     if not isinstance(secret, bytes) or len(secret) < 32:
         raise ValueError("Step08_pseudonym_key_invalid")
@@ -81,7 +100,10 @@ def aggregate(spine, documentation, primary, status, summary, secret):
         "documentation_record_id","linked_patient_pseudonymous","source",
         "source_kind","date_of_documentation","clinical_category_primary",
         "classification_confidence","actual_exposure_confirmed",
-        "documentation_dated_usable",
+        "documentation_dated_usable", "ingredient_canonical",
+        "medication_name_raw", "drug_short_label", "route_canonical",
+        "clinical_category_detail", "review_reasons", "qc_flags",
+        "date_evidence_kind", "source_audit_record_id",
     ], "Step08_documentation")
     _require(primary, [
         "documentation_record_id","linked_patient_pseudonymous","source",
@@ -155,6 +177,9 @@ def aggregate(spine, documentation, primary, status, summary, secret):
         "documentation_record_id","linked_patient_pseudonymous","source",
         "source_kind","date_of_documentation",
         "clinical_category_primary","classification_confidence",
+        "ingredient_canonical","medication_name_raw","drug_short_label",
+        "route_canonical","clinical_category_detail","review_reasons",
+        "qc_flags","date_evidence_kind","source_audit_record_id",
         "documentation_dated_usable",
     ]],on="documentation_record_id",how="left",validate="many_to_one",
         suffixes=("","_catalog"),indicator=True)
@@ -201,9 +226,13 @@ def aggregate(spine, documentation, primary, status, summary, secret):
                 part.classification_confidence.eq("high_exact").sum()))
         for category,col in CATEGORIES.items():
             values[col]=int(part.clinical_category_primary.eq(category).sum())
+        values[NAME_FIELD] = "; ".join(sorted({
+            name for name in part.ingredient_canonical.map(_canonical_name)
+            if name
+        }, key=str.casefold))
         results.append(values)
     sparse=pd.DataFrame(results,columns=[
-        "patient_id","clinical_episode_id",*COUNT_COLUMNS])
+        "patient_id","clinical_episode_id",*COUNT_COLUMNS,NAME_FIELD])
     # Zero denotes no *linked documentation observed in included sources*,
     # not that the patient was medication-free.
     output=clinical[["patient_id","clinical_episode_id"]].merge(
@@ -212,6 +241,7 @@ def aggregate(spine, documentation, primary, status, summary, secret):
     for col in COUNT_COLUMNS:
         output[col]=output[col].fillna(0).astype("Int64")
     output[FLAG]=output.meddoc__n_documentation_records.gt(0).astype(bool)
+    output[NAME_FIELD]=output[NAME_FIELD].replace("",pd.NA).astype("string")
     if len(output)!=len(spine) or output.duplicated(["patient_id","clinical_episode_id"]).any():
         raise ValueError("Step10_episode_grain_not_preserved")
     if int(output.meddoc__n_documentation_records.sum())!=len(primary):
@@ -248,10 +278,107 @@ def aggregate(spine, documentation, primary, status, summary, secret):
         zero_count_meaning="no_linked_documentation_observed_not_no_medication",
         unverified_patient_identifier_QC_not_overridden=True,
         drug_candidate_categories_not_patient_indications=True,
+        medication_name_semantics="unique_mapped_ingredients_from_linked_documents_not_verified_exposure",
+        n_episode_relations_without_mapped_ingredient=int(
+            joined.ingredient_canonical.map(_canonical_name).eq("").sum()),
+        n_episodes_with_any_mapped_medication_name=int(output[NAME_FIELD].notna().sum()),
     )
-    return output,qc
+    if not include_details:
+        return output,qc
+    protected_detail=joined[[
+        "patient_id","clinical_episode_id","documentation_record_id",
+        "source","source_kind","relation_type","date_of_documentation",
+        "date_evidence_kind","episode_start_date","episode_end_date",
+        "clinical_anchor_date","medication_name_raw","drug_short_label",
+        "ingredient_canonical","route_canonical","clinical_category_primary",
+        "clinical_category_detail","classification_confidence","review_reasons",
+        "qc_flags","source_audit_record_id",
+        "confirmed_medication_exposure",
+    ]].copy()
+    protected_detail["documentation_date_relative_to_anchor"] = "on_anchor"
+    observed=pd.to_datetime(protected_detail.date_of_documentation,errors="raise")
+    anchor=pd.to_datetime(protected_detail.clinical_anchor_date,errors="raise")
+    protected_detail.loc[observed.lt(anchor),"documentation_date_relative_to_anchor"]="before_anchor"
+    protected_detail.loc[observed.gt(anchor),"documentation_date_relative_to_anchor"]="after_anchor"
+    if len(protected_detail)!=len(primary):
+        raise ValueError("Step10_detail_primary_relation_count_changed")
+    return output,qc,protected_detail
 
-def load_and_aggregate(spine, audit_root, clinical_spine_path):
+def _attach_btris_prescription_fields(detail, audit, release):
+    """Join source-record prescription fields to trusted Step 08 links.
+
+    Only BTRIS gets dose/frequency. CTDB slot doses are not reliably aligned.
+    """
+    _require(audit, ["audit_record_id","source","dose_raw","uom_raw",
+                     "frequency_raw"], "Step08_BTRIS_audit")
+    _require(release, ["audit_record_id","source","strength_canonical",
+                       "formulation_canonical"], "Step08_BTRIS_release")
+    btris_mask=detail.source_kind.eq("BTRIS_order")
+    btris=detail.loc[btris_mask]
+    if (audit.audit_record_id.isna().any() or
+        audit.audit_record_id.duplicated().any() or
+        release.audit_record_id.isna().any() or
+        release.audit_record_id.duplicated().any()):
+        raise ValueError("Step08_BTRIS_audit_or_release_duplicate_ids")
+    if (btris.source_audit_record_id.isna().any() or
+        ~btris.documentation_record_id.eq("BTRIS:"+btris.source_audit_record_id).all()):
+        raise ValueError("Step08_BTRIS_source_audit_identifier_mismatch")
+    a=audit.loc[audit.source.isin(["11D","15D"]),[
+        "audit_record_id","source","dose_raw","uom_raw","frequency_raw"
+    ]].rename(columns={"source":"audit_source"})
+    b=btris.merge(a,left_on="source_audit_record_id",
+                  right_on="audit_record_id",how="left",
+                  validate="many_to_one",indicator="_audit_match")
+    if not b._audit_match.eq("both").all() or not b.source.eq(b.audit_source).all():
+        raise ValueError("BTRIS_audit_document_source_or_id_mismatch")
+    rel=release.loc[release.source.isin(["11D","15D"]),[
+        "audit_record_id","source","strength_canonical","formulation_canonical"
+    ]].rename(columns={"source":"release_source"})
+    b=b.merge(rel,left_on="source_audit_record_id",right_on="audit_record_id",
+              how="left",validate="many_to_one",indicator="_release_match",
+              suffixes=("","_release"))
+    if not b._release_match.eq("both").all() or not b.source.eq(b.release_source).all():
+        raise ValueError("BTRIS_release_document_source_or_id_mismatch")
+    # No dose values are inferred for CTDB from unassigned dose slots.
+    cols=["dose_raw","uom_raw","frequency_raw",
+          "strength_canonical","formulation_canonical"]
+    for col in cols:
+        detail[col]=pd.Series(pd.NA,index=detail.index,dtype="string")
+        if len(b):
+            detail.loc[btris_mask,col]=b[col].replace("",pd.NA).astype("string").to_numpy()
+    detail["dose_semantics"]="not_available_for_ctdb_original_visit"
+    detail.loc[btris_mask,"dose_semantics"]="btris_order_documentation_unverified"
+    if not detail.confirmed_medication_exposure.eq(False).all():
+        raise ValueError("confirmed_exposure_must_remain_false")
+    if detail.duplicated(["documentation_record_id","clinical_episode_id"]).any():
+        raise ValueError("detailed_medication_links_have_duplicate_record_episode_pairs")
+    return detail
+
+
+def write_protected_detail(detail, audit_root):
+    root=Path(audit_root).resolve()/"restricted"
+    if not root.is_dir():
+        raise FileNotFoundError("Step08_protected_root_missing")
+    destination=root/DETAIL_DIR
+    destination.mkdir(mode=0o700,exist_ok=True)
+    os.chmod(destination,0o700)
+    target=destination/DETAIL_FILE
+    import tempfile
+    temp=None
+    try:
+        with tempfile.NamedTemporaryFile(prefix=".meddoc_",suffix=".parquet",
+                                         dir=destination,delete=False) as fp:
+            temp=Path(fp.name)
+        detail.to_parquet(temp,index=False)
+        os.chmod(temp,0o600)
+        os.replace(temp,target)
+    finally:
+        if temp is not None and temp.exists():
+            temp.unlink()
+    return target
+
+
+def load_and_aggregate(spine, audit_root, clinical_spine_path, *, include_details=False):
     """Read guarded Step 08 files, check upstream hashes, return context and QC."""
     root=Path(audit_root).resolve()/"restricted"
     paths={
@@ -270,12 +397,40 @@ def load_and_aggregate(spine, audit_root, clinical_spine_path):
         raise ValueError("Step08_medication_catalog_hash_changed")
     if fingerprints.get("clinical_Step00_episodes")!=_sha(clinical_spine_path):
         raise ValueError("Step00_clinical_spine_changed_since_08_linking")
-    result,qc=aggregate(
+    result=aggregate(
         spine,
         pd.read_parquet(paths["catalog"]),
         pd.read_parquet(paths["primary"]),
         pd.read_parquet(paths["record_status"]),
         summary,paths["secret"].read_bytes(),
+        include_details=include_details,
     )
+    episode_counts,qc=result[:2]
     qc["input_sha256"]={key:_sha(path) for key,path in paths.items() if key!="secret"}
-    return result,qc
+    if not include_details:
+        return episode_counts,qc
+    details=result[2]
+    consolidation_path=root/CONSOLIDATED_SUMMARY
+    audit_path=root/BTRIS_AUDIT
+    release_path=root/BTRIS_RELEASE
+    for path in [consolidation_path,audit_path,release_path]:
+        if not path.is_file():
+            raise FileNotFoundError("Step08_missing_prescription_detail_input:"+path.name)
+    consolidated=json.loads(consolidation_path.read_text())
+    if consolidated.get("version")!="08-medication-documentation-consolidated-1.0.0":
+        raise ValueError("Step08_consolidation_version_changed")
+    original_hashes=consolidated.get("input_sha256",{})
+    if (original_hashes.get("btris_audit")!=_sha(audit_path)
+            or original_hashes.get("btris_release")!=_sha(release_path)):
+        raise ValueError("Step08_BTRIS_audit_or_release_changed_since_consolidation")
+    details=_attach_btris_prescription_fields(
+        details,pd.read_parquet(audit_path),pd.read_parquet(release_path))
+    qc["detail_rows"]=len(details)
+    qc["n_btris_links_with_documented_dose"]=int(
+        (details.source_kind.eq("BTRIS_order")&details.dose_raw.notna()).sum())
+    qc["n_btris_links_with_documented_frequency"]=int(
+        (details.source_kind.eq("BTRIS_order")&details.frequency_raw.notna()).sum())
+    qc["detail_dose_rule"]="BTRIS raw order fields only; CTDB original-visit dose not reliably slot-mapped"
+    qc["input_sha256"]["btris_audit"]=_sha(audit_path)
+    qc["input_sha256"]["btris_release"]=_sha(release_path)
+    return episode_counts,qc,details
