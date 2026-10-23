@@ -21,21 +21,14 @@ from pathlib import Path
 
 import pandas as pd
 
-VERSION = "08-medication-documentation-release-1.0.0"
+VERSION = "08-medication-documentation-release-1.0.1"
 INPUT_BASENAME = "08_treatment_record_classification_audit.parquet"
 SUMMARY_BASENAME = "08_treatment_classification_v21_summary.json"
 BAD_QC = {
-    "end_definitely_before_start",
     "formulation_route_conflict",
     "ingredient_product_conflict",
-    "protocol_folder_not_confirmed_by_value",
-    "cross_protocol_possible_duplicate_retained",
-    "same_order_id_revision_or_discordance_retained",
-    "exact_reexport_duplicate_retained",
     "nontext_mrn_not_linkable",
-    "nontext_mrn_normalized_match_requires_identifier_review",
     "ambiguous_key",
-    "concatenated_visit_dates_temporal_linkage_unresolved",
     "order_after_documented_death_verify",
 }
 BAD_CLASSIFICATION = {
@@ -143,9 +136,20 @@ def _row_to_document(row):
     date_quality = "exact_day" if event_day else "no_exact_observation_day"
     # Only two descriptive gates. No inferred exposure, treatment period,
     # adherence, disease indication or pharmacological effect.
+    # Unvalidated order status, potential duplicates, inverted *end* intervals
+    # and nontext-MRN normalization do not erase an observed order date.
+    # They remain QC warnings; no treatment era or administration is inferred.
     documented_date_usable = bool(event_day and not conflict)
     normalized_date_usable = bool(
         documented_date_usable and mapped and category != "indeterminate")
+    warning_only = bool(
+        qc & {"protocol_folder_not_confirmed_by_value",
+              "nontext_mrn_normalized_match_requires_identifier_review",
+              "cross_protocol_possible_duplicate_retained",
+              "same_order_id_revision_or_discordance_retained",
+              "exact_reexport_duplicate_retained",
+              "end_definitely_before_start",
+              "concatenated_visit_dates_temporal_linkage_unresolved"})
     return {
         "audit_record_id": row.audit_record_id,
         "linked_patient_pseudonymous": row.linked_patient_pseudonymous,
@@ -178,6 +182,7 @@ def _row_to_document(row):
         "order_interval_qc": row.order_interval_qc,
         "has_unresolved_status_semantics": row.source_kind == "BTRIS",
         "qc_has_major_conflict": conflict,
+        "qc_has_warning_only": warning_only,
         "qc_flags": row.qc_flags,
         "classification_review_reasons": row.review_reasons,
         "documentation_dated_usable": documented_date_usable,
@@ -227,6 +232,7 @@ def build_medication_release(records, audit_summary, *, eligibility=None, secret
             "n_normalized_dated_usable": int(part.normalized_dated_usable.sum()),
             "n_undated_rows": int(part.date_of_documentation.eq("").sum()),
             "n_major_conflict_rows": int(part.qc_has_major_conflict.sum()),
+            "n_warning_only_rows": int(part.qc_has_warning_only.sum()),
         })
     source_qc = pd.DataFrame(reasons)
     summary = {
@@ -236,6 +242,9 @@ def build_medication_release(records, audit_summary, *, eligibility=None, secret
         "n_documented_named": int(len(catalog)),
         "n_dated_observations": int(len(dated)),
         "n_normalized_dated": int(len(normalized)),
+        "n_dated_usable": int(catalog.documentation_dated_usable.sum()),
+        "n_major_conflict": int(catalog.qc_has_major_conflict.sum()),
+        "n_warning_only": int(catalog.qc_has_warning_only.sum()),
         "n_undated_retained": int(catalog.date_of_documentation.eq("").sum()),
         "n_patients_with_documented_medications": int(catalog.linked_patient_pseudonymous.nunique()),
         "n_patients_with_dated_observations": int(dated.linked_patient_pseudonymous.nunique()),
