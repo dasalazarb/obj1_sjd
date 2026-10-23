@@ -48,7 +48,7 @@ ROLE_DESTINATION = {
     "UNCLASSIFIED": "none",
 }
 DATASET_CONTRACT_VERSION = "clinical_episode_curated_v2"
-INTEGRATION_BUILD_VERSION = "v6_meddoc_descriptive_master"
+INTEGRATION_BUILD_VERSION = "v7_meddoc_named_detail"
 PRODUCER_SCRIPTS = {
     "clinical_spine": "00_build_visit_spine.py", "pop": "01_pop_distribution.py",
     "labs": "01_serological_profile.py", "overlap": "06_overlap_glandular.py",
@@ -1040,10 +1040,10 @@ def _integrate_medication_context(build: CuratedBuild, *, audit_root: Path,
         raise RuntimeError("Step10 medication adapter unavailable")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    episode_counts, medication_qc = module.load_and_aggregate(
+    episode_counts, medication_qc, medication_detail = module.load_and_aggregate(
         build.analytic[KEYS + ["clinical_anchor_date", "episode_start_date",
                                 "episode_end_date", "clinical_visit"]],
-        audit_root, clinical_spine_path)
+        audit_root, clinical_spine_path, include_details=True)
     if len(episode_counts) != len(build.context):
         raise CurationContractError("Step10 medication episode count mismatch")
     if any(col in build.analytic or col in build.context for col in episode_counts
@@ -1079,7 +1079,7 @@ def _integrate_medication_context(build: CuratedBuild, *, audit_root: Path,
 
     # Compare medication descriptors at patient+episode grain rather than
     # row position, since context and analytic can have different row order.
-    medication_columns = [*module.COUNT_COLUMNS, module.FLAG]
+    medication_columns = [*module.COUNT_COLUMNS, module.FLAG, module.NAME_FIELD]
     comparison = merged_analytic[KEYS + medication_columns].merge(
         merged_context[KEYS + medication_columns], on=KEYS,
         how="outer", validate="one_to_one", indicator=True,
@@ -1093,7 +1093,7 @@ def _integrate_medication_context(build: CuratedBuild, *, audit_root: Path,
             raise CurationContractError(
                 "Medication documentation differs between master and context: " + col)
     rows = []
-    for col in [*module.COUNT_COLUMNS, module.FLAG]:
+    for col in medication_columns:
         rows.append(ColumnClassification(
             variable=col, source="medication_documentation", family="medication_documentation",
             role="ANALYTIC", destination="analytic+context", canonical_variable=col,
@@ -1104,7 +1104,7 @@ def _integrate_medication_context(build: CuratedBuild, *, audit_root: Path,
             dtype=str(episode_counts[col].dtype), n_nonmissing=len(episode_counts),
             pct_nonmissing=100.0,
             n_unique=int(episode_counts[col].nunique()),
-            notes="DESCRIPTIVE ONLY: not a pre-index predictor or verified drug exposure. "
+            notes="DESCRIPTIVE ONLY: normalized ingredient names and counts; not a pre-index predictor or verified drug exposure. "
                   "Zero=no linked documentation observed; multiple episode links do "
                   "not mean new original orders. Month tolerance excluded.",
             producer_script="08_build_medication_episode_links.py",
@@ -1115,7 +1115,7 @@ def _integrate_medication_context(build: CuratedBuild, *, audit_root: Path,
                          ignore_index=True)
     medication_qc["destination"] = "descriptive_analytic_master_and_scientific_context"
     medication_qc["analytic_master_unchanged"] = False
-    medication_qc["n_descriptive_medication_columns_added_to_master"] = len(module.COUNT_COLUMNS) + 1
+    medication_qc["n_descriptive_medication_columns_added_to_master"] = len(medication_columns)\n    medication_qc["protected_medication_detail_path"] = str(module.write_protected_detail(medication_detail, audit_root))
     medication_qc["pre_anchor_treatment_exposure_established"] = False
     return CuratedBuild(merged_analytic, merged_context, build.coverage, registry,
                         [*build.source_summaries, {
