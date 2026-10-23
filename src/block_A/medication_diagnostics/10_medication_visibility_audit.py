@@ -103,23 +103,20 @@ def audit(catalog: pd.DataFrame, primary: pd.DataFrame,
                      .str.strip().str.lower().nunique()),
         }
 
-    episode_groups = records.groupby(
-        ["linked_patient_pseudonymous", "clinical_episode_id"], dropna=False)
-    episode_summary = episode_groups.apply(
-        lambda df: pd.Series({
-            "n_docs": len(df),
-            "n_unique_ingredients": df.loc[
-                df.ingredient_mapped, "ingredient_canonical"
-            ].astype("string").str.strip().str.lower().nunique(),
-            "has_unmapped_raw": bool(df.only_raw.any()),
-        }), include_groups=False) if "include_groups" in pd.core.groupby.generic.DataFrameGroupBy.apply.__code__.co_varnames else episode_groups.apply(
-        lambda df: pd.Series({
-            "n_docs": len(df),
-            "n_unique_ingredients": df.loc[
-                df.ingredient_mapped, "ingredient_canonical"
-            ].astype("string").str.strip().str.lower().nunique(),
-            "has_unmapped_raw": bool(df.only_raw.any()),
-        }))
+    # Avoid pandas-version-specific GroupBy.apply(include_groups=...) API.
+    group_keys = ["linked_patient_pseudonymous", "clinical_episode_id"]
+    summary_docs = records.groupby(group_keys, dropna=False).agg(
+        n_docs=("documentation_record_id", "size"),
+        has_unmapped_raw=("only_raw", "any"),
+    )
+    mapped = records.loc[records.ingredient_mapped].copy()
+    mapped["_ingredient_key"] = (
+        mapped.ingredient_canonical.astype("string").str.strip().str.lower())
+    unique_names = mapped.groupby(group_keys, dropna=False)["_ingredient_key"].nunique()
+    episode_summary = summary_docs.join(
+        unique_names.rename("n_unique_ingredients"), how="left")
+    episode_summary["n_unique_ingredients"] = (
+        episode_summary.n_unique_ingredients.fillna(0).astype(int))
     ep_with=episode_summary.n_unique_ingredients.gt(0)
     cohort_summary = {
         "n_episode_keys_with_documentation": int(len(episode_summary)),
