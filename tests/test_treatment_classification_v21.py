@@ -506,3 +506,29 @@ def test_v219_ctdb_whitespace_normalization_is_exact():
     out = classification.classify('  Synthroid   ', '', '', audit.DRUG_RULES,
                                   source_kind='CTDB')
     assert out['ingredient_canonical'] == 'levothyroxine'
+
+
+@pytest.mark.parametrize('name,ingredient,primary', [
+    ('Lotemax', 'loteprednol etabonate', classification.PRIMARY_CONCOMITANT),
+    ('Refresh Plus eye drops', 'carboxymethylcellulose', classification.PRIMARY_SYMPTOMATIC),
+    ('Lovaza', 'omega-3-acid ethyl esters', classification.PRIMARY_CONCOMITANT),
+    ('Tylenol Arthritis', 'acetaminophen', classification.PRIMARY_CONCOMITANT),
+    ('Vitamin D3', 'cholecalciferol', classification.PRIMARY_CONCOMITANT),
+    ('Vitamin D2', 'ergocalciferol', classification.PRIMARY_CONCOMITANT),
+])
+def test_v2110_exact_ctdb_names_identify_only_ctdb(name, ingredient, primary):
+    result = classification.classify(name, '', '', audit.DRUG_RULES, source_kind='CTDB')
+    assert result['ingredient_canonical'] == ingredient
+    assert result['clinical_category_primary'] == primary
+    assert result['ctdb_exact_alias_rule_id']
+    assert not result['clinical_indication_confirmed']
+
+
+def test_v2110_spelling_review_and_ambiguous_names_remain_pending():
+    typo = classification.classify('Rstasis opthalmic drops', '', '', audit.DRUG_RULES, source_kind='CTDB')
+    assert typo['ingredient_canonical'] == 'cyclosporine'
+    assert typo['classification_confidence'] == 'candidate_review'
+    for name in ['Vitamin D', 'Multivitamin', 'Refresh', 'Biotene products',
+                 'Hydrocodone-Ibuprofen', 'Eye ointment']:
+        result = classification.classify(name, '', '', audit.DRUG_RULES, source_kind='CTDB')
+        assert result['ctdb_exact_alias_rule_id'] == ''
