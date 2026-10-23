@@ -13,7 +13,7 @@ HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("step08audit", HERE / "08_treatment_audit_v2.py")
 audit = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(audit)
-VERSION = "08-ctdb-visit-1.0"
+VERSION = "08-ctdb-visit-1.1"
 EDA = audit.v1.common.EDA_SJD_ROOT
 SPINE = audit.v1.common.EPISODE_SPINE_PARQUET
 
@@ -43,7 +43,7 @@ def build(visits, row_map, spine, secret):
     episode = spine[list(required_spine)].copy()
     episode["patient_key"] = episode.patient_id.astype(str).str.strip()
     episode["episode_key"] = episode.clinical_episode_id.astype(str).str.strip()
-    if episode[["patient_key", "episode_key"]].duplicated().any():
+    if episode[["patient_key", "episode_key"]].isna().any().any() or episode[["patient_key", "episode_key"]].duplicated().any():
         raise ValueError("duplicate Step00 episode keys")
     linked["patient_key"] = linked.patient_id_map.astype(str).str.strip()
     linked["episode_key"] = linked.episode_id_map.astype(str).str.strip()
@@ -58,6 +58,18 @@ def build(visits, row_map, spine, secret):
     for _, r in linked.iterrows():
         day = audit.parse_date(r["collection_date"])
         observed = day["parsed"][:10] if day["status"] == "valid" and day["precision"] in {"day", "datetime"} else ""
+        lower = audit.parse_date(r["episode_start_date"])
+        upper = audit.parse_date(r["episode_end_date"])
+        episode_bounds_valid = (
+            lower["status"] == upper["status"] == "valid"
+            and lower["precision"] in {"day", "datetime"}
+            and upper["precision"] in {"day", "datetime"}
+            and lower["lower_bound"] <= upper["upper_bound"]
+        )
+        report_within_episode = bool(
+            observed and episode_bounds_valid
+            and lower["lower_bound"] <= observed <= upper["upper_bound"]
+        )
         for slot, column in enumerate(audit.CTDB_RX_NAMES, 1):
             if column not in linked or not audit.present(r.get(column)):
                 continue
@@ -77,6 +89,13 @@ def build(visits, row_map, spine, secret):
                 "ingredient_canonical": classification["ingredient_canonical"],
                 "clinical_category_primary": classification["clinical_category_primary"],
                 "classification_confidence": classification["classification_confidence"],
+                "clinical_category_detail": classification["clinical_category_detail"],
+                "study_category_rule_status": classification["study_category_rule_status"],
+                "route_canonical": classification["route_canonical"],
+                "classification_review_reasons": classification["review_reasons"],
+                "medication_date_within_episode": report_within_episode,
+                "episode_dates_valid": episode_bounds_valid,
+                "classification_version": audit.classification.VERSION,
                 "visit_documentation_date": observed,
                 "visit_report_semantics": "current_medication_reported_at_source_visit",
                 "source_reported_start_lower": start["lower_bound"],
@@ -98,6 +117,11 @@ def build(visits, row_map, spine, secret):
                "n_episodes": int(catalog.clinical_episode_id.nunique()),
                "n_patients": int(catalog.patient_pseudonym.nunique()),
                "n_nonclinical_episode_mentions": int((~catalog.clinical_visit).sum()),
+               "n_report_dates_outside_episode_or_invalid_bounds": int(
+                   (~catalog.medication_date_within_episode).sum()),
+               "n_report_dates_within_episode": int(catalog.medication_date_within_episode.sum()),
+               "n_original_visit_high_exact": int(
+                   catalog.classification_confidence.eq("high_exact").sum()),
                "reference": "Step 00 episode spine + EDA row_id_raw map",
                "actual_exposure": "NO_GO",
                "downstream_integration": "NO_GO",
@@ -112,8 +136,13 @@ def main():
     p.add_argument("--spine", type=Path, default=SPINE)
     a = p.parse_args()
     restricted = a.audit_root.resolve()/"restricted"
-    if not (a.audit_root/"08_treatment_classification_v21_summary.json").is_file():
+    class_path = a.audit_root/"08_treatment_classification_v21_summary.json"
+    if not class_path.is_file():
         raise ValueError("Step 08 audit required")
+    class_summary = json.loads(class_path.read_text())
+    if (class_summary.get("run_status") != "completed_with_review_gates"
+            or class_summary.get("classification_version") != audit.classification.VERSION):
+        raise ValueError("Step 08 classification/audit version mismatch")
     key = (restricted/".pseudonym_key").read_bytes()
     catalog, dated, summary = build(pd.read_parquet(a.visits), pd.read_parquet(a.row_map),
                                     pd.read_parquet(a.spine), key)
