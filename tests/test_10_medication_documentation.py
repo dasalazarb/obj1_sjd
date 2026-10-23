@@ -24,16 +24,28 @@ def sample():
         dict(documentation_record_id="B1",linked_patient_pseudonymous=token,
              source="11D",source_kind="BTRIS_order",date_of_documentation="2021-02-15",
              clinical_category_primary="systemic_sjd",classification_confidence="high_exact",
-             ingredient_canonical="hydroxychloroquine", medication_name_raw="Plaquenil",\n             drug_short_label="hydroxychloroquine",route_canonical="oral",\n             clinical_category_detail="systemic",review_reasons="",qc_flags="",\n             date_evidence_kind="btris_order_or_start_date_unvalidated",source_audit_record_id="",\n             actual_exposure_confirmed=False,documentation_dated_usable=True),
+             ingredient_canonical="hydroxychloroquine", medication_name_raw="Plaquenil",
+             drug_short_label="hydroxychloroquine",route_canonical="oral",
+             clinical_category_detail="systemic",review_reasons="",qc_flags="",
+             date_evidence_kind="btris_order_or_start_date_unvalidated",source_audit_record_id="",
+             actual_exposure_confirmed=False,documentation_dated_usable=True),
         dict(documentation_record_id="C1",linked_patient_pseudonymous=token,
              source="CTDB_original_visit",source_kind="CTDB_reported_current",
              date_of_documentation="2021-02-20",clinical_category_primary="symptomatic_sjd",
              classification_confidence="candidate_review",
-             ingredient_canonical="hydroxychloroquine", medication_name_raw="Plaquenil",\n             drug_short_label="hydroxychloroquine",route_canonical="oral",\n             clinical_category_detail="systemic",review_reasons="",qc_flags="",\n             date_evidence_kind="btris_order_or_start_date_unvalidated",source_audit_record_id="",\n             actual_exposure_confirmed=False,documentation_dated_usable=True),
+             ingredient_canonical="hydroxychloroquine", medication_name_raw="Plaquenil",
+             drug_short_label="hydroxychloroquine",route_canonical="oral",
+             clinical_category_detail="systemic",review_reasons="",qc_flags="",
+             date_evidence_kind="btris_order_or_start_date_unvalidated",source_audit_record_id="",
+             actual_exposure_confirmed=False,documentation_dated_usable=True),
         dict(documentation_record_id="B2",linked_patient_pseudonymous=token,
              source="15D",source_kind="BTRIS_order",date_of_documentation="2021-02-15",
              clinical_category_primary="indeterminate",classification_confidence="unmapped",
-             ingredient_canonical="hydroxychloroquine", medication_name_raw="Plaquenil",\n             drug_short_label="hydroxychloroquine",route_canonical="oral",\n             clinical_category_detail="systemic",review_reasons="",qc_flags="",\n             date_evidence_kind="btris_order_or_start_date_unvalidated",source_audit_record_id="",\n             actual_exposure_confirmed=False,documentation_dated_usable=False)])
+             ingredient_canonical="hydroxychloroquine", medication_name_raw="Plaquenil",
+             drug_short_label="hydroxychloroquine",route_canonical="oral",
+             clinical_category_detail="systemic",review_reasons="",qc_flags="",
+             date_evidence_kind="btris_order_or_start_date_unvalidated",source_audit_record_id="",
+             actual_exposure_confirmed=False,documentation_dated_usable=False)])
     links=[]
     for eid,record,source,kind,day in [
         ("e1","B1","11D","BTRIS_order","2021-02-15"),
@@ -66,7 +78,8 @@ def test_aggregation_preserves_episode_grain_and_order_ids():
     out,qc=med.aggregate(*sample())
     assert len(out)==3
     assert out.duplicated(["patient_id","clinical_episode_id"]).sum()==0
-    assert out.meddoc__n_documentation_records.tolist()==[2,1,0]\n    assert out[med.NAME_FIELD].iloc[0] == "hydroxychloroquine"
+    assert out.meddoc__n_documentation_records.tolist()==[2,1,0]
+    assert out[med.NAME_FIELD].iloc[0] == "hydroxychloroquine"
     assert out.meddoc__n_btris_11d_order_documents.tolist()==[1,1,0]
     assert out.meddoc__n_ctdb_original_visit_mentions.tolist()==[1,0,0]
     assert out.meddoc__n_systemic_sjd_candidate_documents.tolist()==[1,1,0]
