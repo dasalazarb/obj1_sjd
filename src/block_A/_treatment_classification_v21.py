@@ -12,7 +12,7 @@ from datetime import datetime
 
 import pandas as pd
 
-VERSION = '08-classification-2.1.6'
+VERSION = '08-classification-2.1.7'
 RULE_SOURCE = 'investigator specification 2026-10-21 §3; candidate nomenclature, not institutional validation'
 SYSTEMIC = 'sjd_systemic_candidate'
 OCULAR = 'sjd_ocular_symptomatic_candidate'
@@ -492,6 +492,27 @@ def coverage(records, eligible, linkage, source_ok):
     return pd.DataFrame(rows)
 
 
+def _restricted_vocabulary_display(value):
+    """Avoid copying obvious free-text contact instructions into review tables.
+
+    Preserve the untouched original in the restricted row-level audit. These
+    heuristics reduce accidental disclosure; they do NOT certify that any
+    aggregate output is anonymous or safe for unrestricted distribution.
+    """
+    text = _text(value)
+    if (re.search(r'[\r\n]|@|\b(?:please contact|research nurse|phone number)\b',
+                  text, re.I)
+            or re.search(r'\b\d{3}[-.]\d{3}[-.]\d{4}\b', text)):
+        return '[redacted free-text medication entry]', True
+    return text, False
+
+
+def _group_count_no_ids(frame, columns):
+    """Aggregate without person identifiers, source dates or free-text fields."""
+    return (frame.groupby(columns, dropna=False).size()
+            .rename('n_record_rows').reset_index())
+
+
 def artifacts(records, legacy_rules, eligible, linkage, source_ok):
     orders = records[records.source_kind.eq('BTRIS')].copy()
     ok = linkage['status'] == 'validated'
@@ -511,9 +532,16 @@ def artifacts(records, legacy_rules, eligible, linkage, source_ok):
         matrices.append(table)
     context = cross_tab(orders, ['order_set_raw', 'order_type_raw', 'category_raw', 'drug_type_raw',
                                 'drug_raw', 'ingredient_raw', 'order_set_procedure_context', 'order_set_context_rule_id'], ok)
-    unresolved = records[records.name_present.astype(bool) & records.classification_confidence.ne('high_exact')]
+    unresolved = records[records.name_present.astype(bool) & records.classification_confidence.ne('high_exact')].copy()
+    unresolved['source_text_redacted'] = False
+    for text_col in ('drug_raw', 'ingredient_raw'):
+        replaced = unresolved[text_col].map(_restricted_vocabulary_display)
+        unresolved[text_col] = replaced.map(lambda item: item[0])
+        unresolved['source_text_redacted'] = (
+            unresolved['source_text_redacted'] | replaced.map(lambda item: item[1]))
     priority_rows = []
-    dims = ['drug_raw', 'ingredient_raw', 'route_canonical', 'clinical_relevance_candidate', 'review_reasons']
+    dims = ['drug_raw', 'ingredient_raw', 'route_canonical',
+            'clinical_relevance_candidate', 'review_reasons', 'source_text_redacted']
     for values, part in unresolved.groupby(dims, dropna=False, sort=True):
         priority_rows.append(dict(zip(dims, values), source_provenance='|'.join(sorted(set(part.source))), n_order_rows=int(part.source_kind.eq('BTRIS').sum()),
                                   n_record_rows=len(part), n_distinct_eligible_patients=part.loc[part.eligible_linked, 'linked_patient_pseudonymous'].replace('', pd.NA).nunique() if ok else None,
@@ -560,6 +588,17 @@ def artifacts(records, legacy_rules, eligible, linkage, source_ok):
             'end_definitely_before_start')) else 'medium')
         for reason in targeted.targeted_review_reason
     ]
+    # Future review can use these compact QC-only tables rather than sending
+    # pseudonymous row-level records or raw medication vocabulary.
+    targeted_aggregate = _group_count_no_ids(
+        targeted, ['source', 'targeted_review_reason', 'review_priority',
+                   'clinical_category_primary', 'classification_confidence',
+                   'drug_short_label'])
+    pending_aggregate = _group_count_no_ids(
+        records[records.name_present.astype(bool)
+                & records.classification_confidence.ne('high_exact')],
+        ['source', 'classification_confidence', 'clinical_category_primary',
+         'drug_short_label', 'review_reasons'])
     reference = orders[['status_code_raw', 'order_type_raw', 'data_source_raw']].drop_duplicates().rename(columns={'data_source_raw': 'source_system'})
     for column, value in {
         'effective_from': '', 'effective_to': '', 'meaning_in_system': 'unvalidated',
@@ -572,6 +611,8 @@ def artifacts(records, legacy_rules, eligible, linkage, source_ok):
         '08_treatment_classification_dictionary.csv': dictionary(legacy_rules),
         '08_treatment_record_classification_audit.parquet': records,
         '08_treatment_unmapped_priority.csv': priority,
+        '08_treatment_pending_summary_aggregate.csv': pending_aggregate,
+        '08_treatment_review_summary_aggregate.csv': targeted_aggregate,
         '08_btris_status_type_matrix.csv': pd.concat(matrices, ignore_index=True),
         '08_btris_order_set_context_qc.csv': context,
         '08_treatment_coverage_by_evidence.csv': coverage(records, eligible, linkage, source_ok),
@@ -617,6 +658,8 @@ def summary(records, tables, source_ok, linkage, fingerprints, drift):
                 },
                 targeted_review_rows=len(tables['08_treatment_targeted_review_qc.csv']),
                 short_label_policy='display_only; canonical identity and original name retained; empty if unresolved or contradictory',
+                review_aggregates='restricted/08_treatment_review_summary_aggregate.csv; restricted/08_treatment_pending_summary_aggregate.csv',
+                free_text_precaution='free-text contact information masked in priority review; untouched originals restricted to row-level audit; not deidentified',
                 source_counts=counts, coverage_metrics=metrics,
                 n_order_rows=len(orders) if complete else None,
                 n_orders_classified=classified if complete else None,
