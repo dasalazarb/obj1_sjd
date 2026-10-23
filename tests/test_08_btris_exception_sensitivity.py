@@ -2,7 +2,7 @@ import importlib.util
 from pathlib import Path
 import pandas as pd
 
-module=Path(__file__).resolve().parents[1]/"src/block_A/08_btris_exception_sensitivity.py"
+module=Path(__file__).resolve().parents[1]/"src/block_A/medication_diagnostics/08_btris_exception_sensitivity.py"
 spec=importlib.util.spec_from_file_location("sensitivity",module)
 m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 

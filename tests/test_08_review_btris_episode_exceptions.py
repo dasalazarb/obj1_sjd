@@ -2,7 +2,7 @@ import importlib.util
 from pathlib import Path
 import pandas as pd
 
-p=Path(__file__).resolve().parents[1]/"src/block_A/08_review_btris_episode_exceptions.py"
+p=Path(__file__).resolve().parents[1]/"src/block_A/medication_diagnostics/08_review_btris_episode_exceptions.py"
 spec=importlib.util.spec_from_file_location("review",p)
 m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 

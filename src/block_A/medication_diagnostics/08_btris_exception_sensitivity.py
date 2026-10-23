@@ -16,7 +16,7 @@ import pandas as pd
 
 HERE=Path(__file__).resolve().parent
 SPEC=importlib.util.spec_from_file_location(
-    "med_order_episode_match",HERE/"08_match_btris_episode_windows.py")
+    "med_order_episode_match",HERE.parent/"08_match_btris_episode_windows.py")
 matcher=importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(matcher)
 
