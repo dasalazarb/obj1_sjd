@@ -12,7 +12,7 @@ from datetime import datetime
 
 import pandas as pd
 
-VERSION = '08-classification-2.1.5'
+VERSION = '08-classification-2.1.6'
 RULE_SOURCE = 'investigator specification 2026-10-21 §3; candidate nomenclature, not institutional validation'
 SYSTEMIC = 'sjd_systemic_candidate'
 OCULAR = 'sjd_ocular_symptomatic_candidate'
@@ -52,7 +52,8 @@ EXTRA_RULES = (
     ('citric acid monohydrate', 'diagnostic_or_local_agent', ('citric acid monohydrate',)),
     ('sodium fluoride', 'dental_fluoride', ('sodium fluoride',)),
     ('ibuprofen', 'nsaid', ('ibuprofen', 'advil', 'motrin')),
-    ('carboxymethylcellulose', 'lubricant', ('carboxymethylcellulose', 'carboxymethylcellulose sodium', 'refresh plus')),
+    ('carboxymethylcellulose', 'lubricant', ('carboxymethylcellulose', 'carboxymethylcellulose sodium', 'refresh plus',
+                                          'carboxymethylcellulose ophth drops 1% (celluvisc)')),
     ('mineral oil', 'lubricant', ('mineral oil',)),
     ('petrolatum', 'lubricant', ('petrolatum', 'white petrolatum')),
     ('codeine', 'opioid_analgesic', ('codeine', 'codeine phosphate')),
@@ -60,6 +61,17 @@ EXTRA_RULES = (
     ('nystatin', 'antifungal', ('nystatin',)),
     ('iopamidol', 'radiologic_contrast', ('iopamidol', 'isovue')),
 )
+# Explicit BTRIS ingredient-field annotations: the trailing terms in these
+# source strings are pharmacologic class / formulation descriptors, not
+# additional active ingredients. Never strip arbitrary comma-separated text.
+# Exact matches provide ingredient identity candidates, not indication,
+# medication administration, product use or regulatory validation.
+BTRIS_INGREDIENT_ANNOTATIONS = {
+    'fluoride, sodium fluoride': ('sodium fluoride',),
+    'carboxymethylcellulose, ophthalmic lubricant': ('carboxymethylcellulose',),
+    'white petrolatum/mineral oil combination, ophthalmic lubricant, mineral oil': ('petrolatum', 'mineral oil'),
+}
+
 SUFFIX = re.compile(
     r'(?:\s|[(),.\-]|\d+(?:\.\d+)?\s*(?:mg|mcg|g|ml|%|units?)|'
     r'tablets?|tabs?|capsules?|caps?|oral|ophthalmic|ophth|ocular|topical|'
@@ -91,6 +103,16 @@ def dictionary(legacy_rules):
                              rule_source=RULE_SOURCE, classification_version=VERSION,
                              confidence_policy='high_exact_identity_only; clinical_relevance_is_candidate',
                              pending_clinical_review=True))
+    for source_term, components in sorted(BTRIS_INGREDIENT_ANNOTATIONS.items()):
+        rows.append(dict(classification_rule_id=f'{VERSION}:source_ingredient_annotation:{source_term}',
+                         exact_alias=source_term, ingredient_canonical=' + '.join(components),
+                         pharmacologic_family='source_ontology_descriptor',
+                         route_requirement='source_exact_only',
+                         formulation_requirement='source_exact_only',
+                         relevance_rule='identity_only_no_clinical_indication',
+                         rule_source=RULE_SOURCE, classification_version=VERSION,
+                         confidence_policy='exact_annotation_match; subject_to_product_crosscheck',
+                         pending_clinical_review=True))
     for alias, family, relevance in (
         ('mouth kote dry mouth treatment', 'oral_moisturizer', ORAL),
         ('oral balance gel', 'oral_moisturizer', ORAL),
@@ -125,6 +147,29 @@ def _matches(value, vocabulary):
         if all(matches):
             return [item for match in matches for item in match]
     return []
+
+
+def _source_annotated_ingredients(value, vocabulary):
+    """Interpret only reviewed, exact BTRIS source annotation strings.
+
+    Produce the same ingredient tuples as the existing matcher, and reject
+    any annotation whose component has no recognized rule. Product and source
+    identities must still agree through the existing conflict gate.
+    """
+    source = _text(value).strip().casefold()
+    if source not in BTRIS_INGREDIENT_ANNOTATIONS:
+        return []
+    canonical = BTRIS_INGREDIENT_ANNOTATIONS[source]
+    matched = []
+    for expected in canonical:
+        rules_for_component = [
+            (ingredient, family, source)
+            for ingredient, family, _aliases in vocabulary if ingredient == expected
+        ]
+        if len(rules_for_component) != 1:
+            return []
+        matched.extend(rules_for_component)
+    return matched
 
 
 def _route(value):
@@ -179,7 +224,10 @@ def _drug_short_label(ingredients, route, original_name, families, *, uncertain=
 def classify(drug, ingredient, route, legacy_rules):
     vocabulary = rules(legacy_rules)
     product = _matches(drug, vocabulary)
-    components = _matches(ingredient, vocabulary)
+    annotated_components = _source_annotated_ingredients(ingredient, vocabulary)
+    components = annotated_components or _matches(ingredient, vocabulary)
+    annotation_rule_id = (f'{VERSION}:source_ingredient_annotation:{_text(ingredient).strip().casefold()}'
+                          if annotated_components else '')
     flags = []
     product_ids, ingredient_ids = {x[0] for x in product}, {x[0] for x in components}
     conflict = bool(product_ids and ingredient_ids and product_ids != ingredient_ids)
@@ -297,7 +345,8 @@ def classify(drug, ingredient, route, legacy_rules):
         ingredients, canonical_route, drug, families,
         uncertain=bool(conflict or route_conflict or
                        'product_components_unresolved' in flags))
-    return dict(drug_short_label=short_label,
+    return dict(source_ingredient_annotation_rule_id=annotation_rule_id,
+                drug_short_label=short_label,
                 clinical_category_primary=primary_category,
                 clinical_category_detail=relevance,
                 clinical_category_validation='candidate_only_indication_unconfirmed',
