@@ -434,3 +434,37 @@ def test_v217_freetext_masking_is_selective():
     masked, flagged = classification._restricted_vocabulary_display(
         'Non-formulary request\\nPlease contact Research Nurse')
     assert flagged and masked.startswith('[redacted')
+
+
+@pytest.mark.parametrize('name,ingredient,route,category', [
+    ('Citric Acid Monohydrate 2% Oral Solution', 'citric acid monohydrate',
+     'oral', classification.PRIMARY_PROCEDURE),
+    ('Mouth Kote Dry Mouth Treatment', '', 'oral',
+     classification.PRIMARY_SYMPTOMATIC),
+])
+def test_v218_category_rule_signed_off_without_exposure_claims(name, ingredient, route, category):
+    out = classify(name, ingredient=ingredient, route=route)
+    assert out['clinical_category_primary'] == category
+    assert out['study_category_rule_status'] == 'approved_by_investigator'
+    assert out['study_category_rule_decision_ref'] == 'investigator_decision_2026-10-22'
+    assert out['clinical_category_validation'] == 'candidate_only_indication_unconfirmed'
+    assert not out['clinical_indication_confirmed']
+    assert out['classification_confidence'] == 'candidate_review'
+    assert out['requires_manual_review']
+
+
+def test_v218_approval_never_overrides_ingredient_conflict_or_other_drug():
+    bad = classify('Citric Acid Monohydrate 2% Oral Solution', 'ibuprofen', 'oral')
+    assert bad['clinical_category_primary'] == classification.PRIMARY_INDETERMINATE
+    assert bad['study_category_rule_status'] == 'candidate_not_adjudicated'
+    ordinary = classify('Ibuprofen 400 mg tablet', 'ibuprofen', 'oral')
+    assert ordinary['study_category_rule_status'] == 'candidate_not_adjudicated'
+
+
+def test_v218_dictionary_signoff_keeps_composition_validation_separate():
+    dictionary = classification.dictionary(audit.DRUG_RULES)
+    citric = dictionary.loc[dictionary.ingredient_canonical.eq('citric acid monohydrate')]
+    mouth = dictionary.loc[dictionary.exact_alias.eq('mouth kote dry mouth treatment')]
+    assert citric.study_category_rule_status.eq('approved_by_investigator').all()
+    assert mouth.study_category_rule_status.eq('approved_by_investigator').all()
+    assert mouth.pending_clinical_review.all()
