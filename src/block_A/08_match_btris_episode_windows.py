@@ -145,10 +145,12 @@ def build(documentation, clinical_spine, key, source_summary):
                 episode_matches.append(item)
         n_inside=sum(x["within_episode"] for x in episode_matches)
         n_tolerance=len(episode_matches)-n_inside
-        if not usable:
-            status="blocked_by_documentation_qc"
-        elif pd.isna(event):
+        if pd.isna(event):
+            # Undated records stay in the protected patient-level catalog;
+            # missing date alone is not a pharmacological identity/QC rejection.
             status="missing_exact_order_documentation_day"
+        elif not usable:
+            status="blocked_by_documentation_qc"
         elif pool is None:
             status="patient_absent_from_clinical_spine"
         elif not episode_matches:
