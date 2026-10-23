@@ -117,7 +117,8 @@ def main():
         raise ValueError("full_source_Step10_output_must_be_staged_separately")
     out.parent.mkdir(parents=True,exist_ok=True)
     cmd("10_build_integrated_longitudinal_dataset.py",
-        "--medication-audit-root",audit,"--output",out)
+        "--medication-audit-root",audit,"--output",out,
+        "--qc-dir",audit/"reviewed_step10"/"qc")
     analytic=pd.read_parquet(out)
     if len(analytic)!=497 or analytic.patient_id.nunique()!=159:
         raise ValueError("Step10_recovered_medications_changed_frozen_clinical_cohort")
