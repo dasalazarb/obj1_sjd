@@ -79,8 +79,6 @@ def build(burden,episode_pairs,identity,spine,secret,upstream_summary):
         tokens=part.patient_token.dropna().unique()
         left=part.episode_id_left.dropna().astype(str).unique()
         right=part.episode_id_right.dropna().astype(str).unique()
-        if len(tokens)!=len(left)!=1:
-            pass
         if len(tokens)!=1 or len(left)!=1 or len(right)!=1:
             raise ValueError("pair_patient_or_episode_ids_inconsistent")
         if left[0]==right[0]:
