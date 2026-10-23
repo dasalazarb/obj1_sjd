@@ -264,7 +264,7 @@ def _matches(value, vocabulary):
 def _ctdb_exact_name(value):
     # A separate CTDB-only exact namespace. Unknown products, mixtures,
     # supplements and free text remain unresolved, not guessed.
-    name = re.sub(r'\\s+', ' ', _text(value).strip().casefold())
+    name = re.sub(r'\s+', ' ', _text(value).strip().casefold())
     if name in CTDB_SPELLING_REVIEW:
         ingredient, family = CTDB_SPELLING_REVIEW[name]
         return (ingredient, family, name), True
