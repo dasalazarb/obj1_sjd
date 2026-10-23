@@ -74,7 +74,7 @@ def audit(catalog: pd.DataFrame, primary: pd.DataFrame,
     if not linkage.n_primary_episode_relations.eq(
             linkage.observed_n.fillna(0)).all():
         raise ValueError("record_status_primary_counts_mismatch")
-    if not set(catalog.documentation_record_id).eq(set(status.documentation_record_id)):
+    if set(catalog.documentation_record_id) != set(status.documentation_record_id):
         raise ValueError("catalog_status_record_ids_disagree")
 
     catalog = catalog.copy()
