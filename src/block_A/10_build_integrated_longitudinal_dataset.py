@@ -1056,18 +1056,40 @@ def _integrate_medication_context(build: CuratedBuild, *, audit_root: Path,
         episode_counts, on=KEYS, how="left", validate="one_to_one", sort=False)
     merged_analytic = build.analytic.merge(
         episode_counts, on=KEYS, how="left", validate="one_to_one", sort=False)
+    # Compare episode *identity* by values, not Series.equals(): pandas may
+    # change object/string extension dtypes on merge, and master/context may
+    # legitimately have different row orders. Do not interpret those as a
+    # change to Step 00 episode identity.
+    def episode_key_set(frame: pd.DataFrame, label: str) -> set[tuple[str, str]]:
+        keys = frame[KEYS].astype("string")
+        if keys.isna().any().any() or keys.duplicated().any():
+            raise CurationContractError(
+                f"Step10 medication {label} has missing/duplicate episode keys")
+        return set(keys.itertuples(index=False, name=None))
+
     for label, original, merged in [
         ("context", build.context, merged_context),
         ("analytic", build.analytic, merged_analytic),
     ]:
         if (len(merged) != len(original)
-                or merged[KEYS].duplicated().any()
-                or not merged[KEYS].reset_index(drop=True).equals(
-                    original[KEYS].reset_index(drop=True))):
+                or episode_key_set(merged, label + "_merged")
+                   != episode_key_set(original, label + "_original")):
             raise CurationContractError(
-                f"Step10 medication {label} changed authoritative episode grain")
-    for col in [*module.COUNT_COLUMNS, module.FLAG]:
-        if not merged_analytic[col].equals(merged_context[col]):
+                f"Step10 medication {label} changed authoritative episode keys")
+
+    # Compare medication descriptors at patient+episode grain rather than
+    # row position, since context and analytic can have different row order.
+    medication_columns = [*module.COUNT_COLUMNS, module.FLAG]
+    comparison = merged_analytic[KEYS + medication_columns].merge(
+        merged_context[KEYS + medication_columns], on=KEYS,
+        how="outer", validate="one_to_one", indicator=True,
+        suffixes=("_analytic", "_context"))
+    if len(comparison) != len(merged_analytic) or not comparison["_merge"].eq("both").all():
+        raise CurationContractError("Medication master/context episode keys differ")
+    for col in medication_columns:
+        left = comparison[f"{col}_analytic"].reset_index(drop=True)
+        right = comparison[f"{col}_context"].reset_index(drop=True)
+        if not left.equals(right):
             raise CurationContractError(
                 "Medication documentation differs between master and context: " + col)
     rows = []
