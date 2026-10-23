@@ -12,7 +12,7 @@ from datetime import datetime
 
 import pandas as pd
 
-VERSION = '08-classification-2.1.9'
+VERSION = '08-classification-2.1.10'
 RULE_SOURCE = 'investigator specification 2026-10-21 §3; candidate nomenclature, not institutional validation'
 SYSTEMIC = 'sjd_systemic_candidate'
 OCULAR = 'sjd_ocular_symptomatic_candidate'
@@ -119,6 +119,34 @@ CTDB_EXACT_RULES = (
     ('hydrochlorothiazide', 'diuretic', ('hydrochlorothiazide',)),
     ('cyclosporine', 'needs_review', ('restasis eye drops', 'restasis eyedrops',
                                       'restasis cyclosporin eye drops')),
+    # Source-specific, exact CTDB nomenclature. Ingredient identity only.
+    ('loteprednol etabonate', 'ophthalmic_glucocorticoid', ('lotemax', 'alrex ophthalmic suspension')),
+    ('fluorometholone', 'ophthalmic_glucocorticoid', ('fluorometholone 0.1% eyedrops',)),
+    ('ketotifen', 'ocular_antihistamine', ('zaditor',)),
+    ('carboxymethylcellulose', 'lubricant', ('refresh plus eye drops',)),
+    ('acetaminophen', 'other_symptomatic', ('tylenol arthritis',)),
+    ('aspirin', 'concomitant_other', ('ecotrin',)),
+    ('guaifenesin', 'expectorant', ('mucinex',)),
+    ('dexlansoprazole', 'proton_pump_inhibitor', ('dexilant (dexlansoprazole)',)),
+    ('linaclotide', 'gi_medication', ('linzess',)),
+    ('hydroxyzine', 'antihistamine', ('atarax',)),
+    ('irbesartan', 'angiotensin_receptor_blocker', ('avapro',)),
+    ('buprenorphine', 'opioid_analgesic', ('butrans',)),
+    ('tadalafil', 'pde5_inhibitor', ('adcirca',)),
+    ('bosentan', 'endothelin_receptor_antagonist', ('tracleer',)),
+    ('metoprolol succinate', 'beta_blocker', ('toprol xl',)),
+    ('diazepam', 'benzodiazepine', ('valium',)),
+    ('nefazodone', 'antidepressant', ('serzone',)),
+    ('methylphenidate', 'stimulant', ('ritalin',)),
+    ('omega-3-acid ethyl esters', 'lipid_lowering', ('lovaza',)),
+    ('triamterene', 'diuretic', ('triamterene',)),
+    ('lithium', 'mood_stabilizer', ('lithium',)),
+    ('oxybutynin', 'anticholinergic', ('oxybutynin',)),
+    ('estradiol', 'sex_hormone', ('estradiol', 'estradiol patch', 'estrace 0.01%', 'estring')),
+    ('fluticasone', 'intranasal_corticosteroid', ('fluticasone nasal',)),
+    ('ergocalciferol', 'vitamin_supplement', ('vitamin d2',)),
+    ('cholecalciferol', 'vitamin_supplement', ('vitamin d3',)),
+    ('folic acid', 'vitamin_supplement', ('folic acid supplements',)),
 )
 # Spelling variants are identifiable proposals, not high-confidence identity.
 # A typo alone must never silently promote a record to high_exact.
@@ -134,6 +162,10 @@ CTDB_SPELLING_REVIEW = {
     'pantoparozole': ('pantoprazole', 'proton_pump_inhibitor'),
     'pentoxyfilline': ('pentoxifylline', 'vasoactive_agent'),
     'pentoxyfylline': ('pentoxifylline', 'vasoactive_agent'),
+    'amitryptilline': ('amitriptyline', 'antidepressant'),
+    'nefazaodone': ('nefazodone', 'antidepressant'),
+    'rstasis opthalmic drops': ('cyclosporine', 'needs_review'),
+    'aspirine': ('aspirin', 'concomitant_other'),
 }
 
 # Explicit BTRIS ingredient-field annotations: the trailing terms in these
