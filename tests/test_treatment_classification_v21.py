@@ -383,3 +383,31 @@ def test_v215_ophthalmic_oint_abbreviation_preserves_combination_identity():
     assert out['clinical_category_primary'] == classification.PRIMARY_SYMPTOMATIC
     assert out['drug_short_label'] == 'Mineral oil + Petrolatum (ophthalmic)'
     assert not out['clinical_indication_confirmed']
+
+
+@pytest.mark.parametrize('product,annotation,expected', [
+    ('Sodium Fluoride Topical Gel 1.1%', 'Fluoride, Sodium Fluoride', 'sodium fluoride'),
+    ('Carboxymethylcellulose Ophth Drops 0.5% (REFRESH PLUS)',
+     'Carboxymethylcellulose, Ophthalmic Lubricant', 'carboxymethylcellulose'),
+    ('White Petrolatum/Mineral Oil Ophth Oint -',
+     'White Petrolatum/Mineral Oil Combination, Ophthalmic Lubricant, Mineral Oil',
+     'mineral oil + petrolatum'),
+])
+def test_v216_exact_ontology_annotations_reconcile_product_components(product, annotation, expected):
+    out = classify(product, ingredient=annotation)
+    assert out['ingredient_canonical'] == expected
+    assert 'ingredient_unresolved' not in out['review_reasons']
+    assert 'ingredient_product_conflict' not in out['review_reasons']
+    assert out['source_ingredient_annotation_rule_id'].startswith(classification.VERSION)
+    assert not out['clinical_indication_confirmed']
+
+
+def test_v216_unreviewed_annotation_and_conflicting_product_not_silently_accepted():
+    unknown = classify('Sodium Fluoride Topical Gel 1.1%',
+                       'Fluoride, Sodium Fluoride, Unknown Compound', 'topical')
+    assert 'ingredient_unresolved' in unknown['review_reasons']
+    contradictory = classify('Ibuprofen 400 mg tablet',
+                             'Carboxymethylcellulose, Ophthalmic Lubricant', 'oral')
+    assert 'ingredient_product_conflict' in contradictory['review_reasons']
+    assert contradictory['drug_short_label'] == ''
+    assert contradictory['clinical_category_primary'] == classification.PRIMARY_INDETERMINATE
