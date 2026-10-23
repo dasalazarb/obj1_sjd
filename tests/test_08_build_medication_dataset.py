@@ -104,9 +104,11 @@ def test_conflict_quarantined_without_losing_dated_row():
     catalog, dated, normalized, *_ = release.build_medication_release(
         rec, source_summary(1))
     assert len(catalog) == len(dated) == 1
-    assert len(normalized) == 0
+    assert len(normalized) == 1
     assert catalog.iloc[0].source_end_date_exact_unvalidated == ""
-    assert not catalog.iloc[0].documentation_dated_usable
+    assert catalog.iloc[0].documentation_dated_usable
+    assert catalog.iloc[0].qc_has_warning_only
+    assert not catalog.iloc[0].actual_medication_exposure_confirmed
 
 
 def test_unmapped_and_undated_kept_in_protected_catalog():
@@ -136,3 +138,23 @@ def test_patient_id_release_requires_eligibility_and_key():
     with pytest.raises(ValueError, match="pseudonym_key_required"):
         release.build_medication_release(
             rec, source_summary(1), eligibility=pd.DataFrame({"patient_id": ["123"]}))
+
+
+def test_v101_normalized_numeric_linkage_warning_preserves_dated_order():
+    rec = pd.DataFrame([row(
+        qc_flags="nontext_mrn_normalized_match_requires_identifier_review")])
+    catalog, dated, normalized, qc, summary = release.build_medication_release(
+        rec, source_summary(1))
+    assert len(dated) == len(normalized) == 1
+    assert qc.iloc[0].n_warning_only_rows == 1
+    assert qc.iloc[0].n_major_conflict_rows == 0
+    assert not catalog.iloc[0].actual_medication_exposure_confirmed
+
+
+def test_v101_true_product_conflict_remains_quarantined():
+    rec = pd.DataFrame([row(review_reasons="ingredient_product_conflict")])
+    catalog, dated, normalized, qc, summary = release.build_medication_release(
+        rec, source_summary(1))
+    assert len(dated) == 1
+    assert len(normalized) == 0
+    assert not catalog.iloc[0].documentation_dated_usable
