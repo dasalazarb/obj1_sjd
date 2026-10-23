@@ -12,7 +12,7 @@ from datetime import datetime
 
 import pandas as pd
 
-VERSION = '08-classification-2.1.8'
+VERSION = '08-classification-2.1.9'
 RULE_SOURCE = 'investigator specification 2026-10-21 §3; candidate nomenclature, not institutional validation'
 SYSTEMIC = 'sjd_systemic_candidate'
 OCULAR = 'sjd_ocular_symptomatic_candidate'
@@ -68,6 +68,74 @@ EXTRA_RULES = (
     ('nystatin', 'antifungal', ('nystatin',)),
     ('iopamidol', 'radiologic_contrast', ('iopamidol', 'isovue')),
 )
+# Curated EXACT CTDB current-medication vocabulary. Scope is CTDB only.
+# Identity mappings do not validate route, indication, dispensing or exposure.
+# Brand aliases are accepted only as full strings (case/whitespace normalized),
+# never as substrings, to prevent ambiguous combinations from being swallowed.
+CTDB_EXACT_RULES = (
+    ('simvastatin', 'statin', ('simvastatin', 'zocor')),
+    ('levothyroxine', 'thyroid_replacement', ('levothyroxine', 'synthroid', 'levoxyl', 'thyroxine')),
+    ('celecoxib', 'nsaid', ('celebrex',)),
+    ('clonazepam', 'benzodiazepine', ('clonazepam', 'klonopin')),
+    ('gabapentin', 'neuropathic_analgesic', ('neurontin',)),
+    ('zolpidem', 'hypnotic', ('zolpidem', 'ambien', 'ambien cr')),
+    ('amlodipine', 'antihypertensive', ('amlodipine', 'norvasc')),
+    ('raloxifene', 'bone_modifying_agent', ('evista',)),
+    ('escitalopram', 'antidepressant', ('lexapro',)),
+    ('lisinopril', 'ace_inhibitor', ('lisinopril',)),
+    ('losartan', 'angiotensin_receptor_blocker', ('losartan', 'cozaar')),
+    ('pregabalin', 'neuropathic_analgesic', ('lyrica',)),
+    ('omeprazole', 'proton_pump_inhibitor', ('omeprazole', 'prilosec')),
+    ('topiramate', 'antiepileptic', ('topiramate', 'topamax')),
+    ('rosuvastatin', 'statin', ('crestor',)),
+    ('duloxetine', 'antidepressant', ('cymbalta',)),
+    ('diltiazem', 'antihypertensive', ('diltiazem',)),
+    ('azathioprine', 'nonbiologic_systemic', ('azathioprine',)),
+    ('atenolol', 'antihypertensive', ('atenolol',)),
+    ('alendronate', 'bone_modifying_agent', ('alendronate',)),
+    ('fluoxetine', 'antidepressant', ('prozac',)),
+    ('warfarin', 'anticoagulant', ('warfarin',)),
+    ('famotidine', 'acid_suppression', ('pepcid',)),
+    ('furosemide', 'diuretic', ('lasix',)),
+    ('tramadol', 'analgesic', ('tramadol',)),
+    ('meloxicam', 'nsaid', ('meloxicam',)),
+    ('doxycycline', 'antibiotic', ('doxycycline',)),
+    ('lamotrigine', 'antiepileptic', ('lamictal',)),
+    ('lorazepam', 'benzodiazepine', ('lorazepam',)),
+    ('nabumetone', 'nsaid', ('relafen',)),
+    ('mirtazapine', 'antidepressant', ('remeron',)),
+    ('bupropion', 'antidepressant', ('wellbutrin',)),
+    ('valacyclovir', 'antiviral', ('valtrex',)),
+    ('venlafaxine', 'antidepressant', ('effexor xr',)),
+    ('folic acid', 'vitamin_supplement', ('folic acid',)),
+    ('ferrous sulfate', 'iron_supplement', ('ferrous sulfate',)),
+    ('prazosin', 'antihypertensive', ('prazosin',)),
+    ('quinapril', 'ace_inhibitor', ('quinapril',)),
+    ('calcitriol', 'vitamin_d_analogue', ('calcitriol',)),
+    ('cyclobenzaprine', 'muscle_relaxant', ('flexeril',)),
+    ('oxazepam', 'benzodiazepine', ('oxazepam',)),
+    ('naltrexone', 'opioid_antagonist', ('naltrexone',)),
+    ('midodrine', 'vasopressor', ('midodrine',)),
+    ('hydrochlorothiazide', 'diuretic', ('hydrochlorothiazide',)),
+    ('cyclosporine', 'needs_review', ('restasis eye drops', 'restasis eyedrops',
+                                      'restasis cyclosporin eye drops')),
+)
+# Spelling variants are identifiable proposals, not high-confidence identity.
+# A typo alone must never silently promote a record to high_exact.
+CTDB_SPELLING_REVIEW = {
+    'synthyroid': ('levothyroxine', 'thyroid_replacement'),
+    'celebrax': ('celecoxib', 'nsaid'),
+    'cevimiline': ('cevimeline', 'symptomatic_sjd_oral'),
+    'evosac': ('cevimeline', 'symptomatic_sjd_oral'),
+    'plaquenill': ('hydroxychloroquine', 'nonbiologic_systemic'),
+    'plaquenl': ('hydroxychloroquine', 'nonbiologic_systemic'),
+    'flexerill': ('cyclobenzaprine', 'muscle_relaxant'),
+    'oxybutinin': ('oxybutynin', 'anticholinergic'),
+    'pantoparozole': ('pantoprazole', 'proton_pump_inhibitor'),
+    'pentoxyfilline': ('pentoxifylline', 'vasoactive_agent'),
+    'pentoxyfylline': ('pentoxifylline', 'vasoactive_agent'),
+}
+
 # Explicit BTRIS ingredient-field annotations: the trailing terms in these
 # source strings are pharmacologic class / formulation descriptors, not
 # additional active ingredients. Never strip arbitrary comma-separated text.
@@ -110,6 +178,29 @@ def dictionary(legacy_rules):
                              rule_source=RULE_SOURCE, classification_version=VERSION,
                              confidence_policy='high_exact_identity_only; clinical_relevance_is_candidate',
                              pending_clinical_review=True))
+    for ingredient, family, aliases in CTDB_EXACT_RULES:
+        for alias in aliases:
+            rows.append(dict(
+                classification_rule_id=f'{VERSION}:ctdb_exact:{ingredient}:{alias}',
+                exact_alias=alias, ingredient_canonical=ingredient,
+                pharmacologic_family=family_label(family),
+                route_requirement='retain_source_route',
+                formulation_requirement='retain_source_formulation',
+                relevance_rule='identity_only; clinical_indication_unconfirmed',
+                rule_source=RULE_SOURCE, classification_version=VERSION,
+                confidence_policy='high_exact_identity_only_on_ctdb',
+                pending_clinical_review=True, source_scope='CTDB_only'))
+    for alias, (ingredient, family) in sorted(CTDB_SPELLING_REVIEW.items()):
+        rows.append(dict(
+            classification_rule_id=f'{VERSION}:ctdb_spelling_review:{ingredient}:{alias}',
+            exact_alias=alias, ingredient_canonical=ingredient,
+            pharmacologic_family=family_label(family),
+            route_requirement='retain_source_route',
+            formulation_requirement='retain_source_formulation',
+            relevance_rule='identity_proposal_needs_manual_spelling_validation',
+            rule_source=RULE_SOURCE, classification_version=VERSION,
+            confidence_policy='candidate_review_spelling_variant',
+            pending_clinical_review=True, source_scope='CTDB_only'))
     for source_term, components in sorted(BTRIS_INGREDIENT_ANNOTATIONS.items()):
         rows.append(dict(classification_rule_id=f'{VERSION}:source_ingredient_annotation:{source_term}',
                          exact_alias=source_term, ingredient_canonical=' + '.join(components),
@@ -132,6 +223,7 @@ def dictionary(legacy_rules):
                          classification_version=VERSION, confidence_policy='candidate_review',
                          pending_clinical_review=True))
     result = pd.DataFrame(rows)
+    result['source_scope'] = result['source_scope'].fillna('all_sources')
     result['study_category_rule_status'] = [
         'approved_by_investigator' if (
             row.ingredient_canonical == 'citric acid monohydrate' or
@@ -167,6 +259,19 @@ def _matches(value, vocabulary):
         if all(matches):
             return [item for match in matches for item in match]
     return []
+
+
+def _ctdb_exact_name(value):
+    # A separate CTDB-only exact namespace. Unknown products, mixtures,
+    # supplements and free text remain unresolved, not guessed.
+    name = re.sub(r'\\s+', ' ', _text(value).strip().casefold())
+    if name in CTDB_SPELLING_REVIEW:
+        ingredient, family = CTDB_SPELLING_REVIEW[name]
+        return (ingredient, family, name), True
+    for ingredient, family, aliases in CTDB_EXACT_RULES:
+        if name in aliases:
+            return (ingredient, family, name), False
+    return None, False
 
 
 def _source_annotated_ingredients(value, vocabulary):
@@ -241,14 +346,24 @@ def _drug_short_label(ingredients, route, original_name, families, *, uncertain=
     return ''
 
 
-def classify(drug, ingredient, route, legacy_rules):
+def classify(drug, ingredient, route, legacy_rules, *, source_kind=None):
     vocabulary = rules(legacy_rules)
     product = _matches(drug, vocabulary)
+    ctdb_rule_id = ''
+    ctdb_is_spelling_variant = False
+    if source_kind == 'CTDB' and not product:
+        ctdb_found, ctdb_is_spelling_variant = _ctdb_exact_name(drug)
+        if ctdb_found:
+            product = [ctdb_found]
+            ctdb_rule_id = (f'{VERSION}:ctdb_spelling_review:' if ctdb_is_spelling_variant
+                            else f'{VERSION}:ctdb_exact:') + ctdb_found[0] + ':' + ctdb_found[2]
     annotated_components = _source_annotated_ingredients(ingredient, vocabulary)
     components = annotated_components or _matches(ingredient, vocabulary)
     annotation_rule_id = (f'{VERSION}:source_ingredient_annotation:{_text(ingredient).strip().casefold()}'
                           if annotated_components else '')
     flags = []
+    if ctdb_is_spelling_variant:
+        flags.append('ctdb_spelling_variant_requires_review')
     product_ids, ingredient_ids = {x[0] for x in product}, {x[0] for x in components}
     conflict = bool(product_ids and ingredient_ids and product_ids != ingredient_ids)
     if conflict:
@@ -376,6 +491,7 @@ def classify(drug, ingredient, route, legacy_rules):
         uncertain=bool(conflict or route_conflict or
                        'product_components_unresolved' in flags))
     return dict(source_ingredient_annotation_rule_id=annotation_rule_id,
+                ctdb_exact_alias_rule_id=ctdb_rule_id,
                 study_category_rule_status=('approved_by_investigator' if category_rule_approved
                                             else 'candidate_not_adjudicated'),
                 study_category_rule_decision_ref=(approved[1] if category_rule_approved else ''),
@@ -415,7 +531,9 @@ def _interval(row):
 def enrich(records, legacy_rules, linkage):
     result = records.copy()
     axes = [classify(row.drug_raw if row.name_present else '', row.ingredient_raw if row.name_present else '',
-                     row.route, legacy_rules) for row in result.itertuples()]
+                     row.route, legacy_rules,
+                     source_kind='CTDB' if row.source_kind == 'CTDB' else 'BTRIS')
+            for row in result.itertuples()]
     # Stable schema also when every source is unavailable.
     empty = classify('', '', '', legacy_rules)
     for column in empty:
@@ -690,6 +808,8 @@ def summary(records, tables, source_ok, linkage, fingerprints, drift):
                     PRIMARY_INDETERMINATE: 'unknown role, unvalidated dental support or non-drug device',
                 },
                 targeted_review_rows=len(tables['08_treatment_targeted_review_qc.csv']),
+                ctdb_vocabulary_policy='CTDB-only casefolded exact aliases; spelling variants candidate_review; no route or indication imputed',
+                ctdb_exact_alias_records=int(records.ctdb_exact_alias_rule_id.ne('').sum()),
                 study_category_rule_decisions={
                     'citric_acid_monohydrate': 'procedure_related: approved category rule only',
                     'mouth_kote_dry_mouth_treatment': 'symptomatic_sjd: oral: approved category rule only',
