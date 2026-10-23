@@ -109,3 +109,23 @@ def test_qc_blocked_order_cannot_be_joined():
     data[4]["n_primary_episode_relations"]=4
     with pytest.raises(ValueError,match="QC_blocked_BTRIS"):
         med.aggregate(*data)
+
+def test_protected_detail_preserves_source_documents_and_dose_semantics():
+    episode,qc,details=med.aggregate(*sample(),include_details=True)
+    assert len(details)==qc["n_primary_links"]==3
+    assert details.duplicated(["documentation_record_id","clinical_episode_id"]).sum()==0
+    assert details.loc[details.documentation_record_id.eq("B1"),"clinical_episode_id"].nunique()==2
+    assert details.confirmed_medication_exposure.eq(False).all()
+    assert "meddoc__medication_names" in episode.columns
+    audit=pd.DataFrame([dict(audit_record_id="11D:1",source="11D",
+        dose_raw="200",uom_raw="mg",frequency_raw="once daily")])
+    release=pd.DataFrame([dict(audit_record_id="11D:1",source="11D",
+        strength_canonical="200 mg",formulation_canonical="tablet")])
+    details.loc[details.documentation_record_id.eq("B1"),"source_audit_record_id"]="11D:1"
+    details.loc[details.documentation_record_id.eq("B1"),"documentation_record_id"]="BTRIS:11D:1"
+    # The BTRIS order is represented in two episode links but only one source order.
+    detail=med._attach_btris_prescription_fields(details,audit,release)
+    assert detail.loc[detail.source_kind.eq("BTRIS_order"),"dose_raw"].tolist()==["200","200"]
+    assert detail.loc[detail.source_kind.eq("CTDB_reported_current"),"dose_raw"].isna().all()
+    assert detail.loc[detail.source_kind.eq("CTDB_reported_current"),"dose_semantics"].eq(
+        "not_available_for_ctdb_original_visit").all()
