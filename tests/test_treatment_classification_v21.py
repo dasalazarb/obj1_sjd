@@ -411,3 +411,26 @@ def test_v216_unreviewed_annotation_and_conflicting_product_not_silently_accepte
     assert 'ingredient_product_conflict' in contradictory['review_reasons']
     assert contradictory['drug_short_label'] == ''
     assert contradictory['clinical_category_primary'] == classification.PRIMARY_INDETERMINATE
+
+
+def test_v217_priority_masks_contact_details_and_keeps_source_row_original():
+    original = 'Non-Formulary Request - product\\nPlease contact Research Nurse at 301-555-0101'
+    source = records([btris(**{'Medication Name': original, 'Drug Ingredient': ''})])
+    enhanced = classification.enrich(source, audit.DRUG_RULES, link())
+    tables = classification.artifacts(enhanced, audit.DRUG_RULES, {'p1'}, link(),
+                                      {'CTDB': True, '11D': True, '15D': True})
+    priority = tables['08_treatment_unmapped_priority.csv']
+    assert priority.source_text_redacted.any()
+    assert not priority.drug_raw.astype(str).str.contains('301-555').any()
+    assert enhanced.drug_raw.iloc[0] == original
+    assert 'linked_patient_pseudonymous' not in tables['08_treatment_pending_summary_aggregate.csv']
+    assert 'linked_patient_pseudonymous' not in tables['08_treatment_review_summary_aggregate.csv']
+
+
+def test_v217_freetext_masking_is_selective():
+    safe, flagged = classification._restricted_vocabulary_display(
+        'Hydroxychloroquine sulfate tablet 200 mg')
+    assert safe == 'Hydroxychloroquine sulfate tablet 200 mg' and not flagged
+    masked, flagged = classification._restricted_vocabulary_display(
+        'Non-formulary request\\nPlease contact Research Nurse')
+    assert flagged and masked.startswith('[redacted')
