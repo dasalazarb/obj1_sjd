@@ -27,14 +27,24 @@ def test_medication_descriptors_present_in_both_outputs(monkeypatch, tmp_path):
     adapter=iu.module_from_spec(mspec);mspec.loader.exec_module(adapter)
     for col in adapter.COUNT_COLUMNS:
         if col not in cols: cols[col]=pd.Series([0],dtype="Int64")
-    monkeypatch.setattr(adapter,"load_and_aggregate",lambda *a,**k:(cols,{"version":"test"}))
     original=iu.spec_from_file_location
+
+    class AdapterStubLoader:
+        """A real importlib loader contract for the synthetic module."""
+        def create_module(self, spec):
+            return None  # Allow importlib to construct the module.
+
+        def exec_module(self, module):
+            module.COUNT_COLUMNS = adapter.COUNT_COLUMNS
+            module.FLAG = adapter.FLAG
+            module.load_and_aggregate = lambda *args, **kwargs: (
+                cols, {"version": "test"})
+
     def intercepted(name,path):
         if str(path)==str(mpath):
-            class FakeSpec:
-                loader=type("FakeLoader",(),{"exec_module":lambda self,module:module.__dict__.update(adapter.__dict__)})()
-            return FakeSpec()
+            return iu.spec_from_loader(name, AdapterStubLoader())
         return original(name,path)
+
     monkeypatch.setattr(iu,"spec_from_file_location",intercepted)
     base = m.CuratedBuild(clinical.copy(),clinical.copy(),pd.DataFrame(),pd.DataFrame(),[],[],[],pd.DataFrame())
     built,qc=m._integrate_medication_context(base,audit_root=tmp_path,clinical_spine_path=tmp_path/"spine.parquet")
