@@ -468,3 +468,41 @@ def test_v218_dictionary_signoff_keeps_composition_validation_separate():
     assert citric.study_category_rule_status.eq('approved_by_investigator').all()
     assert mouth.study_category_rule_status.eq('approved_by_investigator').all()
     assert mouth.pending_clinical_review.all()
+
+
+@pytest.mark.parametrize('name,ingredient,category', [
+    ('Synthroid', 'levothyroxine', classification.PRIMARY_CONCOMITANT),
+    ('Celebrex', 'celecoxib', classification.PRIMARY_CONCOMITANT),
+    ('Restasis eye drops', 'cyclosporine', classification.PRIMARY_SYMPTOMATIC),
+    ('Azathioprine', 'azathioprine', classification.PRIMARY_SYSTEMIC),
+])
+def test_v219_ctdb_exact_rules_restricted_to_ctdb(name, ingredient, category):
+    ctdb = classification.classify(name, '', '', audit.DRUG_RULES, source_kind='CTDB')
+    btris = classification.classify(name, '', '', audit.DRUG_RULES, source_kind='BTRIS')
+    assert ctdb['ingredient_canonical'] == ingredient
+    assert ctdb['clinical_category_primary'] == category
+    assert ctdb['ctdb_exact_alias_rule_id'].startswith(classification.VERSION)
+    assert not ctdb['clinical_indication_confirmed']
+    assert btris['ctdb_exact_alias_rule_id'] == ''
+
+
+def test_v219_unreviewed_spelling_is_candidate_not_confirmed():
+    typo = classification.classify('Synthyroid', '', '', audit.DRUG_RULES, source_kind='CTDB')
+    assert typo['ingredient_canonical'] == 'levothyroxine'
+    assert typo['classification_confidence'] == 'candidate_review'
+    assert 'ctdb_spelling_variant_requires_review' in typo['review_reasons']
+    assert classification.classify('Synthyroid', '', '', audit.DRUG_RULES,
+                                   source_kind='BTRIS')['ingredient_canonical'] == ''
+
+
+def test_v219_generic_ctdb_entries_not_mapped():
+    for name in ('eye drops', 'supplements', 'calcium and vitamin D',
+                 'Restasis unknown combination'):
+        out = classification.classify(name, '', '', audit.DRUG_RULES, source_kind='CTDB')
+        assert out['ctdb_exact_alias_rule_id'] == ''
+
+
+def test_v219_ctdb_whitespace_normalization_is_exact():
+    out = classification.classify('  Synthroid   ', '', '', audit.DRUG_RULES,
+                                  source_kind='CTDB')
+    assert out['ingredient_canonical'] == 'levothyroxine'
