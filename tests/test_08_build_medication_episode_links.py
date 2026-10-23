@@ -51,7 +51,7 @@ def sample():
              source="15D",clinical_episode_id="e2",within_episode=False,
              within_one_calendar_month_tolerance=True,
              episode_start_date="2021-02-01",episode_end_date="2021-03-31",
-             clinical_anchor_date="2021-02-15")]
+             clinical_anchor_date="2021-02-15")])
     status=pd.DataFrame([
         dict(documentation_record_id="B1",linked_patient_pseudonymous=patient,
              source="11D",match_status="multiple_within_episode",n_candidates=2,
