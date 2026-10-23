@@ -37,3 +37,12 @@ def test_unknown_episode_is_rejected():
     m.loc[0,"clinical_episode_id"]="missing"
     with pytest.raises(ValueError,match="missing Step00 episode"):
         mod.build(v,m,s,b"x"*32)
+
+def test_episode_date_bounds_checked_without_reassignment():
+    v,m,sp=sample()
+    sp.loc[0,"episode_end_date"]=pd.Timestamp("2021-01-15")
+    catalog, dated, summary=mod.build(v,m,sp,b"x"*32)
+    assert summary["n_report_dates_outside_episode_or_invalid_bounds"] == 1
+    assert len(dated)==2
+    assert catalog.medication_date_within_episode.tolist()==[True,False]
+    assert catalog.actual_exposure_confirmed.eq(False).all()
