@@ -89,6 +89,8 @@ def test_medication_descriptors_are_checked_by_episode_key_when_orders_differ(mo
         def exec_module(self, module):
             module.COUNT_COLUMNS = adapter.COUNT_COLUMNS
             module.FLAG = adapter.FLAG
+            module.NAME_FIELD = adapter.NAME_FIELD
+            module.write_protected_detail = lambda details, audit_root: tmp_path / "synthetic_detail.parquet"
             module.load_and_aggregate = lambda *args, **kwargs: (
                 counts, {"version": "synthetic"}, pd.DataFrame())
     def factory(name, path):
