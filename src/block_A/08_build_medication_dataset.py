@@ -17,11 +17,12 @@ import hashlib
 import hmac
 import json
 import os
+import re
 from pathlib import Path
 
 import pandas as pd
 
-VERSION = "08-medication-documentation-release-1.0.1"
+VERSION = "08-medication-documentation-release-1.1.0"
 INPUT_BASENAME = "08_treatment_record_classification_audit.parquet"
 SUMMARY_BASENAME = "08_treatment_classification_v21_summary.json"
 BAD_QC = {
@@ -80,6 +81,52 @@ def _visit_day(value):
             continue
     return ""
 
+def _date_bound(value):
+    """Strict date-only bound. A partial source date is never imputed to a day."""
+    if not _has(value) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(value)):
+        return ""
+    try:
+        return pd.Timestamp(str(value)).date().isoformat()
+    except (ValueError, TypeError, OverflowError):
+        return ""
+
+
+def _time_window(row, event_day, event_kind):
+    """Return a documentation-time uncertainty window, never an exposure era.
+
+    Preserve an exact documented event (including a CTDB observation date).
+    Otherwise, CTDB month/year-precision *reported* starts may yield a bounded
+    start-time window, separate from any observation/administration claim.
+    """
+    if event_day:
+        return event_day, event_day, event_kind, "day"
+    if row.source_kind == "CTDB" and row.start_status == "valid" and row.start_precision in {"month", "year"}:
+        lo = _date_bound(row.start_lower_bound)
+        hi = _date_bound(row.start_upper_bound)
+        if lo and hi and lo <= hi:
+            kind = "ctdb_reported_start_month_uncertain" if row.start_precision == "month" else "ctdb_reported_start_year_uncertain"
+            return lo, hi, kind, row.start_precision
+    return "", "", "no_bounded_documentation_date", "unknown"
+
+
+def _ctdb_temporal_triage(row, event_day):
+    if row.source_kind != "CTDB":
+        return "not_ctdb"
+    if event_day:
+        return "ctdb_exact_date_available"
+    if row.start_status == "valid" and row.start_precision == "month":
+        return "ctdb_month_precision_reported_start"
+    if row.start_status == "valid" and row.start_precision == "year":
+        return "ctdb_year_precision_reported_start"
+    if getattr(row, "visit_semantics", "") == "concatenated_visits_no_arbitrary_date" or " | " in str(getattr(row, "visit_raw", "")):
+        return "ctdb_concatenated_visit_dates"
+    if row.start_status not in {"missing", "valid"}:
+        return "ctdb_start_date_invalid_or_unsupported"
+    if _has(getattr(row, "visit_raw", "")):
+        return "ctdb_visit_date_unparseable"
+    return "ctdb_no_usable_temporal_reference"
+
+
 def _required_data(frame, summary):
     missing = REQUIRED - set(frame.columns)
     if missing:
@@ -125,6 +172,15 @@ def _row_to_document(row):
             visit_uncertain = getattr(row, "visit_semantics", "") == "concatenated_visits_no_arbitrary_date"
             if observed_day and not visit_uncertain:
                 event_day, event_kind = observed_day, "ctdb_current_medication_observed_at_visit"
+    window_lo, window_hi, window_kind, window_precision = _time_window(
+        row, event_day, event_kind)
+    ctdb_temporal_reason = _ctdb_temporal_triage(row, event_day)
+    # Calendar-month matching can be tested later against explicit episode
+    # start/end bounds, with configurable +/- one calendar month tolerance.
+    # A YEAR-wide date is too imprecise for that preselected monthly gate.
+    month_pairing_eligible = bool(
+        window_lo and window_hi and window_precision in {"day", "month"}
+        and not conflict)
     # BTRIS end date is a validity/order boundary of unknown meaning, not a
     # discontinuation. A contradictory end date must remain quarantined.
     end_reviewed = bool(end_day and start_day and end_day >= start_day and
@@ -169,6 +225,12 @@ def _row_to_document(row):
         "date_of_documentation": event_day,
         "date_evidence_kind": event_kind,
         "date_quality": date_quality,
+        "documentation_window_lower_bound": window_lo,
+        "documentation_window_upper_bound": window_hi,
+        "documentation_window_evidence_kind": window_kind,
+        "documentation_window_precision": window_precision,
+        "eligible_for_future_month_window_pairing": month_pairing_eligible,
+        "ctdb_temporal_triage_reason": ctdb_temporal_reason,
         "source_start_date_exact": start_day,
         "source_start_precision": row.start_precision,
         "source_start_lower_bound": row.start_lower_bound,
@@ -235,6 +297,15 @@ def build_medication_release(records, audit_summary, *, eligibility=None, secret
             "n_warning_only_rows": int(part.qc_has_warning_only.sum()),
         })
     source_qc = pd.DataFrame(reasons)
+    ctdb = catalog.loc[catalog.source_kind.eq("CTDB")]
+    ctdb_temporal_triage = (
+        ctdb.groupby(["ctdb_temporal_triage_reason", "documentation_window_precision"],
+                     dropna=False)
+        .agg(n_records=("audit_record_id", "size"),
+             n_month_match_candidates=("eligible_for_future_month_window_pairing", "sum"),
+             n_normalized_exact_day=("normalized_dated_usable", "sum"))
+        .reset_index()
+    )
     summary = {
         "version": VERSION,
         "source_classification_version": audit_summary["classification_version"],
@@ -245,11 +316,35 @@ def build_medication_release(records, audit_summary, *, eligibility=None, secret
         "n_dated_usable": int(catalog.documentation_dated_usable.sum()),
         "n_major_conflict": int(catalog.qc_has_major_conflict.sum()),
         "n_warning_only": int(catalog.qc_has_warning_only.sum()),
+        "n_month_window_pairing_candidates": int(
+            catalog.eligible_for_future_month_window_pairing.sum()),
+        "n_ctdb_month_window_pairing_candidates": int(
+            ctdb.eligible_for_future_month_window_pairing.sum()),
+        "n_ctdb_month_precision_without_exact_day": int(
+            (ctdb.ctdb_temporal_triage_reason == "ctdb_month_precision_reported_start").sum()),
+        "n_ctdb_year_precision_without_exact_day": int(
+            (ctdb.ctdb_temporal_triage_reason == "ctdb_year_precision_reported_start").sum()),
+        "n_ctdb_undated_without_month_resolution": int(
+            (ctdb.date_of_documentation.eq("") &
+             ~ctdb.eligible_for_future_month_window_pairing).sum()),
         "n_undated_retained": int(catalog.date_of_documentation.eq("").sum()),
         "n_patients_with_documented_medications": int(catalog.linked_patient_pseudonymous.nunique()),
         "n_patients_with_dated_observations": int(dated.linked_patient_pseudonymous.nunique()),
         "date_kind_counts": {str(k): int(v) for k, v in catalog.date_evidence_kind.value_counts().items()},
         "patient_id_join_column_released": eligibility is not None,
+        "future_episode_pairing_policy": {
+            "intended_episode_fields": [
+                "patient_id", "clinical_episode_id", "episode_start_date", "episode_end_date",
+                "clinical_anchor_date"
+            ],
+            "time_tolerance": "one_calendar_month_on_each_side_of_episode_interval_configurable",
+            "match_rule": "overlap_documentation_window_with_expanded_episode_interval",
+            "month_only_start": "source_calendar_bounds_without_day_imputation",
+            "year_only_start": "retained_but_not_eligible_for_month_resolution",
+            "no_patient_episode_join_in_this_step": True,
+            "patient_join_must_be_explicitly_authorized": True,
+            "future_looking_order_must_not_be_used_as_prior_exposure": True
+        },
         "gates": {
             "documentation_descriptive_timeline": "GO_protected_descriptive_only",
             "medication_identity": "row_specific_with_quality_columns",
@@ -301,6 +396,19 @@ def run(audit_root, *, output_dir=None, eligibility_path=None, release_patient_i
         ("08_medications_normalized_dated.parquet", normalized),
     ):
         _private_write(dest / filename, frame)
+    ctdb = catalog.loc[catalog.source_kind.eq("CTDB")]
+    temporal_triage = (
+        ctdb.groupby(["ctdb_temporal_triage_reason", "documentation_window_precision"],
+                     dropna=False)
+        .agg(n_records=("audit_record_id", "size"),
+             n_future_month_pairing_candidates=("eligible_for_future_month_window_pairing", "sum"))
+        .reset_index()
+    )
+    if int(temporal_triage.n_records.sum()) != len(ctdb):
+        raise ValueError("ctdb_temporal_triage_reconciliation_failed")
+    temporal_triage.to_csv(dest / "08_medications_ctdb_temporal_triage_aggregate.csv",
+                          index=False)
+    os.chmod(dest / "08_medications_ctdb_temporal_triage_aggregate.csv", 0o600)
     source_qc.to_csv(dest / "08_medications_release_source_qc.csv", index=False)
     os.chmod(dest / "08_medications_release_source_qc.csv", 0o600)
     with (dest / "08_medications_release_summary.json").open("w", encoding="utf-8") as stream:
