@@ -41,7 +41,7 @@ def sample():
     matches=pd.DataFrame([
         dict(documentation_record_id="B1",linked_patient_pseudonymous=patient,
              source="11D",clinical_episode_id=e,within_episode=True,
-             within_one_calendar_month_tolerance=False,
+             within_one_calendar_year_proximity=False,
              episode_start_date=start,episode_end_date=end,
              clinical_anchor_date=anchor)
         for e,start,end,anchor in [
@@ -65,7 +65,7 @@ def sample():
     cs={"version":"08-medication-documentation-consolidated-1.0.0",
         "n_total_documentation_records":4,"n_btris_order_rows":3,
         "n_ctdb_original_visit_mentions":1}
-    ms={"version":"08-btris-episode-candidate-match-1.0.0",
+    ms={"version":"08-btris-episode-candidate-match-1.1.0",
         "n_btris_orders":3,"n_btris_with_multiple_candidates":1}
     return meds,matches,status,episodes,episodes.copy(),KEY,cs,ms
 
@@ -95,7 +95,7 @@ def test_spine_date_change_is_blocked():
     with pytest.raises(ValueError,match="clinical_spine_does_not_match"):
         m.build(*x)
 
-def test_bad_tolerance_cannot_be_primary():
+def test_bad_proximity_cannot_be_primary():
     x=list(sample())
     x[1].loc[2,"within_episode"]=True
     x[1].loc[2,"within_one_calendar_month_tolerance"]=False
