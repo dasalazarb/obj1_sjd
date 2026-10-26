@@ -7,7 +7,7 @@ releasing direct patient identifiers. Every possible episode match is retained;
 multiple candidates remain ambiguous rather than silently selecting one.
 
 Primary window: [episode_start_date, episode_end_date].
-Sensitivity window: expand episode bounds by ONE CALENDAR MONTH on each side.
+Exploratory proximity window: expand episode bounds by ONE CALENDAR YEAR on each side.
 Do not classify post-episode orders as prior treatment.
 """
 from __future__ import annotations
@@ -28,7 +28,7 @@ SPEC = importlib.util.spec_from_file_location("_step08_audit_match", HERE / "08_
 audit = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(audit)
 
-VERSION = "08-btris-episode-candidate-match-1.0.0"
+VERSION = "08-btris-episode-candidate-match-1.1.0"
 DEFAULT_SPINE = audit.v1.common.CLINICAL_VISIT_SPINE_PARQUET
 SOURCE = "medication_documentation_consolidated/08_medications_consolidated_documentation.parquet"
 SOURCE_SUMMARY = "medication_documentation_consolidated/08_medications_consolidated_summary.json"
@@ -114,8 +114,8 @@ def build(documentation, clinical_spine, key, source_summary):
             for e in pool.itertuples(index=False):
                 start=e.episode_start_date
                 end=e.episode_end_date
-                extended_start=start-pd.DateOffset(months=1)
-                extended_end=end+pd.DateOffset(months=1)
+                extended_start=start-pd.DateOffset(years=1)
+                extended_end=end+pd.DateOffset(years=1)
                 if event < extended_start or event > extended_end:
                     continue
                 inside=start<=event<=end
@@ -134,7 +134,7 @@ def build(documentation, clinical_spine, key, source_summary):
                     btris_documentation_date=event.date().isoformat(),
                     temporal_relation=relation,
                     within_episode=inside,
-                    within_one_calendar_month_tolerance=not inside,
+                    within_one_calendar_year_proximity=not inside,
                     distance_from_episode_days=distance,
                     prior_to_episode_start=event<start,
                     post_episode_end=event>end,
@@ -154,7 +154,7 @@ def build(documentation, clinical_spine, key, source_summary):
         elif pool is None:
             status="patient_absent_from_clinical_spine"
         elif not episode_matches:
-            status="no_candidate_within_month"
+            status="no_candidate_within_year"
         elif n_inside==1:
             status="one_within_episode" if len(episode_matches)==1 else "one_within_episode_plus_tolerance"
         elif n_inside>1:
@@ -187,7 +187,7 @@ def build(documentation, clinical_spine, key, source_summary):
         "documentation_record_id","linked_patient_pseudonymous","source",
         "clinical_episode_id","episode_start_date","episode_end_date",
         "clinical_anchor_date","btris_documentation_date","temporal_relation",
-        "within_episode","within_one_calendar_month_tolerance",
+        "within_episode","within_one_calendar_year_proximity",
         "distance_from_episode_days","prior_to_episode_start","post_episode_end",
         "date_evidence_kind","actual_exposure_confirmed","match_version",
     ]
@@ -199,7 +199,7 @@ def build(documentation, clinical_spine, key, source_summary):
         raise ValueError("candidate_count_mismatch")
     if not candidate_df.empty and not candidate_df.apply(
         lambda row:(
-            row.within_episode != row.within_one_calendar_month_tolerance
+            row.within_episode != row.within_one_calendar_year_proximity
             and (row.temporal_relation=="within_episode")==row.within_episode
         ),axis=1).all():
         raise ValueError("temporal_relation_inconsistent")
@@ -220,7 +220,7 @@ def build(documentation, clinical_spine, key, source_summary):
         "n_btris_without_candidate":int(status_df.n_candidates.eq(0).sum()),
         "n_btris_with_multiple_candidates":int(status_df.n_candidates.gt(1).sum()),
         "n_within_episode_candidates":int(candidate_df.within_episode.sum()),
-        "n_tolerance_only_candidates":int(candidate_df.within_one_calendar_month_tolerance.sum()),
+        "n_tolerance_only_candidates":int(candidate_df.within_one_calendar_year_proximity.sum()),
         "n_orders_with_at_least_one_within_episode":int(status_df.n_within_episode.gt(0).sum()),
         "n_orders_only_with_tolerance_candidates":int(
             (status_df.n_candidates.gt(0)&status_df.n_within_episode.eq(0)).sum()),
@@ -229,9 +229,11 @@ def build(documentation, clinical_spine, key, source_summary):
         "n_step00_clinical_episodes":int(len(spine)),
         "n_step00_clinical_patients":int(spine.patient_token.nunique()),
         "status_counts":{str(k):int(v) for k,v in status_df.match_status.value_counts().items()},
+        "proximity_relation_is_not_confirmed_treatment":True,
+        "one_calendar_year_proximity_before_and_after":True,
         "no_automatic_episode_assignment":True,
         "no_cross_source_deduplication":True,
-        "date_window":"episode_start/end plus or minus one calendar month",
+        "date_window":"episode_start/end plus or minus one calendar year",
         "post_episode_documentation_not_valid_as_prior_exposure":True,
         "causal_treatment_effect":"NO_GO",
         "confirmed_medication_exposure":"NO_GO",
