@@ -4,7 +4,7 @@ from .dates import exact_day
 from .contracts import KEYS, key_set, spine_signature
 from .documentation import pseudonym
 
-LINK_COLUMNS = KEYS + ['documentation_record_id', 'source_kind', 'medication_name',
+LINK_COLUMNS = KEYS + ['documentation_record_id', 'source_kind', 'medication_name', 'canonical_medication_name', 'name_requires_review',
     'matching_reference_kinds', 'selected_reference_kind', 'selected_date',
     'relation_to_episode', 'evidence_level', 'post_anchor', 'qc_flags']
 
@@ -48,7 +48,9 @@ def match(documents, spine, secret):
             day = refs[selected]
             records.append(dict(patient_id=ep.patient_id, clinical_episode_id=ep.clinical_episode_id,
                 documentation_record_id=doc.documentation_record_id, source_kind=doc.source_kind,
-                medication_name=doc.medication_name, matching_reference_kinds='|'.join(refs),
+                medication_name=doc.medication_name,
+                canonical_medication_name=doc.canonical_medication_name,
+                name_requires_review=bool(doc.name_requires_review), matching_reference_kinds='|'.join(refs),
                 selected_reference_kind=selected, selected_date=day,
                 relation_to_episode=relation, evidence_level=evidence,
                 post_anchor=bool(pd.notna(day) and day > ep.clinical_anchor_date), qc_flags=doc.qc_flags))
