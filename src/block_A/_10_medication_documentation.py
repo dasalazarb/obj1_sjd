@@ -19,7 +19,7 @@ from pathlib import Path
 import pandas as pd
 
 VERSION = "10-medication-documentation-context-1.1.0"
-UPSTREAM_VERSION = "08-medication-episode-links-1.0.0"
+UPSTREAM_VERSION = "08-medication-episode-links-1.1.0"
 CATALOG = "medication_documentation_consolidated/08_medications_consolidated_documentation.parquet"
 LINKS = "medication_episode_documentation_links/08_medication_episode_primary_links.parquet"
 RECORD_STATUS = "medication_episode_documentation_links/08_medication_documentation_record_status.parquet"
@@ -44,6 +44,14 @@ COUNT_COLUMNS = [
     "meddoc__n_ctdb_original_visit_mentions",
     "meddoc__n_high_exact_identity_documents",
     *CATEGORIES.values(),
+]
+PROXIMITY_FILE = "medication_episode_documentation_links/08_medication_episode_year_proximity.parquet"
+PROXIMITY_COLUMNS = [
+    "medprox__n_order_episode_relations_within_1y",
+    "medprox__n_prior_order_relations_within_1y",
+    "medprox__n_subsequent_order_relations_within_1y",
+    "medprox__n_unique_order_documents_within_1y",
+    "medprox__medication_names_within_1y",
 ]
 FLAG = "meddoc__has_linked_documentation"
 
@@ -244,6 +252,85 @@ def aggregate(spine, documentation, primary, status, summary, secret,
     output[NAME_FIELD]=output[NAME_FIELD].replace("",pd.NA).astype("string")
     if len(output)!=len(spine) or output.duplicated(["patient_id","clinical_episode_id"]).any():
         raise ValueError("Step10_episode_grain_not_preserved")
+    # Explicit sensitivity fields: order date within one calendar year of the
+    # clinical episode, but outside the episode. Never equate with exposure.
+    proximity_path = getattr(aggregate, "_proximity_path", None)
+    if proximity_path is None or not Path(proximity_path).is_file():
+        raise FileNotFoundError("one_year_proximity_Step08_artifact_missing")
+    proximity = pd.read_parquet(proximity_path)
+    _require(proximity, [
+        "documentation_record_id", "linked_patient_pseudonymous",
+        "clinical_episode_id", "date_of_documentation",
+        "episode_start_date", "episode_end_date", "tolerance_sensitivity_only",
+        "primary_documentation_relation", "confirmed_medication_exposure",
+        "relation_type"], "one_year_proximity")
+    if proximity.duplicated(["documentation_record_id", "clinical_episode_id"]).any():
+        raise ValueError("duplicate_one_year_order_episode_links")
+    if not proximity.empty and (
+        not proximity.tolerance_sensitivity_only.eq(True).all()
+        or not proximity.primary_documentation_relation.eq(False).all()
+        or not proximity.confirmed_medication_exposure.eq(False).all()
+        or not proximity.relation_type.eq("year_proximity_only").all()
+    ):
+        raise ValueError("one_year_proximity_contains_primary_or_exposure_link")
+    lookup = documentation[["documentation_record_id",
+                             "linked_patient_pseudonymous", "source_kind",
+                             "ingredient_canonical", "documentation_dated_usable"]]
+    near = proximity.merge(lookup, on="documentation_record_id",
+                           how="left", validate="many_to_one",
+                           indicator="_catalog_join", suffixes=("", "_source"))
+    if not near["_catalog_join"].eq("both").all():
+        raise ValueError("one_year_proximity_document_not_in_catalog")
+    if not near.linked_patient_pseudonymous.eq(
+        near.linked_patient_pseudonymous_source).all():
+        raise ValueError("one_year_proximity_patient_mismatch")
+    if not near.source_kind.eq("BTRIS_order").all() or not near.documentation_dated_usable.eq(True).all():
+        raise ValueError("one_year_proximity_invalid_source_or_date")
+    near = near.merge(
+        clinical[["linked_patient_pseudonymous", "clinical_episode_id", "patient_id",
+                  "episode_start_date", "episode_end_date"]],
+        on=["linked_patient_pseudonymous", "clinical_episode_id"],
+        how="left", validate="many_to_one", suffixes=("", "_spine"),
+        indicator="_episode_join")
+    if not near["_episode_join"].eq("both").all():
+        raise ValueError("one_year_proximity_episode_not_in_spine")
+    dt = near.date_of_documentation.map(_day)
+    st = near.episode_start_date_spine
+    en = near.episode_end_date_spine
+    earlier = dt.lt(st)
+    later = dt.gt(en)
+    if not near.empty and (
+        dt.isna().any() or
+        (~(earlier | later)).any() or
+        ((dt < st - pd.DateOffset(years=1)) |
+         (dt > en + pd.DateOffset(years=1))).any()
+    ):
+        raise ValueError("one_year_proximity_temporal_validation_failed")
+    near["prior"] = earlier
+    near["subsequent"] = later
+    proxrows = []
+    for (pid, eid), group in near.groupby(["patient_id", "clinical_episode_id"]):
+        proxrows.append({
+            "patient_id": pid, "clinical_episode_id": eid,
+            PROXIMITY_COLUMNS[0]: len(group),
+            PROXIMITY_COLUMNS[1]: int(group.prior.sum()),
+            PROXIMITY_COLUMNS[2]: int(group.subsequent.sum()),
+            PROXIMITY_COLUMNS[3]: int(group.documentation_record_id.nunique()),
+            PROXIMITY_COLUMNS[4]: "; ".join(sorted({
+                n for n in group.ingredient_canonical.map(_canonical_name) if n
+            }, key=str.casefold)),
+        })
+    near_frame = pd.DataFrame(proxrows, columns=["patient_id", "clinical_episode_id", *PROXIMITY_COLUMNS])
+    output = output.merge(near_frame, on=["patient_id", "clinical_episode_id"],
+                          how="left", validate="one_to_one")
+    for column in PROXIMITY_COLUMNS[:4]:
+        output[column] = output[column].fillna(0).astype("Int64")
+    output[PROXIMITY_COLUMNS[4]] = output[PROXIMITY_COLUMNS[4]].replace("", pd.NA).astype("string")
+    if int(output[PROXIMITY_COLUMNS[0]].sum()) != len(near) or (
+        output[PROXIMITY_COLUMNS[1]].sum() +
+        output[PROXIMITY_COLUMNS[2]].sum() != len(near)
+    ):
+        raise ValueError("one_year_proximity_aggregate_disagrees_with_edges")
     if int(output.meddoc__n_documentation_records.sum())!=len(primary):
         raise ValueError("Step10_episode_documentation_sum_mismatch")
     if output[list(CATEGORIES.values())].sum().sum()!=len(primary):
@@ -267,6 +354,8 @@ def aggregate(spine, documentation, primary, status, summary, secret,
             counts.loc[documentation.loc[
                 documentation.source_kind.eq("BTRIS_order"),
                 "documentation_record_id"]].gt(1).sum()),
+        n_one_year_exploratory_links=int(len(near)),
+        n_episodes_with_one_year_exploratory_links=int(output[PROXIMITY_COLUMNS[0]].gt(0).sum()),
         n_tolerance_relations_excluded_from_main=int(
             status.n_tolerance_sensitivity_relations.sum()),
         n_documentation_records_without_primary_episode_link=int(counts.eq(0).sum()),
@@ -397,6 +486,10 @@ def load_and_aggregate(spine, audit_root, clinical_spine_path, *, include_detail
         raise ValueError("Step08_medication_catalog_hash_changed")
     if fingerprints.get("clinical_Step00_episodes")!=_sha(clinical_spine_path):
         raise ValueError("Step00_clinical_spine_changed_since_08_linking")
+    prox_path=root/PROXIMITY_FILE
+    if not prox_path.is_file():
+        raise FileNotFoundError("one_year_proximity_edges_required")
+    aggregate._proximity_path = prox_path
     result=aggregate(
         spine,
         pd.read_parquet(paths["catalog"]),
