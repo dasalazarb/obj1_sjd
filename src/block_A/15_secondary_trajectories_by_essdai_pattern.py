@@ -83,6 +83,15 @@ def concatenate(frames, columns):
     return pd.concat(nonempty, ignore_index=True) if nonempty else pd.DataFrame(columns=columns)
 
 
+def source_code_hashes(source_files, project_root):
+    """Record source identities using canonical paths (supports Biowulf /data aliases)."""
+    canonical_root = Path(project_root).resolve()
+    return {
+        str(Path(path).resolve().relative_to(canonical_root)): sha256(path)
+        for path in source_files
+    }
+
+
 class Runtime:
     """Aggregate-only diagnostics; never log patient identities or measurements."""
     def __init__(self, progress):
@@ -142,6 +151,11 @@ def _run(args, cleanup, runtime):
         elif explicit:
             raise ContractError("missing explicit "+role)
     input_hashes = {role: dict(path=str(p), sha256=sha256(p)) for role, p in inputs.items()}
+    # Check code provenance before expensive rendering: /data and /vf/users
+    # can refer to the same Biowulf directory but differ as lexical paths.
+    source_files = [Path(__file__), *Path(__file__).parent.glob("secondary_trajectory_*.py")]
+    source_sha256 = source_code_hashes(source_files, ROOT)
+    code_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     runtime.mark("Read / validate inputs")
     x, baseline, patterns = validate_inputs(read_table(args.integrated), read_table(args.baseline),
         read_table(protected["patterns"]), read_table(protected["eligibility"]), read_table(protected["selected_dates"]), args.data_cutoff)
@@ -310,7 +324,8 @@ def _run(args, cleanup, runtime):
         if sha256(path) != input_hashes[role]["sha256"]:
             raise ContractError("input changed during run: "+role)
     verified_manifest(args.patterns_manifest, args.patterns, args.integrated, args.baseline, args.input_origin)
-    code_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    if source_code_hashes(source_files, ROOT) != source_sha256:
+        raise ContractError("Step 15 source files changed during run")
     for threshold, bundle in bundles.items():
         qc_dir = staging["qc"]/f"delta{threshold}"
         qc_dir.mkdir()
@@ -321,7 +336,7 @@ def _run(args, cleanup, runtime):
                             variables={str(threshold): report["variables"][str(threshold)]}, n_png=bundle["n_png"])
         local_report["runtime"] = runtime.metrics()
         run_manifest = dict(**local_report, definition_version=DEFINITION, created_at_utc=datetime.now(timezone.utc).isoformat(),
-            code_commit=code_commit, source_sha256={str(p.relative_to(ROOT)): sha256(p) for p in [Path(__file__), *Path(__file__).parent.glob("secondary_trajectory_*.py")]},
+            code_commit=code_commit, source_sha256=source_sha256,
             inputs=input_hashes, step13_artifacts=manifest["artifacts"], qc_status="PASS_WITH_WARNINGS" if any(c["status"] == "WARN" for c in local_checks) else "PASS",
             parameters={k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}, random_seed=config.RANDOM_SEED,
             window_policy="[start,end) actual years; last observation per patient/window", duplicate_policy="official episode on its baseline date wins; concordant last episode ID; discordant dates excluded",
