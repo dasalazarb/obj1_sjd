@@ -285,3 +285,7 @@ are not included in GitHub; missing files are reported explicitly.
 
 Repository-root `pytest` remains scoped to the analysis tests in `tests/`.
 Run the dashboard's separate software suite from `dashboard/` using its environment.
+
+### Medication pipeline
+
+Step 08 now has a single productive entrypoint, `src/block_A/08_build_medications.py`. Step 10 requires its versioned episode-name contract (`--medication-input`) or explicit `--no-medications`. Orders and consent are documentation for review, not verified exposure. See [the analytic contract](docs/08_medications_analytic_contract.md), [migration inventory](docs/08_medications_refactor_inventory.md) and [validation status](docs/08_medications_migration_validation.md). Historical tools live under `src/block_A/audit/08_medications/` and `audit/10_medications/`. Future audit folders follow `audit/<step_prefix>/`; no Step 13–15 refactor is included here.

@@ -7,9 +7,7 @@ observed column and emits a small analytic master, scientific context, registry,
 and compact audit products.  It never reconstructs clinical facts.
 """
 import argparse
-import importlib.util
 import json
-import os
 import sys
 from dataclasses import asdict, dataclass
 from datetime import date
@@ -49,7 +47,7 @@ ROLE_DESTINATION = {
     "UNCLASSIFIED": "none",
 }
 DATASET_CONTRACT_VERSION = "clinical_episode_curated_v2"
-INTEGRATION_BUILD_VERSION = "v7_meddoc_named_detail"
+INTEGRATION_BUILD_VERSION = "v8_medication_episode_contract"
 PRODUCER_SCRIPTS = {
     "clinical_spine": "00_build_visit_spine.py", "pop": "01_pop_distribution.py",
     "labs": "01_serological_profile.py", "overlap": "06_overlap_glandular.py",
@@ -1032,197 +1030,49 @@ def _write_audits(build: CuratedBuild, output: Path, qc_dir: Path) -> dict:
     return qc
 
 
-def _integrate_medication_context(build: CuratedBuild, *, audit_root: Path,
+def _integrate_medication_context(build: CuratedBuild, *, medication_input: Path,
                                   clinical_spine_path: Path) -> tuple[CuratedBuild, dict]:
-    """Attach Step 08 episode-documentation descriptors to master AND context.\n\n    These are descriptive-only, NOT pre-index treatment exposure predictors.\n    """
-    module_path = Path(__file__).with_name("_10_medication_documentation.py")
-    spec = importlib.util.spec_from_file_location("_10_medication_documentation", module_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError("Step10 medication adapter unavailable")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    episode_counts, medication_qc, medication_detail = module.load_and_aggregate(
-        build.analytic[KEYS + ["clinical_anchor_date", "episode_start_date",
-                                "episode_end_date", "clinical_visit"]],
-        audit_root, clinical_spine_path, include_details=True)
-    # Real medication identities, not documentary counts. The any-date product
-    # is a protected candidate table, matched to the SAME authoritative episodes.
-    med_root = Path(audit_root).resolve() / "restricted"
-    candidates_path = (med_root / "anydate_medication_associations" /
-                       "08_anydate_medication_episode_candidates.parquet")
-    qc_path = (med_root / "anydate_medication_associations" /
-               "08_anydate_medication_association_qc.json")
-    if not candidates_path.is_file() or not qc_path.is_file():
-        raise FileNotFoundError("run 08_anydate_medication_associations.py before Step10")
-    candidates = pd.read_parquet(candidates_path)
-    candidate_qc = json.loads(qc_path.read_text())
-    if (len(candidates) != candidate_qc.get("n_candidate_document_episode_pairs")
-        or not candidate_qc.get("available_date_reference_counts",{}).get("order_start")
-        or candidate_qc.get("n_unparseable_nonblank_dates") != 0):
-        raise CurationContractError("Step10_anydate_medications_QC_failed")
-    need = {"patient_id","clinical_episode_id","documentation_record_id",
-            "medication_name_candidate","ingredient_canonical",
-            "date_reference_kinds_matching","date_reference_selected",
-            "date_reference_selected_value","consent_only_basis",
-            "actual_exposure_confirmed","relation_to_episode"}
-    if not need.issubset(candidates.columns):
-        raise CurationContractError("Step10_anydate_required_fields_missing")
-    if (candidates.duplicated(KEYS+["documentation_record_id"]).any()
-        or candidates.actual_exposure_confirmed.ne(False).any()):
-        raise CurationContractError("Step10_duplicate_medication_candidate_or_exposure_claim")
-    reference = candidates.date_reference_kinds_matching.fillna("").astype(str)
-    dated = reference.str.contains(r"order_start|order_end",regex=True)
-    if not (~dated).eq(candidates.consent_only_basis.astype(bool)).all():
-        raise CurationContractError("Step10_anydate_temporal_provenance_inconsistent")
-    valid_episodes = set(map(tuple,build.analytic[KEYS].astype("string").itertuples(index=False,name=None)))
-    if not set(map(tuple,candidates[KEYS].astype("string").itertuples(index=False,name=None))).issubset(valid_episodes):
-        raise CurationContractError("Step10_anydate_candidate_episode_not_in_spine")
-    def clean_medication(v):
-        if pd.isna(v): return ""
-        v=" ".join(str(v).split()).replace("; ",", ").replace("|","/")
-        return "" if v.casefold() in {"","unknown","unmapped","nan","none","null"} else v[:160]
-    candidates["_med_name"]=[
-        clean_medication(a) or clean_medication(b) for a,b in
-        zip(candidates.ingredient_canonical,candidates.medication_name_candidate)]
-    candidates["_has_order_date"] = dated
-    med_fields=[
-        "medication__within_episode_names",
-        "medication__ctdb_reported_names",
-        "medication__btris_order_nearby_1y_names",
-        "medication__btris_consent_only_review_names",
-        "medication__chart_review_candidate_names",
-    ]
-    candidate_rows=[]
-    for (pid,eid),part in candidates.groupby(KEYS,dropna=False):
-        order=part.loc[part._has_order_date]
-        consent=part.loc[~part._has_order_date]
-        def namelist(frame):
-            return "; ".join(sorted(set(filter(None,frame._med_name)),key=str.casefold))
-        candidate_rows.append({
-            "patient_id":pid,"clinical_episode_id":eid,
-            med_fields[2]:namelist(order),
-            med_fields[3]:namelist(consent),
-            med_fields[4]:namelist(part),
-        })
-    candidate_names=pd.DataFrame(candidate_rows,columns=KEYS+med_fields[2:])
-    # Preserve CTDB names from the validated primary link catalog; this is
-    # reported-current medication documentation, not verified administration.
-    episode_counts=episode_counts.rename(columns={
-        module.NAME_FIELD:med_fields[0],
-        module.PROXIMITY_COLUMNS[-1]: "_unused_order_name_proximity"})
-    episode_counts[med_fields[1]]=pd.NA
-    med_detail_ctdb=medication_detail.loc[
-        medication_detail.source_kind.eq("CTDB_reported_current")].copy()
-    if not med_detail_ctdb.empty:
-        med_detail_ctdb["_name"]=med_detail_ctdb.ingredient_canonical.map(clean_medication)
-        ctdb_rows=med_detail_ctdb.groupby(KEYS,dropna=False)["_name"].apply(
-            lambda x:"; ".join(sorted(set(filter(None,x)),key=str.casefold))).reset_index()
-        ctdb_rows=ctdb_rows.rename(columns={"_name":med_fields[1]})
-        episode_counts=episode_counts.drop(columns=[med_fields[1]]).merge(
-            ctdb_rows,on=KEYS,how="left",validate="one_to_one")
-    episode_counts=episode_counts.merge(candidate_names,on=KEYS,how="left",
-                                         validate="one_to_one")
-    episode_counts=episode_counts[KEYS+med_fields].copy()
-    for name_field in med_fields:
-        episode_counts[name_field]=episode_counts[name_field].replace("",pd.NA).astype("string")
-    medication_qc["candidate_source_qc"]=candidate_qc
-    medication_qc["n_medication_name_fields"]=len(med_fields)
-    medication_qc["excluded_documentation_count_fields"]=True
-    medication_columns=med_fields
-    # Detail stays protected with individual order-reference dates and evidence.
-    protected_detail = med_root / "step10_medication_episode_details"
-    protected_detail.mkdir(parents=True,exist_ok=True,mode=0o700)
-    review_path=protected_detail/"10_anydate_medication_candidate_review.parquet"
-    candidates.drop(columns=["_med_name","_has_order_date"]).to_parquet(
-        review_path,index=False)
-    os.chmod(review_path,0o600)
-    medication_qc["protected_candidate_detail_path"]=str(review_path)
-    if len(episode_counts) != len(build.context):
-        raise CurationContractError("Step10 medication episode count mismatch")
-    if any(col in build.analytic or col in build.context for col in episode_counts
-           if col not in KEYS):
-        raise CurationContractError("Medication documentation public variable collision")
-    # Many-to-many source links collapse to one row per canonical episode.
-    # Publish medication names in both master and scientific context,
-    # so episode outputs retain drugs without implying administration.
-    merged_context = build.context.merge(
-        episode_counts, on=KEYS, how="left", validate="one_to_one", sort=False)
-    merged_analytic = build.analytic.merge(
-        episode_counts, on=KEYS, how="left", validate="one_to_one", sort=False)
-    # Compare episode *identity* by values, not Series.equals(): pandas may
-    # change object/string extension dtypes on merge, and master/context may
-    # legitimately have different row orders. Do not interpret those as a
-    # change to Step 00 episode identity.
-    def episode_key_set(frame: pd.DataFrame, label: str) -> set[tuple[str, str]]:
-        keys = frame[KEYS].astype("string")
-        if keys.isna().any().any() or keys.duplicated().any():
-            raise CurationContractError(
-                f"Step10 medication {label} has missing/duplicate episode keys")
-        return set(keys.itertuples(index=False, name=None))
-
-    for label, original, merged in [
-        ("context", build.context, merged_context),
-        ("analytic", build.analytic, merged_analytic),
-    ]:
-        if (len(merged) != len(original)
-                or episode_key_set(merged, label + "_merged")
-                   != episode_key_set(original, label + "_original")):
-            raise CurationContractError(
-                f"Step10 medication {label} changed authoritative episode keys")
-
-    # Compare medication descriptors at patient+episode grain rather than
-    # row position, since context and analytic can have different row order.
-    medication_columns = med_fields
-    comparison = merged_analytic[KEYS + medication_columns].merge(
-        merged_context[KEYS + medication_columns], on=KEYS,
-        how="outer", validate="one_to_one", indicator=True,
-        suffixes=("_analytic", "_context"))
-    if len(comparison) != len(merged_analytic) or not comparison["_merge"].eq("both").all():
+    """Merge the sole validated episode-name contract into both published products."""
+    from src.block_A._internal.step10_medications import load_contract
+    from src.block_A._internal.medications.contracts import COLUMNS, key_set
+    features, qc = load_contract(medication_input, build.analytic, clinical_spine_path)
+    if key_set(build.context) != key_set(build.analytic):
         raise CurationContractError("Medication master/context episode keys differ")
-    for col in medication_columns:
-        left = comparison[f"{col}_analytic"].reset_index(drop=True)
-        right = comparison[f"{col}_context"].reset_index(drop=True)
-        if not left.equals(right):
-            raise CurationContractError(
-                "Medication documentation differs between master and context: " + col)
+    for frame in (build.analytic, build.context):
+        if any(c in frame for c in COLUMNS):
+            raise CurationContractError("Medication variable collision")
+        if any(c.startswith(("meddoc__", "medprox__", "medcand__")) for c in frame):
+            raise CurationContractError("Obsolete medication schema: rebuild upstream inputs")
+    analytic = build.analytic.merge(features, on=KEYS, how="left", validate="one_to_one", sort=False)
+    context = build.context.merge(features, on=KEYS, how="left", validate="one_to_one", sort=False)
     rows = []
-    for col in medication_columns:
+    for col in COLUMNS:
         rows.append(ColumnClassification(
-            variable=col, source="medication_documentation", family="medication_documentation",
+            variable=col, source="step08_medication_episode_contract", family="medication_documentation",
             role="ANALYTIC", destination="analytic+context", canonical_variable=col,
-            classification_rule="documented_medication_names_by_source_and_date_evidence",
-            classification_reason="Medication ingredient/name documented, not administration or active exposure",
-            present_in_input=True, included_in_analytic=True, included_in_context=True,
-            dtype=str(episode_counts[col].dtype), n_nonmissing=int(episode_counts[col].notna().sum()),
-            pct_nonmissing=float(100*episode_counts[col].notna().mean()),
-            n_unique=int(episode_counts[col].nunique()),
-            notes="MEDICATION NAMES ONLY. Order dates and consent-based candidates are separate. No administration inferred.",
-            producer_script="08_build_medication_episode_links.py",
-            original_variable=col, canonical_concept=col,
-            clinical_domain="medication_documentation",
-            public_variable=col, temporal_scope="episode_or_one_year_medication_candidate")
-    registry = pd.concat([build.registry, pd.DataFrame([asdict(r) for r in rows])],
-                         ignore_index=True)
-    medication_qc["destination"] = "descriptive_analytic_master_and_scientific_context"
-    medication_qc["analytic_master_unchanged"] = False
-    medication_qc["n_descriptive_medication_columns_added_to_master"] = len(medication_columns)
-    medication_qc["n_exploratory_one_year_proximity_columns"] = 2
-    medication_qc["protected_medication_detail_path"] = str(
-        module.write_protected_detail(medication_detail, audit_root))
-    medication_qc["pre_anchor_treatment_exposure_established"] = False
-    return CuratedBuild(merged_analytic, merged_context, build.coverage, registry,
-                        [*build.source_summaries, {
-                            "source": "medication_documentation",
-                            "n_rows": len(episode_counts),
-                            "n_columns": len(episode_counts.columns),
-                            "n_patients": int(episode_counts.patient_id.nunique()),
-                            "n_unique_patient_episode": len(episode_counts),
-                            "n_duplicates": 0, "n_missing_spine_keys": 0,
-                            "n_extra_keys": 0, "structural_discrepancies": 0,
-                            "n_inherited_spine_columns": 0,
-                        }],
+            classification_rule="documented_names_by_source_and_date_evidence",
+            classification_reason="Documented names for descriptive chart review; exposure not established",
+            included_in_analytic=True, included_in_context=True,
+            dtype=str(features[col].dtype), n_nonmissing=int(features[col].notna().sum()),
+            pct_nonmissing=float(100 * features[col].notna().mean()) if len(features) else 0.,
+            n_unique=int(features[col].nunique()),
+            notes="DESCRIPTIVE ONLY. Not a pre-anchor predictor. Null means no assignable documentation. "
+                  "End dates do not confirm discontinuation; consent is not a medication date.",
+            producer_script="08_build_medications.py", original_variable=col,
+            canonical_concept=col, clinical_domain="medication_documentation", public_variable=col,
+            temporal_scope=col.removeprefix("medication__").removesuffix("_names")))
+    registry = pd.concat([build.registry, pd.DataFrame([asdict(r) for r in rows])], ignore_index=True)
+    qc.update(destination="descriptive_analytic_master_and_scientific_context",
+              n_descriptive_medication_columns_added_to_master=len(COLUMNS))
+    return CuratedBuild(analytic, context, build.coverage, registry,
+                        [*build.source_summaries, {"source":"step08_medication_episode_contract",
+                         "n_rows":len(features), "n_columns":len(features.columns),
+                         "n_patients":int(features.patient_id.nunique()),
+                         "n_unique_patient_episode":len(features), "n_duplicates":0,
+                         "n_missing_spine_keys":0,"n_extra_keys":0,"structural_discrepancies":0,
+                         "n_inherited_spine_columns":0}],
                         build.key_mismatches, build.structural_discrepancies,
-                        build.redundancy_audit), medication_qc
+                        build.redundancy_audit), qc
 
 
 def main() -> None:
@@ -1236,8 +1086,12 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=common.INTEGRATED_LONGITUDINAL_PARQUET)
     parser.add_argument("--qc-dir", type=Path, default=None,
                         help="Optional isolated QC folder for a staged integration")
-    parser.add_argument("--medication-audit-root", type=Path, default=None,
-                        help="Add documented medication identities and separated ±1 year chart-review candidates to Step10; not confirmed exposures")
+    medications = parser.add_mutually_exclusive_group()
+    medications.add_argument("--medication-input", type=Path,
+                             default=common.MEDICATION_EPISODE_FEATURES_PARQUET,
+                             help="Published Step08 episode names with a validated manifest")
+    medications.add_argument("--no-medications", action="store_true",
+                             help="Explicit clinical-only build, recorded in QC")
     args = parser.parse_args()
     common.ensure_output_dirs()
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -1246,20 +1100,16 @@ def main() -> None:
     frames = [pd.read_parquet(path) for path in [args.spine, args.pop, args.labs, args.overlap, args.pros, args.extended_clinical]]
     # Classify once without raising so contract failures still leave actionable audit files.
     build = build_curated(*frames, fail_closed=False)
-    build.registry.to_csv(args.output.with_name("10_variable_registry.csv"), index=False)
     build.registry.loc[build.registry.role.eq("UNCLASSIFIED")].to_csv(qc_dir / "10_unclassified_variables.csv", index=False)
     unclassified = build.registry.loc[build.registry.role.eq("UNCLASSIFIED")]
     if not unclassified.empty:
         details = unclassified[["source", "variable", "dtype", "n_nonmissing"]].to_dict("records")
         raise CurationContractError(f"unclassified upstream variables: {details[:20]}")
-    medication_qc = None
-    if args.medication_audit_root is not None:
+    medication_qc = {"omitted_explicitly": True, "reason": "--no-medications"}
+    if not args.no_medications:
         build, medication_qc = _integrate_medication_context(
-            build, audit_root=args.medication_audit_root,
-            clinical_spine_path=args.spine)
+            build, medication_input=args.medication_input, clinical_spine_path=args.spine)
     qc = _write_audits(build, args.output, qc_dir)
-    if medication_qc is None:
-        print("NOTE: medication identities omitted. Pass --medication-audit-root to add medication__* columns.")
     if medication_qc is not None:
         (qc_dir / "10_medication_documentation_qc.json").write_text(
             json.dumps(medication_qc, indent=2, sort_keys=True), encoding="utf-8")
