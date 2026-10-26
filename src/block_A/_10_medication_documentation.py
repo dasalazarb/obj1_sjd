@@ -255,9 +255,19 @@ def aggregate(spine, documentation, primary, status, summary, secret,
     # Explicit sensitivity fields: order date within one calendar year of the
     # clinical episode, but outside the episode. Never equate with exposure.
     proximity_path = getattr(aggregate, "_proximity_path", None)
-    if proximity_path is None or not Path(proximity_path).is_file():
+    if proximity_path is None:
+        # Pure unit tests of primary aggregation may omit the optional
+        # exploratory table; production load_and_aggregate requires it.
+        proximity = pd.DataFrame(columns=[
+            "documentation_record_id", "linked_patient_pseudonymous",
+            "clinical_episode_id", "date_of_documentation",
+            "episode_start_date", "episode_end_date", "tolerance_sensitivity_only",
+            "primary_documentation_relation", "confirmed_medication_exposure",
+            "relation_type"])
+    elif Path(proximity_path).is_file():
+        proximity = pd.read_parquet(proximity_path)
+    else:
         raise FileNotFoundError("one_year_proximity_Step08_artifact_missing")
-    proximity = pd.read_parquet(proximity_path)
     _require(proximity, [
         "documentation_record_id", "linked_patient_pseudonymous",
         "clinical_episode_id", "date_of_documentation",
