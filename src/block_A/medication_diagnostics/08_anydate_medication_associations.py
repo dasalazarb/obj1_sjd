@@ -42,8 +42,8 @@ def strict_date(value):
     if not value or value.lower() in {"nat", "nan", "none", "null"}:
         return pd.NaT
     # Must contain a recorded day, month and four-digit year.
-    if not (re.match(r"^\\d{4}-\\d{1,2}-\\d{1,2}(?:[T ].*)?$", value)
-            or re.match(r"^\\d{1,2}/\\d{1,2}/\\d{4}(?:\\s+.*)?$", value)):
+    if not (re.match(r"^\d{4}-\d{1,2}-\d{1,2}(?:[T ].*)?$", value)
+            or re.match(r"^\d{1,2}/\d{1,2}/\d{4}(?:\s+.*)?$", value)):
         return pd.NaT
     try:
         parsed = date_parser.parse(value, dayfirst=False, yearfirst=value[:4].isdigit()
