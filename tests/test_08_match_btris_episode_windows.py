@@ -28,7 +28,7 @@ def sample():
                  n_total_documentation_records=3,n_btris_order_rows=2)
     return med,spine,summary
 
-def test_exact_and_month_window_distinguished():
+def test_exact_and_year_window_distinguished():
     med,spine,summary=sample()
     candidates,status,qc,result=m.build(med,spine,KEY,summary)
     assert len(candidates)==2
@@ -37,6 +37,7 @@ def test_exact_and_month_window_distinguished():
     assert result["n_orders_only_with_tolerance_candidates"]==1
     assert set(status.match_status)=={"one_within_episode","one_tolerance_only"}
     assert not candidates.actual_exposure_confirmed.any()
+    assert candidates.within_one_calendar_year_proximity.sum()==1
 
 def test_post_episode_is_not_prior_exposure():
     med,spine,summary=sample()
@@ -53,3 +54,15 @@ def test_patient_token_without_matching_spine_is_unmatched():
     assert candidates.empty
     assert result["n_btris_without_candidate"]==2
     assert set(status.match_status)=={"patient_absent_from_clinical_spine"}
+
+def test_one_year_boundaries_and_no_imputation():
+    med,spine,summary=sample()
+    med.loc[1,"date_of_documentation"]="2022-02-28"
+    candidates,status,_,_=m.build(med,spine,KEY,summary)
+    assert "BTRIS:2" in set(candidates.documentation_record_id)
+    med.loc[1,"date_of_documentation"]="2022-03-01"
+    candidates,status,_,_=m.build(med,spine,KEY,summary)
+    assert "BTRIS:2" not in set(candidates.documentation_record_id)
+    med.loc[1,"date_of_documentation"]=""
+    candidates,status,_,_=m.build(med,spine,KEY,summary)
+    assert "missing_exact_order_documentation_day" in set(status.match_status)
