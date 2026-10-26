@@ -9,6 +9,7 @@ and compact audit products.  It never reconstructs clinical facts.
 import argparse
 import importlib.util
 import json
+import os
 import sys
 from dataclasses import asdict, dataclass
 from datetime import date
@@ -1142,8 +1143,8 @@ def _integrate_medication_context(build: CuratedBuild, *, audit_root: Path,
            if col not in KEYS):
         raise CurationContractError("Medication documentation public variable collision")
     # Many-to-many source links collapse to one row per canonical episode.
-    # Publish IDENTICAL descriptive counts in both master and scientific context,
-    # so clinical_episode.csv contains them without implying drug administration.
+    # Publish medication names in both master and scientific context,
+    # so episode outputs retain drugs without implying administration.
     merged_context = build.context.merge(
         episode_counts, on=KEYS, how="left", validate="one_to_one", sort=False)
     merged_analytic = build.analytic.merge(
@@ -1192,8 +1193,8 @@ def _integrate_medication_context(build: CuratedBuild, *, audit_root: Path,
             classification_rule="documented_medication_names_by_source_and_date_evidence",
             classification_reason="Medication ingredient/name documented, not administration or active exposure",
             present_in_input=True, included_in_analytic=True, included_in_context=True,
-            dtype=str(episode_counts[col].dtype), n_nonmissing=len(episode_counts),
-            pct_nonmissing=100.0,
+            dtype=str(episode_counts[col].dtype), n_nonmissing=int(episode_counts[col].notna().sum()),
+            pct_nonmissing=float(100*episode_counts[col].notna().mean()),
             n_unique=int(episode_counts[col].nunique()),
             notes="MEDICATION NAMES ONLY. Order dates and consent-based candidates are separate. No administration inferred.",
             producer_script="08_build_medication_episode_links.py",
@@ -1236,9 +1237,7 @@ def main() -> None:
     parser.add_argument("--qc-dir", type=Path, default=None,
                         help="Optional isolated QC folder for a staged integration")
     parser.add_argument("--medication-audit-root", type=Path, default=None,
-                        help="Add protected Step 08 descriptive medication-documentation "
-                             "counts to BOTH the clinical-episode master and scientific context; "
-                             "these are not verified drug-exposure predictors")
+                        help="Add documented medication identities and separated ±1 year chart-review candidates to Step10; not confirmed exposures")
     args = parser.parse_args()
     common.ensure_output_dirs()
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -1260,7 +1259,7 @@ def main() -> None:
             clinical_spine_path=args.spine)
     qc = _write_audits(build, args.output, qc_dir)
     if medication_qc is None:
-        print("NOTE: Step 08 medication documentation omitted. Pass --medication-audit-root to include meddoc__* in clinical_episode.csv.")
+        print("NOTE: medication identities omitted. Pass --medication-audit-root to add medication__* columns.")
     if medication_qc is not None:
         (qc_dir / "10_medication_documentation_qc.json").write_text(
             json.dumps(medication_qc, indent=2, sort_keys=True), encoding="utf-8")
