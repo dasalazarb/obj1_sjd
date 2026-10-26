@@ -70,7 +70,7 @@ def sample():
         dict(documentation_record_id="B2",n_primary_episode_relations=0,
              n_tolerance_sensitivity_relations=0,
              original_match_status="blocked_by_documentation_qc")])
-    summary=dict(version="08-medication-episode-links-1.0.0",
+    summary=dict(version="08-medication-episode-links-1.1.0",
         n_original_documentation_records=3,n_primary_episode_relations=3)
     return spine,meds,pd.DataFrame(links),status,summary,KEY
 
