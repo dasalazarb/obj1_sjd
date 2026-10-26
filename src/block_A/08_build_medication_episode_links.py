@@ -3,7 +3,7 @@
 Frozen Step 00 episodes are authoritative. One medication documentation record
 may link to multiple clinical episodes when its exact documented date is inside
 each episode interval. Preserve order-grain and link-grain tables separately.
-One-calendar-month proximity is a distinct sensitivity edge, never a primary
+One-calendar-year proximity is a distinct exploratory association, never a primary
 inside-episode relation. Existing BTRIS QC holds remain blocked.
 
 Never infer prescriptions administered, exposure, ingestion, discontinuation,
@@ -21,7 +21,7 @@ import re
 from pathlib import Path
 import pandas as pd
 
-VERSION = "08-medication-episode-links-1.0.0"
+VERSION = "08-medication-episode-links-1.1.0"
 ROOT = Path(__file__).resolve().parents[2]
 AUDIT_SUBDIR = "outputs/audit/08_treatments_v2"
 MED_FILE = "medication_documentation_consolidated/08_medications_consolidated_documentation.parquet"
@@ -60,7 +60,7 @@ def columns_for_links():
         "source_kind","clinical_episode_id","relation_type",
         "primary_documentation_relation","tolerance_sensitivity_only",
         "date_of_documentation","episode_start_date","episode_end_date",
-        "clinical_anchor_date","match_origin","within_one_calendar_month",
+        "clinical_anchor_date","match_origin","within_one_calendar_year",
         "patient_and_episode_verified_against_Step00",
         "documentation_record_not_duplicated","confirmed_medication_exposure",
         "linkage_version",
@@ -106,7 +106,7 @@ def build(medications, candidates, match_status, all_spine, clinical_spine,
         raise ValueError("invalid_protected_pseudonym_key")
     if consolidated_summary.get("version")!="08-medication-documentation-consolidated-1.0.0":
         raise ValueError("unexpected_consolidated_input_version")
-    if matching_summary.get("version")!="08-btris-episode-candidate-match-1.0.0":
+    if matching_summary.get("version")!="08-btris-episode-candidate-match-1.1.0":
         raise ValueError("unexpected_matching_input_version")
     required(medications,[
         "documentation_record_id","linked_patient_pseudonymous","source",
@@ -116,7 +116,7 @@ def build(medications, candidates, match_status, all_spine, clinical_spine,
     required(candidates,[
         "documentation_record_id","linked_patient_pseudonymous","source",
         "clinical_episode_id","within_episode",
-        "within_one_calendar_month_tolerance","episode_start_date",
+        "within_one_calendar_year_proximity","episode_start_date",
         "episode_end_date","clinical_anchor_date"],"BTRIS_candidates")
     required(match_status,[
         "documentation_record_id","linked_patient_pseudonymous",
@@ -178,17 +178,17 @@ def build(medications, candidates, match_status, all_spine, clinical_spine,
             exact_day(r.clinical_anchor_date)!=anchor):
             raise ValueError("BTRIS_candidate_episode_dates_differ_from_Step00")
         inside=start<=event<=end
-        month_window=(start-pd.DateOffset(months=1)<=event<=
-                      end+pd.DateOffset(months=1))
-        if not month_window or inside!=bool(r.within_episode) or (
-            (not inside)!=bool(r.within_one_calendar_month_tolerance)):
+        year_window=(start-pd.DateOffset(years=1)<=event<=
+                      end+pd.DateOffset(years=1))
+        if not year_window or inside!=bool(r.within_episode) or (
+            (not inside)!=bool(r.within_one_calendar_year_proximity)):
             raise ValueError("BTRIS_candidate_temporal_classification_incorrect")
         rows.append(dict(
             documentation_record_id=r.documentation_record_id,
             linked_patient_pseudonymous=m.linked_patient_pseudonymous,
             source=m.source,source_kind=m.source_kind,
             clinical_episode_id=str(r.clinical_episode_id),
-            relation_type="within_episode" if inside else "month_tolerance_only",
+            relation_type="within_episode" if inside else "year_proximity_only",
             primary_documentation_relation=inside,
             tolerance_sensitivity_only=not inside,
             date_of_documentation=event.date().isoformat(),
@@ -196,7 +196,7 @@ def build(medications, candidates, match_status, all_spine, clinical_spine,
             episode_end_date=end.date().isoformat(),
             clinical_anchor_date=anchor.date().isoformat(),
             match_origin="BTRIS_temporal_candidates",
-            within_one_calendar_month=month_window,
+            within_one_calendar_year=year_window,
             patient_and_episode_verified_against_Step00=True,
             documentation_record_not_duplicated=True,
             confirmed_medication_exposure=False,linkage_version=VERSION))
@@ -227,7 +227,7 @@ def build(medications, candidates, match_status, all_spine, clinical_spine,
             episode_end_date=s.episode_end_date.date().isoformat(),
             clinical_anchor_date=s.clinical_anchor_date.date().isoformat(),
             match_origin="CTDB_original_row_map_via_Step00",
-            within_one_calendar_month=True,
+            within_one_calendar_year=True,
             patient_and_episode_verified_against_Step00=True,
             documentation_record_not_duplicated=True,
             confirmed_medication_exposure=False,linkage_version=VERSION))
@@ -305,7 +305,7 @@ def build(medications, candidates, match_status, all_spine, clinical_spine,
                 "multiple_primary_episode_relations"].sum()),
         n_CTDB_authoritative_relations=int(
             primary.source_kind.eq("CTDB_reported_current").sum()),
-        n_BTRIS_month_tolerance_sensitivity_relations=int(len(sensitivity)),
+        n_BTRIS_year_proximity_relations=int(len(sensitivity)),
         n_BTRIS_orders_with_tolerance_candidates=int(
             record_status.loc[record_status.source_kind.eq("BTRIS_order"),
                 "n_tolerance_sensitivity_relations"].gt(0).sum()),
@@ -321,7 +321,7 @@ def build(medications, candidates, match_status, all_spine, clinical_spine,
         date_evidence_not_exposure=True,
         exposure_inference="NO_GO",
         Step00_episode_boundaries_unchanged=True,
-        primary_includes_month_tolerance=False,
+        primary_includes_year_proximity=False,
         outputs_protected_only=True,
     )
     return primary,sensitivity,record_status,aggregate,summary
@@ -364,7 +364,7 @@ def run(audit_root,all_spine_path,clinical_spine_path):
     os.chmod(destination,0o700)
     for name,frame in [
         ("08_medication_episode_primary_links.parquet",primary),
-        ("08_medication_episode_month_tolerance_sensitivity.parquet",tolerance),
+        ("08_medication_episode_year_proximity.parquet",tolerance),
         ("08_medication_documentation_record_status.parquet",status)]:
         p=destination/name
         frame.to_parquet(p,index=False)
