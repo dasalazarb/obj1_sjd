@@ -3,7 +3,7 @@ from pathlib import Path
 import pandas as pd
 from . import documentation as d
 from .ctdb import build as ctdb_build
-from .episode_features import review_name
+from .episode_features import review_name, canonical_name
 from .dates import parse_date
 
 SOURCES = {'11D': 'data_intermediate/BTRIS/11D/Medication288444-1.csv',
@@ -86,10 +86,11 @@ def load(eda_root, cohort_path, spine, all_spine, secret):
     for col in required:
         if col not in catalog: catalog[col]=pd.Series(dtype='string')
     catalog['medication_name']=[review_name(r.ingredient_canonical,r.medication_name_raw,r.classification_confidence) for r in catalog.itertuples()]
-    catalog['name_requires_review']=~catalog.classification_confidence.isin(['high_exact','high','exact'])
+    catalog['canonical_medication_name']=[canonical_name(r.ingredient_canonical,r.classification_confidence) for r in catalog.itertuples()]
+    catalog['name_requires_review']=catalog.canonical_medication_name.eq('')
     # Never retain identified MRN, subject name, or source free-text instructions in this catalogue.
     qc={'n_source_rows_by_protocol':{k:len(v) for k,v in frames.items()},
         'n_selected_rows_by_protocol':selected_counts,'n_btris':len(orders),'n_ctdb':len(ctdb),'n_documents':len(catalog), 'date_parsing':parsing,
-        'n_unmapped_or_uncertain':int(catalog.name_requires_review.sum()), 'ctdb':ctdb_qc,
+        'n_unmapped_or_uncertain':int(catalog.name_requires_review.sum()), 'n_validated_canonical_documents':int(catalog.canonical_medication_name.ne('').sum()), 'ctdb':ctdb_qc,
         'n_btris_source_rows_outside_cohort':linkage['n_btris_rows_outside_eligibility']}
     return catalog,qc
