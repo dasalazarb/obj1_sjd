@@ -56,7 +56,7 @@ def main():
         "medication_exposure_confirmed": False,
     }
     output = dest / "08_recovered_patient_medications_qc.json"
-    output.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\\n")
+    output.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
     output.chmod(0o600)
     print(json.dumps(summary, indent=2))
 
