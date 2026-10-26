@@ -285,3 +285,11 @@ are not included in GitHub; missing files are reported explicitly.
 
 Repository-root `pytest` remains scoped to the analysis tests in `tests/`.
 Run the dashboard's separate software suite from `dashboard/` using its environment.
+
+### Step 16: comparative secondary trajectories
+
+[Step 16 methodology and CLI](docs/16_compare_secondary_trajectories.md) describe
+read-only comparisons within fixed ESSDAI v2 groups, feasibility gates,
+patient-clustered models, sensitivity/FDR, and transactional aggregate exports.
+Start with `python src/block_A/16_compare_secondary_trajectories.py --analysis feasibility --dry-run`.
+Synthetic validation does not establish real-cohort feasibility or clinical findings.
