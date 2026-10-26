@@ -61,13 +61,17 @@ def run(args):
         raise FileExistsError('Contract exists; choose --reuse-validated-inputs or --force-rebuild')
     catalog,qc=source_inputs.load(args.eda_root,args.cohort,spine,all_spine,secret)
     links=match(catalog,spine,secret); features=build(spine,links)
+    unresolved=links.loc[links.name_requires_review].copy()
     qc.update(n_rows=len(features),n_patients=int(features.patient_id.nunique()),
         n_order_relations=int(links.evidence_level.eq('order_date_proximity').sum()),
         n_consent_only_relations=int(links.evidence_level.eq('consent_only_review').sum()),
         n_unassigned=int((~catalog.documentation_record_id.isin(links.documentation_record_id)).sum()),
         n_post_anchor_relations=int(links.post_anchor.sum()),
         confirmed_medication_exposure=False,consent_is_not_medication_date=True,
-        n_names_present_by_category={c:int(features[c].notna().sum()) for c in contracts.COLUMNS})
+        n_names_present_by_category={c:int(features[c].notna().sum()) for c in contracts.COLUMNS},
+        n_unresolved_episode_candidate_relations=len(unresolved),
+        n_unresolved_candidate_documents=int(unresolved.documentation_record_id.nunique()),
+        analytic_names_only_validated_canonical=True)
     from src.block_A._internal.medications.dates import exact_day
     unassigned=catalog.loc[~catalog.documentation_record_id.isin(links.documentation_record_id)].copy()
     unassigned['unassigned_reason']=[
@@ -94,7 +98,8 @@ def run(args):
         '08_medication_order_date_details.parquet':catalog.loc[catalog.source_kind.eq('BTRIS')],
         '08_medication_patient_anytime.parquet':catalog,
         '08_medication_unassigned.parquet':unassigned,
-        '08_medication_review_queue.parquet':links}
+        '08_medication_review_queue.parquet':links,
+        '08_medication_unresolved_name_review.parquet':unresolved}
     sha=subprocess.run(['git','rev-parse','HEAD'],cwd=ROOT,text=True,capture_output=True,check=True).stdout.strip()
     manifest={'contract_version':contracts.VERSION,'producer_version':contracts.PRODUCER_VERSION,
         'run_at':datetime.now(timezone.utc).isoformat(),'code_sha':sha,
