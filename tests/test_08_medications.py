@@ -83,8 +83,11 @@ def test_identity_and_source_safety_fail_closed(tmp_path,failure):
 
 
 def test_unmapped_ingredient_and_free_text_sanitization():
-    from src.block_A._internal.medications.episode_features import review_name
+    from src.block_A._internal.medications.episode_features import review_name, canonical_name
     assert review_name('unmapped','New synthetic compound','unmapped')=='new synthetic compound'
+    assert canonical_name('unmapped','unmapped') == ''
+    assert canonical_name('rituximab','candidate_review') == ''
+    assert canonical_name('rituximab','high_exact') == 'rituximab'
     assert review_name('','Please contact research nurse@example.invalid','unmapped')==''
 
 
