@@ -31,13 +31,14 @@ def run(audit_root):
         raise ValueError("duplicate_source_record")
     target=target.merge(status[["documentation_record_id",
         "n_primary_episode_relations","original_match_status"]],
-        on="documentation_record_id",how="left",validate="one_to_one",indicator=True)
-    if not target._merge.eq("both").all():
+        on="documentation_record_id",how="left",validate="one_to_one",indicator="_status_merge"
+    if not target["_status_merge"].eq("both").all():
         raise ValueError("source_status_link_missing")
+    target=target.drop(columns="_status_merge")
     matched=target.loc[target.source_kind.eq("BTRIS_order")].merge(
         match[["documentation_record_id","match_status"]],
-        on="documentation_record_id",validate="one_to_one",how="left",indicator=True)
-    if not matched._merge.eq("both").all():
+        on="documentation_record_id",validate="one_to_one",how="left",indicator="_match_merge"
+    if not matched["_match_merge"].eq("both").all():
         raise ValueError("BTRIS_match_status_missing")
     def counter(series):
         return {str(k):int(v) for k,v in series.fillna("missing").value_counts().items()}
