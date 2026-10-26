@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from PIL import Image
+from matplotlib.collections import LineCollection
 
 from src.block_A import observed_patterns_v2 as v2
 from src.block_A import secondary_trajectory_analysis as analysis
@@ -263,7 +264,8 @@ def test_actual_four_panel_figure_semantics(upstream):
         assert all(line.get_color() == COLORS[pattern] or line.get_color() == "0.6" for line in ax.lines)
         horizontals = [line for line in ax.lines if len(set(line.get_ydata())) == 1]
         assert all(set(line.get_ydata()) == {0} for line in horizontals)
-    assert any(line.get_linestyle() == "--" for ax in fig.axes for line in ax.lines)
+    assert any(collection.get_linestyle()[0][1] for ax in fig.axes for collection in ax.collections
+               if isinstance(collection, LineCollection))
     plt.close(fig)
 
 
