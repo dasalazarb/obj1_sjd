@@ -1079,7 +1079,7 @@ def _integrate_medication_context(build: CuratedBuild, *, audit_root: Path,
 
     # Compare medication descriptors at patient+episode grain rather than
     # row position, since context and analytic can have different row order.
-    medication_columns = [*module.COUNT_COLUMNS, module.FLAG, module.NAME_FIELD]
+    medication_columns = [*module.COUNT_COLUMNS, module.FLAG, module.NAME_FIELD, *module.PROXIMITY_COLUMNS]
     comparison = merged_analytic[KEYS + medication_columns].merge(
         merged_context[KEYS + medication_columns], on=KEYS,
         how="outer", validate="one_to_one", indicator=True,
@@ -1097,9 +1097,11 @@ def _integrate_medication_context(build: CuratedBuild, *, audit_root: Path,
         rows.append(ColumnClassification(
             variable=col, source="medication_documentation", family="medication_documentation",
             role="ANALYTIC", destination="analytic+context", canonical_variable=col,
-            classification_rule="step08.primary_many_to_many_documentation",
-            classification_reason="Aggregated recorded orders/CTDB current-medication mentions; "
-                                  "not administered or continuous drug exposure",
+            classification_rule=("step08.one_calendar_year_proximity_exploratory" if col in module.PROXIMITY_COLUMNS
+                                 else "step08.primary_many_to_many_documentation"),
+            classification_reason=("One-year pre/post episode order proximity, not exposure" if col in module.PROXIMITY_COLUMNS
+                                   else "Aggregated recorded orders/CTDB current-medication mentions; "
+                                        "not administered or continuous drug exposure"),
             present_in_input=True, included_in_analytic=True, included_in_context=True,
             dtype=str(episode_counts[col].dtype), n_nonmissing=len(episode_counts),
             pct_nonmissing=100.0,
@@ -1110,12 +1112,14 @@ def _integrate_medication_context(build: CuratedBuild, *, audit_root: Path,
             producer_script="08_build_medication_episode_links.py",
             original_variable=col, canonical_concept=col,
             clinical_domain="medication_documentation",
-            public_variable=col, temporal_scope="within_authoritative_episode"))
+            public_variable=col, temporal_scope=("one_calendar_year_before_or_after_episode" if col in module.PROXIMITY_COLUMNS
+                            else "within_authoritative_episode")))
     registry = pd.concat([build.registry, pd.DataFrame([asdict(r) for r in rows])],
                          ignore_index=True)
     medication_qc["destination"] = "descriptive_analytic_master_and_scientific_context"
     medication_qc["analytic_master_unchanged"] = False
     medication_qc["n_descriptive_medication_columns_added_to_master"] = len(medication_columns)
+    medication_qc["n_exploratory_one_year_proximity_columns"] = len(module.PROXIMITY_COLUMNS)
     medication_qc["protected_medication_detail_path"] = str(
         module.write_protected_detail(medication_detail, audit_root))
     medication_qc["pre_anchor_treatment_exposure_established"] = False
