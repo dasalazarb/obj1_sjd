@@ -112,13 +112,15 @@ def infer_registered(column):
                         unit="ordinal level" if numeric else "% evaluable", scale_min=0, scale_max=3 if numeric else 1,
                         observation_semantics="derived_from_essdai", is_essdai_derived=True,
                         limitation="Partially mechanical association: domains also define ESSDAI groups")
+    # Explicit overlap counts take precedence over the generic "*_active" binary suffix.
+    # These are counts with possible values >1, not true/false indicators.
+    if column in {"ovl__n_extraglandular_domains_active", "ovl__n_glandular_manifestations_active", "ovl__intensity_count"}:
+        return Variable(column.removeprefix("ovl__"), "overlap", column.removeprefix("ovl__").replace("_", " "),
+                        column, "06_overlap_glandular.py", type="numeric", unit="count", scale_min=0, is_essdai_derived=True)
     if column.startswith("ovl__") and column.endswith("_active"):
         return Variable(column.removeprefix("ovl__"), "overlap", column.removeprefix("ovl__").replace("_", " "),
                         column, "06_overlap_glandular.py", type="binary", unit="% evaluable",
                         is_essdai_derived="extraglandular" in column or "overlap" in column)
-    if column in {"ovl__n_extraglandular_domains_active", "ovl__n_glandular_manifestations_active", "ovl__intensity_count"}:
-        return Variable(column.removeprefix("ovl__"), "overlap", column.removeprefix("ovl__").replace("_", " "),
-                        column, "06_overlap_glandular.py", unit="count", scale_min=0, is_essdai_derived=True)
     if re.fullmatch(r"ext__sgus_(theander_final_score_grade|omeract_[rl]_(parotid|submandibular)_grade)", column):
         return Variable(column.removeprefix("ext__"), "sgus", column.removeprefix("ext__").replace("_", " "),
                         column, "01_extended_clinical_phenotype.py", type="ordinal", unit="grade", scale_min=0, scale_max=3)
