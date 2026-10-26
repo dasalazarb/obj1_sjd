@@ -3,8 +3,8 @@ import hashlib
 import json
 import pandas as pd
 
-VERSION = '08-medication-episode-features-1.0'
-PRODUCER_VERSION = '08-medications-1.0'
+VERSION = '08-medication-episode-features-1.1'
+PRODUCER_VERSION = '08-medications-1.1'
 KEYS = ['patient_id', 'clinical_episode_id']
 STRUCTURE = KEYS + ['clinical_anchor_date', 'episode_start_date', 'episode_end_date', 'clinical_visit']
 COLUMNS = ['medication__' + s for s in (
