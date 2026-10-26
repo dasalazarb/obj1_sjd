@@ -190,6 +190,46 @@ def test_patient_window_deduplication(upstream):
     assert not analysis.window_contributions(both).duplicated(["patient_id", "window"]).any()
 
 
+
+def test_overlap_count_fields_precede_active_binary_suffix(upstream):
+    """Regression: count-valued overlap fields must never use the binary decoder."""
+    from src.block_A.secondary_trajectory_catalog import infer_registered
+
+    count_columns = (
+        "ovl__n_extraglandular_domains_active",
+        "ovl__n_glandular_manifestations_active",
+        "ovl__intensity_count",
+    )
+    x = analysis.attach_context(upstream["x"], upstream["context"]).copy()
+    values = [0, 2, 3] * ((len(x) + 2) // 3)
+    for column in count_columns:
+        spec = infer_registered(column)
+        assert spec.type == "numeric"
+        assert spec.unit == "count"
+        assert spec.scale_min == 0
+        assert spec.is_essdai_derived
+        x[column] = values[:len(x)]
+        (frame, status, _, unit), _, groups = measure(
+            upstream, spec.variable_id, x=x
+        )
+        assert status == "plot_ready"
+        assert unit == "count"
+        assert (frame.value > 1).any()
+        assert frame.observed_pattern.eq(
+            frame.patient_id.map(groups.set_index("patient_id").observed_pattern)
+        ).all()
+        assert frame.delta.notna().any()
+    # Generic overlap activity flags remain binary.
+    flag = infer_registered("ovl__extraglandular_active")
+    assert flag.type == "binary"
+    assert flag.unit == "% evaluable"
+
+    specs, catalog = build_catalog(x)
+    for column in count_columns:
+        assert specs[column].type == "numeric"
+        assert catalog.loc[catalog.canonical_column.eq(column), "type"].iloc[0] == "numeric"
+
+
 def test_registry_scans_every_column_and_unresolved_domains(upstream):
     x = upstream["x"].assign(unrecognized_numeric=1, **{"lab__new_analyte__value": 9})
     specs, catalog = build_catalog(x)
