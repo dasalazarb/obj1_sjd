@@ -1,3 +1,5 @@
+> Historical documentation. Superseded for production by [the Step08 episode-name contract](08_medications_analytic_contract.md). Old count fields, month windows and audit-root CLI commands below describe archived products only.
+
 # Política temporal de documentación farmacológica — Step 08 → Step 10 → estudios
 
 **Fecha:** 2026-10-23. **Estado:** decisión científica para futuras implementaciones; no implica tratamiento administrado ni modelos de efecto causal.

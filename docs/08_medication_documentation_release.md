@@ -1,3 +1,5 @@
+> Historical documentation. Superseded for production by [the Step08 episode-name contract](08_medications_analytic_contract.md). Old count fields, month windows and audit-root CLI commands below describe archived products only.
+
 # Step 08 — Medication documentation release (independent of exposure reconstruction)
 
 ## Objective
@@ -23,10 +25,10 @@ git pull origin main
     tests/test_08_build_medication_dataset.py
 
 # Refresh audit; source-only classification and existing QC remain unchanged.
-/usr/local/Anaconda/envs/py3.10/bin/python src/block_A/08_treatment_audit_v2.py
+/usr/local/Anaconda/envs/py3.10/bin/python src/block_A/audit/08_medications/legacy/08_treatment_audit_v2.py
 
 # Creates medication documentation tables within protected audit directory.
-/usr/local/Anaconda/envs/py3.10/bin/python src/block_A/08_build_medication_dataset.py \
+/usr/local/Anaconda/envs/py3.10/bin/python src/block_A/audit/08_medications/legacy/08_build_medication_dataset.py \
     --audit-root outputs/audit/08_treatments_v2
 ```
 
@@ -61,7 +63,7 @@ Default release retains **pseudonymous linked patient IDs** only. Downstream joi
 ONLY in a protected, authorized NIH analysis environment and after confirming that the `patient_id` identifiers match the Step 08 source-eligibility contract:
 
 ```bash
-/usr/local/Anaconda/envs/py3.10/bin/python src/block_A/08_build_medication_dataset.py \
+/usr/local/Anaconda/envs/py3.10/bin/python src/block_A/audit/08_medications/legacy/08_build_medication_dataset.py \
   --audit-root outputs/audit/08_treatments_v2 \
   --eligibility PATH_TO_SAME_STEP08_ELIGIBILITY_FILE \
   --release-patient-ids

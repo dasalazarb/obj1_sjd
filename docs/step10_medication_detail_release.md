@@ -1,3 +1,5 @@
+> Historical documentation. Superseded for production by [the Step08 episode-name contract](08_medications_analytic_contract.md). Old count fields, month windows and audit-root CLI commands below describe archived products only.
+
 # Step 10 — Medication-name summary and protected medication–episode detail
 
 ## Purpose
