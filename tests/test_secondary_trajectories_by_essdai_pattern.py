@@ -434,6 +434,26 @@ def test_protocol_availability_counts_each_observed_protocol_once(upstream):
     assert availability.n_patients_unique.max() <= 2
 
 
+def test_source_code_hashes_normalize_symlinked_root(tmp_path):
+    """Biowulf /data and /vf/users aliases must produce the same manifest keys."""
+    root = tmp_path / "canonical_repo"
+    source = root / "src" / "block_A" / "module.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("x = 1\n")
+    alias = tmp_path / "repo_alias"
+    try:
+        alias.symlink_to(root, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("Directory symlinks are unavailable")
+    aliased_source = alias / "src" / "block_A" / "module.py"
+    expected = {"src/block_A/module.py": analysis.sha256(source)}
+    assert cli.source_code_hashes([aliased_source], root) == expected
+    assert cli.source_code_hashes([source], alias) == expected
+    assert cli.source_code_hashes([aliased_source], alias) == expected
+    source.write_text("x = 2\n")
+    assert cli.source_code_hashes([aliased_source], root) != expected
+
+
 def test_consumer_never_calls_classification_or_models():
     forbidden = {"build_observed_patterns_v2", "classify_sequence", "build_observed_patterns", "fit", "score_all_pros"}
     for path in [ROOT/"src/block_A/15_secondary_trajectories_by_essdai_pattern.py", *ROOT.glob("src/block_A/secondary_trajectory_*.py")]:
