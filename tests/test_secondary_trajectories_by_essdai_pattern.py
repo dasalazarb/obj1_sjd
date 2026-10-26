@@ -411,6 +411,34 @@ def test_partial_dates_and_context_conflicts_are_blocking(upstream):
         analysis.attach_context(upstream["x"], upstream["context"].iloc[:-1])
 
 
+def test_context_candidate_medication_fields_are_not_dates(upstream):
+    """Shared Step 15/16 alignment preserves medication text and real date QC."""
+    x = upstream["x"].copy()
+    context = upstream["context"].copy()
+    text_column = "meddoc__systemic_sjd_candidate_names"
+    candidate_values = [
+        "acetaminophen; cevimeline",
+        "cyclosporine; vitamin D",
+        "no medication documented",
+    ]
+    x[text_column] = [candidate_values[i % 3] for i in range(len(x))]
+    context[text_column] = x[text_column].values
+    # This column is a true date and must still be normalized across data types.
+    x["meddoc__candidate_date"] = pd.Timestamp("2021-01-01")
+    context["meddoc__candidate_date"] = "2021-01-01"
+    result = analysis.attach_context(x, context)
+    assert result[text_column].tolist() == x[text_column].tolist()
+    assert len(result) == len(x)
+    bad_text = context.copy()
+    bad_text.loc[bad_text.index[0], text_column] = "changed medication"
+    with pytest.raises(analysis.ContractError, match="context conflicts"):
+        analysis.attach_context(x, bad_text)
+    bad_date = context.copy()
+    bad_date.loc[bad_date.index[0], "meddoc__candidate_date"] = "2022-01-01"
+    with pytest.raises(analysis.ContractError, match="context conflicts"):
+        analysis.attach_context(x, bad_date)
+
+
 def test_no_data_panels_and_delta_singleton_exclusion(upstream):
     x = analysis.attach_context(upstream["x"], upstream["context"])
     x.loc[x.patient_id.eq("synthetic_002"), "esspri__total"] = np.nan
