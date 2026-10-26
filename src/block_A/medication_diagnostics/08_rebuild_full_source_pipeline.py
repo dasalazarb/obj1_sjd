@@ -87,6 +87,8 @@ def main():
                    default=ROOT/"outputs/audit/08_treatments_full_source/reviewed_step10/10_integrated_longitudinal_clinical_episode.parquet")
     p.add_argument("--skip-rebuild",action="store_true",
                    help="Rebuild Step 10 from already regenerated full-source 08 artifacts")
+    p.add_argument("--refresh-links-only",action="store_true",
+                   help="Recompute one-year proximity and staged Step10 from existing full-source Step08 records")
     a=p.parse_args()
     audit=a.audit_root.resolve()
     legacy=(ROOT/"outputs/audit/08_treatments_v2").resolve()
@@ -94,7 +96,7 @@ def main():
         raise ValueError("cannot_overwrite_legacy_medication_audit")
     if "restricted" in audit.parts:
         raise ValueError("audit_root_must_be_parent_of_restricted")
-    if not a.skip_rebuild:
+    if not (a.skip_rebuild or a.refresh_links_only):
         cmd("08_prepare_full_btris_medication_inputs.py",
             "--eda-root",a.eda_root,"--cohort",a.cohort,"--audit-root",audit)
         candidate=audit/"restricted/btris_full_source_inputs"
@@ -112,6 +114,13 @@ def main():
         for script in ("08_build_medication_dataset.py","08_ctdb_visit_recovery.py",
                        "08_merge_medication_documentation.py"):
             cmd(script,"--audit-root",audit)
+        cmd("08_match_btris_episode_windows.py","--audit-root",audit,
+            "--clinical-spine",a.spine)
+        cmd("08_build_medication_episode_links.py","--audit-root",audit,
+            "--episode-spine-all",a.all_spine,"--clinical-visit-spine",a.spine)
+    if a.refresh_links_only:
+        if not (audit/"restricted/medication_documentation_consolidated/08_medications_consolidated_documentation.parquet").is_file():
+            raise FileNotFoundError("full_source_consolidation_required_before_refresh")
         cmd("08_match_btris_episode_windows.py","--audit-root",audit,
             "--clinical-spine",a.spine)
         cmd("08_build_medication_episode_links.py","--audit-root",audit,
@@ -135,6 +144,10 @@ def main():
     if len(records)==0:
         raise ValueError("no_recovered_medication_episode_details")
     final={
+        "proximity_policy":"one_calendar_year_before_or_after_clinical_episode_as_exploratory_documentation",
+        "proximity_is_not_confirmed_exposure":True,
+        "n_episodes_with_one_year_proximity":int(analytic["medprox__n_order_episode_relations_within_1y"].gt(0).sum()),
+        "n_one_year_proximity_relations":int(analytic["medprox__n_order_episode_relations_within_1y"].sum()),
         "status":"staged_full_source_only",
         "step10_staged_output":str(out),
         "n_episodes":len(analytic),
