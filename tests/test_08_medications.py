@@ -13,8 +13,8 @@ def test_full_pipeline_without_step10_preserves_all_documents(tmp_path):
     first=features.iloc[0]
     assert first[COLUMNS[0]]=='hydroxychloroquine'
     assert 'rituximab' in first[COLUMNS[2]] and 'rituximab' in first[COLUMNS[3]]
-    assert 'unknown synthetic product' in first[COLUMNS[5]]
-    assert 'unknown synthetic product' not in first[COLUMNS[4]]
+    assert pd.isna(first[COLUMNS[5]])
+    assert 'unknown synthetic product' not in str(first[COLUMNS[4]])
     assert features.iloc[2][COLUMNS].isna().all()
     assert not any(c.startswith(('meddoc__','medprox__','medcand__')) for c in features)
     restricted=args.audit_root/'restricted'
@@ -25,6 +25,10 @@ def test_full_pipeline_without_step10_preserves_all_documents(tmp_path):
     assert ctdb.dose_slot_mapping.eq('unassigned_not_inferred').all()
     assert len(catalog)==15  # all protocol rows, plus original CTDB report
     assert not links.duplicated(KEYS+['documentation_record_id']).any()
+    unresolved=pd.read_parquet(restricted/'08_medication_unresolved_name_review.parquet')
+    assert unresolved.medication_name.str.contains('unknown synthetic product').any()
+    assert unresolved.canonical_medication_name.eq('').all()
+    assert not features[COLUMNS].fillna('').astype(str).apply(lambda x:x.str.contains('unknown synthetic product')).any().any()
     ritux=links.loc[links.medication_name.eq('rituximab')]
     assert ritux.matching_reference_kinds.str.contains('order_end').any()
     assert 'MRN' not in catalog and 'Subject Name' not in catalog
@@ -33,6 +37,7 @@ def test_full_pipeline_without_step10_preserves_all_documents(tmp_path):
     undated=pd.read_parquet(restricted/'08_medication_unassigned.parquet')
     assert undated.medication_name.str.contains('undated synthetic product').any()
     assert qc['confirmed_medication_exposure'] is False
+    assert qc['analytic_names_only_validated_canonical'] is True
     assert os.stat(restricted).st_mode & 0o777 == 0o700
     assert all(os.stat(p).st_mode & 0o777 == 0o600 for p in restricted.iterdir() if p.is_file() and p.name!='.pseudonym_key')
     assert os.stat(args.output).st_mode & 0o777 == 0o600
