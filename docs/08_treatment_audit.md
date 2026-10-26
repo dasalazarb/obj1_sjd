@@ -1,10 +1,12 @@
+> Historical documentation. Superseded for production by [the Step08 episode-name contract](08_medications_analytic_contract.md). Old count fields, month windows and audit-root CLI commands below describe archived products only.
+
 # Step 08: isolated treatment audit
 
 For the separate CTDB + BTRIS audit 2.0, use
 [`08_treatment_audit_v2.md`](08_treatment_audit_v2.md). The v1 entry point and
 outputs documented below remain unchanged.
 
-`src/block_A/08_treatment_audit.py` inventories medication documentation and
+`src/block_A/audit/08_medications/legacy/08_treatment_audit.py` inventories medication documentation and
 creates reviewable audit artifacts. No scientific Step 08 script existed at the
 implementation base, so this is a new standalone entry point. No existing script,
 input, analytic contract or output is changed. It reads CSV/Parquet sources and
@@ -15,7 +17,7 @@ the existing longitudinal eligibility list; it never reads the Excel codebook.
 From the repository root, with the established raw inputs available:
 
 ```bash
-python src/block_A/08_treatment_audit.py
+python src/block_A/audit/08_medications/legacy/08_treatment_audit.py
 ```
 
 Defaults are `common.DEFAULT_ANALYTIC_DATASET` (legacy raw visits),
@@ -23,7 +25,7 @@ Defaults are `common.DEFAULT_ANALYTIC_DATASET` (legacy raw visits),
 `outputs/qc/blockA/08_treatment_audit/`. Override the paths as needed:
 
 ```bash
-python src/block_A/08_treatment_audit.py \
+python src/block_A/audit/08_medications/legacy/08_treatment_audit.py \
   --input /path/to/visits.parquet \
   --eligibility /path/to/list_ids_longitudinal.csv \
   --output-dir outputs/qc/blockA/08_treatment_audit/run_01

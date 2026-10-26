@@ -1,6 +1,8 @@
+> Historical documentation. Superseded for production by [the Step08 episode-name contract](08_medications_analytic_contract.md). Old count fields, month windows and audit-root CLI commands below describe archived products only.
+
 # Step 08: CTDB + BTRIS audit v2.1
 
-`src/block_A/08_treatment_audit_v2.py` is the only entrypoint. Its private helper
+`src/block_A/audit/08_medications/legacy/08_treatment_audit_v2.py` is the only entrypoint. Its private helper
 `_treatment_classification_v21.py` extends the existing v2 audit with conservative
 product axes, observed order-context matrices and patient coverage by evidence.
 It creates no therapeutic episodes or integrated clinical dataset.
@@ -12,7 +14,7 @@ Block B, studies, common paths and master sources remain unchanged.
 Use the project's Python environment with pandas and pyarrow:
 
 ```bash
-python src/block_A/08_treatment_audit_v2.py
+python src/block_A/audit/08_medications/legacy/08_treatment_audit_v2.py
 ```
 
 Defaults read only:
@@ -30,7 +32,7 @@ outputs. Source paths can be explicitly overridden for protected executions or
 synthetic tests; no alternate source or cohort is searched automatically.
 
 ```bash
-python src/block_A/08_treatment_audit_v2.py \
+python src/block_A/audit/08_medications/legacy/08_treatment_audit_v2.py \
   --input /protected/visits.parquet \
   --eligibility /protected/list_ids_longitudinal.csv \
   --btris-11d /protected/BTRIS/11D/medication_records.parquet \
