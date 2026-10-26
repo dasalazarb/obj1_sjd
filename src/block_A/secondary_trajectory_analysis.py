@@ -254,8 +254,19 @@ def attach_context(x, context):
     aligned = c.set_index(KEYS).reindex(xi).reset_index(drop=True)
     for col in (set(c)&set(x))-set(KEYS):
         left, right = x[col].reset_index(drop=True), aligned[col]
-        if "date" in col:
-            left, right = pd.to_datetime(left), pd.to_datetime(right)
+        # "candidate" contains "date" but is not temporal; some context
+        # fields hold medication names and must retain their original dtype.
+        # Match date as a standalone snake_case token or an actual datetime dtype.
+        is_date_column = (
+            bool(re.search(r"(?:^|_)date(?:_|$)", col))
+            or pd.api.types.is_datetime64_any_dtype(left)
+            or pd.api.types.is_datetime64_any_dtype(right)
+        )
+        if is_date_column:
+            left, right = (
+                pd.to_datetime(left, format="mixed"),
+                pd.to_datetime(right, format="mixed"),
+            )
         if not (left.eq(right) | (left.isna() & right.isna())).fillna(False).all():
             raise ContractError("Step 10 context conflicts with integrated: "+col)
     # Keep only context consumed by measurement validation and availability.
