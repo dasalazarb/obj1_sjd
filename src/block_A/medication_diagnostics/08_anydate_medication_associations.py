@@ -32,16 +32,25 @@ RITUX=re.compile(r"rituximab|rituxan|mabthera|truxima|ruxience|riabni",re.I)
 
 
 def strict_date(value):
-    """Only an explicitly recorded day; never manufacture day from month/year."""
-    if value is None or pd.isna(value): return pd.NaT
-    if isinstance(value,pd.Timestamp): return value.normalize()
-    value=str(value).strip()
-    if not value: return pd.NaT
-    for fmt in ("%Y-%m-%d","%Y-%m-%d %H:%M:%S","%Y-%m-%dT%H:%M:%S",
-                "%m/%d/%Y","%m/%d/%Y %H:%M:%S"):
-        try: return pd.Timestamp(pd.to_datetime(value,format=fmt,errors="raise")).normalize()
-        except (ValueError,TypeError,OverflowError): pass
-    return pd.NaT
+    """Exact dates only. Accept BTRIS timestamps with AM/PM, fractional seconds, timezone."""
+    from dateutil import parser as date_parser
+    if value is None or pd.isna(value):
+        return pd.NaT
+    if isinstance(value, pd.Timestamp):
+        return value.normalize()
+    value = str(value).strip()
+    if not value or value.lower() in {"nat", "nan", "none", "null"}:
+        return pd.NaT
+    # Must contain a recorded day, month and four-digit year.
+    if not (re.match(r"^\\d{4}-\\d{1,2}-\\d{1,2}(?:[T ].*)?$", value)
+            or re.match(r"^\\d{1,2}/\\d{1,2}/\\d{4}(?:\\s+.*)?$", value)):
+        return pd.NaT
+    try:
+        parsed = date_parser.parse(value, dayfirst=False, yearfirst=value[:4].isdigit()
+                                   and value[4:5] == "-", fuzzy=False)
+        return pd.Timestamp(parsed.date())
+    except (ValueError, TypeError, OverflowError):
+        return pd.NaT
 
 
 def text(value):
@@ -85,6 +94,8 @@ def run(audit_root=AUDIT,spine_path=SPINE,staged_path=STAGED):
     rows=[]
     invalid_dates=0
     reference_counts={kind:0 for kind in DATE_FIELDS}
+    nonblank_counts={kind:0 for kind in DATE_FIELDS}
+    invalid_by_kind={kind:0 for kind in DATE_FIELDS}
     for med in candidates.itertuples(index=False):
         source=med.source
         raw_id=text(med.source_audit_record_id)
@@ -98,7 +109,11 @@ def run(audit_root=AUDIT,spine_path=SPINE,staged_path=STAGED):
         for kind,field in DATE_FIELDS.items():
             original=text(record[field])
             day=strict_date(original)
-            if original and pd.isna(day):invalid_dates+=1
+            if original:
+                nonblank_counts[kind]+=1
+            if original and pd.isna(day):
+                invalid_dates+=1
+                invalid_by_kind[kind]+=1
             if pd.notna(day):
                 dates[kind]=day
                 reference_counts[kind]+=1
@@ -135,6 +150,8 @@ def run(audit_root=AUDIT,spine_path=SPINE,staged_path=STAGED):
                 "qc_flags":text(med.qc_flags),"review_reasons":text(med.review_reasons),
                 "actual_exposure_confirmed":False
             })
+    if (nonblank_counts["order_start"] and reference_counts["order_start"] == 0):
+        raise ValueError("all_BTRIS_order_start_dates_failed_parsing_check_source_format")
     out=base/"anydate_medication_associations"
     out.mkdir(parents=True,exist_ok=True,mode=0o700)
     os.chmod(out,0o700)
@@ -195,6 +212,9 @@ def run(audit_root=AUDIT,spine_path=SPINE,staged_path=STAGED):
         "n_consent_only_pairs":int(table.consent_only_basis.sum()),
         "n_unparseable_nonblank_dates":invalid_dates,
         "available_date_reference_counts":reference_counts,
+        "nonblank_date_reference_counts":nonblank_counts,
+        "unparseable_by_date_kind":invalid_by_kind,
+        "n_pairs_with_order_start_or_end_reference":int((~table.consent_only_basis).sum()),
         "patient_count":int(result.patient_id.nunique()),"episode_count":len(result),
         "detail_protected_file":str(detail),"staged_episode_dataset":str(output),
         "original_step10_untouched":True,"confirmed_medication_exposure":False,
