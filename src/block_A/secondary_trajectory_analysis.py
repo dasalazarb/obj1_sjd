@@ -228,30 +228,55 @@ def validate_inputs(integrated, baseline, patterns, eligibility, sequence, cutof
         scores = s.merge(x[KEYS+[essdai]], on=KEYS, validate="one_to_one", suffixes=("_v2", "_step10"))
         if not scores[essdai+"_v2"].eq(scores[essdai+"_step10"]).all():
             raise ContractError("selected ESSDAI scores conflict with Step 10")
-    for row in p.itertuples():
-        selected = s.loc[s.patient_id.eq(row.patient_id)]
-        if not selected.essdai_index_date.eq(row.essdai_index_date).all() or not ((selected.clinical_episode_id == row.essdai_index_episode_id) & selected.clinical_anchor_date.eq(row.essdai_index_date)).any():
-            raise ContractError("selected ESSDAI index identity conflict")
+    # Validate each protected patient/threshold against the same selected sequence.
+    # No repeated scan of selected dates for every patient.
+    index_dates = s.groupby("patient_id").essdai_index_date.agg(["min", "max", "count", "size"])
+    aligned = index_dates.reindex(p.patient_id).reset_index(drop=True)
+    expected_dates = p.essdai_index_date.reset_index(drop=True)
+    index_keys = pd.MultiIndex.from_frame(s[["patient_id", "clinical_episode_id", "clinical_anchor_date"]])
+    expected_keys = pd.MultiIndex.from_frame(p[["patient_id", "essdai_index_episode_id", "essdai_index_date"]])
+    if (not aligned["min"].eq(expected_dates).all() or not aligned["max"].eq(expected_dates).all()
+            or not aligned["count"].eq(aligned["size"]).all() or not expected_keys.isin(index_keys).all()):
+        raise ContractError("selected ESSDAI index identity conflict")
     return x, b, p
 
 
 def attach_context(x, context):
     if context is None:
-        return x.copy()
+        return x
     c = identities(context, KEYS, "Step 10 context")
     if c.duplicated(KEYS).any():
         raise ContractError("Step 10 context duplicate keys")
-    keys = x[KEYS].merge(c[KEYS], on=KEYS, how="outer", indicator=True, validate="one_to_one")
-    if not keys._merge.eq("both").all():
+    xi = pd.MultiIndex.from_frame(x[KEYS])
+    ci = pd.MultiIndex.from_frame(c[KEYS])
+    if not xi.is_unique or len(xi) != len(ci) or not xi.isin(ci).all():
         raise ContractError("Step 10 context episode coverage mismatch")
+    aligned = c.set_index(KEYS).reindex(xi).reset_index(drop=True)
     for col in (set(c)&set(x))-set(KEYS):
-        pair = x[KEYS+[col]].merge(c[KEYS+[col]], on=KEYS, validate="one_to_one", suffixes=("_a", "_b"))
-        left, right = pair[col+"_a"], pair[col+"_b"]
+        left, right = x[col].reset_index(drop=True), aligned[col]
         if "date" in col:
             left, right = pd.to_datetime(left), pd.to_datetime(right)
         if not (left.eq(right) | (left.isna() & right.isna())).fillna(False).all():
             raise ContractError("Step 10 context conflicts with integrated: "+col)
-    return x.merge(c[KEYS+[col for col in c if col not in x]], on=KEYS, how="left", validate="one_to_one")
+    # Keep only context consumed by measurement validation and availability.
+    extra = [col for col in aligned if col not in x and (
+        col == "source_protocol" or col.endswith(("date", "__unit", "conflict", "assay", "platform", "scoring_version")))]
+    if not extra:
+        return x
+    additions = aligned[extra].copy()
+    additions.index = x.index
+    return pd.concat([x, additions], axis=1)
+
+
+def variable_columns(x, spec):
+    """Project before joining immutable groups; never copy the wide clinical table."""
+    stem = spec.canonical_column.removesuffix("__value")
+    instrument = spec.canonical_column.split("__")[-1].split("_")[0]
+    needed = set(KEYS + ["clinical_baseline_episode_id", "clinical_anchor_date", "clinical_baseline_date",
+        "is_clinical_baseline", "source_protocol", spec.canonical_column, spec.measurement_date_column,
+        stem+"__unit", stem+"__conflict", spec.canonical_column+"_conflict"])
+    return [c for c in x if c in needed or (
+        c.startswith((stem+"__", "pro__"+instrument+"_")) and c.endswith(("assay", "platform", "scoring_version")))]
 
 
 def fixed_groups(patterns, threshold):
@@ -277,7 +302,7 @@ def observations(x, groups, spec, cutoff, time_axis="clinical_baseline", window_
         return empty, "invalid_date: no verified measurement date", qc, spec.unit
     # Keep upstream baseline in x; prefix only immutable group metadata.
     cols = ["patient_id", "observed_pattern", "trajectory_evidence_level", "n_distinct_essdai_dates", "essdai_index_date", "essdai_index_source"]
-    frame = x.merge(groups[cols], on="patient_id", how="inner", validate="many_to_one").copy()
+    frame = x[variable_columns(x, spec)].merge(groups[cols], on="patient_id", how="inner", validate="many_to_one")
     frame["value"] = frame[spec.canonical_column]
     frame = frame.loc[frame.value.notna()].copy()
     unit = spec.unit
@@ -332,20 +357,22 @@ def observations(x, groups, spec, cutoff, time_axis="clinical_baseline", window_
     audit("prebaseline_measurements_excluded", pre.sum())
     audit("undated_measurements_excluded", absent.sum())
     frame = frame.loc[~pre & ~absent].copy()
-    chosen = []
-    for _, same in frame.groupby(["patient_id", "variable_measurement_date"], sort=True):
-        official = same.loc[same.clinical_episode_id.eq(same.clinical_baseline_episode_id) & same.variable_measurement_date.eq(same.clinical_baseline_date)]
-        discordant = same.value.nunique() > 1
-        if len(same) > 1:
-            audit("same_day_discordant" if discordant else "same_day_concordant", 1)
-        if len(official):
-            chosen.append(official.iloc[0])
-        elif not discordant:
-            chosen.append(same.sort_values("clinical_episode_id").iloc[-1])
-        # No cross-producer rule justifies choosing among discordant values.
-    if not chosen:
+    keys = ["patient_id", "variable_measurement_date"]
+    grouped = frame.groupby(keys, sort=True)
+    stats = grouped.value.agg(["size", "nunique"])
+    # Retain the historical QC row granularity and sorted patient/date order.
+    for discordant in stats.loc[stats["size"].gt(1), "nunique"].gt(1):
+        audit("same_day_discordant" if discordant else "same_day_concordant", 1)
+    official = frame.clinical_episode_id.eq(frame.clinical_baseline_episode_id) & frame.variable_measurement_date.eq(frame.clinical_baseline_date)
+    discordant = grouped.value.transform("nunique").gt(1)
+    # Official baseline wins even on discordant dates; otherwise retain the
+    # greatest episode ID only when the observed values agree.
+    baseline_rows = frame.loc[official].drop_duplicates(keys, keep="first")
+    ordinary = frame.loc[~discordant].sort_values("clinical_episode_id", kind="stable").drop_duplicates(keys, keep="last")
+    frame = pd.concat([baseline_rows, ordinary]).drop_duplicates(keys, keep="first")
+    if frame.empty:
         return empty, "no_valid_observed_measurements", qc, unit
-    frame = pd.DataFrame(chosen).sort_values(["patient_id", "variable_measurement_date", "clinical_episode_id"]).reset_index(drop=True)
+    frame = frame.sort_values(keys+["clinical_episode_id"]).reset_index(drop=True)
     frame["time_from_clinical_baseline_years"] = (frame.variable_measurement_date-frame.clinical_baseline_date).dt.days/365.25
     frame["time_from_essdai_index_years"] = (frame.variable_measurement_date-frame.essdai_index_date).dt.days/365.25
     frame["time"] = frame["time_from_"+time_axis+"_years"]
@@ -403,10 +430,14 @@ def summarize(frame, spec, threshold, axis, unit, minimum_support=5, profile=Fal
     common = dict(variable=spec.variable_id, threshold_abs=threshold, time_axis=axis, unit=unit,
                   summary_type="first_available_profile" if profile else "by_window",
                   temporal_rule="first valid available observation per patient; no common time implied" if profile else "[start,end) years; last actual observed date per patient; no imputation")
+    raw_counts = (data.groupby("observed_pattern").size() if profile else
+                  frame.groupby(["observed_pattern", "window"]).size())
+    protocol_counts = frame.groupby(["observed_pattern", "window", "source_protocol"], dropna=False).size()
+    levels = [1] if spec.type == "binary" else sorted(data.value.unique(), key=str)
     for (pattern, window), g in data.groupby(["observed_pattern", "window"], sort=True):
-        raw = data.loc[data.observed_pattern.eq(pattern)] if profile else frame.loc[frame.observed_pattern.eq(pattern) & frame.window.eq(window)]
+        n_raw = int(raw_counts.loc[pattern if profile else (pattern, window)])
         base = dict(**common, group=pattern, window=window, window_start=float(g.window_start.iloc[0]),
-                    window_end=float(g.window_end.iloc[0]), n_patients_unique=len(g), n_observations_raw=len(raw),
+                    window_end=float(g.window_end.iloc[0]), n_patients_unique=len(g), n_observations_raw=n_raw,
                     n_at_window=len(g),
                     n_delta_at_window=int(g.is_delta_followup.sum()), support_status="supported" if len(g) >= minimum_support else "insufficient support")
         if spec.type == "numeric":
@@ -418,7 +449,6 @@ def summarize(frame, spec, threshold, axis, unit, minimum_support=5, profile=Fal
             row["n_delta_observed_including_reference"] = int(g.delta.notna().sum())
             numeric.append(row)
         else:
-            levels = [1] if spec.type == "binary" else sorted(data.value.unique(), key=str)
             for level in levels:
                 n, total = int(g.value.eq(level).sum()), len(g)
                 # Wilson 95% interval, explicitly patient-denominated.
@@ -430,7 +460,9 @@ def summarize(frame, spec, threshold, axis, unit, minimum_support=5, profile=Fal
     if not profile:
         availability_data = frame.sort_values("variable_measurement_date").drop_duplicates(["patient_id", "window", "source_protocol"], keep="last")
     for (pattern, window, protocol), g in availability_data.groupby(["observed_pattern", "window", "source_protocol"], dropna=False):
-        raw = frame.loc[frame.observed_pattern.eq(pattern) & frame.window.eq(window) & frame.source_protocol.eq(protocol)]
+        # observations() fills missing protocols; retain the historical
+        # null-comparison behavior for callers supplying frames directly.
+        n_raw = 0 if pd.isna(protocol) else int(protocol_counts.loc[(pattern, window, protocol)])
         availability.append(dict(**common, group=pattern, window=window, source_protocol=protocol,
-                                 n_patients_unique=len(g), n_observations_raw=len(raw)))
+                                 n_patients_unique=len(g), n_observations_raw=n_raw))
     return pd.DataFrame(numeric), pd.DataFrame(category), pd.DataFrame(availability)

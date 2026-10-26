@@ -5,18 +5,21 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+from matplotlib.collections import LineCollection
+import numpy as np
 
 from src.block_A.observed_patterns_v2_figures import COLORS, LABELS
 from src.block_A.secondary_trajectory_analysis import summarize
 
 
 def build_figure(frame, groups, support, spec, threshold, kind, time_axis, unit,
-                 origin, minimum_support=5):
+                 origin, minimum_support=5, summaries=None):
     fig, axes = plt.subplots(2, 2, figsize=(13, 10), sharex=True, sharey=True)
     profile = kind == "first_available_profile"
     data = frame.sort_values("variable_measurement_date").groupby("patient_id").head(1) if profile else frame
-    numeric, category, _ = summarize(data, spec, threshold, time_axis, unit, minimum_support,
-                                   profile=profile and spec.type != "numeric")
+    numeric, category = (summaries if summaries is not None else
+        summarize(data, spec, threshold, time_axis, unit, minimum_support,
+                  profile=profile and spec.type != "numeric")[:2])
     for ax, (pattern, title) in zip(axes.flat, LABELS.items()):
         g = groups.loc[groups.observed_pattern.eq(pattern)]
         subset = data.loc[data.observed_pattern.eq(pattern)]
@@ -34,15 +37,21 @@ def build_figure(frame, groups, support, spec, threshold, kind, time_axis, unit,
         elif spec.type == "numeric":
             if kind == "delta" and not subset.n_variable_dates.ge(2).any():
                 ax.text(.5, .5, "No repeated observations for change", ha="center", va="center", transform=ax.transAxes)
-            for _, visits in subset.groupby("patient_id", sort=False):
-                if kind == "delta" and visits.n_variable_dates.iloc[0] < 2:
-                    continue
-                visits = visits.sort_values("time")
-                ys = visits.delta if kind == "delta" else visits.value
-                if len(visits) >= 2 and not profile:
-                    ax.plot(visits.time, ys, color=COLORS[pattern], alpha=.4, linewidth=1.3,
-                            linestyle="--" if visits.n_distinct_essdai_dates.iloc[0] == 2 else "-")
-                ax.scatter(visits.time, ys, color=COLORS[pattern], alpha=.6, s=12)
+            points = subset.loc[subset.n_variable_dates.ge(2)] if kind == "delta" else subset
+            points = points.sort_values(["patient_id", "time"], kind="stable")
+            if not points.empty:
+                ys = points.delta if kind == "delta" else points.value
+                xy = np.column_stack([points.time.to_numpy(dtype=float), ys.to_numpy(dtype=float)])
+                if not profile and len(points) > 1:
+                    same_patient = points.patient_id.iloc[1:].to_numpy() == points.patient_id.iloc[:-1].to_numpy()
+                    two_dates = points.n_distinct_essdai_dates.iloc[1:].eq(2).to_numpy()
+                    segments = np.stack([xy[:-1], xy[1:]], axis=1)
+                    for provisional, style in ((False, "-"), (True, "--")):
+                        selected = segments[same_patient & (two_dates == provisional)]
+                        if len(selected):
+                            ax.add_collection(LineCollection(selected, colors=COLORS[pattern], alpha=.4,
+                                                             linewidths=1.3, linestyles=style))
+                ax.scatter(xy[:, 0], xy[:, 1], color=COLORS[pattern], alpha=.6, s=12)
             if kind == "delta":
                 ax.axhline(0, color="0.6", lw=.8)
             # No population curve or implied extrapolation is drawn. Exact
@@ -104,13 +113,16 @@ def build_figure(frame, groups, support, spec, threshold, kind, time_axis, unit,
 
 
 def plot_variable(frame, groups, support, spec, threshold, kind, path, *, time_axis, unit,
-                  origin, dpi=250, minimum_support=5):
+                  origin, dpi=250, minimum_support=5, summaries=None):
     path = Path(path)
     if path.suffix.lower() != ".png":
         raise ValueError("Step 15 output format is PNG only")
-    fig = build_figure(frame, groups, support, spec, threshold, kind, time_axis, unit, origin, minimum_support)
+    # Close a partially built figure too if layout/render raises.
+    previous = set(plt.get_fignums())
     try:
+        fig = build_figure(frame, groups, support, spec, threshold, kind, time_axis, unit, origin, minimum_support, summaries)
         fig.savefig(path, dpi=dpi, bbox_inches="tight", format="png", metadata={"Software": "obj1_sjd Step 15", "Source": origin})
     finally:
-        plt.close(fig)
+        for number in set(plt.get_fignums()) - previous:
+            plt.close(number)
     return path
