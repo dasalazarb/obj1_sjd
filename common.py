@@ -111,3 +111,6 @@ def ensure_output_dirs() -> None:
         STUDIES_QC_DIR, STUDIES_LOGS_DIR,
     ):
         path.mkdir(parents=True, exist_ok=True)
+
+# Step08's sole episode-level medication-name input to Step10.
+MEDICATION_EPISODE_FEATURES_PARQUET = PROJECT_ROOT / 'data/intermediate/08_medication_episode_features.parquet'

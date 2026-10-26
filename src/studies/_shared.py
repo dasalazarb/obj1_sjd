@@ -154,6 +154,10 @@ validate_intervals = validate_transition_intervals
 def validate_predictors(columns: Iterable[str]) -> list[str]:
     """Reject outcome/future/consensus leakage from an explicit predictor list."""
     columns = list(columns)
+    medication = [c for c in columns if c.removeprefix("from_").startswith(
+        ("medication__", "meddoc__", "medprox__", "medcand__"))]
+    if medication:
+        raise ValueError(f"Medication documentation is descriptive, not verified pre-anchor exposure: {medication}")
     bad = [c for c in columns if c.startswith(("to_", "next_", "delta_")) or "patient_consensus" in c.lower()]
     if bad:
         raise ValueError(f"Predictors contain future or consensus information: {bad}")
