@@ -73,7 +73,7 @@ def test_default_rerun_reuses_and_rebuilds_changed_inputs(tmp_path):
     assert module.run(args)['status'] == 'published'
     assert module.run(args)['status'] == 'validated_reuse'
     before = args.output.read_bytes()
-    args.cohort.write_text(args.cohort.read_text() + '\\n')
+    args.cohort.write_text(args.cohort.read_text() + '\n')
     assert module.run(args)['status'] == 'published'
     assert args.output.read_bytes() == before
     generations = args.audit_root / 'restricted' / 'generations'
