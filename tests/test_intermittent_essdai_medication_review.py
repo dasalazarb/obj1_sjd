@@ -32,6 +32,20 @@ cli = load("private_step15", "15_intermittent_essdai_medication_review.py")
 step13 = load("private_step13", "13_disease_activity_progression.py")
 
 
+def test_internal_configuration_runs_without_required_flags_and_allows_overrides(tmp_path):
+    args = cli.parse_args([])
+    assert vars(args) == cli.DEFAULT_CONFIG
+    assert args.threshold == "both" and args.jump_figures
+    assert args.no_overwrite and not args.dry_run
+    assert args.restricted_output_root == ROOT.parent / "restricted" / ROOT.name
+    destination = cli.output_destination(args.restricted_output_root, "canonical")
+    assert not destination.is_relative_to(ROOT)
+    custom = cli.parse_args(["--restricted-output-root", str(tmp_path / "restricted"),
+                             "--threshold", "5", "--no-jump-figures", "--dry-run"])
+    assert custom.restricted_output_root == tmp_path / "restricted"
+    assert custom.threshold == "5" and not custom.jump_figures and custom.dry_run
+
+
 @pytest.fixture
 def upstream(tmp_path):
     root = tmp_path / "synthetic_validation" / "upstream"
