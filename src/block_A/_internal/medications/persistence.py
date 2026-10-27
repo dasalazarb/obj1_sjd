@@ -47,6 +47,16 @@ def publish(features, manifest, output, tables, qc, audit_root):
         validate(pd.read_parquet(table),features)
         generation=uuid4().hex
         details=generations/generation;details.mkdir(mode=0o700)
+        # Preserve the previous public dataset and manifest in this restricted
+        # generation before replacing them (including v1.0 -> v1.1 upgrades).
+        for original, archive_name in (
+            (output, "08_previous_episode_features.parquet"),
+            (manifest_path(output), "08_previous_episode_features.manifest.json"),
+        ):
+            if original.is_file():
+                archive = details / archive_name
+                archive.write_bytes(original.read_bytes())
+                os.chmod(archive, 0o600)
         # Every run retains its own long products. Never overwrite an older review trail.
         for name,frame in tables.items():
             path=details/name;frame.to_parquet(path,index=False);os.chmod(path,0o600)
