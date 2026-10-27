@@ -30,30 +30,61 @@ from src.block_A.intermittent_medication_analysis import (
 
 STEM = "step15_intermittent_medication_review"
 
+# Internal run configuration: running this file without flags uses these values.
+# Keep individual outputs outside the checkout, next to the project directory:
+# /data/salazarda/data/obj1_sjd -> /data/salazarda/data/restricted/obj1_sjd
+# ROOT is resolved, so equivalent institutional mount aliases use the same path.
+# Every setting remains overridable through its corresponding CLI option.
+DEFAULT_CONFIG = dict(
+    integrated=common.INTEGRATED_LONGITUDINAL_PARQUET,
+    baseline=common.INTEGRATED_BASELINE_PARQUET,
+    patterns=common.DISEASE_ACTIVITY_PROGRESSION_DIR / "13_essdai_patient_observed_patterns_v2.parquet",
+    patterns_manifest=common.BLOCKA_QC_DIR / "13_disease_activity_progression/13_essdai_observed_pattern_manifest_v2.json",
+    spine=common.CLINICAL_VISIT_SPINE_PARQUET,
+    medication_features=common.MEDICATION_EPISODE_FEATURES_PARQUET,
+    medication_audit_root=ROOT / "outputs/audit/08_medications",
+    pseudonym_key=None,  # Use medication_audit_root/restricted/.pseudonym_key.
+    context=None,  # Use the Step10 context sibling when present.
+    restricted_output_root=ROOT.parent / "restricted" / ROOT.name,
+    threshold="both",
+    input_origin="canonical",
+    data_cutoff=datetime.now(timezone.utc).date().isoformat(),
+    post_window_days=90,
+    measurement_gap_days=365,
+    minimum_cell=5,
+    format="png",
+    dpi=160,
+    jump_figures=True,
+    no_overwrite=True,
+    dry_run=False,
+)
+
 
 def parse_args(argv=None):
-    p = argparse.ArgumentParser(description=__doc__, epilog=NOTICE)
-    p.add_argument("--integrated", type=Path, default=common.INTEGRATED_LONGITUDINAL_PARQUET)
-    p.add_argument("--baseline", type=Path, default=common.INTEGRATED_BASELINE_PARQUET)
-    p.add_argument("--patterns", type=Path, default=common.DISEASE_ACTIVITY_PROGRESSION_DIR / "13_essdai_patient_observed_patterns_v2.parquet")
-    p.add_argument("--patterns-manifest", type=Path, default=common.BLOCKA_QC_DIR / "13_disease_activity_progression/13_essdai_observed_pattern_manifest_v2.json")
-    p.add_argument("--spine", type=Path, default=common.CLINICAL_VISIT_SPINE_PARQUET)
-    p.add_argument("--medication-features", type=Path, default=common.MEDICATION_EPISODE_FEATURES_PARQUET)
-    p.add_argument("--medication-audit-root", type=Path, default=ROOT / "outputs/audit/08_medications")
+    p = argparse.ArgumentParser(description=__doc__, epilog=NOTICE,
+                                formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    p.add_argument("--integrated", type=Path)
+    p.add_argument("--baseline", type=Path)
+    p.add_argument("--patterns", type=Path)
+    p.add_argument("--patterns-manifest", type=Path)
+    p.add_argument("--spine", type=Path)
+    p.add_argument("--medication-features", type=Path)
+    p.add_argument("--medication-audit-root", type=Path)
     p.add_argument("--pseudonym-key", type=Path, help="Established protected Step08 key, used in memory only; never generated")
     p.add_argument("--context", type=Path, help="Optional exact-key Step10 measurement-date context")
-    p.add_argument("--restricted-output-root", type=Path, required=True, help="Authorized external directory named/under restricted, mode 0700; never inside a Git repository")
-    p.add_argument("--threshold", choices=("3", "5", "both"), default="both")
-    p.add_argument("--input-origin", choices=("canonical", "synthetic_validation"), default="canonical")
-    p.add_argument("--data-cutoff", default=datetime.now(timezone.utc).date().isoformat())
-    p.add_argument("--post-window-days", type=int, default=90)
-    p.add_argument("--measurement-gap-days", type=int, default=365)
-    p.add_argument("--minimum-cell", type=int, default=5, help="Local disclosure minimum (>=5); aggregates remain access controlled")
-    p.add_argument("--format", choices=("png",), default="png")
-    p.add_argument("--dpi", type=int, default=160)
-    p.add_argument("--jump-figures", action=argparse.BooleanOptionalAction, default=True)
-    p.add_argument("--no-overwrite", action="store_true", default=True, help="Existing runs are always preserved")
+    p.add_argument("--restricted-output-root", type=Path, help="Authorized external directory named/under restricted, mode 0700; never inside a Git repository")
+    p.add_argument("--threshold", choices=("3", "5", "both"))
+    p.add_argument("--input-origin", choices=("canonical", "synthetic_validation"))
+    p.add_argument("--data-cutoff")
+    p.add_argument("--post-window-days", type=int)
+    p.add_argument("--measurement-gap-days", type=int)
+    p.add_argument("--minimum-cell", type=int, help="Local disclosure minimum (>=5); aggregates remain access controlled")
+    p.add_argument("--format", choices=("png",))
+    p.add_argument("--dpi", type=int)
+    p.add_argument("--jump-figures", action=argparse.BooleanOptionalAction)
+    p.add_argument("--no-overwrite", action="store_true", help="Existing runs are always preserved")
     p.add_argument("--dry-run", action="store_true", help="Validate and build all tables in memory; create no directories or products")
+    p.set_defaults(**DEFAULT_CONFIG)
     args = p.parse_args(argv)
     if args.post_window_days < 0 or args.measurement_gap_days < 1 or args.minimum_cell < 5 or args.dpi < 50:
         p.error("invalid windows, disclosure minimum or DPI")

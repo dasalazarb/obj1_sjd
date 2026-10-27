@@ -149,6 +149,24 @@ Console messages contain fixed statuses only, without identifiers or drug names.
 
 ## CLI
 
+Running the script without flags uses the editable `DEFAULT_CONFIG` block near
+the top of the command. It selects canonical inputs, both thresholds, PNG
+timelines and jump figures, and preserves existing runs. The protected output
+root defaults to `ROOT.parent / "restricted" / ROOT.name`, outside the checkout.
+For `/data/salazarda/data/obj1_sjd`, this is
+`/data/salazarda/data/restricted/obj1_sjd` (equivalent mount aliases resolve to
+the same physical location). Existing permission and repository checks still
+apply. The key and optional context are discovered from their existing canonical
+locations; no key is generated. Every CLI option overrides its internal setting.
+
+```bash
+# Uses DEFAULT_CONFIG; no flags required.
+python src/block_A/15_intermittent_essdai_medication_review.py
+
+# Same internal configuration, validate without producing outputs.
+python src/block_A/15_intermittent_essdai_medication_review.py --dry-run
+```
+
 ```bash
 # Validate every input and compute tables in memory; zero output directories.
 python src/block_A/15_intermittent_essdai_medication_review.py \
