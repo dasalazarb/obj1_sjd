@@ -66,6 +66,22 @@ def test_reuse_checks_inputs_code_key_and_rebuild_is_deterministic(tmp_path):
     assert args.output.read_bytes()==original  # analytic names don't expose key-dependent tokens
 
 
+def test_default_rerun_reuses_and_rebuilds_changed_inputs(tmp_path):
+    from src.block_A._internal.medications.persistence import manifest_path
+    args, _ = sources(tmp_path)
+    module = producer()
+    assert module.run(args)['status'] == 'published'
+    assert module.run(args)['status'] == 'validated_reuse'
+    before = args.output.read_bytes()
+    args.cohort.write_text(args.cohort.read_text() + '\\n')
+    assert module.run(args)['status'] == 'published'
+    assert args.output.read_bytes() == before
+    generations = args.audit_root / 'restricted' / 'generations'
+    assert any((p / '08_previous_episode_features.parquet').is_file()
+               for p in generations.iterdir())
+    assert manifest_path(args.output).exists()
+
+
 @pytest.mark.parametrize('failure',['ctdb_patient','source_collision','spine_missing','upstream_overwrite'])
 def test_identity_and_source_safety_fail_closed(tmp_path,failure):
     args,spine=sources(tmp_path)
