@@ -65,12 +65,24 @@ def run(args):
         if (prior.get('sha256')!=sha256(args.output)
             or prior.get('spine_sha256')!=fingerprints['spine']
             or prior.get('spine_signature')!=contracts.spine_signature(spine)
+            or prior.get('keys')!=contracts.KEYS
+            or prior.get('confirmed_medication_exposure') is not False
+            or prior.get('consent_is_not_medication_date') is not True
+            or prior.get('temporal_policy')!='one_calendar_year'
             or prior.get('contract_version') not in ('08-medication-episode-features-1.0',contracts.VERSION)):
             raise ValueError('Existing medication publication failed validation')
+        if (not key_check.is_file() or
+            json.loads(key_check.read_text()).get('scope') !=
+                pseudonym(secret,'compatibility','08-medications')):
+            raise ValueError('Existing Step08 publication has unverified HMAC identity')
         if prior.get('contract_version')==contracts.VERSION:
             load_contract(args.output,spine,args.spine)
             if prior.get('inputs_sha256')==fingerprints:
                 return {'status':'validated_reuse','n_rows':len(spine)}
+        else:
+            # Older contract uses the same schema but may contain review names.
+            # It must still validate before a canonical-only rebuild.
+            contracts.validate(pd.read_parquet(args.output),spine)
         # Existing version or input has changed: proceed to rebuilt publication.
     catalog,qc=source_inputs.load(args.eda_root,args.cohort,spine,all_spine,secret)
     links=match(catalog,spine,secret); features=build(spine,links)
