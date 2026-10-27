@@ -28,7 +28,7 @@ def canonical_name(canonical, confidence):
     text, redacted = _restricted_vocabulary_display(text)
     if redacted:
         return ''
-    return re.sub(r'\\s+', ' ', re.sub(r'[\\x00-\\x1f\\x7f;]', ' ', text)).strip().casefold()
+    return re.sub(r'\s+', ' ', re.sub(r'[\x00-\x1f\x7f;]', ' ', text)).strip().casefold()
 
 
 def build(spine, links):
