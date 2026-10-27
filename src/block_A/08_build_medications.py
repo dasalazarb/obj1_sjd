@@ -58,7 +58,20 @@ def run(args):
             raise ValueError('validated inputs or pseudonym key changed; force rebuild after review')
         return {'status':'validated_reuse','n_rows':len(features)}
     if args.output.exists() and not args.force_rebuild and not args.dry_run:
-        raise FileExistsError('Contract exists; choose --reuse-validated-inputs or --force-rebuild')
+        existing_manifest=manifest_path(args.output)
+        if not existing_manifest.is_file():
+            raise ValueError('Existing output is missing its manifest; manual review required')
+        prior=json.loads(existing_manifest.read_text())
+        if (prior.get('sha256')!=sha256(args.output)
+            or prior.get('spine_sha256')!=fingerprints['spine']
+            or prior.get('spine_signature')!=contracts.spine_signature(spine)
+            or prior.get('contract_version') not in ('08-medication-episode-features-1.0',contracts.VERSION)):
+            raise ValueError('Existing medication publication failed validation')
+        if prior.get('contract_version')==contracts.VERSION:
+            load_contract(args.output,spine,args.spine)
+            if prior.get('inputs_sha256')==fingerprints:
+                return {'status':'validated_reuse','n_rows':len(spine)}
+        # Existing version or input has changed: proceed to rebuilt publication.
     catalog,qc=source_inputs.load(args.eda_root,args.cohort,spine,all_spine,secret)
     links=match(catalog,spine,secret); features=build(spine,links)
     unresolved=links.loc[links.name_requires_review].copy()
