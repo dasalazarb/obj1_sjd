@@ -41,6 +41,21 @@ def test_full_pipeline_without_step10_preserves_all_documents(tmp_path):
     assert os.stat(restricted).st_mode & 0o777 == 0o700
     assert all(os.stat(p).st_mode & 0o777 == 0o600 for p in restricted.iterdir() if p.is_file() and p.name!='.pseudonym_key')
     assert os.stat(args.output).st_mode & 0o777 == 0o600
+    csv_output=args.output.with_suffix('.csv')
+    assert csv_output.is_file()
+    assert os.stat(csv_output).st_mode & 0o777 == 0o600
+    csv=pd.read_csv(csv_output,dtype='string',keep_default_na=False)
+    assert csv.equals(features.fillna('').astype('string'))
+    for name in ('08_medication_documentation_long','08_medication_candidate_episode_links',
+                 '08_medication_unassigned','08_medication_unresolved_name_review'):
+        csv_path=restricted/(name+'.csv')
+        assert csv_path.is_file() and os.stat(csv_path).st_mode & 0o777 == 0o600
+        assert len(pd.read_csv(csv_path))==len(pd.read_parquet(restricted/(name+'.parquet')))
+    qc_csv=pd.read_csv(args.audit_root/'08_medication_publication_qc.csv')
+    assert {'metric','value'} == set(qc_csv.columns)
+    assert 'n_btris' in set(qc_csv.metric)
+    assert 'n_source_rows_by_protocol.11D' in set(qc_csv.metric)
+
 
 
 def test_dry_run_no_writes_and_missing_key_fails(tmp_path):
