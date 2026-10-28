@@ -292,4 +292,13 @@ Run the dashboard's separate software suite from `dashboard/` using its environm
 read-only comparisons within fixed ESSDAI v2 groups, feasibility gates,
 patient-clustered models, sensitivity/FDR, and transactional aggregate exports.
 Start with `python src/block_A/16_compare_secondary_trajectories.py --analysis feasibility --dry-run`.
+
+### Step 17: nonlinear temporal heterogeneity
+
+[Step 17 methodology, CLI and validation limits](docs/17_nonlinear_temporal_heterogeneity.md)
+describe a single command for nested linear/common-curvature/group-curvature
+models, supported means, changes, velocities and six-pair simultaneous bands.
+The ±3/±5 analyses and sensitivities remain separate and upstream products are
+read-only. An explicit cutoff is required:
+`python src/block_A/17_nonlinear_temporal_heterogeneity.py --data-cutoff 2026-10-27 --dry-run`.
 Synthetic validation does not establish real-cohort feasibility or clinical findings.
