@@ -45,12 +45,18 @@ def publish(features, manifest, output, tables, qc, audit_root):
         os.chmod(directory,0o700); stage=Path(directory)
         table=stage/'features.parquet'; features.to_parquet(table,index=False); os.chmod(table,0o600)
         validate(pd.read_parquet(table),features)
+        # CSV is a human-readable replica, not a new clinical contract.
+        csv_table=stage/'features.csv'; features.to_csv(csv_table,index=False); os.chmod(csv_table,0o600)
+        csv_roundtrip=pd.read_csv(csv_table,dtype='string',keep_default_na=False)
+        if not csv_roundtrip.equals(features.fillna('').astype('string')):
+            raise ValueError('medication features CSV round-trip mismatch')
         generation=uuid4().hex
         details=generations/generation;details.mkdir(mode=0o700)
         # Preserve the previous public dataset and manifest in this restricted
         # generation before replacing them (including v1.0 -> v1.1 upgrades).
         for original, archive_name in (
             (output, "08_previous_episode_features.parquet"),
+            (output.with_suffix('.csv'), "08_previous_episode_features.csv"),
             (manifest_path(output), "08_previous_episode_features.manifest.json"),
         ):
             if original.is_file():
@@ -60,23 +66,37 @@ def publish(features, manifest, output, tables, qc, audit_root):
         # Every run retains its own long products. Never overwrite an older review trail.
         for name,frame in tables.items():
             path=details/name;frame.to_parquet(path,index=False);os.chmod(path,0o600)
+            csv_path=path.with_suffix('.csv');frame.to_csv(csv_path,index=False);os.chmod(csv_path,0o600)
         private_json(details/'08_medication_reconciliation_qc.json',qc)
-        manifest=dict(manifest,sha256=sha256(table),columns=list(features),
+        manifest=dict(manifest,sha256=sha256(table),csv_sha256=sha256(csv_table),columns=list(features),
             dtypes={c:str(features[c].dtype) for c in features},restricted_generation=generation,
             restricted_outputs_sha256={p.name:sha256(p) for p in details.iterdir()})
         metadata=stage/'manifest.json';private_json(metadata,manifest)
         qcpath=stage/'qc.json';private_json(qcpath,qc)
+        # Flatten only aggregate QC metrics for slides; never export source rows.
+        def qc_rows(prefix,value):
+            if isinstance(value,dict):
+                for name,item in sorted(value.items()):
+                    yield from qc_rows(f'{prefix}.{name}' if prefix else str(name),item)
+            else:
+                yield {'metric':prefix,'value':value}
+        qc_csvpath=stage/'qc.csv'
+        pd.DataFrame(list(qc_rows('',qc)),columns=['metric','value']).to_csv(qc_csvpath,index=False)
+        os.chmod(qc_csvpath,0o600)
         old_table=output.read_bytes() if output.exists() else None
+        public_csv=output.with_suffix('.csv')
+        old_csv=public_csv.read_bytes() if public_csv.exists() else None
         old_meta=manifest_path(output).read_bytes() if manifest_path(output).exists() else None
         current=restricted/'current';old_current=os.readlink(current) if current.is_symlink() else None
         temporary_link=restricted/('.current-'+generation)
         temporary_link.symlink_to(Path('generations')/generation,target_is_directory=True)
         try:
             os.replace(table,output)
+            os.replace(csv_table,public_csv)
             os.replace(metadata,manifest_path(output))
             os.replace(temporary_link,current)
         except BaseException:
-            for path,content in ((output,old_table),(manifest_path(output),old_meta)):
+            for path,content in ((output,old_table),(public_csv,old_csv),(manifest_path(output),old_meta)):
                 if content is None:path.unlink(missing_ok=True)
                 else:path.write_bytes(content);os.chmod(path,0o600)
             if old_current is not None and (not current.is_symlink() or os.readlink(current)!=old_current):
@@ -88,4 +108,5 @@ def publish(features, manifest, output, tables, qc, audit_root):
             alias=restricted/path.name
             if not alias.exists():alias.symlink_to(Path('current')/path.name)
         os.replace(qcpath,Path(audit_root)/'08_medication_publication_qc.json')
+        os.replace(qc_csvpath,Path(audit_root)/'08_medication_publication_qc.csv')
     return manifest
