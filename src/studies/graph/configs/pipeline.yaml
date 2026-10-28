@@ -1,0 +1,38 @@
+# Prespecified exploratory protocol; approvals must never be inferred.
+schema_version: graph_pipeline_v1
+includes:
+  canonical: ../config.yaml
+  sensitivity: ../config_sensitivity.yaml
+  characterization: ../config_characterization.yaml
+  experiments: experiments_02.yaml
+  clinical_domains: clinical_domains_02.yaml
+  validation: validation_03.yaml
+execution:
+  run_02: true
+  run_03: true
+  auto_preflight: true
+  resume: true
+  always_generate_tables_figures: true
+  fail_on_primary_qc_error: true
+  save_negative_and_not_estimable_results: true
+analysis:
+  mode: exploratory
+  feature_policy: phenotype_independent
+  reference_scenario: S3
+paths:
+  integrated: ../../../../data/analytic/10_build_integrated_longitudinal_dataset/10_integrated_longitudinal_clinical_episode.parquet
+  pharma_candidates: ../../../../outputs/tables/studies/pharma/00_profile_labs/00_pharma_graph_lab_candidates.csv
+  source_manifest: null
+  baseline_metrics: ../../../../data/analytic/blockA/11_integrated_baseline_characterization/11_integrated_baseline_patient_level.csv
+  lab_group_map: ../../../../data/raw/graph_s4_lab_group_map.csv
+  clinical_release: ../graph_lab_release.yaml
+  output_02: ../../../../outputs/tables/studies/graph/02_graph_representation_sensitivity
+  output_03: ../../../../outputs/tables/studies/graph/03_graph_community_characterization
+  output_study: ../../../../outputs/tables/studies/graph/run_graph_study
+reporting:
+  tables: true
+  figures_png: true
+  figures_pdf: true
+  summary_md: true
+  experiment_registry: true
+  manifest_with_hashes: true

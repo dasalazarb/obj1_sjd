@@ -82,14 +82,14 @@ def load_config(path: Path) -> dict:
     return config
 
 
-def load_real_inputs(integrated: Path, candidates_path: Path, analysis_mode: str | None = "exploratory") -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+def load_real_inputs(integrated: Path, candidates_path: Path, analysis_mode: str | None = "exploratory", *, resolve_profile: bool = True) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     if analysis_mode is None or isinstance(analysis_mode, dict):
         summary = analysis_mode if isinstance(analysis_mode, dict) else json.loads(candidates_path.with_name("00_pharma_profile_summary.json").read_text())
         master = load_parquet(integrated)
         candidates, report = LAB.validate_graph_lab_contract(master, pd.read_csv(candidates_path), summary,
             integrated_path=integrated, candidates_path=candidates_path)
         return master, candidates, report
-    if analysis_mode is not None:
+    if analysis_mode is not None and resolve_profile:
         candidates_path = resolve_candidates(candidates_path)
     if not candidates_path.exists():
         raise FileNotFoundError(

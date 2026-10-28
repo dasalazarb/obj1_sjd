@@ -158,6 +158,15 @@ validation does not establish real-cohort or institutional closure.
 
 Do not edit the original raw data. Keep all changes reproducible through scripts.
 
+## Baseline Graph02 → Graph03 study
+
+Run `python src/studies/graph/run_graph_study.py` from the repository root to
+execute the full configured exploratory baseline study without required flags.
+Graph02 freezes topology with artifact hashes; Graph03 consumes that exact release
+for observed-value clinical characterization and estimable post-index analyses.
+Clinical domain approvals remain explicit. See the [Graph guide](src/studies/graph/README.md)
+for sources, default experiments, release contracts, and synthetic validation.
+
 ## Longitudinal Graph / Model A
 
 Model A asks how observed patients move through a visit-level clinical landscape.

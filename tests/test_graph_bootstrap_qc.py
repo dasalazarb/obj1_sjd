@@ -1,5 +1,4 @@
 """Execution QC is distinct from topological evidence in graph sensitivity."""
-import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 import warnings
@@ -9,9 +8,7 @@ import pandas as pd
 import pytest
 
 SCRIPT = Path(__file__).parents[1] / "src/studies/graph/02_graph_representation_sensitivity.py"
-SPEC = importlib.util.spec_from_file_location("graph_sensitivity_bootstrap_qc", SCRIPT)
-M = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(M)
+from src.studies.graph.stage02 import s02_legacy as M
 
 
 def config():

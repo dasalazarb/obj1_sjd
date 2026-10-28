@@ -333,10 +333,21 @@ from ._feature_catalog import CONTRACT_VERSION, file_hash
 
 
 def resolve_candidates(path: Path) -> Path:
-    # A historical unversioned candidate file must never shadow a fresh run.
+    path = Path(path)
+    if path.is_file():
+        return path  # An explicit validated bundle is exact, never shadowed by another run.
     runs = path.parent / "runs"
     found = sorted(runs.glob("*/" + path.name)) if runs.exists() else []
-    return found[-1] if found else path
+    distinct = {}
+    for candidate in found:
+        summary = candidate.with_name("00_pharma_profile_summary.json")
+        if not summary.is_file():
+            continue
+        key = (file_hash(candidate), file_hash(summary))
+        distinct.setdefault(key, candidate)
+    if len(distinct) > 1:
+        raise ValueError("AMBIGUOUS_PHARMA00_PROFILES: specify an exact compatible bundle or a pinned source manifest")
+    return next(iter(distinct.values())) if distinct else path
 
 
 def validate_provenance(integrated: Path, candidates: Path, analysis_mode: str) -> dict:

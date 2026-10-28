@@ -1,5 +1,4 @@
 """T01–T20: synthetic-only coordinated Graph ingestion and release safeguards."""
-import importlib.util
 import json
 from pathlib import Path
 
@@ -12,9 +11,7 @@ from graph_contract_fixtures import candidate, empty_candidates, write_bundle
 from src.studies.graph import _lab_contract as LAB
 
 ROOT = Path(__file__).parents[1]
-SPEC = importlib.util.spec_from_file_location("graph_contract_sensitivity", ROOT / "src/studies/graph/02_graph_representation_sensitivity.py")
-G2 = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(G2)
+from src.studies.graph.stage02 import s02_legacy as G2
 G1 = G2.CANON
 
 
