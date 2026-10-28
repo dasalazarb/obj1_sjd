@@ -50,6 +50,8 @@ def run(args):
     # Reuse only a COMPLETE validated publication, never old truncated parquets.
     if args.reuse_validated_inputs:
         features, _=load_contract(args.output,spine,args.spine)
+        if not args.output.with_suffix('.csv').is_file():
+            raise ValueError('validated reuse requires medication CSV; run --force-rebuild')
         prior=json.loads(manifest_path(args.output).read_text())
         key_check=args.audit_root/'restricted/08_key_compatibility.json'
         from src.block_A._internal.medications.documentation import pseudonym
@@ -77,7 +79,7 @@ def run(args):
             raise ValueError('Existing Step08 publication has unverified HMAC identity')
         if prior.get('contract_version')==contracts.VERSION:
             load_contract(args.output,spine,args.spine)
-            if prior.get('inputs_sha256')==fingerprints:
+            if prior.get('inputs_sha256')==fingerprints and args.output.with_suffix('.csv').is_file() and (args.audit_root/'08_medication_publication_qc.csv').is_file():
                 return {'status':'validated_reuse','n_rows':len(spine)}
         else:
             # Older contract uses the same schema but may contain review names.
