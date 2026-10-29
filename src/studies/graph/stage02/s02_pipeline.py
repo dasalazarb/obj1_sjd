@@ -401,6 +401,13 @@ def _execute(cfg,root,run_dir,started,preflight_only):
         if identifier=='R0': continue
         matched,scores=match_sets(base_map['community_sets'],item['mapped']['community_sets'])
         alignments.extend({'reference_representation_id':'R0','representation_id':identifier,**row,'n_patients_common':n} for row in matched)
+    # Additive sensitivity suite uses frozen full-reference panels and its own
+    # refits/artifacts. Historical memberships, summaries and budgets stay intact.
+    from .s02_missingness_study import run_missingness_study
+    missingness_study=run_missingness_study(results,registry,manifest,baseline,families,config,cfg,
+        run_dir,lab_groups,feature_to_lab,digest(sources['integrated']))
+    for row in missingness_study['experiments']:
+        record(row['experiment_id'],row['kind'],row['status'],row['reason'],analysis_role='sensitivity',reference_id=row['reference_id'])
     primary_rows=[r for r in stability if r['representation_id']=='R0' and r['method']=='repeated_subsampling' and r['phase']=='final']
     stable_count=sum(r['stable'] and base_map['supported'][r['community_id']] for r in primary_rows)
     primary_qc=qc_by_id.get('R0',False)
@@ -542,6 +549,10 @@ def _execute(cfg,root,run_dir,started,preflight_only):
         'missingness':{'masks_source':'baseline_R0_raw_selected_features','legacy_N2_mixed':True,
             'standalone_controls':['N2a','N2b','N2c','N2d'],'diagnostic_complete':all(any(r['experiment_id'].startswith(i+'/') for r in experiments) for i in ['N2a','N2b','N2c','N2d','M1'])},
         'coverage':{'n_total':n,'n_covered_R0':int(base_map['covered'].sum()),'n_uncovered_R0':int((~base_map['covered']).sum()),'reason_audit_complete':bool(observation['reason_audit_complete'])},
+        'missingness_sensitivity':{k:v for k,v in missingness_study.items() if k!='experiments'},
+        'sensitivity_artifacts':[dict(artifact=rel,sha256=digest(run_dir/rel),analysis_role='sensitivity',
+            schema_version=missingness_study['schema_version'],references=['R0','R2'],panel_policy='frozen_reference_sources_and_patients',
+            estimability=missingness_study['statuses']) for rel in missingness_study.get('artifacts',[])],
         'artifact_inventory':privacy_inventory(run_dir),
         'sha256_by_artifact':artifact_inventory(run_dir),'source_inputs':source_info,'versions':version_info(),
         'protocol_id':settings['protocol_id'],'random_seed':seed,'clinical_validation':governance['clinical_validation']}
@@ -549,6 +560,9 @@ def _execute(cfg,root,run_dir,started,preflight_only):
     write_json(manifest_path,manifest_release)
     publish_pointer(root,manifest_path)
     print(f'Graph02 {release_status}; {execution_status}; release: {manifest_path}')
+    if missingness_study.get('enabled'):
+        print('Missingness R0/R2 primary variants: '+json.dumps(missingness_study['counts'],sort_keys=True)
+              +'; registry: '+str(run_dir/'02_graph_missingness_method_registry.csv'))
     return {'run_dir':run_dir,'manifest':manifest_path,'execution_status':execution_status}
 
 

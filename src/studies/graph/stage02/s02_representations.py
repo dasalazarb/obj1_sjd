@@ -157,6 +157,11 @@ def famd_matrix(frame,kinds):
 
 
 def build_space(identifier, raw, families, config, registry, manifest, baseline, lab_groups, feature_to_lab):
+    if identifier in {'R0-I','R0-D','R0-M','R2-I','R2-D','R2-M'}:
+        from .s02_missingness_variants import build_variant
+        policy=config.get('missingness_methods')
+        if policy is None: raise ValueError('MISSING_MISSINGNESS_POLICY')
+        return build_variant(identifier,raw,families,config,registry,manifest,baseline,lab_groups,feature_to_lab,policy)[0]
     if identifier in legacy.SCENARIOS or identifier in {'R0','R1'}:
         scenario={'R0':'S3','R1':'S4'}.get(identifier,identifier)
         rep=legacy.fit_embedding(raw,families,scenario,config,lab_groups,feature_to_lab)

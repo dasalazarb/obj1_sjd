@@ -167,6 +167,10 @@ for observed-value clinical characterization and estimable post-index analyses.
 Clinical domain approvals remain explicit. See the [Graph guide](src/studies/graph/README.md)
 for sources, default experiments, release contracts, and synthetic validation.
 
+Graph02 incluye seis sensibilidades transversales de missingness R0/R2 (`-I`, `-D`, `-M`),
+con panel fijo, refit por réplica y artefactos con hashes; Graph03 conserva las
+representaciones históricas. El protocolo y sus límites están en la guía anterior.
+
 ## Longitudinal Graph / Model A
 
 Model A asks how observed patients move through a visit-level clinical landscape.

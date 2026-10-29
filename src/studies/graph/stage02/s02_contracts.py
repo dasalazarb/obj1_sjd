@@ -113,6 +113,17 @@ def validate_release(path, *, expected_sha=None):
             raise ValueError('Invalid R2 evidence level')
         if r2.get('evidence_level')=='APPROVED' and manifest.get('clinical_mapping',{}).get('review_status')!='approved':
             raise ValueError('Clinical mapping approval is not established')
+    if manifest.get('missingness_sensitivity',{}).get('enabled'):
+        sensitivity=manifest['missingness_sensitivity']
+        if sensitivity.get('analysis_role')!='sensitivity' or sensitivity.get('graph03_defining') is not False:
+            raise ValueError('Invalid missingness sensitivity role')
+        if any(i in manifest['eligible_representation_ids'] for i in sensitivity['statuses']):
+            raise ValueError('Missingness sensitivity cannot become a defining representation')
+        for item in manifest.get('sensitivity_artifacts',[]):
+            if item.get('analysis_role')!='sensitivity' or hashes.get(item['artifact'])!=item['sha256']:
+                raise ValueError('Sensitivity artifact checksum/role mismatch')
+        if set(sensitivity['artifacts'])!={item['artifact'] for item in manifest.get('sensitivity_artifacts',[])}:
+            raise ValueError('Missing sensitivity artifact inventory')
     if 'artifact_inventory' in manifest:
         for item in manifest['artifact_inventory']:
             if hashes.get(item['artifact'])!=item.get('sha256'):

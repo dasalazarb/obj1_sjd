@@ -1,0 +1,46 @@
+schema_version: graph_missingness_methods_v1
+enabled: true
+references: [R0, R2]
+methods: [iterative_regularized, observed_pairwise_distance, values_plus_mask]
+freeze_original_representations: true
+freeze_source_feature_panels: true
+no_outcome_based_method_selection: true
+estimator_version: graph02_weighted_low_rank_v1
+iterative_regularized:
+  enabled: true
+  candidate_rank: [2, 3, 4]
+  singular_value_shrinkage: 0.10
+  score_ridge: 0.10
+  convergence_tolerance: 1.0e-5
+  max_iterations: 200
+  max_matrix_cells: 2000000
+  masked_validation_repeats: 10
+  masked_fraction_per_replicate: 0.10
+  validation_patient_fraction: 0.20
+  preserve_observed_values: true
+  fail_not_estimable_on_nonconvergence: true
+observed_pairwise_distance:
+  enabled: true
+  minimum_shared_domains: 2
+  minimum_shared_weight_fraction: 0.40
+  sensitivity_shared_weight_fraction: [0.25, 0.50]
+  forbid_unobserved_pair_filling: true
+  forbid_max_distance_fallback: true
+values_plus_mask:
+  enabled: true
+  primary_mask_weight: 0.25
+  sensitivity_mask_weights: [0.10, 0.50]
+  use_panel_specific_masks: true
+  deduplicate_source_observation_units: true
+  exclude_administrative_blocks_from_clinical_mask: true
+resampling:
+  main_subsampling_replicates_per_variant: 60
+  iterative_bootstrap_replicates: 20
+  parameter_sensitivity_subsampling_replicates: 20
+  patient_fraction: 0.80
+  refit_all_within_resample: true
+reporting:
+  save_all_comparisons: true
+  save_not_estimable_reason: true
+  emit_png_pdf: true
+  never_export_raw_patient_values_in_public_summary: true

@@ -214,3 +214,94 @@ mapa clínico, la comprobación de fechas/unidades reales y la ejecución defini
 en Biowulf siguen dependiendo de fuentes y revisión clínica reales.
 
 Ver [inventario y límites de implementación](../../../docs/graph02_03_implementation.md).
+
+## Sensibilidad transversal a datos faltantes (Graph02)
+
+El comando sin flags ejecuta además `R0-I`, `R0-D`, `R0-M`, `R2-I`, `R2-D` y
+`R2-M`, definidos en [configs/missingness_methods_02.yaml](configs/missingness_methods_02.yaml).
+Son sensibilidades no definitorias: mantienen las fuentes y pacientes de su
+referencia. R0/S3 y R2 conservan sus cálculos, presupuestos de 200 submuestras y
+100 bootstrap, tablas y membresías. R1, R3, R4 y S0–S4 reciben auditoría de
+missingness, familias/dominios y comparabilidad de pares. R0 frente a R2 mezcla
+selección, ponderación y geometría; ese contraste no aísla missingness.
+
+| Variante | Pregunta y método | Límite explícito |
+| --- | --- | --- |
+| `-I` | Reconstrucción de bajo rango regularizada con pesos singulares ajustados por familia R0 o constructo → subdominio → dominio R2; después se ejecuta la representación original | No equivale a `missMDA::imputeMFA`. Paneles con nominales no soportados quedan `NOT_ESTIMABLE`, sin excluirlos o imputar sus niveles continuamente |
+| `-D` | Diferencias robustas de resultados compartidos, una contribución por fuente/constructo, ponderación jerárquica | Mínimo dos familias/dominios y 40% de peso compartido; matrices incompletas quedan `NOT_ESTIMABLE`, conservando NA y su auditoría; nunca se rellenan pares |
+| `-M` | Distancia clínica más desacuerdo de estados de disponibilidad del propio panel | Peso principal 0.25, contrastes 0.10 y 0.50. Peso cero conserva exactamente el objeto de referencia. M1 histórico no es un alias |
+
+La reconstrucción minimiza residuo cuadrático observado ponderado con penalización
+nuclear y rango máximo preespecificado. Inicializa con medianas del entrenamiento,
+ajusta normalizaciones singulares sólo en ese entrenamiento y las congela durante
+la reconstrucción. Alterna SVD con contracción fija del 10% del primer singular
+inicial y restauración exacta de celdas observadas. Evalúa rangos 2/3/4 con diez
+particiones de pacientes; alterna enmascaramiento artificial por fuente e
+instrumento, al 10%. Los factores, límites, escalas y pesos se ajustan sin los
+pacientes de evaluación; éstos sólo ajustan sus propios scores mediante ridge
+0.10 sobre sus resultados disponibles. El criterio es MAE normalizado ponderado
+por celdas ocultadas; nunca outcomes ni comunidades. Tolerancia relativa 1e-5,
+máximo 200 iteraciones: falta de soporte, exceso de memoria o no convergencia
+producen `NOT_ESTIMABLE`, sin fallback silencioso. Las observaciones originales
+se conservan, las binarias mantienen sus niveles y las ordinales su orden
+previamente validado upstream. No se acepta una etiqueta nominal como continua.
+
+Las distancias `-D` pueden incumplir la desigualdad triangular. MDS métrico es
+sólo una lente sobre una matriz completa; DBSCAN recibe la disimilitud original,
+no las coordenadas MDS. Se reportan constructos/dominios compartidos, fracción
+de peso, pares no estimables y pacientes sin vecinos fiables. Los cortes 25% y
+50% son sensibilidades fijas, sin optimizar cobertura. Los niveles one-hot
+cuentan una sola vez. Las máscaras se construyen antes de imputar, deduplican
+linaje de fuentes y conservan `observed`, `missing`, `partial`, `unknown_detail`
+y razones upstream disponibles. No se infiere una ausencia administrativa o
+estructural cuando no está documentada. D08/D09 permanecen fuera del panel R2;
+los bloques administrativos no entran en las máscaras clínicas.
+
+Cada variante principal solicita 60 submuestras; `-I` añade 20 bootstrap clásicos.
+Cada sensibilidad de peso/corte solicita 20 submuestras sin cruzar la grilla
+Mapper. Imputación, pesos, escalas, máscaras, reducción y Mapper se reajustan en
+cada réplica sobre el panel congelado; no se submuestrea una matriz completada
+previamente. Las claves de cache incluyen fuentes, panel, estados originales,
+semilla, configuración, versión y hashes del código. Son cálculos CPU; el coste
+crece especialmente con la validación de rangos dentro de cada refit. No requieren
+GPU. El test sintético incluye un panel de 159 × 98 y control de memoria.
+
+En el nuevo `runs/<run_id>/`, los CSV `02_graph_missingness_*` contienen registro
+de métodos, paneles, estados agregados, reconstrucción, soporte de distancias,
+comparaciones geométricas y comunitarias, cobertura, estabilidad y QC. Se separan
+`FAILED` y `NOT_ESTIMABLE`; una variante secundaria fallida limita el release y
+no reemplaza la referencia. Los CSV internos de membresías, componentes de
+distancia y soporte por pares no son productos públicos. Las siete figuras
+PNG/PDF incluyen CSV fuente, denominadores y supresión de nodos/celdas menores
+a `minimum_publication_cell`. El resumen técnico no declara fenotipos validados,
+causalidad del proceso de observación ni progresión temporal.
+
+El manifiesto registra SHA256 de cada artefacto, versión del estimador,
+`analysis_role: sensitivity`, panel fijo y estados. El lector Graph03 comprueba
+estos hashes y continúa usando R0/R2 históricos; las variantes nunca se incluyen
+en `eligible_representation_ids`. `latest_completed_02.json` sólo se publica
+tras la validación integral del release. No se reescriben corridas previas.
+
+Pruebas sintéticas y regresión:
+
+```bash
+python -m pytest tests/test_graph_missingness_variants.py tests/test_graph_pipeline.py \
+  tests/test_graph_representation_sensitivity.py tests/test_graph_missingness_v2.py \
+  tests/test_graph_clinical_domain_mapping_v2.py tests/test_graph_coverage_diagnostics_v2.py \
+  tests/test_graph_bootstrap_qc.py -q
+```
+
+La ejecución real sin flags se intentó en el entorno de implementación del
+2026-10-29 y se detuvo antes del análisis: falta
+`data/analytic/10_build_integrated_longitudinal_dataset/10_integrated_longitudinal_clinical_episode.parquet`.
+No se generó ni publicó un release clínico ni se sustituyeron fuentes privadas
+por datos sintéticos. La verificación funcional usa fuentes sintéticas con el
+contrato Pharma00, comprueba identidad SHA256 de ocho salidas históricas al
+activar las variantes y compatibilidad con el lector Graph03. La corrida real
+completa queda pendiente de disponer de los insumos privados autorizados.
+
+Referencias: Josse y Husson, *missMDA* (2016), DOI
+[10.18637/jss.v070.i01](https://www.jstatsoft.org/article/view/v070i01);
+[`missMDA::imputeMFA`](https://search.r-project.org/CRAN/refmans/missMDA/html/imputeMFA.html).
+La validación con enmascaramiento artificial no identifica el mecanismo real de
+missingness; estabilidad técnica no establece validez clínica.
