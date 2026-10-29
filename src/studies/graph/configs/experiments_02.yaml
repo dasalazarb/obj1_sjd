@@ -1,5 +1,4 @@
-# Prespecified exploratory protocol; approvals must never be inferred.
-protocol_id: graph02_03_20261028_v1
+protocol_id: graph02_20261029_v2
 legacy_scenarios:
 - S0
 - S1
@@ -16,13 +15,13 @@ final_representation_ids:
 - R0
 - R2
 - R3
-final_subsampling_replicates: 60
-secondary_subsampling_replicates: 20
+final_subsampling_replicates: 200
+secondary_subsampling_replicates: 60
 patient_fraction: 0.8
 match_jaccard: 0.5
 stable_threshold: 0.8
 minimum_success_fraction: 0.95
-bootstrap_replicates: 20
+bootstrap_replicates: 100
 preflight_replicates: 10
 run_lens_distance_sensitivity: true
 run_mapper_grid: true
@@ -68,4 +67,9 @@ minimum_mapper_coverage: 0.5
 maximum_fragmentation: 0.5
 threshold_justification: Historical execution/stability reference thresholds; technical
   screening only, never biological validity. Frozen before clinical validation.
-cache_version: graph02_cache_v2
+cache_version: graph02_cache_v3
+observation_permutations: 199
+observation_cv_repeats: 5
+minimum_comparison_patients: 10
+minimum_publication_cell: 5
+run_observation_diagnostics: true

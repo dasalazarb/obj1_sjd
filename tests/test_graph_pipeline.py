@@ -77,6 +77,8 @@ def test_default_full_protocol_and_no_required_flags():
     cfg=pipe.load_pipeline()
     assert cfg['analysis']=={'mode':'exploratory','feature_policy':'phenotype_independent','reference_scenario':'S3'}
     assert cfg['experiments']['final_subsampling_replicates']==200
+    assert cfg['experiments']['bootstrap_replicates']==100
+    assert cfg['experiments']['secondary_subsampling_replicates']==60
     assert set(cfg['experiments']['legacy_scenarios'])==set(legacy.SCENARIOS)
     assert cfg['experiments']['mapper_grid']['n_cubes']==[6,8,10]
     assert cfg['experiments']['mapper_grid']['perc_overlap']==[.3,.4,.5]
@@ -99,14 +101,24 @@ def test_zero_argument_full_study_and_standalone_entries(configuration,monkeypat
     registry=pd.read_csv(path.parent/'02_graph_experiment_registry.csv')
     for identifier in ['S0','S1','S2','S3','S4','R0','R1','R2','R3','R4','D1','D2','D3','D4','D5']:
         assert identifier in set(registry.experiment_id)
-    assert registry.loc[registry.experiment_id.eq('R2'),'status'].iloc[0]=='NOT_ESTIMABLE'
-    assert registry.experiment_id.str.startswith('A1/').sum()==9
+    assert registry.loc[registry.experiment_id.eq('R2'),'status'].iloc[0]=='COMPLETE'
+    assert manifest['representations']['R2']['evidence_level']=='EXPLORATORY_PROVISIONAL'
+    assert manifest['clinical_mapping']['review_status']=='pending_clinical_review'
+    assert manifest['clinical_mapping']['selected_unmapped_count']==0
+    assert manifest['coverage']['n_total']==36
+    for identifier in ['A5/context_excluded','N2a/missingness_only','N2b/administrative_only','N2c/missingness_plus_admin','N2d/domain_missingness_only','M1/value_plus_mask_sensitivity','N5/mask_row_permutation','N6/administrative_stratified_permutation']:
+        assert identifier in set(registry.experiment_id)
+    assert (registry.experiment_id.str.startswith('A1/') & registry.kind.eq('domain_ablation')).sum()==9
     assert registry.loc[registry.kind.eq('mapper_grid')].shape[0]==4
     methods=pd.read_csv(path.parent/'02_graph_resampling_replications.csv')
     assert set(methods.method)=={'repeated_subsampling','classic_bootstrap'}
     assert methods.loc[methods.method.eq('repeated_subsampling')].n_draws.eq(methods.loc[methods.method.eq('repeated_subsampling')].n_unique_patients).all()
-    assert len(list((path.parent/'figures').glob('*.png')))==4
-    assert len(list((path.parent/'figures').glob('*.pdf')))==4
+    assert len(list((path.parent/'figures').glob('*.png')))>=4
+    assert len(list((path.parent/'figures').glob('*.png')))==len(list((path.parent/'figures').glob('*.pdf')))
+    figure_inventory=pd.read_csv(path.parent/'02_graph_figure_inventory.csv')
+    assert set(figure_inventory.status)<= {'COMPLETE','NOT_ESTIMABLE'}
+    assert all((path.parent/r.artifact).is_file() for r in figure_inventory.query("status=='COMPLETE'").itertuples())
+    assert all(not r['shareable_export_allowed'] for r in manifest['artifact_inventory'])
     study=list(pipe.output_root(cfg,'study').glob('runs/*'))[0]
     report=json.loads((study/'graph_study_execution_manifest.json').read_text())
     assert report['execution_status'] in {'COMPLETE_WITH_LIMITATIONS','PARTIAL'}
@@ -359,3 +371,37 @@ def test_domain_unit_review_and_reserved_anchor_role():
     registry.loc[0,'unit']='SYNTHETIC_UNIT'; registry.loc[0,'role']='independent_baseline_anchor'
     eligible=eligible_domain_map(registry,['a','b'])
     assert list(eligible.index)==['b']
+
+
+def test_all_observation_controls_execute_on_missing_synthetic_panel(configuration,tmp_path):
+    from tests.test_graph_clinical_domain_mapping_v2 import SOURCES
+    cfg=configuration; source=Path(cfg['paths']['integrated']); master=pd.read_parquet(source)
+    rng=np.random.default_rng(772)
+    for column in SOURCES:
+        master[column]=rng.normal(size=len(master))
+        absent=rng.choice(36,5,replace=False)
+        master.loc[absent,column]=np.nan
+    master.to_parquet(source,index=False)
+    spec=importlib.util.spec_from_file_location('observation_fixture_pharma',GRAPH.parent/'pharma/00_profile_labs.py')
+    pharma=importlib.util.module_from_spec(spec); spec.loader.exec_module(pharma)
+    profile=tmp_path/'missing_panel_profile'/'00_pharma_lab_profile.csv'
+    cfg['paths']['pharma_candidates']=str(profile.with_name(pharma.GRAPH_CANDIDATES_NAME))
+    pharma.run(pharma.parse_args(['--integrated',str(source),'--output',str(profile)]))
+    cfg['experiments'].update(observation_permutations=19,observation_cv_repeats=2)
+    result=run02(cfg); manifest,path=validate_release(result['manifest'])
+    registry=pd.read_csv(path.parent/'02_graph_experiment_registry.csv')
+    for identifier in ['N2a/missingness_only','N2b/administrative_only','N2c/missingness_plus_admin','N2d/domain_missingness_only','M1/value_plus_mask_sensitivity','A5/context_excluded']:
+        row=registry.loc[registry.experiment_id.eq(identifier)].iloc[0]
+        assert row.status=='COMPLETE',row.reason
+    assert manifest['clinical_mapping']['selected_unmapped_count']==0
+    assert manifest['coverage']['reason_audit_complete']
+    for name in ['missingness_domain_heatmap','missingness_coverage','missingness_topologies']:
+        assert (path.parent/f'figures/02_graph_{name}.png').is_file()
+    masks=pd.read_csv(path.parent/'02_graph_patient_observation_masks.csv')
+    assert masks.patient_id.tolist()==master.loc[master.is_clinical_baseline,'patient_id'].tolist()
+    sources=pd.read_csv(path.parent/'02_graph_missingness_source_manifest.csv')
+    assert sources.loc[sources.included_in_mask,'clinical_domain'].ne('D09').all()
+    # New mapping/diagnostic artifacts are hash-protected even though Graph03 does not reestimate them.
+    artifact=path.parent/'02_graph_missingness_summary.csv'
+    artifact.write_text(artifact.read_text()+'\n')
+    with pytest.raises(ValueError,match='SHA mismatch'): validate_release(path)

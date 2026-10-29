@@ -1,6 +1,7 @@
 """Representations separate the Mapper lens from its local clustering space."""
 from dataclasses import dataclass
 import inspect
+import json
 import numpy as np
 import pandas as pd
 from sklearn.decomposition import PCA
@@ -85,19 +86,33 @@ def reduce_matrix(matrix, config, *, dimensions=None):
     return probe.transform(matrix)[:,:count]
 
 
-def hierarchical_mfa(raw, registry):
-    meta=eligible_domain_map(registry,list(raw))
+def hierarchical_mfa(raw, registry, purpose='clinical_release'):
+    meta=eligible_domain_map(registry,list(raw),purpose=purpose)
     raw=raw[meta.index]
     blocks=[]; audit=[]
     for domain, group in meta.groupby('clinical_domain',sort=True):
         nested=[]; subrows=[]
         for sub, part in group.groupby('subdomain',sort=True):
             cols=part.index.tolist()
-            block,sigma=legacy.scale_mfa_block(raw[cols],f'{domain}/{sub}',allow_zero=True)
+            # One normalized block per documented construct; one-hot levels,
+            # bilateral variants and derived summaries cannot multiply its weight.
+            construct_blocks=[]
+            construct_audit=[]
+            groups=part.groupby('derivation_group',sort=True) if 'derivation_group' in part else [(c,part.loc[[c]]) for c in cols]
+            for construct, members in groups:
+                b,first=legacy.scale_mfa_block(raw[members.index],str(construct),allow_zero=True)
+                construct_blocks.append(b)
+                construct_audit.append({'construct':str(construct),'sigma1':first,'weight':1/first if first else 0.,'n_columns':len(members)})
+            combined_constructs=np.column_stack(construct_blocks)
+            sigma=legacy._first_singular_value(combined_constructs,f'{domain}/{sub}')
+            block=combined_constructs/sigma if sigma else np.zeros_like(combined_constructs)
             nested.append(block)
             row={'level':'SUBDOMAIN','block':f'{domain}/{sub}','n_features':len(cols),
                  'sigma1_before_weighting':sigma,'weight_applied':1/sigma if sigma else 0.,
-                 'effective_weight':1/sigma if sigma else 0.,'status':'active' if sigma else 'zero_variance'}
+                 'effective_weight':1/sigma if sigma else 0.,'status':'active' if sigma else 'zero_variance',
+                 'n_source_variables':part.source_column.nunique(),'n_semantic_constructs':len(construct_blocks),
+                 'imputation':'within_refit_source_median','construct_weighting':'unit_first_singular_value',
+                 'construct_normalization':json.dumps(construct_audit,sort_keys=True)}
             subrows.append(row)
         combined=np.column_stack(nested)
         sigma=legacy._first_singular_value(combined,domain)
@@ -113,8 +128,10 @@ def hierarchical_mfa(raw, registry):
         audit.append({'level':'DOMAIN','block':domain,'n_features':len(group),
                       'sigma1_before_weighting':sigma,'weight_applied':1/sigma,'effective_weight':1/sigma,'status':'active'})
         blocks.append(combined/sigma)
-    if not blocks:
-        raise ValueError('ZERO_VARIANCE_CLINICAL_DOMAINS')
+    if len(blocks)<2:
+        raise ValueError('FEWER_THAN_TWO_ACTIVE_CLINICAL_DOMAINS')
+    if np.linalg.matrix_rank(np.column_stack(blocks))<2:
+        raise ValueError('CLINICAL_MATRIX_INSUFFICIENT_RANK')
     return np.column_stack(blocks),pd.DataFrame(audit),list(raw)
 
 
@@ -146,7 +163,7 @@ def build_space(identifier, raw, families, config, registry, manifest, baseline,
         x=rep.embedding
         return Space(raw,x[:,:2],x,pairwise_distances(x),rep.balance_audit,'PCA',list(raw),rep)
     if identifier=='R2':
-        matrix,audit,features=hierarchical_mfa(raw,registry)
+        matrix,audit,features=hierarchical_mfa(raw,registry,purpose=config.get('analysis_mode','clinical_release'))
         x=reduce_matrix(matrix,config)
         return Space(raw[features],x[:,:2],x,pairwise_distances(x),audit,'hierarchical_clinical_MFA',features)
     frame,kinds=mixed_source_frame(raw,manifest,baseline)

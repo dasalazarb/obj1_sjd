@@ -52,17 +52,25 @@ fuentes no cambia los contratos Pharma00 ni las compuertas de serología as-of.
 * R2 realiza MFA jerárquico por subdominio y dominio clínico transversal. D01–D07
   son candidatos; D08/D09 son contexto. El YAML contiene **candidatos pendientes**,
   con nombres exactos y sin inferencia clínica por coincidencias de texto. Sin
-  aprobación y temporalidad verificadas, R2 queda `NOT_ESTIMABLE`, sin bloquear R0.
+  aprobación clínica, R2 puede ejecutar como `EXPLORATORY_PROVISIONAL` si pasa
+  elegibilidad técnica, temporalidad basal y al menos dos dominios activos.
+  `clinical_release` exige aprobación humana y unidades/temporalidad verificadas;
+  una fuente técnicamente insegura se excluye con razón. Las 16 fuentes salivales,
+  oculares y SF-36 están mapeadas exactamente; el join usa la fuente original,
+  incluso en codificaciones `__binary`/one-hot. El linaje conocido y los pesos por
+  constructo evitan contar derivados como ensayos independientes.
 * R3 calcula Gower por variable fuente mixta y usa MDS métrico sólo como lente.
   DBSCAN recibe la distancia Gower precomputada. R4 usa FAMD cuando hay nominales;
   los niveles one-hot de una fuente cuentan como una variable mixta.
 * D1–D6 separan lente y espacio de clustering; la rejilla Mapper predefinida es
-  6/8/10 cubos × 0.30/0.40/0.50 de solapamiento. Cada celda tiene 20 submuestras
-  preliminares, sin afirmar estabilidad final. UMAP es secundario y produce una
+  6/8/10 cubos × 0.30/0.40/0.50 de solapamiento. Cada celda tiene submuestras
+  preliminares según YAML (10 en este protocolo), sin afirmar estabilidad final. UMAP es secundario y produce una
   limitación explícita si no está instalado.
 * R0/R2/R3 elegibles tienen **200 submuestras al 80% sin reemplazo**. Los otros
   escenarios tienen el presupuesto secundario de 60. Bootstrap clásico, separado,
-  refita con multiplicidades y representa cada paciente único una vez en Mapper.
+  usa **100 réplicas para R0 y R2 estimable**, refita con multiplicidades y
+  representa cada paciente único una vez en Mapper. R3 usa 200 submuestras solo
+  si pasa cobertura y estructura preespecificadas; de lo contrario usa 60.
   Los filtros, imputación, escalado, reducción y topología se refitan en cada réplica.
 * El matching es Hungarian uno-a-uno sobre uniones de nodos, con auditoría de
   splits/merges, denominadores de ejecuciones válidas y comunidades evaluables,
@@ -71,6 +79,43 @@ fuentes no cambia los contratos Pharma00 ni las compuertas de serología as-of.
 * Se ejecutan ablations por familia/dominio aplicable, panel con unidades válidas,
   permutaciones que conservan marginales y máscaras, controles de observación y
   estratos administrativos, y k-medoids/aglomerativo con K=2–5 y refit por submuestra.
+
+* A5/context_excluded excluye D08/D09 y roles contextuales **antes de cada refit**
+  de selección, redundancia, imputación, escalado, PCA y Mapper. No altera R0.
+  A1/D01–D07, A2/familia y A6/constructos documentados tienen refits completos
+  y presupuesto secundario. No se selecciona la rejilla por mayor cobertura.
+* M0 fija las máscaras a fuentes/constructos R0, colapsando codificaciones y
+  derivados documentados. Conserva estados explícitos, incluidos `unknown_detail`,
+  sin interpretar un dato ausente como negativo. N2a usa solo máscaras y distancia
+  Hamming balanceada por familia; N2b solo administración verificada y Gower;
+  N2c combina distancias con pesos 1/2; N2d balancea dominios/instrumentos.
+  Máscaras idénticas y totalmente observadas/ausentes se auditan y no se perturban
+  artificialmente. Sin variabilidad se registra `NOT_ESTIMABLE`. El N2 histórico
+  sigue etiquetado como mezcla de ausencia y administración.
+* M1 combina valores R0 e indicadores con pesos de energía 1/2 y refits; N5
+  permuta filas completas de máscaras; N6 permuta dentro de estratos amplios de
+  protocolo/era cuando hay soporte. Se usan 199 permutaciones preespecificadas,
+  p=(1+extremos)/(B+1), distribución nula e intersecciones auditadas. Son pruebas
+  exploratorias múltiples: no identifican MCAR/MAR/MNAR ni mecanismos causales.
+* Regresión logística regularizada diagnostica cobertura con cargas por
+  familia/dominio y, por separado, administración. Imputer/scaler se entrenan en
+  cada fold de CV estratificada repetida. Los percentiles son distribución de CV,
+  no un IC de observaciones independientes. Cada contraste reporta n, soporte,
+  universo completo y asignaciones duras comunes; los no cubiertos no son clase.
+* La auditoría de cobertura usa los cubos exactos y los nodos emitidos de Mapper,
+  distinguiendo cubos pequeños, ruido DBSCAN, nodos descartados y razón no resuelta.
+  Registra distancias kNN, soporte local, bordes de cubos, carga observacional y
+  efectos con bootstrap por paciente; no reasigna pacientes. N3 usa bandas de
+  edad fijas, y protocolo solo usa aliases estructurales documentados.
+
+El comando sin flags genera todos los CSV, figuras PNG/PDF aplicables, resumen
+con cifras de ejecución, inventario de figuras no estimables, pesos y auditorías.
+El manifiesto conserva `graph02_release_v1` de forma aditiva y Graph03 valida
+los mismos hashes sin reestimar. Caché v3 incluye mapa/release, variables,
+configuración, semilla, versión de algoritmo y hash de entrada. Los archivos por
+paciente y el resto del release son internos/restringidos por defecto: el inventario
+no autoriza exportación pública sin revisión NIH. Una corrida real requiere las
+fuentes Step10/Pharma00 originales en el entorno NIH; los tests usan sintéticos.
 
 Las pruebas no aplicables tienen filas `NOT_ESTIMABLE` con motivos. Los fallos de
 réplicas se registran y afectan QC; no se reintenta hasta obtener éxitos. Un grafo

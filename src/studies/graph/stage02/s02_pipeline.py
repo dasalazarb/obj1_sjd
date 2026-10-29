@@ -14,7 +14,7 @@ from .._pipeline import (load_pipeline, config_path, output_root, new_run, save_
 from .. import _feature_catalog as catalog
 from . import s02_legacy as legacy
 from .s02_contracts import SCHEMA, resolve_sources, publish_pointer
-from .s02_feature_registry import clinical_registry, domain_coverage, eligible_domain_map, verify_observed_baseline_dates
+from .s02_feature_registry import clinical_registry, domain_coverage, eligible_domain_map, verify_observed_baseline_dates, mapping_counts, RESERVED, CLINICAL
 from .s02_representations import build_space, Space, hierarchical_mfa
 from .s02_mapper_engine import analyze, frozen_membership
 from .s02_resampling import resample, match_sets
@@ -22,6 +22,8 @@ from .s02_perturbations import permute_observed, mask_control
 from .s02_comparators import comparators
 from .s02_decision_rules import release_decision
 from .s02_reporting import figures, save_figure
+from .s02_missingness import compare_coverage, run_observation_diagnostics, administrative_frame, administrative_strata
+from .s02_reporting import diagnostic_figures, results_summary, privacy_inventory
 
 
 def prepare_inputs(cfg):
@@ -93,6 +95,8 @@ def _execute(cfg,root,run_dir,started,preflight_only):
     map_path=config_path(cfg['_path'],cfg['paths']['lab_group_map'])
     cache_base=digest(sources['integrated'])+cfg['_config_sha256']+settings['cache_version']+catalog.frame_hash(pd.DataFrame(values))
     cache_base+=digest(map_path) if map_path.is_file() else 'NO_S4_MAP'
+    cache_base+=json.dumps(cfg['clinical_domains'],sort_keys=True)+json.dumps(settings,sort_keys=True)
+    cache_base+=SCHEMA+catalog.CONTRACT_VERSION+'graph02_algorithm_v3/'+str(seed)
     stable_ids={}; memberships={}
 
     def record(identifier,kind,status='COMPLETE',reason='',**more):
@@ -110,6 +114,10 @@ def _execute(cfg,root,run_dir,started,preflight_only):
             source={name:s.iloc[draw].reset_index(drop=True) for name,s in source.items()}
             sample_baseline=baseline.iloc[draw].reset_index(drop=True)
         if exclude: source={name:s for name,s in source.items() if name not in exclude}
+        if identifier=='R2':
+            gate='clinically_approved' if cfg['analysis']['mode']=='clinical_release' else 'exploratory_technical_eligible'
+            allowed=set(registry.loc[registry[gate],'feature'])
+            source={name:s for name,s in source.items() if name in allowed}
         chosen,cov,red=legacy.select_features(source,families,scenario,effective_config,manifest)
         raw=pd.DataFrame(chosen,index=sample_baseline.index)
         if len(raw.columns)<2: raise ValueError('INSUFFICIENT_SELECTED_FEATURES')
@@ -128,7 +136,7 @@ def _execute(cfg,root,run_dir,started,preflight_only):
         result=resample(mapped['community_sets'],n,fit or refit(identifier,effective_config=effective_config),
             partial(analyze,config=effective_config),settings,seed=seed,identifier=experiment_id or identifier,
             method=method,replicates=budget,cache_dir=cache_dir,
-            cache_key=cache_base+json.dumps(effective_config,sort_keys=True),preliminary=preliminary)
+            cache_key=cache_base+json.dumps(effective_config,sort_keys=True)+'|'.join(sorted(space.features)),preliminary=preliminary)
         attempts.extend(result['attempts']); stability.extend(result['stability']); matches.extend(result['alignments'])
         for row in result['assignments']:
             patient=baseline.patient_id.iloc[row.pop('patient_index')]
@@ -153,7 +161,7 @@ def _execute(cfg,root,run_dir,started,preflight_only):
                 space=results['S4']['space']; cov=results['S4']['coverage']; red=results['S4']['redundancy']
             else:
                 space,cov,red=select_and_fit(identifier)
-            mapped=analyze(space,config)
+            mapped=analyze(space,config,audit=identifier=='R0')
             results[identifier]={'space':space,'mapped':mapped,'coverage':cov,'redundancy':red}
             coverage.extend(domain_coverage(space.raw,registry,identifier))
             weights.extend({'representation_id':identifier,**r} for r in space.weights.to_dict('records'))
@@ -167,11 +175,14 @@ def _execute(cfg,root,run_dir,started,preflight_only):
             audit['coverage_pass']=audit.feature.map(cov.set_index('feature').included_after_coverage_filter).eq(True)
             audit['redundancy_pass']=~audit.feature.isin(red.feature_removed)
             selection.append(audit)
-            record(identifier,'representation',method=space.method,n_features=len(space.raw.columns),
+            evidence='APPROVED' if identifier=='R2' and registry.loc[registry.feature.isin(space.features),'clinically_approved'].all() else 'EXPLORATORY_PROVISIONAL' if identifier=='R2' else 'TECHNICAL_REFERENCE_OR_SENSITIVITY'
+            record(identifier,'representation',method=space.method,n_features=len(space.raw.columns),evidence_level=evidence,
+                **mapping_counts(registry,space.features),
                 mapper_coverage=float(mapped['covered'].mean()),n_nodes=len(mapped['nodes']),n_communities=len(mapped['community_sets']))
             # R0 and R1 reuse identical full fits, not duplicate stability estimates.
             if identifier in {'S3','S4'}: continue
-            budget=int(settings['final_subsampling_replicates'] if identifier in settings['final_representation_ids'] else settings['secondary_subsampling_replicates'])
+            primary_budget=identifier in settings['final_representation_ids'] and (identifier!='R3' or (mapped['covered'].mean()>=settings['minimum_mapper_coverage'] and len(mapped['communities'])>0))
+            budget=int(settings['final_subsampling_replicates'] if primary_budget else settings['secondary_subsampling_replicates'])
             boot=evaluate_resampling(identifier,space,mapped,budget=budget)
             qc_by_id[identifier]=boot['qc_pass']
             statuses={row['community_id']:'stable' if row['stable'] else 'provisional' if boot['qc_pass'] else 'QC_FAILED' for row in boot['stability']}
@@ -191,7 +202,7 @@ def _execute(cfg,root,run_dir,started,preflight_only):
                         'node_support':len(patients),'connected_component':component,'community_id':community})
             for a,b,attr in mapped['nerve'].edges(data=True):
                 edges.append({'representation_id':identifier,'source_node':a,'target_node':b,'weight':attr.get('weight',np.nan),'weight_type':'patient_jaccard'})
-            if identifier in settings['final_representation_ids'] and settings['run_separate_classic_bootstrap_sensitivity']:
+            if identifier in {'R0','R2'} and settings['run_separate_classic_bootstrap_sensitivity']:
                 evaluate_resampling(identifier,space,mapped,method='classic_bootstrap',budget=int(settings['bootstrap_replicates']))
         except (ValueError,np.linalg.LinAlgError) as exc:
             if identifier=='R0': raise ValueError('PRIMARY_REFERENCE_NOT_ESTIMABLE') from exc
@@ -205,25 +216,38 @@ def _execute(cfg,root,run_dir,started,preflight_only):
                 if row['representation_id']==new: member_rows.append({**row,'representation_id':old})
     reference=results['R0']; base_space=reference['space']; base_map=reference['mapped']
 
-    def perturbation(identifier,space,mapped=None,kind='perturbation'):
+    comparisons=[]; perturbations={}
+    def perturbation(identifier,space,mapped=None,kind='perturbation',fit=None):
         mapped=mapped or analyze(space,config)
-        valid=np.isfinite(base_map['hard']) & np.isfinite(mapped['hard']) & ~base_map['ties'] & ~mapped['ties']
-        ari=float(adjusted_rand_score(base_map['hard'][valid],mapped['hard'][valid])) if valid.sum()>1 else np.nan
-        row=record(identifier,kind,mapper_coverage=float(mapped['covered'].mean()),n_common=int(valid.sum()),
-                   common_fraction=float(valid.mean()),ari_primary=ari,n_communities=len(mapped['community_sets']))
+        comparison=compare_coverage(base_map,mapped,int(settings.get('minimum_comparison_patients',10)))
+        comparison['comparison_status']=comparison.pop('status'); comparison['comparison_reason']=comparison.pop('reason')
+        row=record(identifier,kind,mapper_coverage=float(mapped['covered'].mean()),
+                   n_nodes=len(mapped['nodes']),fragmentation=len(mapped['components'])/max(1,len(mapped['nodes'])),
+                   n_communities=len(mapped['community_sets']),**comparison)
+        comparisons.append(row); perturbations[identifier]={'space':space,'mapped':mapped}
+        if fit is not None and settings['run_resampling']:
+            evaluate_resampling(identifier,space,mapped,fit=fit,budget=int(settings['secondary_subsampling_replicates']))
         return row
+
+    # Context exclusions happen before every selection/imputation/scaling/PCA fit.
+    contextual=set(registry.loc[registry.clinical_domain.isin(['D08','D09']) | registry.role.isin(RESERVED),'feature'])
+    try:
+        space,_,_=select_and_fit('R0',exclude=contextual)
+        perturbation('A5/context_excluded',space,kind='context_exclusion',fit=refit('R0',exclude=contextual))
+    except (ValueError,np.linalg.LinAlgError) as exc:
+        record('A5/context_excluded','context_exclusion','NOT_ESTIMABLE',str(exc))
 
     if settings['run_lens_distance_sensitivity']:
         perturbation('D1',base_space,base_map,'lens_distance')
         for identifier in ('D2','D3','D4','D5','D6'):
             try:
                 if identifier=='D2':
-                    meta=eligible_domain_map(registry,list(base_space.raw))
+                    meta=eligible_domain_map(registry,list(base_space.raw),purpose=cfg['analysis']['mode'])
                     scores=[]
                     for _,part in meta.groupby('clinical_domain'):
                         block=base_space.raw[part.index]
                         scores.append(block.sub(block.mean()).div(block.std().replace(0,np.nan)).mean(axis=1).fillna(0).to_numpy())
-                    if len(scores)<2: raise ValueError('INDEPENDENT_DOMAIN_LENS_REQUIRES_TWO_APPROVED_DOMAINS')
+                    if len(scores)<2: raise ValueError('DOMAIN_LENS_REQUIRES_TWO_ELIGIBLE_DOMAINS')
                     mapped=analyze(base_space,config,lens=np.column_stack(scores)[:,:2])
                 elif identifier=='D3':
                     full,_,_=legacy.prepare_matrix(base_space.raw,families,True)
@@ -278,16 +302,24 @@ def _execute(cfg,root,run_dir,started,preflight_only):
             try:
                 if not excluded: raise ValueError('FAMILY_ABSENT')
                 space,_,_=select_and_fit('R0',exclude=excluded)
-                perturbation(f'A2/{family}',space,kind='family_ablation')
+                perturbation(f'A2/{family}',space,kind='family_ablation',fit=refit('R0',exclude=excluded))
             except (ValueError,np.linalg.LinAlgError) as exc: record(f'A2/{family}','family_ablation','NOT_ESTIMABLE',str(exc))
         for domain in cfg['clinical_domains']['domains']:
-            excluded=set(registry.loc[registry.clinical_domain.eq(domain) & registry.selected_in_primary,'feature'])
+            excluded=set(registry.loc[registry.clinical_domain.eq(domain),'feature'])
             try:
                 if not excluded: raise ValueError('DOMAIN_ABSENT_OR_UNMAPPED')
-                eligible_domain_map(registry,sorted(excluded))
+                if domain not in CLINICAL: raise ValueError('CONTEXT_DOMAIN_AUDITED_IN_A5')
+                eligible_domain_map(registry,sorted(excluded),purpose=cfg['analysis']['mode'])
                 space,_,_=select_and_fit('R0',exclude=excluded)
-                perturbation(f'A1/{domain}',space,kind='domain_ablation')
+                perturbation(f'A1/{domain}',space,kind='domain_ablation',fit=refit('R0',exclude=excluded))
             except (ValueError,np.linalg.LinAlgError) as exc: record(f'A1/{domain}','domain_ablation','NOT_ESTIMABLE',str(exc))
+        for construct in ['unstimulated_whole_saliva','ocular_schirmer','SF36_INSTRUMENT']:
+            excluded=set(registry.loc[registry.derivation_group.eq(construct),'feature'])
+            try:
+                if not excluded.intersection(base_space.features): raise ValueError('CONSTRUCT_ABSENT_FROM_REFERENCE')
+                space,_,_=select_and_fit('R0',exclude=excluded)
+                perturbation('A6/'+construct,space,kind='construct_ablation',fit=refit('R0',exclude=excluded))
+            except (ValueError,np.linalg.LinAlgError) as exc: record('A6/'+construct,'construct_ablation','NOT_ESTIMABLE',str(exc))
         try:
             valid_units=set(manifest.loc[manifest.unit_review_status.isin(['valid','harmonized','approved']),'feature'])
             reduced={c:v for c,v in values.items() if c in valid_units and v.notna().all()}
@@ -319,17 +351,15 @@ def _execute(cfg,root,run_dir,started,preflight_only):
             if len(raw.columns)<2: raise ValueError('NO_VARIABLE_OBSERVATION_PROCESS')
             rep=legacy.fit_embedding(raw,{c:'CLINICAL' for c in raw},'S2',config)
             space=Space(raw,rep.embedding[:,:2],rep.embedding,pairwise_distances(rep.embedding),pd.DataFrame(),'missingness_admin',list(raw),rep)
-            negative.append(perturbation('N2/missingness_protocol_era',space,kind='negative_control'))
+            negative.append(perturbation('N2/missingness_protocol_era',space,kind='legacy_mixed_observation_admin_control'))
         except ValueError as exc: negative.append(record('N2/missingness_protocol_era','negative_control','NOT_ESTIMABLE',str(exc)))
         date=cfg['validation']['date_column']
-        controls=list(cfg['validation']['confounders'])
-        if date in baseline:
-            baseline['graph__era']=pd.to_datetime(baseline[date],errors='coerce').dt.year//5*5
-            controls.append('graph__era')
-        for column in controls:
-            if column not in baseline:
-                negative.append(record('N3/'+column,'administrative_stratum','NOT_ESTIMABLE','SOURCE_UNAVAILABLE')); continue
-            for level,idx in baseline.groupby(column,dropna=True).groups.items():
+        admin,_,admin_sources=administrative_frame(baseline,cfg['validation']['confounders'],date)
+        for item in admin_sources.loc[admin_sources.status.eq('NOT_ESTIMABLE')].to_dict('records'):
+            negative.append(record('N3/'+item['requested'],'administrative_stratum','NOT_ESTIMABLE',item['reason']))
+        for column in admin:
+            strata=administrative_strata(admin[column],column,int(settings['minimum_stratum_patients']))
+            for level,idx in strata.groupby(strata,dropna=True).groups.items():
                 # Logs use a level index, never a patient identifier or raw protocol value.
                 identifier=f'N3/{column}/stratum_{len(negative)}'
                 if len(idx)<int(settings['minimum_stratum_patients']):
@@ -340,6 +370,28 @@ def _execute(cfg,root,run_dir,started,preflight_only):
                         mapper_coverage=float(mapped['covered'].mean()),mean_pairwise_distance=float(space.distance[np.triu_indices(len(idx),1)].mean())))
                 except ValueError as exc: negative.append(record(identifier,'administrative_stratum','NOT_ESTIMABLE',str(exc)))
         record('N4/selection_knowledge_date','administrative_control','NOT_ESTIMABLE','NO_APPROVED_BASELINE_SELECTION_KNOWLEDGE_DATE_CONTRAST')
+    observation=run_observation_diagnostics(base_space.raw,registry,baseline,base_map,config,settings,
+        cfg['validation'],run_dir,perturbation,record,refit('R0'))
+    for identifier,item in results.items():
+        if identifier=='R0': continue
+        comparison=compare_coverage(base_map,item['mapped'],int(settings.get('minimum_comparison_patients',10)))
+        comparisons.append({'experiment_id':identifier,**comparison})
+    save_table(run_dir/'02_graph_comparison_denominators.csv',comparisons)
+    save_table(run_dir/'02_graph_domain_ablation_summary.csv',[r for r in experiments if r['experiment_id'].startswith(('A1/','A2/','A6/'))])
+    save_table(run_dir/'02_graph_context_exclusion_comparison.csv',[r for r in experiments if r['experiment_id']=='A5/context_excluded'])
+    registry['included_R2']=registry.feature.isin(results['R2']['space'].features if 'R2' in results else [])
+    registry.loc[registry.exploratory_technical_eligible & ~registry.included_R2,'exclusion_reason']='NOT_SELECTED_IN_R2_REFIT_OR_REPRESENTATION_NOT_ESTIMABLE'
+    save_table(run_dir/'02_graph_clinical_domain_registry.csv',registry)
+    save_table(run_dir/'02_graph_clinical_feature_mapping_audit.csv',registry)
+    unmapped=registry.loc[registry.selected_in_primary & registry.clinical_domain.eq('UNMAPPED')].copy()
+    save_table(run_dir/'02_graph_unmapped_selected_features.csv',unmapped)
+    save_table(run_dir/'02_graph_domain_contributions.csv',[r for r in weights if r['representation_id']=='R2'])
+    save_table(run_dir/'02_graph_clinical_domain_map_summary.csv',[
+        dict(clinical_domain=domain,n_original_sources=part.source_column.nunique(),n_encoded_features=len(part),
+            n_unique_constructs=part.derivation_group.nunique(),n_approved_sources=part.loc[part.clinically_approved,'source_column'].nunique(),
+            n_technical_eligible_sources=part.loc[part.exploratory_technical_eligible,'source_column'].nunique(),
+            n_selected_R0=int(part.selected_in_primary.sum()),n_selected_R2=int(part.included_R2.sum()))
+        for domain,part in registry.groupby('clinical_domain')])
     if settings['run_structural_comparators']:
         comparator_rows=comparators(base_space,base_map,settings,seed,refit('R0'))
         for row in comparator_rows: record(f'C/{row["method"]}/k{row["k"]}','structural_comparator',**{k:v for k,v in row.items() if k not in {'method','k','n_patients'}})
@@ -354,6 +406,10 @@ def _execute(cfg,root,run_dir,started,preflight_only):
     primary_qc=qc_by_id.get('R0',False)
     limitations=sorted({r['reason'] for r in experiments if r['status']=='NOT_ESTIMABLE'})
     limitations.extend('FAILED_EXPERIMENT/'+r['experiment_id'] for r in experiments if r['status']=='FAILED')
+    if len(unmapped): limitations.append('SELECTED_UNMAPPED_FEATURES/'+str(len(unmapped)))
+    if 'R2' in results and not registry.loc[registry.included_R2,'clinically_approved'].all(): limitations.append('R2_EXPLORATORY_PROVISIONAL_PENDING_CLINICAL_APPROVAL')
+    if registry.loc[registry.included_R2,'technical_exceptions'].ne('').any(): limitations.append('R2_TECHNICAL_EXCEPTIONS_RECORDED_IN_MAPPING_AUDIT')
+    if not observation['reason_audit_complete']: limitations.append('UNRESOLVED_COVERAGE_REASONS')
     if float(base_map['covered'].mean())<float(settings['minimum_mapper_coverage']):
         limitations.append('LOW_PRIMARY_MAPPER_COVERAGE')
     fragmentation=len(base_map['components'])/max(1,len(base_map['nodes']))
@@ -392,13 +448,13 @@ def _execute(cfg,root,run_dir,started,preflight_only):
     save_table(run_dir/'02_graph_negative_controls.csv',negative)
     save_table(run_dir/'02_graph_method_comparators.csv',comparator_rows)
     save_table(run_dir/'02_graph_experiment_registry.csv',experiments)
-    observation=[]
+    legacy_observation=[]
     for i,p in enumerate(baseline.patient_id):
         for family in legacy.FAMILY_ORDER:
             cols=[c for c in base_space.raw if families[c]==family]
-            observation.append({'patient_id':p,'representation_id':'R0','family':family,'n_features':len(cols),
+            legacy_observation.append({'patient_id':p,'representation_id':'R0','family':family,'n_features':len(cols),
                 'n_observed':int(base_space.raw.iloc[i][cols].notna().sum()),'mapper_covered':bool(base_map['covered'][i])})
-    save_table(run_dir/'02_graph_coverage_and_missingness.csv',observation)
+    save_table(run_dir/'02_graph_coverage_and_missingness.csv',legacy_observation)
     decision=[{'gate':'primary_refit_qc','passed':primary_qc},{'gate':'primary_coverage','passed':base_map['covered'].mean()>=settings['minimum_mapper_coverage']},
         {'gate':'stable_supported_communities','passed':stable_count>0},{'gate':'administrative_artifact_caution','passed':not artifact_risk}]
     save_table(run_dir/'02_graph_decision_table.csv',decision)
@@ -445,12 +501,18 @@ def _execute(cfg,root,run_dir,started,preflight_only):
     figures({k:v for k,v in results.items() if k.startswith('R')},stable_frame,run_dir/'figures',registry,coverage,alignments)
     with (run_dir/'logs/02_graph_events.jsonl').open('w') as stream:
         for row in logs: stream.write(json.dumps(row,default=str)+'\n')
-    warning='EXPLORATORY: clinical validity is not established. No clinical outcomes selected the representation.'
-    (run_dir/'02_graph_results_summary.md').write_text(f'# Graph02 exploratory technical release\n\n{warning}\n\nStatus: {release_status}; execution: {execution_status}.\n\nBaseline patients: {n}; primary features: {len(base_space.raw.columns)}; primary coverage: {base_map["covered"].mean():.1%}; stable supported communities: {stable_count}.\n\nRepeated subsampling without replacement and classic bootstrap with replacement are separate estimates. Overlapping communities are not progression branches.\n\nSee experiment registry for every negative, failed and not-estimable experiment.\n')
+    figure_inventory=diagnostic_figures(observation,comparisons,experiments,run_dir/'figures',registry,int(settings.get('minimum_publication_cell',5)))
+    inventoried={r['artifact'] for r in figure_inventory}
+    figure_inventory.extend(dict(artifact=p.relative_to(run_dir).as_posix(),status='COMPLETE',reason='') for p in sorted((run_dir/'figures').glob('*')) if p.relative_to(run_dir).as_posix() not in inventoried)
+    save_table(run_dir/'02_graph_figure_inventory.csv',figure_inventory)
+    results_summary(run_dir/'02_graph_results_summary.md',results,perturbations,experiments,comparisons,registry,observation,stable_frame,qc)
+    save_table(run_dir/'02_graph_privacy_inventory.csv',privacy_inventory(run_dir))
     relative={'membership':'02_graph_patient_membership.csv','feature_roles':'02_graph_feature_role_manifest.csv',
         'baseline_raw':'02_graph_baseline_raw.csv','feature_sets':'02_graph_feature_sets.csv','stability':'02_graph_community_stability.csv',
         'experiment_registry':'02_graph_experiment_registry.csv','nodes':'02_graph_mapper_nodes.csv','edges':'02_graph_mapper_edges.csv',
         'community_dictionary':'02_graph_community_dictionary.csv','clinical_registry':'02_graph_clinical_domain_registry.csv',
+        'mapping_audit':'02_graph_clinical_feature_mapping_audit.csv','comparison_denominators':'02_graph_comparison_denominators.csv',
+        'missingness_controls':'02_graph_missingness_control_comparisons.csv','coverage_reasons':'02_graph_coverage_reason_summary.csv',
         'refit_membership':'02_graph_refit_membership.csv','release_qc':'02_graph_release_qc.json','alignment':'02_graph_cross_representation_alignment.csv'}
     pharma=sources['pharma_candidates']; summary_path=pharma.with_name('00_pharma_profile_summary.json')
     source_info={role:{'path':str(p),'sha256':digest(p)} for role,p in sources.items()}
@@ -472,6 +534,15 @@ def _execute(cfg,root,run_dir,started,preflight_only):
         'method_list':sorted({item['space'].method for item in results.values()}),'primary_reference_id':'R0',
         'eligible_representation_ids':eligible,'release_status':release_status,'execution_status':execution_status,
         'qc_reasons':reasons,'created_at_utc':utc_now(),'started_at_utc':started,'relative_paths':relative,
+        'clinical_mapping':{'mapping_release_id':cfg['clinical_domains'].get('mapping_release_id'),
+            'review_status':cfg['clinical_domains']['mapping_review_status'],
+            'technical_exploratory_status':'not_estimable' if 'R2' not in results else 'eligible' if not len(unmapped) and registry.loc[registry.selected_in_primary & registry.clinical_domain.isin(CLINICAL),'exploratory_technical_eligible'].all() else 'partial',
+            'selected_unmapped_count':len(unmapped)},
+        'representations':{'R2':next((dict(status=r['status'],evidence_level=r.get('evidence_level','NOT_ESTIMABLE'),reason=r['reason']) for r in experiments if r['experiment_id']=='R2'),{'status':'NOT_ESTIMABLE','evidence_level':'NOT_ESTIMABLE'})},
+        'missingness':{'masks_source':'baseline_R0_raw_selected_features','legacy_N2_mixed':True,
+            'standalone_controls':['N2a','N2b','N2c','N2d'],'diagnostic_complete':all(any(r['experiment_id'].startswith(i+'/') for r in experiments) for i in ['N2a','N2b','N2c','N2d','M1'])},
+        'coverage':{'n_total':n,'n_covered_R0':int(base_map['covered'].sum()),'n_uncovered_R0':int((~base_map['covered']).sum()),'reason_audit_complete':bool(observation['reason_audit_complete'])},
+        'artifact_inventory':privacy_inventory(run_dir),
         'sha256_by_artifact':artifact_inventory(run_dir),'source_inputs':source_info,'versions':version_info(),
         'protocol_id':settings['protocol_id'],'random_seed':seed,'clinical_validation':governance['clinical_validation']}
     manifest_path=run_dir/'02_graph_release_manifest.json'

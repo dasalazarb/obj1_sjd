@@ -98,6 +98,27 @@ def validate_release(path, *, expected_sha=None):
         raise ValueError('Release QC/manifest mismatch')
     if manifest['primary_reference_id'] not in manifest['eligible_representation_ids']:
         raise ValueError('Frozen primary representation missing')
+    # Additive v2 diagnostics remain optional for historical v1 releases.
+    if 'coverage' in manifest:
+        coverage=manifest['coverage']
+        if (coverage.get('n_total')!=manifest['n_patients'] or
+            coverage.get('n_covered_R0')!=manifest['n_covered'] or
+            coverage.get('n_covered_R0',0)+coverage.get('n_uncovered_R0',0)!=coverage.get('n_total')):
+            raise ValueError('Coverage denominator/manifest mismatch')
+    if 'representations' in manifest and 'R2' in manifest['representations']:
+        r2=manifest['representations']['R2']
+        if r2.get('status') not in {'COMPLETE','NOT_ESTIMABLE','FAILED'}:
+            raise ValueError('Invalid R2 execution status')
+        if r2.get('evidence_level') not in {'APPROVED','EXPLORATORY_PROVISIONAL','NOT_ESTIMABLE'}:
+            raise ValueError('Invalid R2 evidence level')
+        if r2.get('evidence_level')=='APPROVED' and manifest.get('clinical_mapping',{}).get('review_status')!='approved':
+            raise ValueError('Clinical mapping approval is not established')
+    if 'artifact_inventory' in manifest:
+        for item in manifest['artifact_inventory']:
+            if hashes.get(item['artifact'])!=item.get('sha256'):
+                raise ValueError('Diagnostic inventory SHA mismatch')
+            if item.get('shareable_export_allowed') is not False:
+                raise ValueError('Graph02 artifact export requires publication review')
     return manifest,path
 
 

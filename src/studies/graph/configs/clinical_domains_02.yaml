@@ -1,5 +1,5 @@
-# Prespecified exploratory protocol; approvals must never be inferred.
-schema_version: clinical_domains_v1
+# Exact source map; pending approvals are never inferred.
+schema_version: clinical_domains_v2
 mapping_review_status: pending_clinical_review
 domains:
   D01:
@@ -3426,24 +3426,38 @@ features:
   semantic_feature_id: pro__sf36_pcs
   family: PRO
   clinical_domain: D06
-  subdomain: PRO
+  subdomain: SF36_DOMAINS
   role: discovery_candidate
   approval: pending
   temporal_validity: requires_source_verification
   unit: requires_source_review
   missingness_origin: not_recorded_not_negative
   release_id: graph_domains_draft_20261028
+  derivation_group: SF36_INSTRUMENT
+  instrument_id: SF36
+  assay_id: pro__sf36_pcs
+  derived_from: pro__sf36_physical_functioning|pro__sf36_role_physical|pro__sf36_bodily_pain|pro__sf36_general_health|pro__sf36_vitality|pro__sf36_social_functioning|pro__sf36_role_emotional|pro__sf36_mental_health
+  lineage_status: source_code_verified
+  lineage_evidence: src/derivations/pro_scoring.py
+  aggregation_level: summary
 - source_column: pro__sf36_mcs
   semantic_feature_id: pro__sf36_mcs
   family: PRO
   clinical_domain: D06
-  subdomain: PRO
+  subdomain: SF36_DOMAINS
   role: discovery_candidate
   approval: pending
   temporal_validity: requires_source_verification
   unit: requires_source_review
   missingness_origin: not_recorded_not_negative
   release_id: graph_domains_draft_20261028
+  derivation_group: SF36_INSTRUMENT
+  instrument_id: SF36
+  assay_id: pro__sf36_mcs
+  derived_from: pro__sf36_physical_functioning|pro__sf36_role_physical|pro__sf36_bodily_pain|pro__sf36_general_health|pro__sf36_vitality|pro__sf36_social_functioning|pro__sf36_role_emotional|pro__sf36_mental_health
+  lineage_status: source_code_verified
+  lineage_evidence: src/derivations/pro_scoring.py
+  aggregation_level: summary
 - source_column: pro__profad_total
   semantic_feature_id: pro__profad_total
   family: PRO
@@ -3470,68 +3484,116 @@ features:
   semantic_feature_id: ext__ocular_schirmer_min
   family: EXT
   clinical_domain: D01
-  subdomain: OCULAR
+  subdomain: OCULAR_TESTS
   role: discovery_candidate
   approval: pending
   temporal_validity: requires_source_verification
   unit: requires_source_review
   missingness_origin: not_recorded_not_negative
   release_id: graph_domains_draft_20261028
+  derivation_group: ocular_schirmer
+  instrument_id: ocular_schirmer
+  assay_id: schirmer
+  derived_from: ext__ocular_schirmer_right|ext__ocular_schirmer_left
+  lineage_status: source_code_verified
+  eye: bilateral_summary
+  aggregation_level: summary
+  lineage_evidence: src/block_A/01_extended_clinical_phenotype.py
 - source_column: ext__ocular_schirmer_left
   semantic_feature_id: ext__ocular_schirmer_left
   family: EXT
   clinical_domain: D01
-  subdomain: OCULAR
+  subdomain: OCULAR_TESTS
   role: discovery_candidate
   approval: pending
   temporal_validity: requires_source_verification
   unit: requires_source_review
   missingness_origin: not_recorded_not_negative
   release_id: graph_domains_draft_20261028
+  derivation_group: ocular_schirmer
+  instrument_id: ocular_schirmer
+  assay_id: schirmer
+  derived_from: ''
+  lineage_status: source_code_verified
+  eye: left
+  aggregation_level: eye
+  lineage_evidence: src/block_A/01_extended_clinical_phenotype.py
 - source_column: ext__ocular_schirmer_right
   semantic_feature_id: ext__ocular_schirmer_right
   family: EXT
   clinical_domain: D01
-  subdomain: OCULAR
+  subdomain: OCULAR_TESTS
   role: discovery_candidate
   approval: pending
   temporal_validity: requires_source_verification
   unit: requires_source_review
   missingness_origin: not_recorded_not_negative
   release_id: graph_domains_draft_20261028
+  derivation_group: ocular_schirmer
+  instrument_id: ocular_schirmer
+  assay_id: schirmer
+  derived_from: ''
+  lineage_status: source_code_verified
+  eye: right
+  aggregation_level: eye
+  lineage_evidence: src/block_A/01_extended_clinical_phenotype.py
 - source_column: ext__ocular_tbut_min
   semantic_feature_id: ext__ocular_tbut_min
   family: EXT
   clinical_domain: D01
-  subdomain: OCULAR
+  subdomain: OCULAR_TESTS
   role: discovery_candidate
   approval: pending
   temporal_validity: requires_source_verification
   unit: requires_source_review
   missingness_origin: not_recorded_not_negative
   release_id: graph_domains_draft_20261028
+  derivation_group: ocular_tbut
+  instrument_id: ocular_tbut
+  assay_id: tbut
+  derived_from: ''
+  lineage_status: source_code_verified
+  eye: summary
+  aggregation_level: summary
+  lineage_evidence: src/block_A/01_extended_clinical_phenotype.py
 - source_column: ext__ocular_oxford_max
   semantic_feature_id: ext__ocular_oxford_max
   family: EXT
   clinical_domain: D01
-  subdomain: OCULAR
+  subdomain: OCULAR_TESTS
   role: discovery_candidate
   approval: pending
   temporal_validity: requires_source_verification
   unit: requires_source_review
   missingness_origin: not_recorded_not_negative
   release_id: graph_domains_draft_20261028
+  derivation_group: ocular_oxford
+  instrument_id: ocular_oxford
+  assay_id: oxford
+  derived_from: ''
+  lineage_status: source_code_verified
+  eye: summary
+  aggregation_level: summary
+  lineage_evidence: src/block_A/01_extended_clinical_phenotype.py
 - source_column: ext__ocular_van_bijsterveld_max
   semantic_feature_id: ext__ocular_van_bijsterveld_max
   family: EXT
   clinical_domain: D01
-  subdomain: OCULAR
+  subdomain: OCULAR_TESTS
   role: discovery_candidate
   approval: pending
   temporal_validity: requires_source_verification
   unit: requires_source_review
   missingness_origin: not_recorded_not_negative
   release_id: graph_domains_draft_20261028
+  derivation_group: ocular_van_bijsterveld
+  instrument_id: ocular_van_bijsterveld
+  assay_id: van_bijsterveld
+  derived_from: ''
+  lineage_status: source_code_verified
+  eye: summary
+  aggregation_level: summary
+  lineage_evidence: src/block_A/01_extended_clinical_phenotype.py
 - source_column: ext__salivary_flow
   semantic_feature_id: ext__salivary_flow
   family: EXT
@@ -3686,3 +3748,288 @@ features:
   unit: requires_source_review
   missingness_origin: not_recorded_not_negative
   release_id: graph_domains_draft_20261028
+- source_column: ext__salivary_flow_unstimulated
+  semantic_feature_id: ext__salivary_flow_unstimulated
+  family: EXT
+  clinical_domain: D02
+  subdomain: ORAL_SALIVARY
+  role: discovery_candidate
+  approval: pending
+  temporal_validity: requires_source_verification
+  unit: requires_source_review
+  missingness_origin: not_recorded_not_negative
+  release_id: graph_domains_20261029_v2
+  derivation_group: unstimulated_whole_saliva
+  instrument_id: salivary_flow
+  assay_id: unstimulated
+  derived_from: ''
+  lineage_status: source_code_verified
+  aggregation_level: primary
+  lineage_evidence: src/block_A/01_extended_clinical_phenotype.py; src/block_A/10_build_integrated_longitudinal_dataset.py
+- source_column: ext__salivary_total_unstimulated_flow
+  semantic_feature_id: ext__salivary_total_unstimulated_flow
+  family: EXT
+  clinical_domain: D02
+  subdomain: ORAL_SALIVARY
+  role: discovery_candidate
+  approval: pending
+  temporal_validity: requires_source_verification
+  unit: requires_source_review
+  missingness_origin: not_recorded_not_negative
+  release_id: graph_domains_20261029_v2
+  derivation_group: total_unstimulated_saliva
+  instrument_id: salivary_flow
+  assay_id: total_unstimulated
+  derived_from: ''
+  lineage_status: source_code_verified
+  aggregation_level: primary
+  lineage_evidence: src/block_A/01_extended_clinical_phenotype.py; src/block_A/10_build_integrated_longitudinal_dataset.py
+- source_column: ext__salivary_total_stimulated_flow
+  semantic_feature_id: ext__salivary_total_stimulated_flow
+  family: EXT
+  clinical_domain: D02
+  subdomain: ORAL_SALIVARY
+  role: discovery_candidate
+  approval: pending
+  temporal_validity: requires_source_verification
+  unit: requires_source_review
+  missingness_origin: not_recorded_not_negative
+  release_id: graph_domains_20261029_v2
+  derivation_group: total_stimulated_saliva
+  instrument_id: salivary_flow
+  assay_id: total_stimulated
+  derived_from: ''
+  lineage_status: source_code_verified
+  aggregation_level: primary
+  lineage_evidence: src/block_A/01_extended_clinical_phenotype.py; src/block_A/10_build_integrated_longitudinal_dataset.py
+- source_column: ext__low_unstimulated_salivary_flow
+  semantic_feature_id: ext__low_unstimulated_salivary_flow
+  family: EXT
+  clinical_domain: D02
+  subdomain: ORAL_SALIVARY
+  role: discovery_candidate
+  approval: pending
+  temporal_validity: requires_source_verification
+  unit: requires_source_review
+  missingness_origin: not_recorded_not_negative
+  release_id: graph_domains_20261029_v2
+  derivation_group: unstimulated_whole_saliva
+  instrument_id: salivary_flow
+  assay_id: unstimulated
+  derived_from: ext__salivary_flow_unstimulated
+  lineage_status: source_code_verified
+  aggregation_level: threshold
+  lineage_evidence: src/block_A/01_extended_clinical_phenotype.py; src/block_A/10_build_integrated_longitudinal_dataset.py
+- source_column: ext__ocular_tbut_right
+  semantic_feature_id: ext__ocular_tbut_right
+  family: EXT
+  clinical_domain: D01
+  subdomain: OCULAR_TESTS
+  role: discovery_candidate
+  approval: pending
+  temporal_validity: requires_source_verification
+  unit: requires_source_review
+  missingness_origin: not_recorded_not_negative
+  release_id: graph_domains_20261029_v2
+  derivation_group: ocular_tbut
+  instrument_id: ocular_tbut
+  assay_id: tbut
+  derived_from: ''
+  lineage_status: source_code_verified
+  eye: right
+  aggregation_level: eye
+  lineage_evidence: src/block_A/01_extended_clinical_phenotype.py
+- source_column: ext__ocular_van_bijsterveld_right
+  semantic_feature_id: ext__ocular_van_bijsterveld_right
+  family: EXT
+  clinical_domain: D01
+  subdomain: OCULAR_TESTS
+  role: discovery_candidate
+  approval: pending
+  temporal_validity: requires_source_verification
+  unit: requires_source_review
+  missingness_origin: not_recorded_not_negative
+  release_id: graph_domains_20261029_v2
+  derivation_group: ocular_van_bijsterveld
+  instrument_id: ocular_van_bijsterveld
+  assay_id: van_bijsterveld
+  derived_from: ''
+  lineage_status: source_code_verified
+  eye: right
+  aggregation_level: eye
+  lineage_evidence: src/block_A/01_extended_clinical_phenotype.py
+- source_column: ext__ocular_oxford_right
+  semantic_feature_id: ext__ocular_oxford_right
+  family: EXT
+  clinical_domain: D01
+  subdomain: OCULAR_TESTS
+  role: discovery_candidate
+  approval: pending
+  temporal_validity: requires_source_verification
+  unit: requires_source_review
+  missingness_origin: not_recorded_not_negative
+  release_id: graph_domains_20261029_v2
+  derivation_group: ocular_oxford
+  instrument_id: ocular_oxford
+  assay_id: oxford
+  derived_from: ''
+  lineage_status: source_code_verified
+  eye: right
+  aggregation_level: eye
+  lineage_evidence: src/block_A/01_extended_clinical_phenotype.py
+- source_column: ext__ocular_schirmer_abnormal_any
+  semantic_feature_id: ext__ocular_schirmer_abnormal_any
+  family: EXT
+  clinical_domain: D01
+  subdomain: OCULAR_TESTS
+  role: discovery_candidate
+  approval: pending
+  temporal_validity: requires_source_verification
+  unit: requires_source_review
+  missingness_origin: not_recorded_not_negative
+  release_id: graph_domains_20261029_v2
+  derivation_group: ocular_schirmer
+  instrument_id: ocular_schirmer
+  assay_id: schirmer
+  derived_from: ext__ocular_schirmer_right|ext__ocular_schirmer_left
+  lineage_status: source_code_verified
+  eye: bilateral_summary
+  aggregation_level: summary
+  lineage_evidence: src/block_A/01_extended_clinical_phenotype.py
+- source_column: pro__sf36_physical_functioning
+  semantic_feature_id: pro__sf36_physical_functioning
+  family: PRO
+  clinical_domain: D06
+  subdomain: SF36_DOMAINS
+  role: discovery_candidate
+  approval: pending
+  temporal_validity: requires_source_verification
+  unit: requires_source_review
+  missingness_origin: not_recorded_not_negative
+  release_id: graph_domains_20261029_v2
+  derivation_group: SF36_INSTRUMENT
+  instrument_id: SF36
+  assay_id: pro__sf36_physical_functioning
+  derived_from: ''
+  lineage_status: source_code_verified
+  lineage_evidence: src/derivations/pro_scoring.py
+- source_column: pro__sf36_role_physical
+  semantic_feature_id: pro__sf36_role_physical
+  family: PRO
+  clinical_domain: D06
+  subdomain: SF36_DOMAINS
+  role: discovery_candidate
+  approval: pending
+  temporal_validity: requires_source_verification
+  unit: requires_source_review
+  missingness_origin: not_recorded_not_negative
+  release_id: graph_domains_20261029_v2
+  derivation_group: SF36_INSTRUMENT
+  instrument_id: SF36
+  assay_id: pro__sf36_role_physical
+  derived_from: ''
+  lineage_status: source_code_verified
+  lineage_evidence: src/derivations/pro_scoring.py
+- source_column: pro__sf36_bodily_pain
+  semantic_feature_id: pro__sf36_bodily_pain
+  family: PRO
+  clinical_domain: D06
+  subdomain: SF36_DOMAINS
+  role: discovery_candidate
+  approval: pending
+  temporal_validity: requires_source_verification
+  unit: requires_source_review
+  missingness_origin: not_recorded_not_negative
+  release_id: graph_domains_20261029_v2
+  derivation_group: SF36_INSTRUMENT
+  instrument_id: SF36
+  assay_id: pro__sf36_bodily_pain
+  derived_from: ''
+  lineage_status: source_code_verified
+  lineage_evidence: src/derivations/pro_scoring.py
+- source_column: pro__sf36_general_health
+  semantic_feature_id: pro__sf36_general_health
+  family: PRO
+  clinical_domain: D06
+  subdomain: SF36_DOMAINS
+  role: discovery_candidate
+  approval: pending
+  temporal_validity: requires_source_verification
+  unit: requires_source_review
+  missingness_origin: not_recorded_not_negative
+  release_id: graph_domains_20261029_v2
+  derivation_group: SF36_INSTRUMENT
+  instrument_id: SF36
+  assay_id: pro__sf36_general_health
+  derived_from: ''
+  lineage_status: source_code_verified
+  lineage_evidence: src/derivations/pro_scoring.py
+- source_column: pro__sf36_vitality
+  semantic_feature_id: pro__sf36_vitality
+  family: PRO
+  clinical_domain: D06
+  subdomain: SF36_DOMAINS
+  role: discovery_candidate
+  approval: pending
+  temporal_validity: requires_source_verification
+  unit: requires_source_review
+  missingness_origin: not_recorded_not_negative
+  release_id: graph_domains_20261029_v2
+  derivation_group: SF36_INSTRUMENT
+  instrument_id: SF36
+  assay_id: pro__sf36_vitality
+  derived_from: ''
+  lineage_status: source_code_verified
+  lineage_evidence: src/derivations/pro_scoring.py
+- source_column: pro__sf36_social_functioning
+  semantic_feature_id: pro__sf36_social_functioning
+  family: PRO
+  clinical_domain: D06
+  subdomain: SF36_DOMAINS
+  role: discovery_candidate
+  approval: pending
+  temporal_validity: requires_source_verification
+  unit: requires_source_review
+  missingness_origin: not_recorded_not_negative
+  release_id: graph_domains_20261029_v2
+  derivation_group: SF36_INSTRUMENT
+  instrument_id: SF36
+  assay_id: pro__sf36_social_functioning
+  derived_from: ''
+  lineage_status: source_code_verified
+  lineage_evidence: src/derivations/pro_scoring.py
+- source_column: pro__sf36_role_emotional
+  semantic_feature_id: pro__sf36_role_emotional
+  family: PRO
+  clinical_domain: D06
+  subdomain: SF36_DOMAINS
+  role: discovery_candidate
+  approval: pending
+  temporal_validity: requires_source_verification
+  unit: requires_source_review
+  missingness_origin: not_recorded_not_negative
+  release_id: graph_domains_20261029_v2
+  derivation_group: SF36_INSTRUMENT
+  instrument_id: SF36
+  assay_id: pro__sf36_role_emotional
+  derived_from: ''
+  lineage_status: source_code_verified
+  lineage_evidence: src/derivations/pro_scoring.py
+- source_column: pro__sf36_mental_health
+  semantic_feature_id: pro__sf36_mental_health
+  family: PRO
+  clinical_domain: D06
+  subdomain: SF36_DOMAINS
+  role: discovery_candidate
+  approval: pending
+  temporal_validity: requires_source_verification
+  unit: requires_source_review
+  missingness_origin: not_recorded_not_negative
+  release_id: graph_domains_20261029_v2
+  derivation_group: SF36_INSTRUMENT
+  instrument_id: SF36
+  assay_id: pro__sf36_mental_health
+  derived_from: ''
+  lineage_status: source_code_verified
+  lineage_evidence: src/derivations/pro_scoring.py
+mapping_release_id: graph_domains_20261029_v2
