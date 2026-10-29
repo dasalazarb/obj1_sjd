@@ -5,6 +5,7 @@ includes:
   sensitivity: ../config_sensitivity.yaml
   characterization: ../config_characterization.yaml
   experiments: experiments_02.yaml
+  missingness_methods: missingness_methods_02.yaml
   clinical_domains: clinical_domains_02.yaml
   validation: validation_03.yaml
 execution:

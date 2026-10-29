@@ -185,3 +185,96 @@ def privacy_inventory(root):
     return [dict(artifact=p.relative_to(root).as_posix(),sha256=digest(p),classification='INTERNAL_RESTRICTED',
         shareable_export_allowed=False,reason='NIH_publication_review_required;patient_artifacts_never_auto_exported')
         for p in sorted(root.rglob('*')) if p.is_file()]
+
+
+def missingness_method_figures(root,spaces,tables,minimum_cell,reference_results=None):
+    """Aggregate-only figure sources; every PNG/PDF has a colocated source CSV."""
+    from .._pipeline import save_table
+    folder=root/'figures'; folder.mkdir(exist_ok=True)
+    artifacts=[]
+    registry=pd.DataFrame(tables['method_registry'])
+    def finish(fig,name,source,denominator):
+        stem='02_graph_missingness_'+name
+        fig.text(.5,-.05,denominator+'; NOT_ESTIMABLE = insufficient support. R2 is exploratory.',ha='center',fontsize=8)
+        save_table(folder/(stem+'.csv'),source)
+        save_figure(fig,folder,stem)
+        artifacts.extend('figures/'+stem+'.'+ext for ext in ['csv','png','pdf'])
+    for reference in ['R0','R2']:
+        entries=registry.loc[registry.reference_id.eq(reference)&~registry.experiment_id.str.contains('/')]
+        fig,axes=plt.subplots(1,4,figsize=(16,4)); source=[]
+        for ax,identifier in zip(axes,[reference,*[reference+'-'+m for m in ['I','D','M']]]):
+            item=(reference_results or {}).get(reference) if identifier==reference else spaces.get(identifier)
+            status=entries.loc[entries.experiment_id.eq(identifier)]
+            if item is None:
+                ax.text(.5,.5,identifier+'\n'+(status.status.iloc[0] if len(status) else 'NOT_ESTIMABLE'),ha='center',transform=ax.transAxes)
+                source.append(dict(experiment_id=identifier,status=status.status.iloc[0] if len(status) else 'NOT_ESTIMABLE'))
+            else:
+                mapped=item['mapped']; lens=item['space'].lens
+                positions={node:lens[sorted(patients)].mean(axis=0) for node,patients in mapped['nodes'].items() if len(patients)>=minimum_cell}
+                for a,b in mapped['nerve'].edges():
+                    if a in positions and b in positions:
+                        ax.plot([positions[a][0],positions[b][0]],[positions[a][1],positions[b][1]],color='gray',lw=.6)
+                        source.append(dict(experiment_id=identifier,record_type='edge',source_node=a,target_node=b,status='COMPLETE'))
+                for node,(x,y) in positions.items():
+                    count=len(mapped['nodes'][node]); ax.scatter(x,y,s=10+5*count,color='#307f9a')
+                    source.append(dict(experiment_id=identifier,record_type='node',node_id=node,lens_1=x,lens_2=y,n_support=count,
+                        n_total=len(lens),status='COMPLETE'))
+                if not positions: ax.text(.5,.5,'No nodes above publication support',ha='center',transform=ax.transAxes)
+                ax.set_title(identifier)
+            ax.set(xlabel='Lens 1',ylabel='Lens 2')
+        finish(fig,'method_topologies_'+reference,source,f'Node unions among reference baseline patients; support < {minimum_cell} suppressed; no patient scatter or temporal direction')
+    specifications=[
+        ('method_stability','method_stability','stability','Conditional matching fraction; separate subsampling/bootstrap'),
+        ('method_coverage','method_coverage','coverage_fraction','Covered patients / all reference baseline patients'),
+        ('imputation_validation','imputation_validation','normalized_mae','Artificially hidden observed cells; disjoint training/evaluation patients'),
+        ('pairwise_support','distance_support_summary','estimable_pair_fraction','Estimable unordered pairs / n(n−1)/2 within each panel'),
+        ('method_comparison_heatmap','cross_method_comparisons','distance_spearman','Common finite unordered pairs of the same reference patients')]
+    for name,table,metric,denominator in specifications:
+        data=pd.DataFrame(tables[table]); fig,axes=plt.subplots(1,2,figsize=(12,4)); sources=[]
+        if name=='method_comparison_heatmap':
+            metrics=['ari_primary','nmi_primary','jaccard_common_mean','distance_spearman','neighbor_preservation']
+            for ax,reference in zip(axes,['R0','R2']):
+                ids=[reference+'-'+m for m in ['I','D','M']]
+                part=data.reindex(columns=list(dict.fromkeys([*data.columns,'experiment_id',*metrics])))
+                part=part.loc[part.experiment_id.isin(ids)].drop_duplicates('experiment_id').set_index('experiment_id').reindex(ids)
+                matrix=part[metrics].to_numpy(float)
+                ax.imshow(np.ma.masked_invalid(matrix),vmin=-1,vmax=1,cmap='coolwarm',aspect='auto')
+                ax.set_xticks(np.arange(len(metrics)),['ARI','NMI','Jaccard','distance rho','kNN'],rotation=45,ha='right')
+                ax.set_yticks(np.arange(3),ids); ax.set_title(reference)
+                for i in range(3):
+                    for j in range(len(metrics)):
+                        ax.text(j,i,f'{matrix[i,j]:.2f}' if np.isfinite(matrix[i,j]) else 'NE',ha='center',va='center',fontsize=8)
+                for identifier,row in part.iterrows():
+                    sources.append(dict(reference_id=reference,experiment_id=identifier,**{c:row.get(c,np.nan) for c in [*metrics,'n_common','n_total','n_valid_distance_pairs','status']}))
+            finish(fig,name,sources,'ARI/NMI/Jaccard: common supported assignments; geometry: common finite pairs; NE = NOT_ESTIMABLE')
+            continue
+        for ax,reference in zip(axes,['R0','R2']):
+            id_column='representation_id' if table=='method_stability' else 'experiment_id'
+            if id_column in data and metric in data:
+                part=data.loc[data[id_column].astype(str).str.startswith(reference)].copy()
+                if 'n_evaluable' in part:
+                    part.loc[pd.to_numeric(part.n_evaluable,errors='coerce')<minimum_cell,metric]=np.nan
+                if 'n_hidden' in part:
+                    # Aggregate before suppression, otherwise single held-out
+                    # variable cells could leak into a public figure source.
+                    part=part.reindex(columns=list(dict.fromkeys([*part.columns,'rank','clinical_domain'])))
+                    part['_weighted']=part[metric]*part.n_hidden
+                    part=part.groupby(['experiment_id','rank','clinical_domain'],dropna=False).agg(
+                        n_hidden=('n_hidden','sum'),weighted=('_weighted','sum')).reset_index()
+                    part[metric]=part.weighted/part.n_hidden
+                    part.loc[part.n_hidden<minimum_cell,metric]=np.nan
+                if table=='method_coverage':
+                    part=part.drop_duplicates('experiment_id')
+                    part.loc[(part.n_covered<minimum_cell)|(part.n_uncovered.between(1,minimum_cell-1)),metric]=np.nan
+                part=part.dropna(subset=[metric])
+                if len(part):
+                    labels=part[id_column].astype(str)
+                    if 'method' in part: labels=labels+'/'+part.method.astype(str)
+                    ax.bar(np.arange(len(part)),part[metric]); ax.set_xticks(np.arange(len(part)),labels,rotation=75,ha='right')
+                    columns=[c for c in [id_column,'method','rank','clinical_domain',metric,'n_patients','n_total','n_pairs','n_valid_distance_pairs','n_requested','n_success','n_evaluable','n_hidden'] if c in part]
+                    sources.extend(dict(reference_id=reference,**r) for r in part[columns].to_dict('records'))
+                else: ax.text(.5,.5,'NOT_ESTIMABLE / suppressed small cells',ha='center',transform=ax.transAxes)
+            else: ax.text(.5,.5,'NOT_ESTIMABLE',ha='center',transform=ax.transAxes)
+            ax.set_title(reference); ax.set_ylabel(metric)
+        finish(fig,name,sources or [dict(status='NOT_ESTIMABLE',reason='NO_PUBLISHABLE_ESTIMATE')],denominator)
+    return artifacts

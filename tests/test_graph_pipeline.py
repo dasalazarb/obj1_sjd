@@ -63,6 +63,9 @@ def configuration(tmp_path):
             data['mapper_grid']['perc_overlap']=[.4,.5]
             data['minimum_stratum_patients']=8
             data['comparator_k']=[2,3]
+        if name=='missingness_methods':
+            data['resampling'].update(main_subsampling_replicates_per_variant=2,iterative_bootstrap_replicates=2,parameter_sensitivity_subsampling_replicates=2)
+            data['iterative_regularized'].update(masked_validation_repeats=2)
         if name=='validation':
             data['minimum_group_patients']=2; data['effect_ci_replicates']=20
         out=tmp_path/f'{name}.yaml'; out.write_text(yaml.safe_dump(data)); pipeline['includes'][name]=str(out)
@@ -405,3 +408,28 @@ def test_all_observation_controls_execute_on_missing_synthetic_panel(configurati
     artifact=path.parent/'02_graph_missingness_summary.csv'
     artifact.write_text(artifact.read_text()+'\n')
     with pytest.raises(ValueError,match='SHA mismatch'): validate_release(path)
+
+
+def test_transversal_variants_preserve_historical_artifact_hashes_and_graph03(configuration):
+    cfg=configuration
+    for key in ['run_mapper_grid','run_domain_and_family_ablations','run_negative_controls','run_structural_comparators','run_lens_distance_sensitivity']:
+        cfg['experiments'][key]=False
+    cfg['experiments']['run_observation_diagnostics']=False
+    cfg['missingness_methods']['enabled']=False
+    old=run02(cfg)
+    cfg['missingness_methods']['enabled']=True
+    extended=run02(cfg)
+    for name in ['patient_membership','community_stability','feature_sets','scenario_patient_membership',
+                 'representation_sensitivity_summary','patient_embedding','patient_distances','feature_role_manifest']:
+        artifact='02_graph_'+name+'.csv'
+        assert pipe.digest(old['run_dir']/artifact)==pipe.digest(extended['run_dir']/artifact)
+    manifest,path,frames=read_release(cfg,extended['manifest'])
+    suite=manifest['missingness_sensitivity']
+    assert suite['graph03_defining'] is False and manifest['primary_reference_id']=='R0'
+    assert not set(suite['statuses'])&set(manifest['eligible_representation_ids'])
+    assert len(suite['artifacts'])>=28
+    assert all(r['analysis_role']=='sensitivity' for r in manifest['sensitivity_artifacts'])
+    assert set(frames['membership'].representation_id)<=set(['R0','R1','R2','R3','R4','S0','S1','S2','S3','S4'])
+    # Tampering with a new sensitivity artifact is detected before Graph03 can use the release.
+    artifact=path.parent/suite['artifacts'][0]; artifact.write_text(artifact.read_text()+'\n')
+    with pytest.raises(ValueError,match='SHA mismatch'): read_release(cfg,path)

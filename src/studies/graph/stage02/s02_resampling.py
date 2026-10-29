@@ -8,6 +8,7 @@ from scipy.optimize import linear_sum_assignment
 from scipy.stats import norm
 from .._pipeline import write_json, digest
 from .s02_representations import Space
+from .s02_missingness_registry import NotEstimable
 from . import s02_legacy as legacy
 
 
@@ -81,6 +82,8 @@ def resample(reference, n, fit, map_space, settings, *, seed, identifier, method
                     'candidate_ids':candidate_ids}
             except (legacy.MappingError,legacy.LAB.LabContractError):
                 raise
+            except NotEstimable as exc:
+                result={'status':'NOT_ESTIMABLE','reason':str(exc)}
             except (ValueError,np.linalg.LinAlgError) as exc:
                 result={'status':'failed','reason':str(exc).split(':')[0]}
             if cache:
