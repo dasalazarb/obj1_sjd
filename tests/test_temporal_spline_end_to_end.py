@@ -75,9 +75,17 @@ def test_one_command_all_with_supported_synthetic_outcome(upstream, tmp_path, mo
         assert sha256(path) == artifact['sha256']
 
 
-def test_frozen_cutoff_is_required_and_sensitivities_keep_same_full_sample():
+def test_zero_argument_full_run_defaults_and_sensitivities_keep_same_full_sample():
+    args = cli.parse_args([])
+    assert args.data_cutoff == '2026-05-31'
+    assert args.threshold == 'both' and args.time_axis == 'clinical_baseline'
+    assert args.analysis == 'all' and args.sensitivity == 'standard'
+    assert args.figures == 'priority' and args.dry_run is False
+    assert args.output_root == cli.common.PROJECT_ROOT
+    assert SplineConfig().max_primary_years == 3.
+    assert cli.parse_args(['--data-cutoff', '2025-01-01']).data_cutoff == '2025-01-01'
     with pytest.raises(SystemExit):
-        cli.parse_args([])
+        cli.parse_args(['--data-cutoff', 'invalid'])
     data, groups, spec = fixture()
     definitions = {name: (d, cap, horizon) for name, d, axis, cap, horizon in scenarios(data, 'clinical_baseline', SplineConfig(), 'standard')}
     a, b = definitions['full_common_horizon'], definitions['full_sample_primary_domain']
