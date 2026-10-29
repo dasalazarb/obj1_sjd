@@ -38,47 +38,69 @@ patient states. Nonestimability is a result, not evidence of equal trajectories.
   guards and the existing transactional install/rollback. Publication occurs only
   after final input/code verification; QC directories install last.
 
-## One command
+## One command: full analysis by default
 
 Use the institutional Python environment containing numpy, pandas, scipy,
-statsmodels, pyarrow, matplotlib and pytest. A data cutoff is **required**; the
-command never silently uses today's date.
+statsmodels, pyarrow, matplotlib and pytest. Running Step 17 **without flags**
+runs the entire canonical analysis, saves tables, priority figures and QC
+artifacts. `--dry-run` is optional and is not the default.
 
 ```bash
-python src/block_A/17_nonlinear_temporal_heterogeneity.py \
-  --data-cutoff 2026-10-27 \
-  --threshold both --time-axis clinical_baseline --analysis all \
-  --max-primary-years 3 --sensitivity standard --figures priority --progress
+python src/block_A/17_nonlinear_temporal_heterogeneity.py
 ```
 
-`--analysis all` fits the eligible models, tests them, computes temporal
-heterogeneity, applies multiplicity control, makes figures and publishes both
-thresholds in this execution. `--analysis temporal` also fits its own models;
-it does not require an earlier invocation. `feasibility` and `models` get their
-own output namespaces and cannot masquerade as complete bundles.
+The no-argument invocation freezes **data cutoff at 2026-05-31**. This date
+is a reproducible default selected for the current workflow, **not** inferred
+from source data and **not** a claim that the approved institutional freeze
+is 2026-05-31. If the canonical data freeze differs, explicitly override it:
 
 ```bash
-# Validate authenticated inputs, support, ranks and knots; no fitting or writes.
-python src/block_A/17_nonlinear_temporal_heterogeneity.py \
-  --data-cutoff 2026-10-27 --dry-run
+python src/block_A/17_nonlinear_temporal_heterogeneity.py --data-cutoff YYYY-MM-DD
+```
 
-# First real-data smoke, isolated from the eventual complete product.
-# Confirm these exact variable IDs in the input catalog first.
+Default parameters:
+
+- Input origin: `canonical`; output root: `common.PROJECT_ROOT`.
+- `--threshold both`, `--time-axis clinical_baseline`, `--analysis all`.
+- `--sensitivity standard`, `--max-primary-years 3` (via SplineConfig).
+- `--figures priority`, `--progress` (enabled), 250 DPI.
+- `--dry-run` disabled; outputs are written and existing output paths
+  remain overwrite-protected.
+
+When successful, the final JSON contains `qc_status: PASS`, the bundle count,
+the cutoff and output directory paths. CSV/PNG/manifest files live under
+`<project>/outputs/{tables,figures,qc}/blockA/17_nonlinear_temporal_heterogeneity/`
+with `<time_axis>/delta<3|5>/<scenario>/` suffixes. Previous published results
+are never overwritten silently. `--overwrite` still requires a valid
+`--backup-root`.
+
+The `--analysis all` default fits eligible A/B/C models, tests temporal
+heterogeneity, applies multiplicity control, makes priority figures and
+publishes both thresholds. `--analysis temporal` also fits its own models;
+`feasibility` and `models` get distinct partial-output namespaces.
+
+Optional diagnostics / custom runs:
+
+```bash
+# Validate authenticated inputs, support, ranks and knots; no writes.
+python src/block_A/17_nonlinear_temporal_heterogeneity.py --dry-run
+
+# First real-data smoke in an isolated location; verify IDs in catalog.
 python src/block_A/17_nonlinear_temporal_heterogeneity.py \
-  --data-cutoff 2026-10-27 --variables iga igg complement_c3 \
+  --variables iga igg complement_c3 \
   --output-root /authorized/step17_smoke --sensitivity none --figures all
 
-# Optional frozen-basis, stratified whole-patient bootstrap on priority main fits.
+# Optional frozen-basis whole-patient bootstrap on a priority variable.
 python src/block_A/17_nonlinear_temporal_heterogeneity.py \
-  --data-cutoff 2026-10-27 --variables iga --bootstrap-replicates 200 \
+  --variables iga --bootstrap-replicates 200 \
   --output-root /authorized/step17_bootstrap
 ```
 
-Other controls: `--threshold 3|5|both`, `--time-axis
+Other optional controls: `--threshold 3|5|both`, `--time-axis
 clinical_baseline|essdai_index`, `--sensitivity none|standard|full`,
-`--config path.json`, `--seed`, `--simulations` (default 4000, minimum 500),
-`--figures none|priority|all`, `--dpi` (minimum 200). Configuration is a JSON
-object of `SplineConfig` fields; unknown/invalid fields fail. Example:
+`--config path.json`, `--seed`, `--simulations` (default 4000,
+minimum 500), `--figures none|priority|all`, `--dpi` (minimum 200).
+Configuration is a JSON object of `SplineConfig` fields. Example:
 
 ```json
 {"version": "temporal-spline-v1", "max_primary_years": 3,
@@ -86,11 +108,11 @@ object of `SplineConfig` fields; unknown/invalid fields fail. Example:
  "simulations": 4000, "seed": 1701}
 ```
 
-No checkpoint/resume is implemented: it was optional in the proposal. In-memory
-patient rows are discarded after each variable. Existing destinations are
-blocked unless both `--overwrite` and `--backup-root` are provided. Backups must
-be under `<output-root>/outputs/backups/17_nonlinear_temporal_heterogeneity/`
-(and under `synthetic_validation/` when that input origin is selected).
+No checkpoint/resume is implemented. In-memory patient rows are discarded
+after each variable. Existing destinations are blocked unless both
+`--overwrite` and `--backup-root` are provided. Backups must be under
+`<output-root>/outputs/backups/17_nonlinear_temporal_heterogeneity/`
+(and under `synthetic_validation/` for synthetic inputs).
 
 ## Support and estimands
 
