@@ -53,8 +53,12 @@ def evaluate(frame, groups, spec, cfg, axis, fit_horizon=None, report_horizon=No
     if (spec.type not in ('numeric', 'binary') or spec.unit in ('count', 'score', 'foci/4 mm²')
             or spec.variable_id.startswith(('ocular_oxford', 'ocular_van_bijsterveld', 'sgus_summary'))):
         reasons.append('no_validated_family_for_ordinal_count_or_complex_score')
-    if len(data) and (not np.isfinite(data.value).all() or data.value.nunique() < 2):
-        reasons.append('constant_or_nonfinite_outcome')
+    # Categorical outcomes such as ovl__status are inventoried but cannot
+    # enter numeric spline families or numeric-only finite-value checks.
+    if len(data) and spec.type in ('numeric', 'binary'):
+        values = data.value.to_numpy(dtype=float)
+        if not np.isfinite(values).all() or data.value.nunique() < 2:
+            reasons.append('constant_or_nonfinite_outcome')
     if spec.type == 'binary' and len(data):
         if not set(data.value.unique()).issubset({0, 1}):
             reasons.append('invalid_binary_values')

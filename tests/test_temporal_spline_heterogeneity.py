@@ -105,3 +105,32 @@ def test_patient_bootstrap_shortlist_uses_same_family(monkeypatch):
     assert result.status == 'VALIDATION_ESTIMATED'
     assert result.successful_replicates == 100
     assert result.bootstrap_sup_t_critical > 1.96
+
+
+def test_categorical_overlap_status_dry_run_is_inventoried_without_numeric_operations():
+    """A real overlap-status category must not reach np.isfinite or mean/quantile."""
+    from temporal_spline_fixtures import cli
+
+    data, groups, original_spec = fixture()
+    data = data.copy()
+    categories = ('overlap', 'glandular_only', 'extraglandular_only', 'neither')
+    group_names = list(groups.observed_pattern.unique())
+    data['value'] = data.observed_pattern.map(dict(zip(group_names, categories)))
+    spec = replace(original_spec, variable_id='overlap_status',
+                   canonical_column='ovl__status', type='categorical',
+                   unit='% evaluable', is_essdai_derived=True)
+    cfg = SplineConfig(simulations=600)
+    evaluation = evaluate(data, groups, spec, cfg, 'clinical_baseline', 3, 3)
+    gate = evaluation['gate']
+    assert gate['eligible_A'] is False
+    assert gate['eligible_B'] is False
+    assert gate['eligible_C'] is False
+    assert 'no_validated_family_for_ordinal_count_or_complex_score' in gate['reason_A']
+    assert 'mechanically_related_descriptive_only' in gate['reason_A']
+
+    meta = dict(variable='overlap_status', domain='overlap', scenario='main')
+    tables, fits = cli.analyze(evaluation, spec, cfg, meta, do_models=False, do_temporal=False)
+    assert not fits
+    assert tables['00_variable_eligibility'].iloc[0]['variable'] == 'overlap_status'
+    assert tables['00_aggregated_observations'].empty
+    assert tables['01_model_coefficients'].empty

@@ -104,7 +104,9 @@ def analyze(evaluation, spec, cfg, meta, do_models, do_temporal):
     add('00_local_temporal_support', evaluation['support'])
     add('00_group_support', evaluation['counts'])
     data = evaluation['data']
-    if len(data):
+    if len(data) and spec.type in ('numeric', 'binary'):
+        # Only numeric outcomes admit means and quantiles; categorical outcomes
+        # remain in the eligibility inventory without fabricated numeric summaries.
         # One patient contributes once to a window's descriptive aggregate.
         observed = data.assign(annual_window=np.floor(data.time).astype(int))
         patient_windows = observed.groupby(['observed_pattern', 'annual_window', 'patient_id']).agg(
