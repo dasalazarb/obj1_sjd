@@ -1,0 +1,71 @@
+# Prespecified exploratory protocol; approvals must never be inferred.
+protocol_id: graph02_03_20261028_v1
+legacy_scenarios:
+- S0
+- S1
+- S2
+- S3
+- S4
+representations:
+- R0
+- R1
+- R2
+- R3
+- R4
+final_representation_ids:
+- R0
+- R2
+- R3
+final_subsampling_replicates: 200
+secondary_subsampling_replicates: 60
+patient_fraction: 0.8
+match_jaccard: 0.5
+stable_threshold: 0.8
+minimum_success_fraction: 0.95
+bootstrap_replicates: 60
+preflight_replicates: 20
+run_lens_distance_sensitivity: true
+run_mapper_grid: true
+run_domain_and_family_ablations: true
+run_negative_controls: true
+run_structural_comparators: true
+run_resampling: true
+run_separate_classic_bootstrap_sensitivity: true
+mapper_grid:
+  representations:
+  - R0
+  n_cubes:
+  - 6
+  - 8
+  - 10
+  perc_overlap:
+  - 0.3
+  - 0.4
+  - 0.5
+local_sensitivity:
+- eps_k_neighbors: 3
+  eps_percentile: 55
+  minimum_node_support: 3
+- eps_k_neighbors: 5
+  eps_percentile: 75
+  minimum_node_support: 4
+pca_dimensions:
+- 2
+- 10
+umap_seeds:
+- 101
+- 202
+- 303
+negative_control_replicates: 20
+comparator_k:
+- 2
+- 3
+- 4
+- 5
+comparator_replicates: 20
+minimum_stratum_patients: 20
+minimum_mapper_coverage: 0.5
+maximum_fragmentation: 0.5
+threshold_justification: Historical execution/stability reference thresholds; technical
+  screening only, never biological validity. Frozen before clinical validation.
+cache_version: graph02_cache_v2

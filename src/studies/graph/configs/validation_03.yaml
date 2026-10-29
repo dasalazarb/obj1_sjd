@@ -1,0 +1,48 @@
+# Prespecified exploratory protocol; approvals must never be inferred.
+schema_version: graph_validation_v1
+baseline_characterization: true
+independent_anchors: true
+compare_populations: true
+incremental_value: true
+longitudinal_analysis_if_estimable: true
+rare_events_descriptive_if_available: true
+minimum_group_patients: 8
+minimum_model_patients: 30
+minimum_visits_per_patient: 2
+minimum_patients_per_community: 8
+minimum_rare_event_count: 5
+effect_ci_replicates: 500
+fdr_alpha: 0.05
+confounders:
+- demo__protocol
+- demo__age_at_baseline
+- demo__sex
+pop_column: pop__status
+date_column: clinical_anchor_date
+baseline_flag: is_clinical_baseline
+anchors:
+- source_column: essdai__total
+  type: numeric
+  role: independent_baseline_anchor
+  derived_from:
+  - ovl__status
+  unit: ESSDAI points
+- source_column: esspri__total
+  type: numeric
+  role: independent_baseline_anchor
+  derived_from:
+  - esspri__dryness
+  - esspri__fatigue
+  - esspri__pain
+  unit: ESSPRI points
+longitudinal_endpoints:
+- essdai__total
+- esspri__total
+- pro__sf36_pcs
+- pro__profad_total
+- pro__mdafs_global
+rare_events: []
+projection:
+  enabled: false
+  reason: No independently validated out-of-sample Mapper projection protocol
+causal_or_predictive_claims: false
