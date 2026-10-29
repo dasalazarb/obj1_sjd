@@ -39,6 +39,9 @@ MAPPING = dict(curves='03_group_curves', changes='03_within_group_change', deriv
     pairs='04_pairwise_temporal_differences', bands='04_simultaneous_bands', intervals='05_separation_intervals',
     characteristics='05_temporal_characteristics', registry='06_non_estimable_registry')
 TEST_MODELS = dict(linear_group_time='A', common_nonlinearity='B', group_specific_curvature='C', global_temporal_heterogeneity='C')
+# Frozen default used for the Step 17 institutional run; override for a different data freeze.
+# Never derive this cutoff from wall-clock time (the same command must be reproducible).
+DEFAULT_DATA_CUTOFF = '2026-05-31'
 
 
 def parse_args(argv=None):
@@ -56,7 +59,8 @@ def parse_args(argv=None):
     p.add_argument('--sensitivity', choices=('none', 'standard', 'full'), default='standard')
     p.add_argument('--variables', nargs='+')
     p.add_argument('--config', type=Path)
-    p.add_argument('--data-cutoff', required=True, help='Frozen YYYY-MM-DD; never defaults to the current date')
+    p.add_argument('--data-cutoff', default=DEFAULT_DATA_CUTOFF,
+                   help=f'Frozen YYYY-MM-DD (default: {DEFAULT_DATA_CUTOFF}); override if the approved freeze differs')
     p.add_argument('--max-primary-years', type=float)
     p.add_argument('--seed', type=int)
     p.add_argument('--simulations', type=int)
@@ -308,7 +312,10 @@ def run(args):
         verify_unchanged(inputs)
         verify_unchanged(code_hashes)
         install_bundle(staging, destinations, args.backup_root)
-    report.update(analysis_seconds=time.monotonic()-start, published_bundles=len(tables_by_key), qc_status='PASS')
+    report.update(analysis_seconds=time.monotonic()-start, published_bundles=len(tables_by_key), qc_status='PASS',
+                  data_cutoff=args.data_cutoff,
+                  output_directories={area: str(root/'outputs'/area/'blockA'/STEM)
+                                      for area in ('tables', 'figures', 'qc')})
     return report
 
 
