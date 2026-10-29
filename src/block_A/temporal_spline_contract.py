@@ -1,9 +1,15 @@
 """Reuse upstream authentication and dates; add Step 17 code fingerprints."""
 import hashlib
+import json
 from src.block_A.secondary_comparison_contract import (  # noqa: F401
     code_paths as upstream_code_paths, fingerprints, git_identity, load_inputs,
-    measurements, metadata, verify_unchanged,
+    measurements, metadata as upstream_metadata, verify_unchanged,
 )
+
+
+def metadata(spec, threshold, axis, cfg):
+    return dict(upstream_metadata(spec, threshold, axis, cfg),
+                outcome_id=json.dumps([spec.domain, spec.canonical_column], separators=(',', ':')))
 
 
 def code_paths(root):

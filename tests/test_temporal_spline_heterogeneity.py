@@ -32,7 +32,8 @@ def test_sparse_group_support_does_not_invent_C():
     d = d.loc[~d.observed_pattern.eq(group) | d.time.isin([0., 3.])]
     ev = evaluate(d, groups, spec, SplineConfig(), 'clinical_baseline', 3, 3)
     assert not ev['gate']['eligible_C']
-    assert ev['gate']['status'] == 'NOT_ESTIMABLE_SPLINE_GROUP'
+    assert ev['gate']['eligibility_status_C'] == 'NOT_ELIGIBLE'
+    assert 'insufficient_distinct_times' in ev['gate']['reason_A']
 
 
 def test_unsupported_reference_uses_first_common_supported_grid_and_gaps_do_not_merge():

@@ -1,4 +1,4 @@
-"""Frozen common sample and stricter local four-group spline support."""
+"""Frozen common sample and versioned exploratory four-group spline support."""
 import json
 import numpy as np
 import pandas as pd
@@ -6,6 +6,7 @@ from src.block_A.secondary_comparison_contract import inference_frame
 from src.block_A.secondary_comparison_models import PATTERNS
 from src.block_A.secondary_trajectory_analysis import ContractError
 from src.block_A.temporal_spline_design import FrozenBasis
+from src.block_A.temporal_spline_config import ANALYSIS_ROLE
 
 
 def evaluate(frame, groups, spec, cfg, axis, fit_horizon=None, report_horizon=None):
@@ -34,8 +35,11 @@ def evaluate(frame, groups, spec, cfg, axis, fit_horizon=None, report_horizon=No
         d = data.loc[data.observed_pattern.eq(g)] if len(data) else data
         sizes = d.groupby('patient_id').time.nunique() if len(d) else pd.Series(dtype=int)
         spans = d.groupby('patient_id').time.agg(lambda s: s.max()-s.min()) if len(d) else pd.Series(dtype=float)
+        three_dates = int((sizes.ge(3) & spans.ge(1.)).sum())
         rows.append(dict(observed_pattern=g, n_patients=len(sizes), n_repeated=int(sizes.ge(2).sum()),
-            n_three_dates=int((sizes.ge(3) & spans.ge(cfg.minimum_observed_span_years)).sum()),
+            n_three_dates=three_dates, n_three_distinct_dates=int(sizes.ge(3).sum()),
+            n_span_at_least_one_year=int(spans.ge(1.).sum()),
+            limited_three_date_histories=three_dates < cfg.minimum_three_date_patients,
             n_distinct_times=d.time.nunique() if len(d) else 0, n_observations=len(d)))
     counts = pd.DataFrame(rows)
     if counts.n_patients.lt(cfg.minimum_patients_per_group).any():
@@ -87,15 +91,20 @@ def evaluate(frame, groups, spec, cfg, axis, fit_horizon=None, report_horizon=No
         local.extend(dict(**r, four_group_supported=supported) for r in by_group)
     support = pd.DataFrame(local, columns=['observed_pattern', 'time', 'n_observed_local', 'percent_group_measured',
         'observed_span_years', 'local_supported', 'local_window_width_years', 'four_group_supported'])
-    # Three distributed regions and three annual windows must ALL be represented.
+    # Histories with three dates are diagnostic only under the revised policy.
     ok_times = support.loc[support.four_group_supported, 'time'].unique()
     region_n = len(set(np.clip(np.floor((ok_times-lo)/(grid_hi-lo)*3), 0, 2).astype(int))) if grid_hi > lo else 0
     annual_n = len(set(np.floor(ok_times).astype(int)))
+    supported_span = float(np.ptp(ok_times)) if len(ok_times) else 0.
     c_reasons = []
-    if counts.n_three_dates.lt(cfg.minimum_three_date_patients).any():
-        c_reasons.append('insufficient_three_date_patients_with_span')
-    if region_n < 3 or annual_n < 3:
-        c_reasons.append('insufficient_distributed_local_four_group_support')
+    if region_n < cfg.minimum_c_supported_regions:
+        c_reasons.append('insufficient_c_supported_regions')
+    if annual_n < cfg.minimum_c_supported_annual_windows:
+        c_reasons.append('insufficient_c_supported_annual_windows')
+    if len(ok_times) < cfg.minimum_c_supported_grid_points:
+        c_reasons.append('insufficient_c_supported_grid_points')
+    if supported_span < cfg.minimum_c_supported_grid_span_years:
+        c_reasons.append('insufficient_c_supported_grid_span_years')
     basis, matrices, designs = None, {}, []
     if not reasons:
         try:
@@ -117,11 +126,20 @@ def evaluate(frame, groups, spec, cfg, axis, fit_horizon=None, report_horizon=No
                 matrices[model] = m
     a_reason = '; '.join(reasons or ([] if 'A' in matrices else ['singular_or_ill_conditioned_A_design']))
     b_reason = a_reason or ('' if 'B' in matrices else 'nonestimable_nonlinear_basis_or_B_design')
-    c_reason = b_reason or '; '.join(c_reasons or ([] if 'C' in matrices else ['singular_or_ill_conditioned_C_design']))
-    gate = dict(status='ELIGIBLE' if not c_reason else 'NOT_ESTIMABLE_SPLINE_GROUP',
-        reason=c_reason, eligible_A=not bool(a_reason), eligible_B=not bool(b_reason), eligible_C=not bool(c_reason),
+    if 'C' not in matrices:
+        c_reasons.append('singular_or_ill_conditioned_C_design')
+    c_reason = b_reason or '; '.join(c_reasons)
+    gate = dict(status='ELIGIBLE' if not a_reason else 'NOT_ESTIMABLE',
+        reason=a_reason, eligible_A=not bool(a_reason), eligible_B=not bool(b_reason), eligible_C=not bool(c_reason),
         reason_A=a_reason, reason_B=b_reason, reason_C=c_reason,
+        eligibility_status_A='ELIGIBLE' if not a_reason else 'NOT_ELIGIBLE',
+        eligibility_status_B='ELIGIBLE' if not b_reason else 'NOT_ELIGIBLE',
+        eligibility_status_C='ELIGIBLE' if not c_reason else 'NOT_ELIGIBLE',
+        support_policy=cfg.c_support_policy, inference_role=ANALYSIS_ROLE,
+        limited_three_date_histories=bool(counts.limited_three_date_histories.any()),
+        n_three_dates_per_group=json.dumps(dict(zip(counts.observed_pattern, counts.n_three_dates)), sort_keys=True),
         common_time_min=float(lo), common_time_max=float(hi), n_patients=int(counts.n_patients.sum()),
         n_observations=len(data), n_supported_regions=region_n, n_supported_annual_windows=annual_n,
+        n_supported_grid_times=len(ok_times), supported_grid_span_years=supported_span,
         n_per_group=json.dumps(dict(zip(counts.observed_pattern, counts.n_patients)), sort_keys=True))
     return dict(data=data, gate=gate, support=support, counts=counts, basis=basis, matrices=matrices, designs=designs)

@@ -2,6 +2,7 @@
 import numpy as np
 import pandas as pd
 from statsmodels.stats.multitest import multipletests
+from src.block_A.secondary_trajectory_analysis import ContractError
 
 
 def simultaneous_critical(gradients, covariance, simulations, seed):
@@ -33,6 +34,8 @@ def adjust_fdr(table):
         return d
     valid = d.status.eq('ESTIMATED') & d.p.between(0, 1) & ~d.is_essdai_derived.astype(bool)
     keys = ['threshold_abs', 'time_axis', 'scenario', 'test']
+    if 'outcome_id' in d and d.duplicated(keys+['outcome_id']).any():
+        raise ContractError('duplicate canonical outcome in FDR family')
     for extra, q, n in [([], 'q_value', 'family_n_tests'), (['domain'], 'q_domain', 'domain_family_n_tests')]:
         for _, indices in d.loc[valid].groupby(keys+extra, dropna=False).groups.items():
             d.loc[indices, q] = multipletests(d.loc[indices, 'p'], method='fdr_bh')[1]
