@@ -16,14 +16,14 @@ final_representation_ids:
 - R0
 - R2
 - R3
-final_subsampling_replicates: 200
-secondary_subsampling_replicates: 60
+final_subsampling_replicates: 60
+secondary_subsampling_replicates: 20
 patient_fraction: 0.8
 match_jaccard: 0.5
 stable_threshold: 0.8
 minimum_success_fraction: 0.95
-bootstrap_replicates: 60
-preflight_replicates: 20
+bootstrap_replicates: 20
+preflight_replicates: 10
 run_lens_distance_sensitivity: true
 run_mapper_grid: true
 run_domain_and_family_ablations: true
@@ -56,13 +56,13 @@ umap_seeds:
 - 101
 - 202
 - 303
-negative_control_replicates: 20
+negative_control_replicates: 10
 comparator_k:
 - 2
 - 3
 - 4
 - 5
-comparator_replicates: 20
+comparator_replicates: 10
 minimum_stratum_patients: 20
 minimum_mapper_coverage: 0.5
 maximum_fragmentation: 0.5
