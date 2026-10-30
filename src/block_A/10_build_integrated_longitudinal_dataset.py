@@ -20,6 +20,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 import common  # noqa: E402
+from src.block_A._internal.step10_share import (  # noqa: E402
+    build_share_dataset, harmonize_interval_names, organize_analytic_columns,
+)
 
 KEYS = ["patient_id", "clinical_episode_id"]
 STRUCTURAL_COLUMNS = [
@@ -47,7 +50,7 @@ ROLE_DESTINATION = {
     "UNCLASSIFIED": "none",
 }
 DATASET_CONTRACT_VERSION = "clinical_episode_curated_v2"
-INTEGRATION_BUILD_VERSION = "v8_medication_episode_contract"
+INTEGRATION_BUILD_VERSION = "v9_ordered_share_candidate"
 PRODUCER_SCRIPTS = {
     "clinical_spine": "00_build_visit_spine.py", "pop": "01_pop_distribution.py",
     "labs": "01_serological_profile.py", "overlap": "06_overlap_glandular.py",
@@ -980,6 +983,12 @@ def _write_audits(build: CuratedBuild, output: Path, qc_dir: Path) -> dict:
     registry_path = output.with_name("10_variable_registry.csv")
     build.analytic.to_parquet(output, index=False)
     build.analytic.to_csv(output.with_suffix(".csv"), index=False)
+    share, share_qc = build_share_dataset(build.analytic)
+    share_path = output.with_name("to_share.csv")
+    share.to_csv(share_path, index=False)
+    (qc_dir / "10_to_share_privacy_audit.json").write_text(
+        json.dumps(share_qc, indent=2, sort_keys=True), encoding="utf-8"
+    )
     build.context.to_parquet(context_path, index=False)
     build.registry.to_csv(registry_path, index=False)
     build.registry[["source", "producer_script", "original_variable", "public_variable",
@@ -1109,6 +1118,12 @@ def main() -> None:
     if not args.no_medications:
         build, medication_qc = _integrate_medication_context(
             build, medication_input=args.medication_input, clinical_spine_path=args.spine)
+    # Reorder only after medications have been integrated; preserve all canonical fields.
+    build.analytic = organize_analytic_columns(build.analytic)
+    if "spine__interval_name" in build.analytic:
+        build.analytic["spine__interval_name"] = harmonize_interval_names(
+            build.analytic["spine__interval_name"]
+        )
     qc = _write_audits(build, args.output, qc_dir)
     if medication_qc is not None:
         (qc_dir / "10_medication_documentation_qc.json").write_text(
@@ -1116,6 +1131,7 @@ def main() -> None:
     if qc["zero_block_qc"]["zero_block_baseline_present"]:
         print("WARNING: clinical baseline episodes exist with zero integrated data blocks; review before Step 11.")
     print(f"Wrote {len(build.analytic):,} curated clinical episodes to {args.output}")
+    print(f"Wrote pseudonymized review-only candidate to {args.output.with_name('to_share.csv')}")
 
 
 if __name__ == "__main__":
