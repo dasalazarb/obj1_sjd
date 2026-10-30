@@ -166,7 +166,7 @@ def build_share_dataset(analytic: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         raise ValueError("Share export requires unique column names")
     original_ids = analytic.patient_id.astype("string")
     unique_ids = original_ids.unique().tolist()
-    id_map = {old: "SJD_" + secrets.token_hex(16) for old in unique_ids}
+    id_map = {old: f"pt{i}" for i, old in enumerate(unique_ids, start=1)}
     # Reuse one date offset for all rows and date variables of each patient.
     day_map = {old: 36525 + secrets.randbelow(731) for old in unique_ids}
     per_row_shift = original_ids.map(day_map).astype("int64")
@@ -247,7 +247,7 @@ def build_share_dataset(analytic: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         "manual_text_privacy_review_required": bool(text_review),
         "interval_labels_ambiguous_count": interval_ambiguous,
         "requires_irb_dua_and_disclosure_risk_review": True,
-        "patient_id_method": "cryptographically random per run; no mapping saved",
+        "patient_id_method": "sequential pt1, pt2, ... by first patient appearance; no mapping saved",
         "date_method": "same offset per patient: 36525 plus 0..730 random days; exact day intervals preserved",
         "not_hipaa_safe_harbor": True,
         "n_rows": int(len(share)), "n_patients": int(len(unique_ids)),
