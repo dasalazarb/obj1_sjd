@@ -47,6 +47,31 @@ CATEGORICAL_ALLOWED = {
 }
 
 
+# Only curated master domains qualify; never load raw upstream text here.
+CLINICAL_TEXT_PREFIXES = tuple(p for p in BLOCKS if p != "demo__")
+IDENTIFIER_PATTERNS = (
+    (re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}"), "[EMAIL]"),
+    (re.compile(r"\b(?:MRN|SSN|subject(?: number)?|patient ID)\s*[:#=]?\s*[A-Z0-9][A-Z0-9-]*", re.I), "[IDENTIFIER]"),
+    (re.compile(r"(?<!\w)(?:\+?1[-. ]?)?(?:\(\d{3}\)|\d{3})[-. ]?\d{3}[-. ]?\d{4}(?!\w)"), "[PHONE]"),
+    (re.compile(r"\b(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4})\b"), "[DATE]"),
+    (re.compile(r"\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},?\s+\d{4}\b", re.I), "[DATE]"),
+    (re.compile(r"\b(?:Patient name|Name)\s*:\s*[^;|\r\n]+", re.I), "[NAME]"),
+)
+
+
+def _mask_text_identifiers(values: pd.Series) -> tuple[pd.Series, int]:
+    """Conservative pattern masking, not complete de-identification.
+
+    Unlabelled names and informal addresses require human review. Counts never
+    contain original text; missing cells remain missing.
+    """
+    original = values.astype("string")
+    cleaned = original.copy()
+    for pattern, replacement in IDENTIFIER_PATTERNS:
+        cleaned = cleaned.str.replace(pattern, replacement, regex=True)
+    return cleaned, int(cleaned.ne(original).fillna(False).sum())
+
+
 def harmonize_interval_names(values: pd.Series) -> pd.Series:
     """Normalize explicit compound labels, without deriving a visit from its date."""
     cleaned = values.astype("string").str.strip().mask(lambda x: x.eq(""))
@@ -103,13 +128,13 @@ def _sensitive_column(name: str) -> bool:
     if low != "patient_id" and (low.endswith(("_id", "__id", "_key"))
                                 or "episode_id" in low or "identifier" in low):
         return True
-    if RESTRICTED_NAME.search(low) or any(t in low for t in ("free_text", "__text", "_notes", "_narrative")):
+    if RESTRICTED_NAME.search(low):
         return True
     if low in {"demo__race", "demo__ethnicity"}:
         return True  # avoid unnecessarily identifying sparse demographic strata
-    if low.startswith("medication__") and low.endswith("names"):
-        return True  # potentially rare combinations; may need a reviewed release
     if "protocol" in low and low != "spine__interval_name":
+        return True
+    if re.search(r"(?:^|_)(?:source|provenance|qc|legacy|admin|subject|patient_name)(?:_|$)", low):
         return True
     if low in {"calendar_year", "year", "study_year"}:
         return True
@@ -132,8 +157,8 @@ def build_share_dataset(analytic: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
 
     Dates receive a *consistent per-patient* 100-year-plus-random-day offset.
     This preserves within-patient intervals, but DOES NOT make dates HIPAA-safe.
-    Text, unreviewed categories, rare genetic fields and source identifiers are
-    omitted by default; an approved recipient/risk assessment is still required.
+    Curated clinical text is retained with pattern masking for internal review.
+    Unknown strings and administrative identifiers remain excluded.
     """
     if "patient_id" not in analytic or analytic.patient_id.isna().any():
         raise ValueError("Share export requires fully populated patient_id")
@@ -151,6 +176,10 @@ def build_share_dataset(analytic: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     shifted = []
     category_masked = {}
     age_topcoded = {}
+    text_retained = []
+    text_review = []
+    text_masked = {}
+    interval_ambiguous = 0
 
     for column in organize_analytic_columns(analytic).columns:
         if column == "patient_id":
@@ -178,13 +207,27 @@ def build_share_dataset(analytic: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
                 share[column] = values
             continue
         if column in CATEGORICAL_ALLOWED:
+            if column == "spine__interval_name":
+                normalized = harmonize_interval_names(values)
+                interval_ambiguous = int(normalized.str.contains(
+                    r"Optional\s+Evaluation", case=False, regex=True, na=False).sum())
             cleaned, count = _validated_categorical(column, values)
+            cleaned, masked_count = _mask_text_identifiers(cleaned)
+            if masked_count:
+                text_masked[column] = masked_count
+                text_review.append(column)
             share[column] = cleaned
             if count:
                 category_masked[column] = count
             continue
-        # No uncontrolled strings are exported, even from curated sources.
-        dropped.append(column)
+        text_review.append(column)
+        if column.startswith(CLINICAL_TEXT_PREFIXES):
+            share[column], count = _mask_text_identifiers(values)
+            text_retained.append(column)
+            text_masked[column] = count
+        else:
+            # Unknown strings remain excluded and are explicitly queued for review.
+            dropped.append(column)
 
     share = organize_analytic_columns(share)
     if len(share) != len(analytic) or share.patient_id.nunique() != len(unique_ids):
@@ -196,7 +239,13 @@ def build_share_dataset(analytic: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     if any(pd.api.types.is_datetime64_any_dtype(share[c]) for c in share):
         raise AssertionError("Unshifted datetime column in share export")
     qc = {
-        "status": "PSEUDONYMIZED_CANDIDATE_NOT_ANONYMIZED",
+        "status": "PSEUDONYMIZED_REVIEW_ONLY_NOT_ANONYMIZED",
+        "text_columns_retained": text_retained,
+        "text_columns_review_required": sorted(set(text_review)),
+        "text_cells_with_identifier_patterns_masked": text_masked,
+        "contains_unstructured_text": bool(text_retained),
+        "manual_text_privacy_review_required": bool(text_review),
+        "interval_labels_ambiguous_count": interval_ambiguous,
         "requires_irb_dua_and_disclosure_risk_review": True,
         "patient_id_method": "cryptographically random per run; no mapping saved",
         "date_method": "same offset per patient: 36525 plus 0..730 random days; exact day intervals preserved",
@@ -210,3 +259,4 @@ def build_share_dataset(analytic: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         "note": "Check small-cell combinations, rare phenotypes and potential linkage before any disclosure.",
     }
     return share, qc
+

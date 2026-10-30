@@ -56,8 +56,8 @@ def test_share_preserves_episodes_but_not_identifiers_or_exact_dates():
     assert share.patient_id.iloc[0] != share.patient_id.iloc[2]
     assert not share.patient_id.isin(["100", "200"]).any()
     assert not set(SHARE_DROP_COLUMNS) & set(share.columns)
-    assert "lab__clinical_note__text" not in share
-    assert "medication__current_names" not in share
+    assert "lab__clinical_note__text" in share
+    assert share.medication__current_names.tolist() == original.medication__current_names.tolist()
     assert "clinical_anchor_date" in share and "clinical_baseline_date" in share
     shifted = pd.to_datetime(share.clinical_anchor_date)
     assert ((shifted - original.clinical_anchor_date).dt.days >= 36525).all()
@@ -96,3 +96,59 @@ def test_unknown_string_and_source_dates_never_leak():
                       "free_text", "unexpected_date"):
         assert forbidden not in share
     assert set(("patient_subject_number", "source_protocol")) <= set(qc["removed_columns"])
+
+
+
+def test_curated_text_preserves_findings_nulls_and_masks_identifiers():
+    import json
+    original = example().assign(**{
+        "lab__ana__text": ["positive", "negative", None],
+        "lab__clinical_note__text": [
+            "ANA positive; MRN: ABC123; email a@example.org; 2020-05-01",
+            "sicca reported; phone (212) 555-1234; Name: Jane Doe",
+            None,
+        ],
+        "ext__sicca_notes": ["sicca reported", None, "ANA positive"],
+        "spine__source_notes": ["administrative"] * 3,
+        "lab__mrn": ["ABC123"] * 3,
+        "demo__dob": ["1970-01-01"] * 3,
+        "unapproved_notes": ["unreviewed"] * 3,
+    })
+    before = original.copy(deep=True)
+    share, qc = build_share_dataset(original)
+    pd.testing.assert_frame_equal(original, before)
+    assert share["lab__ana__text"].iloc[:2].tolist() == ["positive", "negative"]
+    assert pd.isna(share["lab__ana__text"].iloc[2])
+    assert share["lab__clinical_note__text"].iloc[0] == "ANA positive; [IDENTIFIER]; email [EMAIL]; [DATE]"
+    assert share["lab__clinical_note__text"].iloc[1] == "sicca reported; phone [PHONE]; [NAME]"
+    assert pd.isna(share["lab__clinical_note__text"].iloc[2])
+    assert share["ext__sicca_notes"].iloc[0] == "sicca reported"
+    for name in ["spine__source_notes", "lab__mrn", "demo__dob", "unapproved_notes"]:
+        assert name not in share
+    assert qc["text_cells_with_identifier_patterns_masked"]["lab__clinical_note__text"] == 2
+    assert "unapproved_notes" in qc["text_columns_review_required"]
+    assert qc["contains_unstructured_text"] is True
+    assert qc["manual_text_privacy_review_required"] is True
+    assert qc["status"] == "PSEUDONYMIZED_REVIEW_ONLY_NOT_ANONYMIZED"
+    assert not any(value in json.dumps(qc) for value in ["ABC123", "a@example.org", "Jane Doe", "ANA positive"])
+    assert list(share.columns) == list(organize_analytic_columns(share).columns)
+    assert share["lab__crp__value"].tolist() == original["lab__crp__value"].tolist()
+
+
+def test_no_free_text_flags_and_unknown_only_review():
+    source = pd.DataFrame({"patient_id": ["a"], "lab__crp__value": [1.2], "demo__sex": ["F"]})
+    _, qc = build_share_dataset(source)
+    assert qc["contains_unstructured_text"] is False
+    assert qc["manual_text_privacy_review_required"] is False
+    assert qc["text_columns_retained"] == []
+    assert qc["text_cells_with_identifier_patterns_masked"] == {}
+    _, qc = build_share_dataset(source.assign(unknown_notes="review"))
+    assert qc["contains_unstructured_text"] is False
+    assert qc["manual_text_privacy_review_required"] is True
+
+
+def test_ambiguous_interval_is_counted_without_inventing_phase():
+    label = "Optional Evaluation | Phase 1 | Phase 2"
+    assert harmonize_interval_names(pd.Series([label])).iloc[0] == label
+    _, qc = build_share_dataset(pd.DataFrame({"patient_id": ["a"], "spine__interval_name": [label]}))
+    assert qc["interval_labels_ambiguous_count"] == 1
