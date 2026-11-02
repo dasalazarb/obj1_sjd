@@ -52,8 +52,7 @@ def test_share_preserves_episodes_but_not_identifiers_or_exact_dates():
     share, qc = build_share_dataset(original)
     pd.testing.assert_frame_equal(original, unchanged)
     assert len(share) == 3 and share.patient_id.nunique() == 2
-    assert share.patient_id.iloc[0] == share.patient_id.iloc[1]
-    assert share.patient_id.iloc[0] != share.patient_id.iloc[2]
+    assert share.patient_id.tolist() == ["pt1", "pt1", "pt2"]
     assert not share.patient_id.isin(["100", "200"]).any()
     assert not set(SHARE_DROP_COLUMNS) & set(share.columns)
     assert "lab__clinical_note__text" in share
@@ -68,6 +67,7 @@ def test_share_preserves_episodes_but_not_identifiers_or_exact_dates():
     assert shifted_baseline.iloc[0] == shifted_baseline.iloc[1] == shifted.iloc[0]
     assert share.demo__age_at_visit.tolist() == [90, 90, 39]
     assert share.spine__interval_name.iloc[1] == "Phase 2: 4th Full Evaluation"
+    assert qc["patient_id_method"].startswith("sequential pt1")
     assert qc["not_hipaa_safe_harbor"] is True
     assert qc["n_share_columns"] == len(share.columns)
 
