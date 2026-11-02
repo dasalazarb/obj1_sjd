@@ -233,3 +233,68 @@ See `14_explainwhy_inclusive_v2_validation.json` for the test scope, source hash
 and explicit blocked canonical/review states. Deprecation warnings from the
 existing scientific environment and empty upstream-figure layout warnings do
 not establish clinical validation.
+
+### Interpretability QC and current-run-only execution
+
+Use `--explainwhy-inclusive-main --no-prior-result-comparison` with a new,
+protected `--output-root` and `--no-overwrite`. The opt-out skips prior bundle
+manifests, result tables and prior-product hashing in the analytical snapshot.
+`primary_result_regression_qc.status` and the manifest's
+`prior_result_comparison` are `NOT_REQUESTED_BY_INVESTIGATOR`. Empty historical
+snapshot dictionaries record the absence of that operation. Canonical current
+input hashes, Step 13 reconciliation/legacy bridge, temporal checks, current
+FDR, output hashes, and transactional installation/rollback remain active.
+`--dry-run` validates current contracts without fitting or publishing.
+
+Two additional CSVs live under the existing protected V2 QC directory:
+
+- `14_explainwhy_inclusive_v2_domain_interpretability_qc.csv`: domain, index route
+  and population summaries reuse the composition gate and actual prepared model
+  samples. Arithmetic agreement alone never certifies scoring provenance.
+  Absent upstream authorization remains `UNVERIFIED`, with other-domain
+  sensitivity not estimable. Invalid explicit authorization blocks publication.
+  Matched-total samples and adjustment levels retain the existing paired checks;
+  these sensitivities remain outside primary FDR.
+- `14_explainwhy_inclusive_v2_pns_fragility_qc.csv`: primary inclusive and separate
+  official-only descriptions observe the exact transformed complete cases used
+  by the existing fitting loop. Each exposed patient's entire cluster is removed
+  in memory and the existing support/design guard is reapplied to the frozen
+  formula. No deletion model is fitted; no new coefficients, p or q are produced.
+  Intervals per exposed patient include that patient's inactive intervals, and
+  the largest cluster share uses all intervals in exposed patient clusters as
+  denominator. Exposed intervals themselves use transformed `x > 0`.
+
+Counts describe the prepared sample, including for unsupported/failed models;
+`model_status` and `support_guard_passed` distinguish those from successful fits.
+Unique exposed/unexposed counts can overlap when a patient changes activity.
+These detailed aggregates contain no identifiers, individual dates or patient
+rows, but rare-exposure counts remain **protected pending institutional disclosure
+review**. Do not commit clinical QC or analytic products to GitHub. The closure
+summary exposes only a categorical PNS support status and exploratory limits.
+PNS associations do not establish protection or causality; surviving the support
+guard after deletion does not imply significance or coefficient stability.
+
+This implementation does not create upstream authorization. Certification requires
+independent evidence from the Step 10 producer for all twelve domain scoring
+versions and the recorded total, hash-bound through the Step 13 V2 manifest.
+`_essdai_version` alone does not establish those semantics. Clinical execution
+requires the physical canonical inputs; synthetic tests establish software
+behavior only and do not close clinical or institutional review.
+
+Implementation validation (2026-11-02): all 24 new interpretability tests passed
+with synthetic inputs. A structural AST check against the starting code commit
+(`9179cee`) confirms every Step 14 scientific function and constant is unchanged;
+only its CLI parser changed. The requested four-file suite finished with 181
+passed and one known failure
+in `test_historical_scientific_functions_and_inputs_remain_exact`: its fixed
+`dc56d303` code reference differs from the starting commit's Step 10 producer.
+That upstream file was not modified by this implementation; no unrelated repair
+or historical clinical-result comparison was performed.
+
+The canonical `--dry-run` with the new opt-out failed closed because physical
+Step 10/11/13 inputs and the Step 13 V2 manifest are absent in this environment.
+No clinical bundle was produced and no clinical PNS fragility or provenance
+certification can be reported here. The synthetic bundle verifies `UNVERIFIED`
+without authorization and `OTHER_DOMAINS_NOT_ESTIMABLE` without opening prior
+results. Run the documented commands in the authorized clinical environment to
+obtain current clinical diagnostics; do not infer them from synthetic tests.

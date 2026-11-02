@@ -1771,6 +1771,8 @@ def parse_args(argv=None):
                         help="Write isolated explain-why availability/feasibility QC; never fit models")
     parser.add_argument("--explainwhy-inclusive-main", action="store_true",
                         help="Inclusive ESSDAI-index v2 family (also the no-arguments default)")
+    parser.add_argument("--no-prior-result-comparison", action="store_true",
+                        help="Inclusive V2 only: omit prior-result reads and snapshots")
     parser.add_argument("--historical-main", action="store_true",
                         help="Run the original Step 14 analysis instead of the no-arguments inclusive default")
     parser.add_argument("--patterns-v2", type=Path, help="Explicit v2 eligible patient Parquet")
@@ -1786,6 +1788,8 @@ def parse_args(argv=None):
     if sum(bool(x) for x in (args.explainwhy_inclusive_main, args.explainwhy_audit_only,
                              args.historical_main)) > 1:
         parser.error("inclusive-main, audit-only, and historical-main are mutually exclusive")
+    if args.no_prior_result_comparison and not args.explainwhy_inclusive_main:
+        parser.error("--no-prior-result-comparison requires --explainwhy-inclusive-main")
     if args.explainwhy_inclusive_main:
         # Derive context/registry from the selected canonical Step 10 file and
         # resolve v2 producer artifacts relative to this repository. These
