@@ -4,7 +4,7 @@ from src.block_A.secondary_trajectory_analysis import ContractError
 from src.block_A.secondary_comparison_outputs import (  # noqa: F401
     artifact_manifest, install_bundle, safe_table, write_manifest, write_table,
 )
-from src.block_A.temporal_spline_config import STEM
+from src.block_A.temporal_spline_config import STEM, VERSION
 
 TABLES = (
     '00_variable_eligibility', '00_local_temporal_support', '00_group_support', '00_aggregated_observations',
@@ -19,10 +19,33 @@ TABLES = (
 
 def directories(root, axis, threshold, scenario, analysis='all'):
     # Partial modes have separate namespaces and never replace a complete run.
-    suffix = Path(axis)/f'delta{threshold}'/scenario
+    suffix = Path(VERSION)/axis/f'delta{threshold}'/scenario
     if analysis != 'all':
         suffix /= analysis
     return {area: Path(root)/'outputs'/area/'blockA'/STEM/suffix for area in ('tables', 'figures', 'qc')}
+
+
+def annotate(frame, meta):
+    """Resolve known semantic aliases, then reject every unexpected collision.
+
+    Metadata's legacy `family` is the configured multiplicity family. A row's
+    family describes its outcome; producers of bands/bootstrap use named fields.
+    """
+    d = frame.copy()
+    row_aliases = {'reference_policy': 'inference_reference_policy', 'family': 'outcome_family'}
+    meta_aliases = {'n_patients': 'n_patients_analysis', 'family': 'inference_family',
+                    'reference_policy': 'variable_reference_policy'}
+    for old, new in row_aliases.items():
+        if old in d:
+            if new in d:
+                raise ContractError(f'annotation column collision: {old} -> {new}')
+            d = d.rename(columns={old: new})
+    for key, value in meta.items():
+        target = meta_aliases.get(key, key)
+        if target in d:
+            raise ContractError(f'annotation metadata collision: {key} -> {target}')
+        d[target] = value
+    return d
 
 
 def preflight(root, destinations, inputs, overwrite=False, backup_root=None):

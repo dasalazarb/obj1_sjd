@@ -2,6 +2,8 @@
 import numpy as np
 import pandas as pd
 from src.block_A.secondary_comparison_contract import inference_frame
+from src.block_A.temporal_spline_results import OUTCOME_KEYS
+from src.block_A.secondary_trajectory_analysis import ContractError
 
 
 def scenarios(frame, axis, cfg, mode):
@@ -37,39 +39,53 @@ def scenarios(frame, axis, cfg, mode):
         yield 'essdai_delayed_index', frame.loc[frame.essdai_index_source.ne('official_baseline')].copy(), axis, cfg.max_primary_years, cfg.max_primary_years
 
 
+def match_reference(reference, comparison, keys, suffixes):
+    """Each comparison row matches at most one semantically identical reference."""
+    try:
+        joined = reference.merge(comparison, on=keys, suffixes=suffixes, validate='one_to_many')
+    except pd.errors.MergeError as error:
+        raise ContractError('nonunique sensitivity reference outcome') from error
+    expected = comparison[keys].merge(reference[keys].drop_duplicates(), on=keys, validate='many_to_one')
+    if len(joined) != len(expected):
+        raise ContractError('sensitivity join changed matched row count')
+    return joined
+
+
 def consistency(tables):
     """Match identical tests and pair/time/estimands; thresholds are not independent."""
     rows = []
     slope_tables = [t['01_linear_pairwise_slopes'] for t in tables.values() if len(t['01_linear_pairwise_slopes'])]
     if slope_tables:
         slopes = pd.concat(slope_tables, ignore_index=True)
-        keys = ['variable', 'time_axis', 'contrast']
+        keys = OUTCOME_KEYS+['time_axis', 'contrast']
         primary = slopes.loc[slopes.threshold_abs.eq(3) & slopes.scenario.eq('main')]
         others = slopes.loc[~(slopes.threshold_abs.eq(3) & slopes.scenario.eq('main'))]
-        matched = primary.merge(others, on=keys, suffixes=('_primary', '_comparison'))
+        matched = match_reference(primary, others, keys, ('_primary', '_comparison'))
         for r in matched.to_dict('records'):
             rows.append(dict(**{k: r[k] for k in keys}, test='linear_A_slope_horizon_diagnostic',
                 scenario=r['scenario_comparison'], threshold_abs=r['threshold_abs_comparison'],
                 estimate_primary=r['estimate_primary'], estimate_comparison=r['estimate_comparison'],
                 same_sign=np.sign(r['estimate_primary']) == np.sign(r['estimate_comparison']),
                 same_estimation_rows=r['sample_fingerprint_primary'] == r['sample_fingerprint_comparison'],
-                n_patients_primary=r['n_patients_primary'], n_patients_comparison=r['n_patients_comparison'],
+                n_patients_primary=r['n_patients_analysis_primary'], n_patients_comparison=r['n_patients_analysis_comparison'],
                 interpretation='Slope/horizon/composition diagnostic for every variable; IgA receives no special selection rule'))
     global_tables = [t['02_global_temporal_tests'] for t in tables.values() if len(t['02_global_temporal_tests'])]
     if global_tables:
         tests = pd.concat(global_tables, ignore_index=True)
         full = tests.loc[tests.scenario.eq('full_common_horizon')]
         restricted = tests.loc[tests.scenario.eq('full_sample_primary_domain')]
-        shared = full.merge(restricted, on=['variable', 'time_axis', 'test', 'threshold_abs'], suffixes=('_full', '_restricted'))
+        shared = match_reference(full, restricted, OUTCOME_KEYS+['time_axis', 'test', 'threshold_abs'], ('_full', '_restricted'))
         for r in shared.to_dict('records'):
-            rows.append(dict(variable=r['variable'], time_axis=r['time_axis'], test=r['test'],
+            rows.append(dict(**{k: r[k] for k in OUTCOME_KEYS}, time_axis=r['time_axis'], test=r['test'],
                 threshold_abs=r['threshold_abs'], scenario='full_sample_primary_domain',
                 reference_scenario='full_common_horizon',
                 same_estimation_rows=r['sample_fingerprint_full'] == r['sample_fingerprint_restricted'],
                 primary_status=r['status_full'], comparison_status=r['status_restricted'],
                 primary_q=r['q_value_full'], comparison_q=r['q_value_restricted'],
                 interpretation='Reporting-domain sensitivity on identical full estimation rows; check eligible family and support separately'))
-        for (variable, axis, test), d in tests.groupby(['variable', 'time_axis', 'test']):
+        for identity, d in tests.groupby(OUTCOME_KEYS+['time_axis', 'test']):
+            outcome = dict(zip(OUTCOME_KEYS, identity[:-2]))
+            axis, test = identity[-2:]
             primary = d.loc[d.threshold_abs.eq(3) & d.scenario.eq('main')]
             if primary.empty:
                 continue
@@ -77,20 +93,20 @@ def consistency(tables):
             for b in d.to_dict('records'):
                 if b['threshold_abs'] == 3 and b['scenario'] == 'main':
                     continue
-                rows.append(dict(variable=variable, time_axis=axis, test=test, scenario=b['scenario'],
+                rows.append(dict(**outcome, time_axis=axis, test=test, scenario=b['scenario'],
                     threshold_abs=b['threshold_abs'], primary_status=a.status, comparison_status=b['status'],
                     primary_q=a.q_value, comparison_q=b['q_value'],
-                    n_patients_primary=a.n_patients, n_patients_comparison=b['n_patients'],
+                    n_patients_primary=a.n_patients_analysis, n_patients_comparison=b['n_patients_analysis'],
                     same_estimation_rows=a.sample_fingerprint == b['sample_fingerprint'],
                     interpretation='Sensitivity; overlapping patients and retrospectively different threshold memberships'))
     # IgA and every other variable use exactly the same six-pair matching rule.
     pair_tables = [t['04_pairwise_temporal_differences'] for t in tables.values() if len(t['04_pairwise_temporal_differences'])]
     if pair_tables:
         pairs = pd.concat(pair_tables, ignore_index=True)
-        keys = ['variable', 'time_axis', 'contrast', 'contrast_type', 'time']
+        keys = OUTCOME_KEYS+['time_axis', 'contrast', 'contrast_type', 'time']
         primary = pairs.loc[pairs.threshold_abs.eq(3) & pairs.scenario.eq('main')]
         other = pairs.loc[~(pairs.threshold_abs.eq(3) & pairs.scenario.eq('main'))]
-        merged = primary.merge(other, on=keys, suffixes=('_primary', '_comparison'))
+        merged = match_reference(primary, other, keys, ('_primary', '_comparison'))
         for r in merged.to_dict('records'):
             rows.append(dict(**{k: r[k] for k in keys}, scenario=r['scenario_comparison'],
                 threshold_abs=r['threshold_abs_comparison'], estimate_primary=r['estimate_primary'],
@@ -150,5 +166,5 @@ def bootstrap_patients(evaluation, fits, spec, cfg):
         reason='' if enough else 'Insufficient successful same-family patient bootstrap replicates',
         requested_replicates=cfg.bootstrap_replicates, successful_replicates=len(maxima),
         bootstrap_sup_t_critical=float(np.quantile(maxima, .95)) if enough else np.nan,
-        seed=cfg.seed+2, family='six_pairs_x_supported_grid_x_level_change_velocity',
+        seed=cfg.seed+2, bootstrap_family='six_pairs_x_supported_grid_x_level_change_velocity',
         method='stratified_whole_patient_fixed_basis_bootstrap_sensitivity')])

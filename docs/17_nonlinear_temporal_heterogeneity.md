@@ -69,7 +69,7 @@ Default parameters:
 
 When successful, the final JSON contains `qc_status: PASS`, the bundle count,
 the cutoff and output directory paths. CSV/PNG/manifest files live under
-`<project>/outputs/{tables,figures,qc}/blockA/17_nonlinear_temporal_heterogeneity/`
+`<project>/outputs/{tables,figures,qc}/blockA/17_nonlinear_temporal_heterogeneity/temporal-spline-v2/`
 with `<time_axis>/delta<3|5>/<scenario>/` suffixes. Previous published results
 are never overwritten silently. `--overwrite` still requires a valid
 `--backup-root`.
@@ -103,15 +103,18 @@ minimum 500), `--figures none|priority|all`, `--dpi` (minimum 200).
 Configuration is a JSON object of `SplineConfig` fields. Example:
 
 ```json
-{"version": "temporal-spline-v1", "max_primary_years": 3,
- "grid_step": 0.25, "minimum_three_date_patients": 5,
+{"version": "temporal-spline-v2", "max_primary_years": 3,
+ "grid_step": 0.25, "c_support_policy": "C_RELAXED_SUPPORT_V1",
+ "minimum_c_supported_regions": 2, "minimum_c_supported_annual_windows": 2,
+ "minimum_c_supported_grid_points": 4, "minimum_c_supported_grid_span_years": 1.0,
+ "minimum_prediction_patients": 5,
  "simulations": 4000, "seed": 1701}
 ```
 
 No checkpoint/resume is implemented. In-memory patient rows are discarded
 after each variable. Existing destinations are blocked unless both
 `--overwrite` and `--backup-root` are provided. Backups must be under
-`<output-root>/outputs/backups/17_nonlinear_temporal_heterogeneity/`
+`<output-root>/outputs/backups/17_nonlinear_temporal_heterogeneity/temporal-spline-v2/`
 (and under `synthetic_validation/` for synthetic inputs).
 
 ## Support and estimands
@@ -119,10 +122,25 @@ after each variable. Existing destinations are blocked unless both
 All fits use the intersection of observed group ranges, with nonnegative time
 and a primary maximum of three years. At least 10 patients and 8 repeated
 patients per group, three distinct group times and a common span of at least
-one year are required even for A. For C, each group also needs at least five
-patients with three distinct dates spanning at least one year, and four-group
-local support in three annual windows and all three thirds of the reporting
-horizon. These are operational limits, not power guarantees.
+one year are required even for A. Policy **C_RELAXED_SUPPORT_V1** requires
+four-group local support at **at least four distinct grid times spanning at least
+one year**, covering **at least two of three reporting-horizon regions** and
+**at least two annual windows**. Every published point still requires **five
+distinct patients per group**. The number of patients with at least three dates
+and a one-year span remains a diagnostic (`n_three_dates`, its components, and
+`limited_three_date_histories`), and is no longer a C eligibility barrier.
+These are operational limits, not power guarantees.
+
+This uniform, versioned revision was selected after inspecting prior C
+feasibility failures. The analysis role is therefore
+`exploratory_posthoc_support_revision` for both thresholds and every outcome.
+C results, including p/q and simultaneous bands, are exploratory. Significance,
+BH-FDR, four-knot cubic basis, A/B requirements, rank, condition, convergence,
+model-family and covariance QC remain unchanged. Failed C fits do not yield p/q.
+Support thresholds for this named policy cannot be overridden individually in
+configuration; another policy requires an explicit specification/version change.
+The three-year primary horizon and retrospective group definitions are unchanged.
+V2 destinations include `temporal-spline-v2/`, so V1 artifacts are preserved.
 
 The fixed grid is 0, .25, .5, … within the common range. A point is supported
 only if all four groups have at least five distinct patients in ±.5 years.
@@ -169,6 +187,39 @@ calibration is not implemented and is labeled nonestimable. Maximum-velocity
 windows and T50 remain `NOT_ESTIMABLE_TIMING`: no stable interior timing with
 validated uncertainty is asserted by this version.
 
+## Export identity and evidence classification
+
+Canonical `outcome_id` encodes domain and canonical source column; variable,
+domain, outcome type and unit are checked together in result joins. Homonymous
+lab/serology variables cannot exchange tests, comparisons or figures. Duplicate
+outcome/test rows raise a contract error before publication. Primary BH families
+continue across domains; supplementary domain q-values never drive classification.
+
+`n_patients` retains the table's local meaning (group, or group and annual
+window); `n_patients_analysis` separately describes the entire analysis sample.
+Metadata uses `variable_reference_policy` and `inference_family`; temporal rows
+use `inference_reference_policy`, and bootstrap uses `bootstrap_family`.
+Unexpected annotation collisions raise an informative error. Patient counts
+1–4 and their derived percentages are suppressed in CSVs and figures; analysis
+totals are withheld when they could reconstruct a suppressed group. Identifying
+columns and patient cells remain prohibited by `safe_table()`.
+
+A/B/C eligibility, fit and test states are separate. Classification reuses the
+four global tests and their original across-domain q-values/denominators:
+
+- A describes linear group-slope evidence even when C is unavailable.
+- B versus A describes common curvature, without claiming group-specific curvature.
+- C versus B receives `EXPLORATORY_NONLINEAR_GROUP_HETEROGENEITY` only for a valid
+  specific test with q < .05; otherwise `NO_EXPLORATORY_NONLINEAR_EVIDENCE` or
+  `C_NOT_ESTIMABLE`.
+- The global C interaction has a separate exploratory global classification;
+  it cannot establish nonlinear group evidence by itself.
+
+The run manifest includes policy/version, exploratory role, effective parameters,
+cutoff, commit/code and input hashes, counts of eligible/estimated/failed models
+A/B/C, valid C tests, estimator families, reasons and supported temporal coverage.
+QC PASS certifies software and provenance checks, not confirmatory or clinical validity.
+
 ## Sensitivities and Step 16 reconciliation
 
 `standard` runs primary capped common support, full common horizon, the **same
@@ -201,7 +252,7 @@ nor horizon depends on the observed sign of IgA.
 Every bundle has:
 
 ```text
-outputs/{tables,figures,qc}/blockA/17_nonlinear_temporal_heterogeneity/
+outputs/{tables,figures,qc}/blockA/17_nonlinear_temporal_heterogeneity/temporal-spline-v2/
   <time_axis>/delta<3|5>/<scenario>/
 ```
 
@@ -226,7 +277,7 @@ get an additional `synthetic_validation/` root. Empty tables have readable heade
 | `04_simultaneous_bands` | Explicit sup-t method, critical value, RNG and joint family |
 | `05_separation_intervals` | Contiguous supported separation; not biological onset |
 | `05_temporal_characteristics` | Explicit nonestimable timing registry |
-| `05_heterogeneity_classification` | Variable-level evidence/QC; not patient phenotypes |
+| `05_heterogeneity_classification` | One canonical outcome × test row; eligibility, fit and test states, p/q, FDR denominator, reason, support policy and exploratory role |
 | `06_sensitivity_and_threshold_consistency` | Global tests and signs across thresholds/scenarios with composition metadata |
 | `06_non_estimable_registry` | Missing model/function components and exact reasons |
 | `06_patient_bootstrap_validation` | Optional patient-level bootstrap summary and failures |
@@ -279,3 +330,5 @@ deprecation warnings and existing empty-slice warnings remain nonfatal.
 ```bash
 python -m pytest tests/test_temporal_spline_*.py tests/test_secondary_comparison_*.py -q
 ```
+
+Revision validation (2026-10-29): see the [C_RELAXED_SUPPORT_V1 software QC report](17_c_relaxed_support_v1_validation.md) for the executed 88-test regression, synthetic A/B/C counts and blocked institutional prerequisite check.

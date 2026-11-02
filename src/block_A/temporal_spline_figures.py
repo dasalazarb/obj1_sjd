@@ -1,5 +1,6 @@
 """Aggregate-only atlas, derivatives, six contrasts, support and evidence panels."""
 import re
+import hashlib
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -18,18 +19,20 @@ def render(tables, destination, cfg, selection='priority', dpi=250, origin='cano
     paths = []
     def save(fig, name):
         path = destination/(name+'.png')
-        fig.suptitle(fig._suptitle.get_text()+f'\n{origin}; retrospective associations, no causal/onset interpretation', fontsize=10)
+        fig.suptitle(fig._suptitle.get_text()+f'\n{origin}; exploratory support revision; retrospective associations, no causal/onset interpretation', fontsize=10)
         fig.savefig(path, dpi=dpi, bbox_inches='tight')
         plt.close(fig)
         paths.append(path.name)
     support = tables['00_local_temporal_support']
     curves = tables['03_group_curves']
-    for variable in tables['00_variable_eligibility'].variable.unique():
+    for outcome in tables['00_variable_eligibility'].to_dict('records'):
+        variable, outcome_id = outcome['variable'], outcome['outcome_id']
         if selection == 'priority' and variable not in cfg.priority_variables:
             continue
-        safe_name = re.sub(r'[^A-Za-z0-9_.-]', '_', variable)
-        d = curves.loc[curves.variable.eq(variable)] if len(curves) else curves
-        s = support.loc[support.variable.eq(variable)] if len(support) else support
+        safe_name = re.sub(r'[^A-Za-z0-9_.-]', '_', outcome['domain']+'_'+variable)
+        safe_name += '_'+hashlib.sha256(outcome_id.encode()).hexdigest()[:10]
+        d = curves.loc[curves.outcome_id.eq(outcome_id)] if len(curves) else curves
+        s = support.loc[support.outcome_id.eq(outcome_id)] if len(support) else support
         if len(s):
             fig, ax = plt.subplots(figsize=(8, 4))
             for g in LABELS:
@@ -43,7 +46,7 @@ def render(tables, destination, cfg, selection='priority', dpi=250, origin='cano
         if len(d):
             fig, ax = plt.subplots(figsize=(8, 4))
             observed = tables['00_aggregated_observations']
-            observed = observed.loc[observed.variable.eq(variable)] if len(observed) else observed
+            observed = observed.loc[observed.outcome_id.eq(outcome_id)] if len(observed) else observed
             if len(observed):
                 for g, part in observed.groupby('observed_pattern'):
                     part = part.loc[part.status.eq('DESCRIPTIVE')]
@@ -60,7 +63,7 @@ def render(tables, destination, cfg, selection='priority', dpi=250, origin='cano
             fig.suptitle(variable+' — A/B/C supported mean atlas')
             save(fig, safe_name+'_atlas')
         v = tables['04_temporal_derivatives']
-        v = v.loc[v.variable.eq(variable)] if len(v) else v
+        v = v.loc[v.outcome_id.eq(outcome_id)] if len(v) else v
         if len(v):
             fig, ax = plt.subplots(figsize=(8, 4))
             for g, part in v.groupby('observed_pattern', sort=False):
@@ -74,7 +77,7 @@ def render(tables, destination, cfg, selection='priority', dpi=250, origin='cano
             fig.suptitle(variable+' — velocity with simultaneous bands')
             save(fig, safe_name+'_velocity')
         b = tables['04_simultaneous_bands']
-        b = b.loc[b.variable.eq(variable)] if len(b) else b
+        b = b.loc[b.outcome_id.eq(outcome_id)] if len(b) else b
         if len(b):
             for kind, contrasts in b.groupby('contrast_type'):
                 fig, axes = plt.subplots(3, 2, figsize=(11, 8), squeeze=False)
@@ -93,12 +96,13 @@ def render(tables, destination, cfg, selection='priority', dpi=250, origin='cano
     tests = tables['02_global_temporal_tests']
     eligibility = tables['00_variable_eligibility']
     if len(eligibility):
-        variables = list(eligibility.variable.unique())
+        outcomes = list(eligibility.outcome_id)
+        variables = list(eligibility.domain+' / '+eligibility.variable)
         names = ['linear_group_time', 'common_nonlinearity', 'group_specific_curvature', 'global_temporal_heterogeneity']
         matrix = np.zeros((len(variables), len(names)))
-        for i, variable in enumerate(variables):
+        for i, outcome_id in enumerate(outcomes):
             for j, name in enumerate(names):
-                d = tests.loc[tests.variable.eq(variable) & tests.test.eq(name)] if len(tests) else tests
+                d = tests.loc[tests.outcome_id.eq(outcome_id) & tests.test.eq(name)] if len(tests) else tests
                 if len(d) and d.iloc[0].status == 'ESTIMATED':
                     q = d.iloc[0].q_value
                     matrix[i, j] = 2 if np.isfinite(q) and q < .05 else 1

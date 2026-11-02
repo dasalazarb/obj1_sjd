@@ -7,7 +7,7 @@ from temporal_spline_fixtures import args_for, cli, fixture
 from src.block_A.secondary_trajectory_analysis import sha256, ContractError
 from src.block_A.temporal_spline_outputs import directories, TABLES, safe_table
 from src.block_A.temporal_spline_sensitivity import scenarios
-from src.block_A.temporal_spline_config import SplineConfig
+from src.block_A.temporal_spline_config import SplineConfig, VERSION, C_SUPPORT_POLICY, ANALYSIS_ROLE
 
 
 def test_dry_run_design_and_support_zero_writes(upstream, tmp_path, monkeypatch):
@@ -32,6 +32,10 @@ def test_bundle_both_thresholds_registry_privacy_manifests_and_no_upstream_chang
         manifest = json.loads((dirs['qc']/'run_manifest.json').read_text())
         assert manifest['data_cutoff'] == '2025-01-01' and manifest['input_origin'] == 'synthetic_validation'
         assert manifest['qc_status'] == 'PASS' and manifest['code_hashes']
+        assert manifest['version'] == VERSION and manifest['c_support_policy'] == C_SUPPORT_POLICY
+        assert manifest['analysis_role'] == ANALYSIS_ROLE
+        assert set('ABC').issubset(manifest['model_counts'])
+        assert manifest['supported_temporal_coverage']
         for name in TABLES:
             table = pd.read_csv(dirs['tables']/(name+'.csv'))
             safe_table(table, upstream['p'].patient_id)

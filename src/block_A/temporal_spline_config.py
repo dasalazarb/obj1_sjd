@@ -5,8 +5,10 @@ import math
 from pathlib import Path
 from src.block_A.secondary_comparison_config import ComparisonConfig, PRIORITY
 
-VERSION = 'temporal-spline-v1'
+VERSION = 'temporal-spline-v2'
 STEM = '17_nonlinear_temporal_heterogeneity'
+C_SUPPORT_POLICY = 'C_RELAXED_SUPPORT_V1'
+ANALYSIS_ROLE = 'exploratory_posthoc_support_revision'
 
 
 @dataclass(frozen=True)
@@ -16,7 +18,11 @@ class SplineConfig(ComparisonConfig):
     max_primary_years: float = 3.
     grid_step: float = .25
     minimum_three_date_patients: int = 5
-    minimum_supported_regions: int = 3
+    c_support_policy: str = C_SUPPORT_POLICY
+    minimum_c_supported_regions: int = 2
+    minimum_c_supported_annual_windows: int = 2
+    minimum_c_supported_grid_points: int = 4
+    minimum_c_supported_grid_span_years: float = 1.
     simulations: int = 4000
     bootstrap_replicates: int = 0
     seed: int = 1701
@@ -28,15 +34,24 @@ class SplineConfig(ComparisonConfig):
         ComparisonConfig(**inherited)
         if self.version != VERSION:
             raise ValueError('unsupported Step 17 specification')
-        for name in ('max_primary_years', 'grid_step'):
+        for name in ('max_primary_years', 'grid_step', 'minimum_c_supported_grid_span_years'):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(name+' must be positive and finite')
-        for name in ('minimum_three_date_patients', 'minimum_supported_regions', 'simulations', 'bootstrap_replicates'):
+        for name in ('minimum_three_date_patients', 'minimum_c_supported_regions',
+                     'minimum_c_supported_annual_windows', 'minimum_c_supported_grid_points',
+                     'simulations', 'bootstrap_replicates'):
             v = getattr(self, name)
             if isinstance(v, bool) or not isinstance(v, int) or v < 0:
                 raise ValueError(name+' must be a nonnegative integer')
-        if self.minimum_three_date_patients < 2 or self.minimum_supported_regions != 3 or self.simulations < 500:
-            raise ValueError('require >=2 three-date patients, three regions and >=500 simulations')
+        if self.simulations < 500:
+            raise ValueError('require >=500 simulations')
+        # This named policy is global and frozen; another support specification
+        # requires a new policy/version, never a variable-dependent override.
+        if (self.c_support_policy != C_SUPPORT_POLICY or
+                (self.minimum_c_supported_regions, self.minimum_c_supported_annual_windows,
+                 self.minimum_c_supported_grid_points, self.minimum_c_supported_grid_span_years,
+                 self.minimum_prediction_patients, self.minimum_three_date_patients) != (2, 2, 4, 1., 5, 5)):
+            raise ValueError('support thresholds must match C_RELAXED_SUPPORT_V1')
         if self.grid_step > self.max_primary_years/2:
             raise ValueError('grid too coarse for three support regions')
         if 0 < self.bootstrap_replicates < 100:

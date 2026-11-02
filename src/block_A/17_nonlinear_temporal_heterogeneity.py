@@ -22,7 +22,7 @@ import scipy
 import statsmodels
 import common
 from src.block_A.secondary_trajectory_analysis import ContractError, fixed_groups
-from src.block_A.temporal_spline_config import VERSION, STEM, load_config
+from src.block_A.temporal_spline_config import VERSION, STEM, ANALYSIS_ROLE, load_config
 from src.block_A.temporal_spline_contract import (
     code_paths, fingerprints, git_identity, load_inputs, measurements, metadata, sample_fingerprint, verify_unchanged,
 )
@@ -32,13 +32,13 @@ from src.block_A.temporal_spline_contrasts import characterize
 from src.block_A.temporal_spline_inference import adjust_fdr
 from src.block_A.temporal_spline_sensitivity import scenarios, consistency, bootstrap_patients
 from src.block_A.temporal_spline_outputs import (
-    TABLES, artifact_manifest, directories, install_bundle, preflight, write_manifest, write_table,
+    TABLES, annotate, artifact_manifest, directories, install_bundle, preflight, write_manifest, write_table,
 )
+from src.block_A.temporal_spline_results import TEST_MODELS, classify, qc_summary
 
 MAPPING = dict(curves='03_group_curves', changes='03_within_group_change', derivatives='04_temporal_derivatives',
     pairs='04_pairwise_temporal_differences', bands='04_simultaneous_bands', intervals='05_separation_intervals',
     characteristics='05_temporal_characteristics', registry='06_non_estimable_registry')
-TEST_MODELS = dict(linear_group_time='A', common_nonlinearity='B', group_specific_curvature='C', global_temporal_heterogeneity='C')
 # Frozen default used for the Step 17 institutional run; override for a different data freeze.
 # Never derive this cutoff from wall-clock time (the same command must be reproducible).
 DEFAULT_DATA_CUTOFF = '2026-05-31'
@@ -84,13 +84,6 @@ def parse_args(argv=None):
     return args
 
 
-def annotate(frame, meta):
-    d = frame.copy()
-    for k, v in meta.items():
-        d[k] = v
-    return d
-
-
 def combine(parts):
     nonempty = [p for p in parts if len(p)]
     return pd.concat(nonempty, ignore_index=True) if nonempty else pd.DataFrame(columns=['variable', 'status', 'reason'])
@@ -98,9 +91,16 @@ def combine(parts):
 
 def analyze(evaluation, spec, cfg, meta, do_models, do_temporal):
     collected = {k: [] for k in TABLES}
+    small_group = evaluation['counts'].n_patients.between(1, 4).any()
+    if small_group:
+        # A total plus the other three groups would reconstruct a suppressed cell.
+        meta = dict(meta, n_patients=np.nan)
     def add(name, rows):
         d = rows if isinstance(rows, pd.DataFrame) else pd.DataFrame(rows)
         if len(d):
+            if small_group and name in ('00_variable_eligibility', '01_fit_attempts'):
+                d = d.copy()
+                d['n_patients'] = np.nan
             collected[name].append(annotate(d, meta))
     gate, basis = evaluation['gate'], evaluation['basis']
     add('00_variable_eligibility', [dict(**gate, observation_semantics=spec.observation_semantics,
@@ -144,8 +144,12 @@ def analyze(evaluation, spec, cfg, meta, do_models, do_temporal):
                 **effect(float(vector@fits['A'].beta), vector, fits['A'].covariance))])
     for model in 'ABC':
         fit = fits.get(model)
-        reason = gate['reason_'+model] or ('fit_failed_or_lower_model_failed' if do_models else 'models_not_requested')
-        add('01_model_comparison', [dict(model=model, status='ESTIMATED' if fit else 'NOT_ESTIMABLE',
+        failures = [a['reason'] for a in attempts if a['model'] == model and a['status'] != 'ESTIMATED']
+        reason = gate['reason_'+model] or ('; '.join(failures) or 'required_lower_model_failed' if do_models else 'models_not_requested')
+        fit_status = ('ESTIMATED' if fit else 'NOT_ESTIMABLE' if not gate['eligible_'+model]
+                      else 'FIT_FAILED' if do_models else 'NOT_REQUESTED')
+        add('01_model_comparison', [dict(model=model, status=fit_status, fit_status=fit_status,
+            eligibility_status=gate['eligibility_status_'+model],
             reason='' if fit else reason, model_family=fit.family if fit else '',
             n_fixed_parameters=len(fit.beta) if fit else np.nan,
             logLik=fit.loglik if fit else np.nan, AIC=fit.aic if fit else np.nan, BIC=fit.bic if fit else np.nan,
@@ -153,7 +157,7 @@ def analyze(evaluation, spec, cfg, meta, do_models, do_temporal):
             information_criterion_policy='ML only; GEE AIC/BIC are undefined',
             random_structure='patient_random_intercept' if fit and fit.family.startswith('MixedLM') else 'patient_cluster_robust_independence')])
         if not fit:
-            add('06_non_estimable_registry', [dict(component=model, status='NOT_ESTIMABLE', reason=reason)])
+            add('06_non_estimable_registry', [dict(component=model, status=fit_status, reason=reason)])
     if do_models:
         by_test = {r['test']: r for r in tests}
         for test, model in TEST_MODELS.items():
@@ -228,10 +232,13 @@ def run(args):
                 ev = evaluate(subset, groups, spec, cfg, axis, fit_cap, inference_cap)
                 sample_hash = sample_fingerprint(ev['data'])
                 meta = dict(metadata(spec, threshold, axis, cfg), scenario=scenario,
-                    analysis_role='primary' if threshold == 3 and scenario == 'main' and axis == 'clinical_baseline' else 'sensitivity',
+                    analysis_role=ANALYSIS_ROLE, c_support_policy=cfg.c_support_policy,
+                    scenario_role='primary' if threshold == 3 and scenario == 'main' and axis == 'clinical_baseline' else 'sensitivity',
                     sample_fingerprint=sample_hash, n_patients=ev['gate']['n_patients'],
                     fit_horizon_cap=fit_cap, inference_horizon_cap=inference_cap,
                     observation_status=observation_status)
+                if ev['counts'].n_patients.between(1, 4).any():
+                    meta['n_patients'] = np.nan
                 result, fits = analyze(ev, spec, cfg, meta,
                     do_models=not args.dry_run and args.analysis != 'feasibility',
                     do_temporal=not args.dry_run and args.analysis in ('temporal', 'all'))
@@ -247,20 +254,18 @@ def run(args):
                         target[name].append(table)
                 if scenario == 'main':
                     report['thresholds'].setdefault(str(threshold), dict(group_counts=groups.observed_pattern.value_counts().to_dict(), feasibility=[]))
-                    report['thresholds'][str(threshold)]['feasibility'].append(dict(variable=spec.variable_id, **ev['gate']))
+                    report['thresholds'][str(threshold)]['feasibility'].append(dict(variable=spec.variable_id,
+                        domain=spec.domain, outcome_id=meta['outcome_id'], **ev['gate']))
             pd.testing.assert_frame_equal(groups, immutable)
     tables_by_key = {key: {name: combine(parts) for name, parts in collected.items()} for key, collected in bundles.items()}
     for tables in tables_by_key.values():
         tests = adjust_fdr(tables['02_global_temporal_tests'])
         tables['02_global_temporal_tests'] = tests
-        classified = []
-        for row in tables['00_variable_eligibility'].to_dict('records'):
-            d = tests.loc[tests.variable.eq(row['variable']) & tests.test.eq('global_temporal_heterogeneity')] if len(tests) else tests
-            classification = ('NOT_ESTIMABLE' if d.empty or d.iloc[0].status != 'ESTIMATED' else
-                              'DYNAMIC_HETEROGENEITY_DETECTED' if d.iloc[0].q_value < .05 else 'NO_DYNAMIC_DIFFERENCE_DETECTED')
-            classified.append(dict(variable=row['variable'], domain=row['domain'], interpretation_group=row['interpretation_group'], status=classification,
-                reason=row['reason'], interpretation='Variable-level evidence, never a new patient phenotype'))
-        tables['05_heterogeneity_classification'] = pd.DataFrame(classified)
+        tables['05_heterogeneity_classification'] = classify(tables['00_variable_eligibility'],
+            tables['01_model_comparison'], tests, cfg.c_support_policy)
+    for (threshold, axis, scenario), tables in tables_by_key.items():
+        if scenario == 'main':
+            report['thresholds'][str(threshold)]['models'] = qc_summary(tables)
     consistency_table = consistency(tables_by_key)
     for (threshold, axis, scenario), tables in tables_by_key.items():
         if len(consistency_table):
@@ -268,8 +273,12 @@ def run(args):
                 consistency_table.threshold_abs.eq(threshold) & consistency_table.time_axis.eq(axis) & consistency_table.scenario.eq(scenario)].copy()
     verify_unchanged(inputs)
     verify_unchanged(code_hashes)
+    for details in report['thresholds'].values():
+        details['group_counts'] = {k: v if v == 0 or v >= 5 else None for k, v in details['group_counts'].items()}
+        details['feasibility'] = disclosure_table(pd.DataFrame(details['feasibility'])).to_dict('records')
     if args.dry_run:
-        report.update(analysis_seconds=time.monotonic()-start, code=identity)
+        report.update(analysis_seconds=time.monotonic()-start, code=identity,
+                      c_support_policy=cfg.c_support_policy, analysis_role=ANALYSIS_ROLE)
         return report
     preflight(root, destinations, inputs, args.overwrite, args.backup_root)
     scratch = root/'work'
@@ -290,9 +299,15 @@ def run(args):
             rendered = []
             if args.figures != 'none':
                 from src.block_A.temporal_spline_figures import render
-                rendered = render(tables, paths['figures'], cfg, args.figures, args.dpi, args.input_origin)
+                rendered = render({name: disclosure_table(table) for name, table in tables.items()},
+                    paths['figures'], cfg, args.figures, args.dpi, args.input_origin)
             write_manifest(paths['qc']/'run_manifest.json', dict(
                 version=VERSION, qc_status='PASS', scientific_status='PRELIMINARY',
+                c_support_policy=cfg.c_support_policy, analysis_role=ANALYSIS_ROLE,
+                model_counts=qc_summary(tables),
+                supported_temporal_coverage=tables['00_variable_eligibility'][[
+                    'outcome_id', 'n_supported_grid_times', 'supported_grid_span_years',
+                    'n_supported_regions', 'n_supported_annual_windows']].to_dict('records'),
                 clinical_review_status='NOT_CLINICALLY_REVIEWED',
                 input_origin=args.input_origin, upstream_status=upstream.get('qc_status'),
                 threshold_abs=threshold, time_axis=axis, scenario=scenario, analysis=args.analysis,
@@ -313,8 +328,9 @@ def run(args):
         verify_unchanged(code_hashes)
         install_bundle(staging, destinations, args.backup_root)
     report.update(analysis_seconds=time.monotonic()-start, published_bundles=len(tables_by_key), qc_status='PASS',
+                  c_support_policy=cfg.c_support_policy, analysis_role=ANALYSIS_ROLE,
                   data_cutoff=args.data_cutoff,
-                  output_directories={area: str(root/'outputs'/area/'blockA'/STEM)
+                  output_directories={area: str(root/'outputs'/area/'blockA'/STEM/VERSION)
                                       for area in ('tables', 'figures', 'qc')})
     return report
 
@@ -325,14 +341,21 @@ def disclosure_table(table):
     small_row = pd.Series(False, index=d.index)
     for col in d:
         if (col.startswith(('n_', 'N_')) and pd.api.types.is_numeric_dtype(d[col])
-                and col not in ('n_fixed_parameters', 'n_columns', 'n_supported_regions', 'n_supported_annual_windows')):
+                and col not in ('n_fixed_parameters', 'n_columns', 'n_supported_regions', 'n_supported_annual_windows', 'n_supported_grid_times')):
             mask = d[col].between(1, 4)
             small_row |= mask
             d.loc[mask, col] = np.nan
-    if 'percent_group_measured' in d:
-        d.loc[small_row, 'percent_group_measured'] = np.nan
-    if 'n_per_group' in d:
-        d['n_per_group'] = d.n_per_group.map(lambda value: json.dumps({k: v if v == 0 or v >= 5 else None for k, v in json.loads(value).items()}) if isinstance(value, str) else value)
+    for col in d:
+        if col.startswith(('percent_', 'percentage_', 'proportion_')):
+            d.loc[small_row, col] = np.nan
+    for col in ('n_per_group', 'n_three_dates_per_group'):
+        if col in d:
+            if col == 'n_per_group':
+                small_group = d[col].map(lambda value: any(v is None or 0 < v < 5 for v in json.loads(value).values()) if isinstance(value, str) else False)
+                for total in ('n_patients', 'n_patients_analysis'):
+                    if total in d:
+                        d.loc[small_group, total] = np.nan
+            d[col] = d[col].map(lambda value: json.dumps({k: v if v is not None and (v == 0 or v >= 5) else None for k, v in json.loads(value).items()}) if isinstance(value, str) else value)
     return d
 
 
