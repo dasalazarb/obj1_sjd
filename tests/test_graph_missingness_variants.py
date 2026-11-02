@@ -107,7 +107,9 @@ def test_iterative_preserves_observed_and_is_deterministic(synthetic):
     np.testing.assert_array_equal(a.completed.to_numpy()[observed],raw.to_numpy()[observed])
     assert np.isfinite(a.completed.to_numpy()).all() and a.audit['converged']
     assert a.validation.split.str.contains('patient_holdout').all()
-    assert a.validation.n_hidden.min()>0
+    assert a.validation.n_hidden.sum()>0
+    empty=a.validation.loc[a.validation.n_hidden.eq(0)]
+    assert empty.normalized_mae.isna().all() and empty.status.eq('NOT_ESTIMABLE').all()
 
 
 def test_training_parameters_are_unchanged_by_heldout_patients(synthetic):
@@ -219,16 +221,18 @@ def test_full_sensitivity_suite_refits_every_variant_and_emits_sources(synthetic
     report=run_missingness_study(results,meta,meta,baseline,families,config,cfg,tmp_path,{}, {},'synthetic_source')
     registry=pd.read_csv(tmp_path/'02_graph_missingness_method_registry.csv')
     main=registry.loc[~registry.experiment_id.str.contains('/')]
-    assert set(main.experiment_id)=={r+'-'+m for r in ['R0','R2'] for m in ['I','D','M']}
+    assert set(main.experiment_id)=={r+'-'+m for r in ['R0','R2'] for m in ['I','D','M','DG']}
     assert main.loc[main.experiment_id.str.endswith('-M'),'status'].eq('COMPLETE').all()
     assert main.loc[main.experiment_id.str.endswith('-I'),'status'].eq('COMPLETE').all()
     assert report['graph03_defining'] is False
     attempts=pd.read_csv(tmp_path/'02_graph_missingness_resampling_replications.csv')
     assert set(attempts.loc[attempts.representation_id.str.endswith('-I'),'method'])=={'repeated_subsampling','classic_bootstrap'}
     assert set(attempts.n_draws)<={32,40}
+    assert attempts.mask_sha256.str.len().eq(64).all()
+    assert attempts.panel_hash.str.len().eq(64).all()
     panels=pd.read_csv(tmp_path/'02_graph_missingness_panel_comparability.csv')
     assert panels.identical_panel.all() and panels.n_excluded_sources.eq(0).all()
-    for ext in ['png','pdf','csv']: assert len(list((tmp_path/'figures').glob('*.'+ext)))==7
+    for ext in ['png','pdf','csv']: assert len(list((tmp_path/'figures').glob('*.'+ext)))==10
     for r in results:
         np.testing.assert_array_equal(before[r][0],results[r]['space'].distance)
         np.testing.assert_array_equal(before[r][1],results[r]['mapped']['hard'])
@@ -269,6 +273,9 @@ def test_secondary_method_failure_is_limited_and_statuses_are_distinct(synthetic
     for reference in ['R0','R2']:
         space=build_space(reference,raw,families,config,meta,meta,baseline,{}, {})
         results[reference]=dict(space=space,mapped=analyze(space,config))
+    if status=='FAILED':
+        # Historical v1 configurations have neither optional key.
+        policy.pop('sparse_observed_graph',None); policy.pop('cache_version',None)
     original=study.build_variant
     def failing(identifier,*args,**kwargs):
         if identifier=='R2-I': raise exception

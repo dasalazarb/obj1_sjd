@@ -43,7 +43,7 @@ def build_variant(identifier,raw,families,config,registry,manifest,baseline,lab_
         space=build_space(reference,reconstructed.completed,families,config,registry,manifest,baseline,lab_groups,feature_to_lab)
         # Preserve original availability while retaining the reference's exact
         # PCA/lens/Mapper implementation on the reconstructed refit.
-        space.raw=raw.copy(); space.method=reference+'_iterative_weighted_low_rank'
+        space.raw=raw.copy(); space.method=reference+'_'+reconstructed.audit['estimator']
         audit.update(imputation=reconstructed.audit,validation=reconstructed.validation)
     elif method=='D':
         distance_policy=dict(policy['observed_pairwise_distance'])

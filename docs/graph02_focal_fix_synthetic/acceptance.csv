@@ -1,0 +1,9 @@
+experiment_id,status,reason,n_patients,n_encoded_features,n_shared,n_covered,n_communities,n_valid_pair_distances,n_connected,n_successful_refits,estimator,panel_hash
+R0-I,COMPLETE,,40,12,33.0,37.0,2.0,780,,4.0,weighted_low_rank_v2_not_imputeMFA,a83912988ef4ac42bf4218765afaf08a2cf3cc5a511e0e68311cefbe165e2c72
+R0-D,COMPLETE,,40,12,33.0,35.0,1.0,780,,2.0,observed_pairwise_nonmetric_possible_MDS_lens,a83912988ef4ac42bf4218765afaf08a2cf3cc5a511e0e68311cefbe165e2c72
+R0-M,COMPLETE,,40,12,34.0,34.0,1.0,780,,2.0,values_plus_panel_state_mask,a83912988ef4ac42bf4218765afaf08a2cf3cc5a511e0e68311cefbe165e2c72
+R2-I,COMPLETE,,40,12,32.0,35.0,2.0,780,,4.0,weighted_low_rank_v2_not_imputeMFA,a83912988ef4ac42bf4218765afaf08a2cf3cc5a511e0e68311cefbe165e2c72
+R2-D,COMPLETE,,40,12,33.0,35.0,1.0,780,,2.0,observed_pairwise_nonmetric_possible_MDS_lens,a83912988ef4ac42bf4218765afaf08a2cf3cc5a511e0e68311cefbe165e2c72
+R2-M,COMPLETE,,40,12,34.0,35.0,1.0,780,,2.0,values_plus_panel_state_mask,a83912988ef4ac42bf4218765afaf08a2cf3cc5a511e0e68311cefbe165e2c72
+R0-DG,COMPLETE,,40,12,34.0,40.0,3.0,780,40.0,2.0,sparse_observed_graph_v1,a83912988ef4ac42bf4218765afaf08a2cf3cc5a511e0e68311cefbe165e2c72
+R2-DG,COMPLETE,,40,12,34.0,40.0,3.0,780,40.0,2.0,sparse_observed_graph_v1,a83912988ef4ac42bf4218765afaf08a2cf3cc5a511e0e68311cefbe165e2c72

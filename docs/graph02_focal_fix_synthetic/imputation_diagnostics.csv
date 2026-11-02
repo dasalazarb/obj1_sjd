@@ -1,0 +1,3 @@
+experiment_id,variable_type,metric,n_support,value,baseline,status
+R0-I,continuous,normalized_mae,21,0.16442539950081264,0.6193410310321696,COMPLETE
+R2-I,continuous,normalized_mae,21,0.16496250459281267,0.6193410310321696,COMPLETE

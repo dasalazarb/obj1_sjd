@@ -1,14 +1,18 @@
 schema_version: graph_missingness_methods_v1
 enabled: true
 references: [R0, R2]
-methods: [iterative_regularized, observed_pairwise_distance, values_plus_mask]
+methods: [iterative_regularized, observed_pairwise_distance, values_plus_mask, sparse_observed_graph]
 freeze_original_representations: true
 freeze_source_feature_panels: true
 no_outcome_based_method_selection: true
-estimator_version: graph02_weighted_low_rank_v1
+# Additive optional v1 keys; historical v1 releases remain readable.
+estimator_version: graph02_focal_imputation_graph_v2
+cache_version: graph02_focal_v2
 iterative_regularized:
   enabled: true
   candidate_rank: [2, 3, 4]
+  numeric_rank_selection_objective: hidden_cell_weighted_training_scale_MAE
+  rank_selection_split: development_patients_only
   singular_value_shrinkage: 0.10
   score_ridge: 0.10
   convergence_tolerance: 1.0e-5
@@ -17,6 +21,10 @@ iterative_regularized:
   masked_validation_repeats: 10
   masked_fraction_per_replicate: 0.10
   validation_patient_fraction: 0.20
+  training_mask_fraction: 0.05
+  mixed_ridge: 1.0
+  mixed_logistic_c: 1.0
+  minimum_category_support: 3
   preserve_observed_values: true
   fail_not_estimable_on_nonconvergence: true
 observed_pairwise_distance:
@@ -26,6 +34,20 @@ observed_pairwise_distance:
   sensitivity_shared_weight_fraction: [0.25, 0.50]
   forbid_unobserved_pair_filling: true
   forbid_max_distance_fallback: true
+# Separate non-Mapper comparator; primary k fixed before any clinical labels.
+sparse_observed_graph:
+  enabled: true
+  primary_k: 10
+  sensitivity_k: [5, 15]
+  symmetrization: union
+  minimum_neighbors: 2
+  minimum_shared_domains: 2
+  minimum_shared_weight_fraction: 0.40
+  minimum_connected_patients: 10
+  minimum_connected_fraction: 0.50
+  minimum_largest_component_fraction: 0.50
+  minimum_community_patients: 5
+  resolution: 1.0
 values_plus_mask:
   enabled: true
   primary_mask_weight: 0.25

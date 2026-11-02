@@ -259,6 +259,7 @@ def missingness_method_figures(root,spaces,tables,minimum_cell,reference_results
                     # variable cells could leak into a public figure source.
                     part=part.reindex(columns=list(dict.fromkeys([*part.columns,'rank','clinical_domain'])))
                     part['_weighted']=part[metric]*part.n_hidden
+                    part=part.loc[part[metric].notna()&part.n_hidden.gt(0)]
                     part=part.groupby(['experiment_id','rank','clinical_domain'],dropna=False).agg(
                         n_hidden=('n_hidden','sum'),weighted=('_weighted','sum')).reset_index()
                     part[metric]=part.weighted/part.n_hidden
@@ -277,4 +278,59 @@ def missingness_method_figures(root,spaces,tables,minimum_cell,reference_results
             else: ax.text(.5,.5,'NOT_ESTIMABLE',ha='center',transform=ax.transAxes)
             ax.set_title(reference); ax.set_ylabel(metric)
         finish(fig,name,sources or [dict(status='NOT_ESTIMABLE',reason='NO_PUBLISHABLE_ESTIMATE')],denominator)
+    return artifacts
+
+
+def focal_fix_figures(root,tables,minimum_cell):
+    """Only pooled supported estimates enter figure CSVs; no patient/edge output."""
+    from .._pipeline import save_table
+    artifacts=[]; folder=root/'figures'; folder.mkdir(exist_ok=True)
+    specifications=[('imputation_diagnostics','imputation_by_type'),
+        ('sparse_graph_connectivity','sparse_graph_support_summary'),('focal_comparison','method_registry')]
+    for name,table in specifications:
+        frame=pd.DataFrame(tables[table]); source=[]
+        if name=='imputation_diagnostics' and 'validation_stage' in frame:
+            frame=frame.loc[frame.validation_stage.eq('evaluation')]
+        if name=='imputation_diagnostics' and 'variable_type' in frame:
+            # Weight numeric errors by evaluated cells, never replace missing errors by 0.
+            for (identifier,kind),part in frame.groupby(['experiment_id','variable_type']):
+                metric='accuracy' if kind in {'nominal','binary'} else 'normalized_mae'
+                valid=part.loc[part.status.eq('COMPLETE')&part[metric].notna()&part.n_hidden.gt(0)]
+                count=int(valid.n_hidden.sum())
+                if count<minimum_cell: continue
+                source.append(dict(experiment_id=identifier,variable_type=kind,metric=metric,n_support=count,
+                    value=float(np.average(valid[metric],weights=valid.n_hidden)),
+                    baseline=float(np.average(valid['baseline_accuracy' if metric=='accuracy' else 'baseline_mae'],weights=valid.n_hidden)),
+                    status='COMPLETE'))
+        elif name=='sparse_graph_connectivity':
+            for row in frame.to_dict('records'):
+                n=row.get('n_patients',0); connected=row.get('n_connected',0)
+                # Suppress the entire record when the complementary isolated group is small.
+                if n<minimum_cell or connected<minimum_cell or 0<n-connected<minimum_cell: continue
+                source.append({key:row.get(key,np.nan) for key in ['experiment_id','k','n_patients','n_connected','n_edges','n_estimable_pairs',
+                    'n_pairs','n_components','n_eligibility_components','degree_mean','status']})
+                source[-1].update(n_support=n,value=connected/n,metric='connected_fraction')
+        elif name=='focal_comparison':
+            for row in frame.loc[~frame.experiment_id.str.contains('/')].to_dict('records') if 'experiment_id' in frame else []:
+                n=row.get('n_patients',0); covered=row.get('n_covered',np.nan)
+                if n<minimum_cell or not np.isfinite(covered) or covered<minimum_cell or 0<n-covered<minimum_cell: continue
+                source.append(dict(experiment_id=row['experiment_id'],status=row['status'],n_support=n,n_patients=n,n_covered=covered,
+                    metric='covered_fraction_mapper_or_graph_supported',value=covered/n))
+        fig,ax=plt.subplots(figsize=(11,5.5)); fig.subplots_adjust(bottom=.32)
+        if source:
+            labels=[r['experiment_id']+('/'+r['variable_type'] if 'variable_type' in r else '') for r in source]
+            # Different type metrics get distinct labels rather than an unlabeled pooled score.
+            ax.bar(np.arange(len(source)),[r['value'] for r in source],color='#307f9a')
+            ax.set_xticks(np.arange(len(source)),labels,rotation=45,ha='right')
+            if name=='imputation_diagnostics':
+                ax.scatter(np.arange(len(source)),[r['baseline'] for r in source],label='Training median/mode baseline',color='#a54836')
+                ax.legend()
+        else: ax.text(.5,.5,'NOT_ESTIMABLE / small cells suppressed',transform=ax.transAxes,ha='center')
+        ax.set_title(name.replace('_',' ')+'; exploratory sensitivity')
+        ax.set_ylabel('Per-type error / accuracy' if name=='imputation_diagnostics' else 'Fraction of reference patients')
+        fig.text(.5,.015,f'Support ≥ {minimum_cell}; disjoint train/test for imputation. DG is not Mapper. No clinical validation.',ha='center',fontsize=8)
+        stem='02_graph_missingness_'+name
+        save_table(folder/(stem+'.csv'),source or [dict(status='NOT_ESTIMABLE',reason='NO_PUBLISHABLE_ESTIMATE')])
+        save_figure(fig,folder,stem)
+        artifacts.extend('figures/'+stem+'.'+ext for ext in ['csv','png','pdf'])
     return artifacts

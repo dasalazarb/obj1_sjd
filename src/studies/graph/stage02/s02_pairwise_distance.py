@@ -93,6 +93,11 @@ def observed_distance(raw,registry,reference,policy,baseline=None):
     neighbors=estimable.copy(); np.fill_diagonal(neighbors,False)
     summary=dict(n_patients=n,n_pairs=len(a),n_estimable_pairs=int(estimable[a,b].sum()),
         estimable_pair_fraction=float(estimable[a,b].mean()) if len(a) else np.nan,
+        n_nonestimable_pairs=int((~estimable[a,b]).sum()),n_valid_pair_distances=int(estimable[a,b].sum()),
+        n_shared_constructs_min=int(constructs[a,b].min()) if len(a) else 0,
+        n_shared_constructs_median=float(np.median(constructs[a,b])) if len(a) else np.nan,
+        shared_weight_fraction_p10=float(np.quantile(weight[a,b],.1)) if len(a) else np.nan,
+        shared_weight_fraction_p90=float(np.quantile(weight[a,b],.9)) if len(a) else np.nan,
         no_shared_evidence_fraction=float((constructs[a,b]==0).mean()) if len(a) else np.nan,
         n_patients_without_reliable_neighbors=int((~neighbors.any(axis=1)).sum()),
         minimum_shared_domains=minimum,minimum_shared_weight_fraction=threshold,

@@ -122,6 +122,22 @@ def test_zero_argument_full_study_and_standalone_entries(configuration,monkeypat
     assert set(figure_inventory.status)<= {'COMPLETE','NOT_ESTIMABLE'}
     assert all((path.parent/r.artifact).is_file() for r in figure_inventory.query("status=='COMPLETE'").itertuples())
     assert all(not r['shareable_export_allowed'] for r in manifest['artifact_inventory'])
+    sensitivity=manifest['missingness_sensitivity']
+    assert sensitivity['graph03_defining'] is False
+    assert {'R0-DG','R2-DG'}<=set(sensitivity['statuses'])
+    assert not set(sensitivity['statuses'])&set(manifest['eligible_representation_ids'])
+    membership=pd.read_csv(path.parent/'02_graph_patient_membership.csv')
+    assert not membership.representation_id.str.contains('-DG').any()
+    for name in ['imputation_attempts','imputation_by_type','iterative_method_audit','sparse_graph_registry',
+                 'sparse_graph_support_summary','sparse_graph_stability','sparse_graph_comparisons','focal_fix_qc']:
+        artifact='02_graph_missingness_'+name+'.csv'
+        assert artifact in sensitivity['artifacts']
+        assert pipe.digest(path.parent/artifact)==manifest['sha256_by_artifact'][artifact]
+    for item in manifest['sensitivity_artifacts']:
+        assert item['graph03_defining'] is False
+    for name in ['imputation_diagnostics','sparse_graph_connectivity','focal_comparison']:
+        for extension in ['png','pdf','csv']:
+            assert (path.parent/'figures'/('02_graph_missingness_'+name+'.'+extension)).is_file()
     study=list(pipe.output_root(cfg,'study').glob('runs/*'))[0]
     report=json.loads((study/'graph_study_execution_manifest.json').read_text())
     assert report['execution_status'] in {'COMPLETE_WITH_LIMITATIONS','PARTIAL'}
