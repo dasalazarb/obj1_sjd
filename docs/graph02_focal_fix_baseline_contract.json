@@ -1,0 +1,63 @@
+{
+  "baseline_commit": "bff0c22a2d6a783388f8262e01c9e389a7b0d116",
+  "audited_clinical_run": "20261029T224759222952Z_48edb990",
+  "audited_clinical_release_available": false,
+  "clinical_inputs_available": false,
+  "unchanged": {
+    "src/studies/graph/config.yaml": {
+      "baseline_sha256": "8d2a6a240fa30054dcc98cd595a2ad8e7b59127fd8801f2fc58d8805cb173746",
+      "current_sha256": "8d2a6a240fa30054dcc98cd595a2ad8e7b59127fd8801f2fc58d8805cb173746",
+      "identical": true
+    },
+    "src/studies/graph/config_sensitivity.yaml": {
+      "baseline_sha256": "ded064fe881c725e15d40f46813c15f1f663c0109151d9d4e271526664a96f43",
+      "current_sha256": "ded064fe881c725e15d40f46813c15f1f663c0109151d9d4e271526664a96f43",
+      "identical": true
+    },
+    "src/studies/graph/configs/experiments_02.yaml": {
+      "baseline_sha256": "e9566c27adc99dd0ccf751da1dfb20985df78b1b53ccafb54b35c63bd9922e3c",
+      "current_sha256": "e9566c27adc99dd0ccf751da1dfb20985df78b1b53ccafb54b35c63bd9922e3c",
+      "identical": true
+    },
+    "src/studies/graph/configs/pipeline.yaml": {
+      "baseline_sha256": "1f9010460a5d215857ad4bd1b0f03157f5b0591b15ea328bfbbdb57993207772",
+      "current_sha256": "1f9010460a5d215857ad4bd1b0f03157f5b0591b15ea328bfbbdb57993207772",
+      "identical": true
+    },
+    "src/studies/graph/configs/clinical_domains_02.yaml": {
+      "baseline_sha256": "aa659cb37c2d4bdfea492b098eb3337c153060a81fd11bb8a4eac51ef6d0bcad",
+      "current_sha256": "aa659cb37c2d4bdfea492b098eb3337c153060a81fd11bb8a4eac51ef6d0bcad",
+      "identical": true
+    },
+    "src/studies/graph/stage02/s02_mapper_engine.py": {
+      "baseline_sha256": "f78f369f1fae035bd206df6647d092e5517e29b5bcd72a9f9f4de06da02e5ddc",
+      "current_sha256": "f78f369f1fae035bd206df6647d092e5517e29b5bcd72a9f9f4de06da02e5ddc",
+      "identical": true
+    },
+    "src/studies/graph/stage02/s02_legacy.py": {
+      "baseline_sha256": "1f06c2e173089cc68df47e20d2fb26bf452108da1e0c817e759f86a3dd92b62c",
+      "current_sha256": "1f06c2e173089cc68df47e20d2fb26bf452108da1e0c817e759f86a3dd92b62c",
+      "identical": true
+    },
+    "src/studies/graph/stage02/s02_representations.py": {
+      "baseline_sha256": "5c323845e40ea02dd33fe030269352cb5c39806384144d4bac5f97c78945215c",
+      "current_sha256": "5c323845e40ea02dd33fe030269352cb5c39806384144d4bac5f97c78945215c",
+      "identical": true
+    },
+    "src/studies/graph/stage02/s02_contracts.py": {
+      "baseline_sha256": "47ba838dd89312985d649d5a3a8c02e8b681115d3515a22200cbdeca7f1692fa",
+      "current_sha256": "47ba838dd89312985d649d5a3a8c02e8b681115d3515a22200cbdeca7f1692fa",
+      "identical": true
+    },
+    "src/studies/graph/03_graph_community_characterization.py": {
+      "baseline_sha256": "65e98885fc91f586d64af0ebb3146369bcd8b0c5a87d5097e391f09cedf6d6c7",
+      "current_sha256": "65e98885fc91f586d64af0ebb3146369bcd8b0c5a87d5097e391f09cedf6d6c7",
+      "identical": true
+    },
+    "src/studies/graph/stage03/s03_release_reader.py": {
+      "baseline_sha256": "c3683de3c6ec49cc04fec0584a0bb61780785404c67405bf9e10ded7d0e45064",
+      "current_sha256": "c3683de3c6ec49cc04fec0584a0bb61780785404c67405bf9e10ded7d0e45064",
+      "identical": true
+    }
+  }
+}

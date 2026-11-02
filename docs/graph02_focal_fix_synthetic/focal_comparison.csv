@@ -1,0 +1,8 @@
+experiment_id,status,n_support,n_patients,n_covered,metric,value
+R0-D,COMPLETE,40,40,35.0,covered_fraction_mapper_or_graph_supported,0.875
+R0-M,COMPLETE,40,40,34.0,covered_fraction_mapper_or_graph_supported,0.85
+R2-I,COMPLETE,40,40,35.0,covered_fraction_mapper_or_graph_supported,0.875
+R2-D,COMPLETE,40,40,35.0,covered_fraction_mapper_or_graph_supported,0.875
+R2-M,COMPLETE,40,40,35.0,covered_fraction_mapper_or_graph_supported,0.875
+R0-DG,COMPLETE,40,40,40.0,covered_fraction_mapper_or_graph_supported,1.0
+R2-DG,COMPLETE,40,40,40.0,covered_fraction_mapper_or_graph_supported,1.0

@@ -407,7 +407,8 @@ def _execute(cfg,root,run_dir,started,preflight_only):
     missingness_study=run_missingness_study(results,registry,manifest,baseline,families,config,cfg,
         run_dir,lab_groups,feature_to_lab,digest(sources['integrated']))
     for row in missingness_study['experiments']:
-        record(row['experiment_id'],row['kind'],row['status'],row['reason'],analysis_role='sensitivity',reference_id=row['reference_id'])
+        record(row['experiment_id'],row['kind'],row['status'],row['reason'],analysis_role='sensitivity',reference_id=row['reference_id'],
+            **{k:row[k] for k in ['graph03_defining','method','method_type','is_mapper','estimator','panel_hash'] if k in row})
     primary_rows=[r for r in stability if r['representation_id']=='R0' and r['method']=='repeated_subsampling' and r['phase']=='final']
     stable_count=sum(r['stable'] and base_map['supported'][r['community_id']] for r in primary_rows)
     primary_qc=qc_by_id.get('R0',False)
@@ -551,6 +552,7 @@ def _execute(cfg,root,run_dir,started,preflight_only):
         'coverage':{'n_total':n,'n_covered_R0':int(base_map['covered'].sum()),'n_uncovered_R0':int((~base_map['covered']).sum()),'reason_audit_complete':bool(observation['reason_audit_complete'])},
         'missingness_sensitivity':{k:v for k,v in missingness_study.items() if k!='experiments'},
         'sensitivity_artifacts':[dict(artifact=rel,sha256=digest(run_dir/rel),analysis_role='sensitivity',
+            graph03_defining=False,estimator_version=missingness_study['estimator_version'],
             schema_version=missingness_study['schema_version'],references=['R0','R2'],panel_policy='frozen_reference_sources_and_patients',
             estimability=missingness_study['statuses']) for rel in missingness_study.get('artifacts',[])],
         'artifact_inventory':privacy_inventory(run_dir),

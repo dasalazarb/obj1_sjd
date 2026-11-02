@@ -1,0 +1,7 @@
+experiment_id,k,n_patients,n_connected,n_edges,n_estimable_pairs,n_pairs,n_components,n_eligibility_components,degree_mean,status,n_support,value,metric
+R0-DG,10,40,40,251,780,780,1,1,12.55,COMPLETE,40,1.0,connected_fraction
+R0-DG/k_5,5,40,40,132,780,780,1,1,6.6,COMPLETE,40,1.0,connected_fraction
+R0-DG/k_15,15,40,40,366,780,780,1,1,18.3,COMPLETE,40,1.0,connected_fraction
+R2-DG,10,40,40,251,780,780,1,1,12.55,COMPLETE,40,1.0,connected_fraction
+R2-DG/k_5,5,40,40,132,780,780,1,1,6.6,COMPLETE,40,1.0,connected_fraction
+R2-DG/k_15,15,40,40,366,780,780,1,1,18.3,COMPLETE,40,1.0,connected_fraction
