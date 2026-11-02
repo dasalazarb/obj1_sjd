@@ -17,6 +17,7 @@ from src.block_A.explainwhy_feasibility import attach_audit_context
 from src.block_A.explainwhy_inclusive_figures import make_figures
 from src.block_A.explainwhy_inclusive_models import build_tasks, fit_models, feasibility_table, domain_index_support
 from src.block_A import explainwhy_inclusive_composition as composition_qc
+from src.block_A.explainwhy_inclusive_interpretability import InterpretabilityAudit
 
 PREFIX = core.PREFIX
 
@@ -27,11 +28,11 @@ def directories(root):
         **{area: Path(root)/"outputs"/area/"blockA"/stem for area in ("tables", "qc", "figures")}}
 
 
-def snapshot(root, paths, step14):
+def snapshot(root, paths, step14, compare_prior=True):
     def git(*args):
         return subprocess.check_output(["git", *args], cwd=step14.ROOT, text=True).strip()
     historical = {str(p.relative_to(root)): core.sha256(p)
-        for top in (Path(root)/"data/analytic/blockA", Path(root)/"outputs") if top.exists()
+        for top in (Path(root)/"data/analytic/blockA", Path(root)/"outputs") if compare_prior and top.exists()
         for p in top.rglob("*") if p.is_file() and p.name.startswith(("13_", "14_"))
         and not p.name.startswith(PREFIX) and "backups" not in p.parts}
     return dict(branch=git("branch", "--show-current"), code_commit=git("rev-parse", "HEAD"),
@@ -42,7 +43,7 @@ def snapshot(root, paths, step14):
             "sha256": core.sha256(p) if p.is_file() else None} for role, p in paths.items()},
         historical_products_before=historical,
         inclusive_products_before={str(p.relative_to(root)): core.sha256(p)
-            for d in directories(root).values() if d.exists() for p in d.glob(PREFIX+"*") if p.is_file()},
+            for d in directories(root).values() if compare_prior and d.exists() for p in d.glob(PREFIX+"*") if p.is_file()},
         packages={name: importlib.metadata.version(name) for name in ("pandas", "numpy", "statsmodels", "lifelines", "pyarrow")})
 
 
@@ -98,6 +99,8 @@ def _closure(manifest):
         "Treatment is not_implemented; disease duration is unavailable without verified Step 11 evidence.",
         "Biological-domain/biomarker associations may be algebraically coupled to the total ESSDAI.",
         "Retrospective pattern labels are descriptions, never prospective predictors.", ""]
+    rows += ["", "## PNS interpretability", "", manifest.get("pns_interpretability",
+        "Not available: current inputs or model contracts were not validated."), ""]
     for name, state in manifest.get("components", {}).items():
         rows.append(f"- {name}: {state}")
     if manifest.get("blocking_reason"):
@@ -194,10 +197,12 @@ def run_inclusive(args, step14):
         eligibility=args.eligibility_v2, manifest=args.pattern_manifest_v2, legacy=args.legacy_endpoints)
     unspecified = [role for role, path in options.items() if path is None]
     paths = {role: Path(path) for role, path in options.items() if path is not None}
-    before = snapshot(root, paths, step14)
+    compare_prior = not getattr(args, "no_prior_result_comparison", False)
+    before = snapshot(root, paths, step14, compare_prior=compare_prior)
     manifest = dict(rule_version=core.RULE_VERSION, analysis_family=core.FAMILY, input_origin=args.input_origin,
         status="BLOCKED", qc_status="NOT_RUN", snapshot=before, index_time_origin="essdai_index_date",
         clinical_review="PENDING_CLINICAL_REVIEW", privacy_review="PENDING_INSTITUTIONAL_REVIEW",
+        prior_result_comparison="ENABLED" if compare_prior else "NOT_REQUESTED_BY_INVESTIGATOR",
         canonical_execution="NOT_RUN", components={"implementation": "IMPLEMENTED", "clinical_results": "BLOCKED"})
     tables, analytic, checks = {}, {}, {}
     try:
@@ -234,7 +239,12 @@ def run_inclusive(args, step14):
             print("DRY RUN — physical inputs, index reconciliation, legacy bridge and temporal QC PASS; no fits or files written")
             return checks
         tasks = build_tasks(clean, cohort, sequence, risks, predictors, intervals, specs, step14)
-        results, attempts, fdr = fit_models(tasks, cohort, step14, args.minimum_events)
+        interpretability = InterpretabilityAudit(cohort, intervals, provenance_decision, step14,
+            args.minimum_events, args.input_origin)
+        results, attempts, fdr = fit_models(tasks, cohort, step14, args.minimum_events,
+            diagnostic_observer=interpretability.observe)
+        checks.update(interpretability.outputs())
+        manifest["pns_interpretability"] = interpretability.safe_summary()
         support = [composition_qc.leave_source_support(results, intervals)]
         # S3 reuses the upstream sensitivity index policy, including fallback reselection.
         excluded, excluded_sequence = v2.build_observed_patterns_v2(clean, official, True)
@@ -288,7 +298,9 @@ def run_inclusive(args, step14):
         checks.update(attrition_qc=_attrition(results, risks, intervals), model_attempts_qc=pd.concat(all_attempts, ignore_index=True),
             fdr_qc=pd.concat([fdr_within.assign(scope="within_new_family"), fdr_wide.assign(scope="outcome_wide_new_family")], ignore_index=True),
             domain_composition_qc=composition, leave_source_support_qc=pd.concat(support, ignore_index=True))
-        checks["primary_result_regression_qc"] = _primary_regression(root, results, before, hashes)
+        checks["primary_result_regression_qc"] = (_primary_regression(root, results, before, hashes)
+            if compare_prior else pd.DataFrame([dict(status="NOT_REQUESTED_BY_INVESTIGATOR",
+                reason="prior result access disabled by inclusive CLI option")]))
         # Re-read physical hashes after all fits, prior to publishing anything.
         if any(core.sha256(path) != hashes[role] for role, path in paths.items()):
             raise ValueError("input bytes changed during analysis; bundle blocked")

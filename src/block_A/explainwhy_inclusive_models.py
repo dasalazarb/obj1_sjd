@@ -115,7 +115,7 @@ def build_tasks(integrated, cohort, sequence, risks, predictors, intervals, spec
     return tasks
 
 
-def fit_models(tasks, cohort, step14, minimum_events, official_comparison=True, reference_results=None):
+def fit_models(tasks, cohort, step14, minimum_events, official_comparison=True, reference_results=None, diagnostic_observer=None):
     """Official-only freezes the inclusive adjustment and predictor scale.
 
     A failing official-only design stays not estimable at that same level; it
@@ -187,6 +187,8 @@ def fit_models(tasks, cohort, step14, minimum_events, official_comparison=True, 
                     n_complete_case_fallback=0)
             variants.append((official_task, od, om, result, "official_only"))
         for current, fitted, metadata, result, population in variants:
+            if diagnostic_observer is not None:
+                diagnostic_observer(current, fitted, metadata, result, population)
             ids = set(current.data.patient_id)
             fitted_ids = set(fitted.patient_id)
             result.update(analysis_family=FAMILY, population=population, index_time_origin="essdai_index_date",
