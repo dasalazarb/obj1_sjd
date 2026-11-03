@@ -46,3 +46,33 @@ projection:
   enabled: false
   reason: No independently validated out-of-sample Mapper projection protocol
 causal_or_predictive_claims: false
+
+# No endpoint date or identity field is approved from its name alone. Populate
+# endpoint_policies only after reviewing source schema and measurement lineage.
+temporal_resolution:
+  schema_version: graph03_episode_resolution_v1
+  audit_before_modeling: true
+  reject_unverified_measurement_dates: true
+  collapse_only_verified_exact_duplicates: true
+  allow_arbitrary_first_last_mean: false
+  reject_unresolved_within_episode_conflicts: true
+  treat_same_day_distinct_episodes_as_separate_only_if_verified: true
+  emit_aggregate_qc: true
+  preserve_strict_post_index: true
+  endpoint_policies: {}
+clinical_marker_panels:
+- source_column: essdai__total
+  label: ESSDAI total
+  unit: ESSDAI points
+- source_column: esspri__total
+  label: ESSPRI total
+  unit: ESSPRI points
+- source_column: pro__sf36_pcs
+  label: SF-36 PCS
+  unit: SF-36 PCS points
+- source_column: pro__profad_total
+  label: PROFAD total
+  unit: PROFAD points
+- source_column: pro__mdafs_global
+  label: MDAFS global
+  unit: MDAFS points

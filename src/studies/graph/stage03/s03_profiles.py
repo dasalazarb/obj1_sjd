@@ -48,7 +48,12 @@ def profile_tables(baseline,membership,roles,manifest,validation,seed):
             'n_descriptive':len(members),
             'n_inference':len(members) if len(members) and members.structural_stability_status.eq('stable').all() and manifest['release_status']!='NO_STABLE_STRUCTURE' else 0,
             'inference_eligibility':'topology_gate_only_endpoint_support_and_covariates_required',
-            'n_unclassifiable':int(populations.community_id.isna().sum()),
+            'n_unclassifiable':np.nan,
+            'n_unclassifiable_definition':'DEPRECATED_historical_missing_community_count_not_Pop',
+            'n_missing_community_id':int(membership.loc[membership.representation_id.eq(identifier)].groupby('patient_id').community_id.count().eq(0).sum()),
+            'stability_interpretation':'frozen_Graph02_label_not_clinical_bootstrap_robustness',
+            **{k:v for k,v in pop_counts(frame,validation['pop_column']).items() if k!='n_denominator'},
+            **{'n_all_baseline_'+k[2:]:v for k,v in pop_counts(baseline,validation['pop_column']).items() if k!='n_denominator'},
             'denominator_n_patients':len(baseline)})
         if members.empty:
             for source in validation['anchors']:
@@ -178,4 +183,62 @@ def uncovered_profiles(baseline,membership,roles,manifest,minimum_cell):
                 n_observed=np.nan if small else n,n_missing=np.nan if small else missing,
                 median=float(num.median()) if not small and n and num.notna().sum()==n else np.nan,
                 status='SUPPRESSED_SMALL_CELL' if small else 'DESCRIPTIVE'))
+    return pd.DataFrame(rows)
+
+
+
+def pop_counts(frame,column):
+    """Use the published label exactly; missing and invalid are separate states."""
+    labels=frame[column] if column in frame else pd.Series(pd.NA,index=frame.index)
+    counts=dict(n_denominator=len(frame),n_pop1=int(labels.eq('Pop1').sum()),
+        n_pop2=int(labels.eq('Pop2').sum()),n_pop3=int(labels.eq('Pop3').sum()),
+        n_unclassified_pop=int(labels.eq('Unclassified').sum()),n_missing_pop=int(labels.isna().sum()),
+        n_invalid_pop=int((labels.notna() & ~labels.isin(['Pop1','Pop2','Pop3','Unclassified'])).sum()))
+    assert sum(v for k,v in counts.items() if k!='n_denominator')==len(frame)
+    counts['n_unclassifiable_pop']=counts['n_unclassified_pop']
+    return counts
+
+
+def pop_denominator_audit(baseline,membership,manifest,config):
+    from .s03_episode_audit import validate_unique_patients
+    validate_unique_patients(baseline,'BASELINE')
+    rows=[]
+    for identifier in manifest['eligible_representation_ids']:
+        part=membership.loc[membership.representation_id.eq(identifier)]
+        # Multiple Mapper memberships are legitimate; patient flags must agree.
+        if part.groupby('patient_id').mapper_covered.nunique().gt(1).any():
+            raise ValueError('INCONSISTENT_PATIENT_COVERAGE')
+        covered=set(part.loc[part.mapper_covered,'patient_id'])
+        hard=set(hard_members(membership,identifier).patient_id)
+        for universe,frame in [('all_baseline',baseline),('mapper_covered',baseline.loc[baseline.patient_id.isin(covered)]),
+                               ('hard_supported',baseline.loc[baseline.patient_id.isin(hard)])]:
+            counts=pop_counts(frame,config['pop_column'])
+            rows.append(dict(representation_id=identifier,population_universe=universe,**counts,
+                status='DATA_QUALITY_INVALID_LABELS' if counts['n_invalid_pop'] else 'DESCRIPTIVE',
+                reason='UNKNOWN_PUBLISHED_POP_LABEL' if counts['n_invalid_pop'] else ''))
+    return pd.DataFrame(rows)
+
+
+def clinical_marker_summaries(baseline,membership,roles,manifest,validation):
+    """Prespecified observed instrument panels, including non-discovery sources.
+
+    This additional description does not alter historical baseline tables or
+    grant independence to a source that was not an approved validation anchor.
+    """
+    rows=[]
+    for identifier in ['R0','R2']:
+        if identifier not in manifest['eligible_representation_ids']: continue
+        frame=hard_members(membership,identifier).merge(baseline,on='patient_id',validate='one_to_one')
+        rolemap=roles.loc[roles.representation_id.eq(identifier)].set_index('source_column').validation_role.to_dict()
+        for marker in validation.get('clinical_marker_panels',[]):
+            column=marker['source_column']
+            for community,group in frame.groupby('community_id'):
+                values=numeric(group[column]).dropna() if column in group else pd.Series(dtype=float)
+                rows.append(dict(representation_id=identifier,community_id=community,source_column=column,
+                    validation_role=rolemap.get(column,'unavailable'),unit=marker['unit'],
+                    n_patients=len(group),n_observed=len(values),n_missing=len(group)-len(values),
+                    median=values.median(),q25=values.quantile(.25),q75=values.quantile(.75),
+                    status=('DESCRIPTIVE_PROVISIONAL' if identifier=='R2' or not group.structural_stability_status.eq('stable').all() else 'DESCRIPTIVE') if len(values) else 'NOT_ESTIMABLE',
+                    reason='' if len(values) else 'NO_OBSERVED_NUMERIC_MARKER',
+                    inference_scope='observed_baseline_description_not_independent_validation'))
     return pd.DataFrame(rows)
