@@ -29,11 +29,14 @@ def adjust_fdr(table):
     for col in ('q_value', 'q_domain'):
         d[col] = np.nan
     d['family_n_tests'], d['domain_family_n_tests'] = 0, 0
-    d['multiplicity_method'] = 'BH-FDR_across_independent_variables_per_test_scenario_axis_threshold'
+    d['multiplicity_method'] = 'BH-FDR_across_independent_outcomes_per_test_scenario_axis_threshold_basis'
+    d['cross_basis_multiplicity_policy'] = 'separate_exploratory_families_no_joint_discovery_claim'
     if d.empty or 'p' not in d:
         return d
     valid = d.status.eq('ESTIMATED') & d.p.between(0, 1) & ~d.is_essdai_derived.astype(bool)
     keys = ['threshold_abs', 'time_axis', 'scenario', 'test']
+    if 'basis_specification' in d:
+        keys.append('basis_specification')
     if 'outcome_id' in d and d.duplicated(keys+['outcome_id']).any():
         raise ContractError('duplicate canonical outcome in FDR family')
     for extra, q, n in [([], 'q_value', 'family_n_tests'), (['domain'], 'q_domain', 'domain_family_n_tests')]:

@@ -53,6 +53,16 @@ def match_reference(reference, comparison, keys, suffixes):
 
 def consistency(tables):
     """Match identical tests and pair/time/estimands; thresholds are not independent."""
+    # Each specification has independent comparisons, never a minimum-p selection.
+    bases = {str(d.basis_specification.iloc[0]) for t in tables.values()
+             for d in [t['00_variable_eligibility']] if len(d) and 'basis_specification' in d}
+    if len(bases) > 1:
+        parts = []
+        for basis in sorted(bases):
+            subset = {key: t for key, t in tables.items()
+                      if len(t['00_variable_eligibility']) and t['00_variable_eligibility'].basis_specification.eq(basis).all()}
+            parts.append(consistency(subset))
+        return pd.concat(parts, ignore_index=True)
     rows = []
     slope_tables = [t['01_linear_pairwise_slopes'] for t in tables.values() if len(t['01_linear_pairwise_slopes'])]
     if slope_tables:
@@ -112,7 +122,10 @@ def consistency(tables):
                 threshold_abs=r['threshold_abs_comparison'], estimate_primary=r['estimate_primary'],
                 estimate_comparison=r['estimate_comparison'], same_sign=np.sign(r['estimate_primary']) == np.sign(r['estimate_comparison']),
                 interpretation='Response-scale contrast sign consistency; no independent replication'))
-    return pd.DataFrame(rows)
+    result = pd.DataFrame(rows)
+    if bases and len(result):
+        result['basis_specification'] = next(iter(bases))
+    return result
 
 
 def bootstrap_patients(evaluation, fits, spec, cfg):

@@ -7,6 +7,8 @@ from src.block_A.temporal_spline_config import ANALYSIS_ROLE
 TEST_MODELS = dict(linear_group_time='A', common_nonlinearity='B',
                    group_specific_curvature='C', global_temporal_heterogeneity='C')
 OUTCOME_KEYS = ['outcome_id', 'variable', 'domain', 'outcome_type', 'unit']
+CONTEXT_KEYS = ['threshold_abs', 'time_axis', 'scenario', 'basis_specification']
+EXPORT_METADATA = ['version', 'n_knots', 'nonlinear_df', 'analysis_role', 'sample_fingerprint']
 
 
 def checked_merge(left, right, keys, validate):
@@ -23,24 +25,26 @@ def checked_merge(left, right, keys, validate):
 def classify(eligibility, comparisons, tests, policy):
     if eligibility.empty:
         return pd.DataFrame()
-    if eligibility.outcome_id.duplicated().any():
+    keys = OUTCOME_KEYS+[k for k in CONTEXT_KEYS if k in eligibility]
+    metadata = [k for k in EXPORT_METADATA if k in eligibility]
+    if eligibility.duplicated(keys).any():
         raise ContractError('duplicate canonical outcome in eligibility')
-    if len(tests) and tests.duplicated(['outcome_id', 'test']).any():
+    if len(tests) and tests.duplicated(keys+['test']).any():
         raise ContractError('duplicate canonical outcome/test')
-    if comparisons.duplicated(['outcome_id', 'model']).any():
+    if comparisons.duplicated(keys+['model']).any():
         raise ContractError('duplicate canonical outcome/model')
     expected = []
     for row in eligibility.to_dict('records'):
         for test, model in TEST_MODELS.items():
-            expected.append(dict(**{k: row[k] for k in OUTCOME_KEYS},
+            expected.append(dict(**{k: row[k] for k in keys+metadata},
                 interpretation_group=row['interpretation_group'], test=test, model=model,
                 eligibility_status=row['eligibility_status_'+model], eligibility_reason=row['reason_'+model]))
-    d = checked_merge(pd.DataFrame(expected), comparisons[OUTCOME_KEYS+['model', 'fit_status', 'reason']].rename(
-        columns={'reason': 'fit_reason'}), OUTCOME_KEYS+['model'], 'many_to_one')
+    d = checked_merge(pd.DataFrame(expected), comparisons[keys+['model', 'fit_status', 'reason']].rename(
+        columns={'reason': 'fit_reason'}), keys+['model'], 'many_to_one')
     if len(tests):
-        d = checked_merge(d, tests[OUTCOME_KEYS+['test', 'status', 'reason', 'p', 'q_value', 'family_n_tests']].rename(
+        d = checked_merge(d, tests[keys+['test', 'status', 'reason', 'p', 'q_value', 'family_n_tests']].rename(
             columns={'status': 'test_status', 'reason': 'test_reason', 'family_n_tests': 'fdr_denominator'}),
-            OUTCOME_KEYS+['test'], 'one_to_one')
+            keys+['test'], 'one_to_one')
     else:
         d = d.assign(test_status='NOT_REQUESTED', test_reason='tests_not_requested',
                      p=np.nan, q_value=np.nan, fdr_denominator=0)
@@ -79,5 +83,43 @@ def qc_summary(tables):
             ineligibility_reasons=eligibility.loc[~eligibility['eligible_'+model], 'reason_'+model].value_counts().to_dict(),
             failure_reasons=rows.loc[rows.fit_status.eq('FIT_FAILED'), 'reason'].value_counts().to_dict(),
             estimators=rows.loc[rows.fit_status.eq('ESTIMATED'), 'model_family'].value_counts().to_dict())
+        summary['n_eligible_'+model] = summary[model]['eligible']
+        summary['n_fitted_'+model] = summary[model]['estimated']
     summary['valid_C_tests'] = int((tests.model.eq('C') & tests.status.eq('ESTIMATED') & tests.p.between(0, 1)).sum()) if len(tests) else 0
+    summary['n_valid_C_tests'] = summary['valid_C_tests']
+    summary['n_outcomes_inventory'] = len(eligibility)
+    curves = tables['03_group_curves']
+    for model in 'AC':
+        summary['n_outcomes_with_supported_'+model+'_curves'] = int(
+            curves.loc[curves.model.eq(model), 'outcome_id'].nunique()) if len(curves) else 0
+    failed = models.loc[models.model.eq('C') & models.fit_status.eq('FIT_FAILED'), 'reason']
+    covariance = failed.str.contains('covariance|information_matrix', regex=True)
+    # Warning-only rejection does not establish nonconvergence; retain it as other QC.
+    convergence = ~covariance & failed.str.contains('nonconvergence')
+    summary.update(n_C_failed_covariance=int(covariance.sum()), n_C_failed_convergence=int(convergence.sum()),
+                   n_C_failed_other=int((~covariance & ~convergence).sum()))
+    summary['n_supported_times_by_outcome'] = dict(zip(eligibility.outcome_id, eligibility.n_supported_grid_times.astype(int)))
     return summary
+
+
+def validate_bundle(tables, temporal_requested=True):
+    """Reject missing A curves or unsupported predictions before assigning QC PASS."""
+    inventory, models, curves, support = (tables[k] for k in (
+        '00_variable_eligibility', '01_model_comparison', '03_group_curves', '00_local_temporal_support'))
+    if inventory.outcome_id.duplicated().any() or inventory.basis_specification.nunique() != 1:
+        raise ContractError('bundle must contain unique outcomes from one basis specification')
+    if len(curves):
+        keys = ['outcome_id', 'observed_pattern', 'time']
+        checked = curves.merge(support[keys+['four_group_supported', 'n_observed_local']],
+                               on=keys, how='left', validate='many_to_one', suffixes=('', '_support'))
+        if not checked.four_group_supported.eq(True).all() or not checked.n_observed_local_support.ge(5).all():
+            raise ContractError('curve outside shared five-patient temporal support')
+        if curves.duplicated(keys+['model']).any():
+            raise ContractError('duplicate supported curve')
+    # Models-only and feasibility modes intentionally do not request curves.
+    if temporal_requested:
+        fitted = models.loc[models.model.eq('A') & models.fit_status.eq('ESTIMATED'), 'outcome_id']
+        expected = support.loc[support.outcome_id.isin(fitted) & support.four_group_supported] if len(support) else support
+        actual = curves.loc[curves.model.eq('A')] if len(curves) else curves
+        if len(expected) != len(actual):
+            raise ContractError('fitted A is missing supported curves')

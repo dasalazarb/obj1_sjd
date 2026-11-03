@@ -5,15 +5,19 @@ import math
 from pathlib import Path
 from src.block_A.secondary_comparison_config import ComparisonConfig, PRIORITY
 
-VERSION = 'temporal-spline-v2'
+VERSION = 'temporal-spline-v3'
 STEM = '17_nonlinear_temporal_heterogeneity'
 C_SUPPORT_POLICY = 'C_RELAXED_SUPPORT_V1'
-ANALYSIS_ROLE = 'exploratory_posthoc_support_revision'
+ANALYSIS_ROLE = 'exploratory_posthoc_basis_specification'
+BASIS_SPECIFICATIONS = ('four_knots', 'three_knots')
+BASIS_METHODS = dict(four_knots='restricted_cubic_pooled_quantiles_1_3_2_3_projected',
+                     three_knots='restricted_cubic_pooled_median_projected')
 
 
 @dataclass(frozen=True)
 class SplineConfig(ComparisonConfig):
     version: str = VERSION
+    basis_specifications: tuple = BASIS_SPECIFICATIONS
     priority_variables: tuple = PRIORITY + ('iga', 'igm')
     max_primary_years: float = 3.
     grid_step: float = .25
@@ -34,6 +38,8 @@ class SplineConfig(ComparisonConfig):
         ComparisonConfig(**inherited)
         if self.version != VERSION:
             raise ValueError('unsupported Step 17 specification')
+        if tuple(self.basis_specifications) != BASIS_SPECIFICATIONS:
+            raise ValueError('V3 requires both bases in frozen order: four_knots, three_knots')
         for name in ('max_primary_years', 'grid_step', 'minimum_c_supported_grid_span_years'):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(name+' must be positive and finite')
