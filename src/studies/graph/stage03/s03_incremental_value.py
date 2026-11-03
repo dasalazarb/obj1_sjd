@@ -4,7 +4,7 @@ import pandas as pd
 from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
 import statsmodels.formula.api as smf
 from .s03_release_reader import hard_members
-from .s03_profiles import numeric
+from .s03_profiles import numeric,observed_values
 from .s03_statistics import bh_qvalues
 
 
@@ -33,7 +33,8 @@ def incremental_models(baseline,membership,roles,manifest,config):
         for anchor in config['anchors']:
             column=anchor['source_column']; row={'representation_id':identifier,'endpoint':column,'status':'NOT_ESTIMABLE',
                 'inference_scope':'in_sample_exploratory_conditional_on_frozen_labels','hypothesis_family':f'{identifier}/incremental',
-                'community_selection_uncertainty':'not_included_conditional_intervals','p_value':np.nan}
+                'community_selection_uncertainty':'not_included_conditional_intervals','p_value':np.nan,
+                'interpretation':'in_sample_delta_r2_not_external_predictive_utility'}
             if role_map.get(column)!='independent_baseline_anchor': row['reason']='ENDPOINT_UNAVAILABLE_OR_CIRCULAR'
             elif manifest['release_status']=='NO_STABLE_STRUCTURE' or not frame.structural_stability_status.eq('stable').all(): row['reason']='TOPOLOGY_NOT_STABLE'
             elif config['pop_column'] not in frame: row['reason']='POP_UNAVAILABLE'
@@ -43,7 +44,8 @@ def incremental_models(baseline,membership,roles,manifest,config):
                 for i,c in enumerate(config['confounders']):
                     if c not in frame or frame[c].isna().all(): missing.append(c); continue
                     key=f'confounder_{i}'
-                    values=frame[c]
+                    values=observed_values(frame[c])
+                    if values.isna().all(): missing.append(c); continue
                     num=numeric(values)
                     is_numeric=num.notna().sum()==values.notna().sum()
                     data[key]=num if is_numeric else values.astype('object')
@@ -51,10 +53,13 @@ def incremental_models(baseline,membership,roles,manifest,config):
                 date=config['date_column']
                 if date in frame:
                     data['baseline_era']=pd.to_datetime(frame[date],errors='coerce').dt.year//5*5
+                    if data['baseline_era'].isna().all(): missing.append(date)
                     covariates.append('C(baseline_era)')
+                else: missing.append(date)
                 data=data.dropna()
                 row.update(n_patients=len(data),n_communities=data.community.nunique(),missing_adjustments=','.join(missing))
-                if len(data)<int(config['minimum_model_patients']) or data.community.nunique()<2 or data['pop'].nunique()<2:
+                if missing: row['reason']='PRESPECIFIED_COVARIATES_UNAVAILABLE'
+                elif len(data)<int(config['minimum_model_patients']) or data.community.nunique()<2 or data['pop'].nunique()<2:
                     row['reason']='INSUFFICIENT_PATIENTS_OR_GROUP_VARIATION'
                 elif data.groupby('community').size().min()<int(config['minimum_group_patients']): row['reason']='INSUFFICIENT_COMMUNITY_SUPPORT'
                 else:

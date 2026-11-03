@@ -4,11 +4,11 @@ import numpy as np
 import pandas as pd
 import statsmodels.formula.api as smf
 from .s03_release_reader import hard_members
-from .s03_profiles import numeric
+from .s03_profiles import numeric,observed_values
 from .s03_statistics import bh_qvalues
 
 
-def post_index_data(master,baseline,members,endpoint,config):
+def post_index_data(master,baseline,members,endpoint,config, *, observed_only=True):
     date=config['date_column']
     if endpoint not in master or date not in master or date not in baseline:
         raise ValueError('ENDPOINT_OR_INDEX_DATE_UNAVAILABLE')
@@ -24,7 +24,8 @@ def post_index_data(master,baseline,members,endpoint,config):
     data['time_years']=(data.visit_date-data.index_date).dt.total_seconds()/(365.25*86400)
     data['value']=numeric(data[endpoint])
     # Strictly later than t0, regardless of ordering or visit-number labels.
-    data=data.loc[data.time_years.gt(0) & data.value.notna()].copy()
+    data=data.loc[data.time_years.gt(0)].copy()
+    if observed_only: data=data.loc[data.value.notna()]
     if flag in data: data=data.loc[~data[flag].fillna(False).astype(bool)]
     if data.duplicated(['patient_id','visit_date']).any():
         raise ValueError('DUPLICATE_PATIENT_DATES_REQUIRE_EPISODE_REVIEW')
@@ -36,23 +37,35 @@ def longitudinal(master,baseline,membership,manifest,config):
     for identifier in manifest['eligible_representation_ids']:
         members=hard_members(membership,identifier)
         for endpoint in config['longitudinal_endpoints']:
-            row={'representation_id':identifier,'endpoint':endpoint,'status':'NOT_ESTIMABLE','n_patients':0,'n_visits':0,
+            row={'representation_id':identifier,'endpoint':endpoint,'status':'NOT_ESTIMABLE','n_patients':np.nan,'n_visits':np.nan,
                  'time_unit':'years_since_frozen_clinical_baseline','analysis_population':'strictly_post_index_observed_values'}
             model={**row,'p_value':np.nan,'hypothesis_family':f'{identifier}/longitudinal',
                    'inference_scope':'in_sample_exploratory_conditional_trajectory','community_selection_uncertainty':'not_included_conditional_intervals'}
             try:
-                data=post_index_data(master,baseline,members,endpoint,config)
+                all_visits=post_index_data(master,baseline,members,endpoint,config,observed_only=False)
+                data=all_visits.loc[all_visits.value.notna()].copy()
+                row.update(n_post_index_patients=all_visits.patient_id.nunique(),n_post_index_visits=len(all_visits),
+                    n_observed_post_index_visits=len(data),n_missing_endpoint_visits=int(all_visits.value.isna().sum()),
+                    n_observed_post_index_patients=data.patient_id.nunique(),
+                    descriptive_status='DESCRIPTIVE_PROVISIONAL' if not members.structural_stability_status.eq('stable').all() else 'DESCRIPTIVE')
+                for (community,timebin),part in all_visits.groupby(['community_id',all_visits.time_years.round(0)]):
+                    observed=part.loc[part.value.notna()]
+                    trajectories.append({'representation_id':identifier,'endpoint':endpoint,'community_id':community,
+                        'time_bin_year':timebin,'n_visits':len(observed),'n_patients':observed.patient_id.nunique(),
+                        'n_total_visits':len(part),'n_missing_visits':int(part.value.isna().sum()),
+                        'n_total_patients':part.patient_id.nunique(),
+                        'n_missing_patients':len(set(part.patient_id)-set(observed.patient_id)),
+                        'median':float(observed.value.median()) if len(observed) else np.nan,
+                        'q25':float(observed.value.quantile(.25)) if len(observed) else np.nan,
+                        'q75':float(observed.value.quantile(.75)) if len(observed) else np.nan,
+                        'time_min_years':float(part.time_years.min()),'time_max_years':float(part.time_years.max()),
+                        'status':row['descriptive_status'],'inference_scope':'descriptive_no_confirmatory_p_values'})
                 counts=data.groupby('patient_id').size()
                 eligible=counts.loc[counts.ge(int(config['minimum_visits_per_patient']))].index
                 data=data.loc[data.patient_id.isin(eligible)].copy()
                 row.update(n_patients=data.patient_id.nunique(),n_visits=len(data),n_communities=data.community_id.nunique(),
                     followup_min_years=float(data.time_years.min()) if len(data) else np.nan,
                     followup_max_years=float(data.time_years.max()) if len(data) else np.nan)
-                for (community,timebin),part in data.groupby(['community_id',data.time_years.round(0)]):
-                    trajectories.append({'representation_id':identifier,'endpoint':endpoint,'community_id':community,
-                        'time_bin_year':timebin,'n_visits':len(part),'n_patients':part.patient_id.nunique(),
-                        'median':float(part.value.median()),'q25':float(part.value.quantile(.25)),'q75':float(part.value.quantile(.75)),
-                        'time_min_years':float(part.time_years.min()),'time_max_years':float(part.time_years.max())})
                 if data.patient_id.nunique()<int(config['minimum_model_patients']) or data.community_id.nunique()<2:
                     raise ValueError('INSUFFICIENT_POST_INDEX_PATIENTS_VISITS_OR_COMMUNITIES')
                 sizes=data.groupby('community_id').patient_id.nunique()
@@ -64,10 +77,12 @@ def longitudinal(master,baseline,membership,manifest,config):
                 data=data.merge(frozen_covariates,on='patient_id',validate='many_to_one')
                 for i,c in enumerate(config['confounders']):
                     if c not in data or data[c].isna().all(): missing_covariates.append(c); continue
-                    key=f'covariate_{i}'; s=numeric(data[c])
-                    is_numeric=s.notna().sum()==data[c].notna().sum()
-                    data[key]=s if is_numeric else data[c].astype('object')
+                    key=f'covariate_{i}'; values=observed_values(data[c]); s=numeric(values)
+                    if values.isna().all(): missing_covariates.append(c); continue
+                    is_numeric=s.notna().sum()==values.notna().sum()
+                    data[key]=s if is_numeric else values.astype('object')
                     terms.append(key if is_numeric else f'C({key})')
+                if missing_covariates: raise ValueError('PRESPECIFIED_COVARIATES_UNAVAILABLE')
                 data=data.dropna(subset=[f'covariate_{i}' for i,c in enumerate(config['confounders']) if c not in missing_covariates])
                 if data.patient_id.nunique()<int(config['minimum_model_patients']): raise ValueError('INSUFFICIENT_COMPLETE_COVARIATE_PATIENTS')
                 formula='value ~ time_years * C(community_id)'+''.join(' + '+x for x in terms)
@@ -111,4 +126,32 @@ def pop_transitions(master,baseline,membership,manifest,config):
                 'time_max_years':float(((part.visit_date-part.index_date).dt.days/365.25).max()),
                 'interpretation':'observed_population_labels_not_transit_through_graph'})
         if data.empty: rows.append({'representation_id':representation,'status':'NOT_ESTIMABLE','reason':'NO_VALID_POST_INDEX_POP_LABELS'})
+    return pd.DataFrame(rows)
+
+
+
+def comparable_longitudinal_summary(master,baseline,membership,manifest,config):
+    """R0/R2 descriptions on the same frozen supported-hard patient subset."""
+    if not {'R0','R2'}<=set(manifest['eligible_representation_ids']):
+        return pd.DataFrame([{'status':'NOT_ESTIMABLE','reason':'R0_R2_COMPARISON_UNAVAILABLE'}])
+    reference=hard_members(membership,'R0'); comparison=hard_members(membership,'R2')
+    common=set(reference.patient_id)&set(comparison.patient_id)
+    rows=[]
+    for identifier,members in [('R0',reference),('R2',comparison)]:
+        for endpoint in config['longitudinal_endpoints']:
+            row=dict(representation_id=identifier,endpoint=endpoint,n_common=len(common),
+                analysis_population='common_R0_R2_supported_hard_patients',status='NOT_ESTIMABLE',
+                n_patients=np.nan,n_visits=np.nan,inference_scope='descriptive_conditional_no_temporal_graph_progression')
+            try:
+                visits=post_index_data(master,baseline,members.loc[members.patient_id.isin(common)],endpoint,config,observed_only=False)
+                if visits.empty:
+                    rows.append({**row,'reason':'NO_COMMON_POST_INDEX_OBSERVATIONS'}); continue
+                for community,group in visits.groupby('community_id'):
+                    observed=group.loc[group.value.notna()]
+                    rows.append({**row,'community_id':community,'status':'DESCRIPTIVE_PROVISIONAL','reason':'',
+                        'n_patients':observed.patient_id.nunique(),'n_visits':len(observed),'n_total_visits':len(group),
+                        'n_missing_visits':int(group.value.isna().sum()),
+                        'median':float(observed.value.median()) if len(observed) else np.nan,
+                        'followup_min_years':float(group.time_years.min()),'followup_max_years':float(group.time_years.max())})
+            except ValueError as exc: rows.append({**row,'reason':str(exc)})
     return pd.DataFrame(rows)
