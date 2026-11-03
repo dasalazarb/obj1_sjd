@@ -152,7 +152,8 @@ Configuration is a JSON object of `SplineConfig` fields. Example:
  "simulations": 4000, "seed": 1701}
 ```
 
-No checkpoint/resume is implemented. In-memory patient rows are discarded
+The original analysis command has no checkpoint/resume. The separate global
+validation command below implements aggregate checkpoints. In-memory patient rows are discarded
 after each variable. Existing destinations are blocked unless both
 `--overwrite` and `--backup-root` are provided. Backups must be under
 `<output-root>/outputs/backups/17_nonlinear_temporal_heterogeneity/temporal-spline-v3/`
@@ -385,3 +386,218 @@ V3 acceptance coverage and numerical V2 compatibility are recorded in
 [the V3 software validation report](17_temporal_spline_v3_validation.md). Clinical
 recovery of the previously reported 23 + 7 A-only outcomes is pending execution
 on identical authorized inputs in Biowulf; synthetic QC cannot certify that count.
+
+## Global longitudinal validation supplement (`validation_global_v1`)
+
+The supplement evaluates **every registered outcome**, including missing,
+noneligible, ordinal/count, mechanically derived and historical outcomes. It
+has its own command and namespace; the ordinary Step 17 command and its published
+V3 tables/manifests are unchanged. ALT, IgA and MCV have no special validation
+rules. Software validation below uses synthetic fixtures only; it does not assert
+that the clinical cohort has been validated or clinically reviewed.
+
+```bash
+# Read/authenticate the four COMPLETE original V3 main bundles and cover all outcomes.
+python src/block_A/17_validate_temporal_heterogeneity.py
+
+# Intensive validation for all fitted A/B/C candidates (potentially expensive).
+python src/block_A/17_validate_temporal_heterogeneity.py \
+  --depth deep --all-fitted --bootstrap-replicates 200
+
+# First budgeted batch. This limit includes full-trajectory LOO and bootstrap refits.
+python src/block_A/17_validate_temporal_heterogeneity.py \
+  --depth deep --max-patient-refits 1000 --max-outcomes 8
+
+# Continue the IDENTICAL plan; preserve the previous validation snapshot in backup.
+python src/block_A/17_validate_temporal_heterogeneity.py \
+  --depth deep --bootstrap-replicates 200 --max-patient-refits 1000 --resume \
+  --backup-root /authorized/project/outputs/backups/17_nonlinear_temporal_heterogeneity/validation_global_v1
+```
+
+If a systematic validation snapshot already exists, start intensive work with
+`--depth deep --resume --backup-root ...` to preserve that snapshot, even for
+the first intensive batch. Each checkpoint scope has one writer at a time.
+
+Run canonical data only inside the authorized NIH environment. The no-argument
+cutoff comes from the four authenticated reference manifests, never the system
+date or a hard-coded assumption. An explicit `--data-cutoff` must match them.
+`--reference-root` can point to a different authorized project containing V3;
+by default it equals `--output-root`. Synthetic inputs/references/outputs are
+separated under each root's `synthetic_validation/` directory. The original
+reference runs must have `analysis=all` and
+`fdr_selection_scope=all_registered_variables`; subset runs cannot substitute
+for the complete reference. Missing or hash-invalid bundles fail closed.
+
+`--threshold {3,5,both}` and `--basis {four_knots,three_knots,both}` explicitly
+scope the new snapshot. Both default to `both`; all four source references are
+still authenticated. `--outcomes-file` is an optional JSON list of **canonical
+`outcome_id` strings**, used as a predeclared clinical priority for intensive
+work, not as a filter on the systematic inventory. `--max-outcomes` limits the
+number of new distinct intensive outcomes per invocation; `--max-patient-refits`
+limits reserved refits. Neither changes the complete systematic denominator.
+`--seed` controls deterministic queue ties and validation RNG only. Original
+model parameters, grid, basis, projection/scaling and QC limits come from V3.
+
+### Comparability and systematic diagnostics
+
+The runner authenticates every artifact in all four reference manifests and
+checks their common cutoff/parameters, origin, version and named support policy.
+It requires an exact catalog/inventory match and A/B/C model rows per outcome.
+For each `outcome_id × threshold × basis × clinical_baseline × main`, it
+reproduces the analytic sample fingerprint, unit/type, eligibility, frozen basis,
+counts, local support and rank/condition diagnostics. Suppressed original counts
+remain suppressed; they are not treated as observed zeros. Discrepancies produce
+`NOT_COMPARABLE_REFERENCE`, exclude intensive evaluation and set software QC to
+FAIL. An incomplete/corrupt reference blocks publication entirely. The intensive
+mode additionally reproduces the original coherent model family and compares all
+published coefficients and their standard errors before validation refits.
+
+Systematic mode makes **zero model fits**. For every outcome/group it reports
+coverage on `[0,3]`, distinct measurement dates, repeated-patient counts,
+follow-up-span quartiles and disjoint early `[0,.50]` / late `[1.75,2.50]` windows
+(inclusive endpoints). `n_neither` includes fixed-group members with no analytic
+observations in either window. `pct_both_of_group` uses all fixed-group patients;
+`pct_both_of_early` uses unique early contributors. The four-way early/late
+partition is distinct from the original overlapping one-year prediction windows.
+If a diagnostic window is entirely unobserved, its absence does not by itself
+invalidate a trajectory: the predefined continuity gate uses the full-horizon
+repeated-patient fraction for that group instead of an undefined paired overlap.
+Both fractions and the rule remain explicit in the inventory.
+It reports supported grid-point counts, span, segment count and the sum of
+adjacent supported intervals; no gap is filled to inflate covered duration.
+
+For applicable numeric/binary outcomes, one arithmetic mean per patient/window
+precedes population descriptives and late-minus-early paired summaries. Binary
+change is the difference in each patient's mean binary response (probability
+scale), with the paired-patient denominator. Ordinal/count/complex scores,
+historical/nonlongitudinal and ESSDAI-derived outcomes retain coverage rows but
+receive `NOT_APPLICABLE_TYPE` for numeric change/distribution inference. Medians,
+IQR, MAD and skewness describe distributions; asymmetry is an audit signal, not
+an exclusion rule. Units are checked against the authenticated catalog. No
+individual extremes, exact dates or patient traces are exported.
+
+### Intensive plan, estimands and resumption
+
+Every comparable fitted A/B/C is a candidate, regardless of its p/q. A frozen
+queue cycles one task from each nonempty **model × type × threshold × basis ×
+domain** stratum per round. Within a stratum, predeclared clinical priorities
+precede `sha256(seed, semantic task key)` ties. This supplies explicit diversity
+quotas without selecting only significant findings. Both the plan and its hash
+are persisted **before refits**. Every unexecuted candidate is
+`DEEP_PENDING_RESOURCE_BUDGET`, with its queue position. No robustness percentage
+is attributed to the whole inventory from a selected intensive subset.
+
+A task consists of one outcome/model/threshold/basis. LOO removes a patient's
+**entire trajectory**, rebuilds the frozen design, and fits exactly the original
+family. `fit_fixed_family()` applies the original rank, condition, convergence,
+covariance, separation, residual, repeated-patient/event support and warning checks
+and never selects another
+estimator. Failed and noncomparable refits stay in the denominator. Comparisons
+use only the intersection of original/deletion-supported points; C change
+contrasts also require the original reference point. No temporal interpolation
+or gap bridging is performed. Influence exports pool across deletions and report
+robust quantiles by estimand/group/contrast; no omitted-patient rows or rankings
+are persisted.
+
+The patient bootstrap shares the original resampling implementation. It draws
+complete trajectories with replacement within each ESSDAI group and gives each
+duplicate an internal fresh cluster ID. Refits freeze model, family, basis and
+original inference grid. A replicate losing any original supported point fails
+instead of shrinking its inferential family. Joint sup-t families are:
+
+| Model | Simultaneously calibrated family |
+|---|---|
+| A | Four group slopes plus six pairwise slope differences |
+| B | Shared curvature on the supported grid plus four group trajectories |
+| C | Six pairs × all original supported times × level/change/velocity |
+
+The default is 200 requested bootstrap replicates. Calibration requires
+`max(100, ceil(.8 × requested))` comparable successes; failures and reasons are
+retained. Analytic coefficient simulations retain the reference configuration seed; the
+validation seed controls patient resampling. Analytic/bootstrapped critical values, global sup-t quantiles and
+simultaneous-band sign agreement are reported. Binary response-scale bootstrap
+calibration is explicitly `NOT_ESTIMABLE_METHOD`; binary LOO describes link-scale
+A slopes/B curvature and response-scale trajectories, but cannot establish
+`SUPPORTED_EXPLORATORY` without a validated bootstrap method.
+
+Checkpoint files live only at
+`<root>/work/17_nonlinear_temporal_heterogeneity/temporal-spline-v3/validation_global_v1/<scope>/`.
+They contain **disclosure-controlled aggregates only**, a frozen plan/context
+hash, and payload hashes. Temp-file/fsync/atomic rename guards interrupted writes.
+Resume rejects changes to inputs, references, code, parameters, software versions,
+seed or requested bootstrap count. Budgets may increase. Completed tasks are
+immutable and skipped, and cached results republish idempotently. A model task is
+the interruption boundary: interruption mid-task restarts that task; neither
+patient-level checkpoints nor partial models are published. A budget too small
+for an entire task leaves it pending. Initial-family reconstruction reserves up
+to six fits in addition to its LOO/bootstrap cost. There is no wall-clock timeout
+or per-replicate resume; bound scheduled job runtime using the institutional
+scheduler and choose an appropriate whole-task budget.
+
+Resume of an already published snapshot requires an explicit `--backup-root`
+below `outputs/backups/17_nonlinear_temporal_heterogeneity/`. It replaces only the
+new validation namespace with a transactional snapshot after all selected tasks
+finish, preserving pending tasks as pending. Staging/rollback and final input,
+reference and code hash checks protect the previous snapshots and V3 originals.
+
+### Scientific states, disclosure and output contracts
+
+`software_qc_status` and `scientific_validation_status` are independent. The
+predeclared materiality rules in the frozen plan are descriptive standardized
+rules, **not clinical MCIDs**: a >1 SE LOO shift at any supported estimand (including an isolated influential
+trajectory), or a 95th-percentile standardized shift >1 SE,
+material direction-change fraction >.20, or LOO failure fraction >.20 flag
+fragility when bootstrap is valid. Insufficient comparable refits/calibration
+are inconclusive. Continuity <.20 in any fixed group (paired-window overlap, or the
+full-horizon repeated fraction when either diagnostic window is absent), LOO supported-grid retention
+25th percentile <.80, simultaneous-band
+agreement <.80 or bootstrap/analytic critical ratio >1.50 also prevent support.
+Continuous diagnostics accompany labels. `SUPPORTED_EXPLORATORY` requires both
+intensive components complete and adequate overlap; p/q never enters that rule.
+These thresholds are fixed globally and cannot be changed per outcome.
+
+Patient IDs are used in memory only. CSV columns and values plus nested JSON
+keys/values are audited before writing. Linked diagnostic patient totals,
+subtotals, percentages and distribution/change summaries are conservatively
+suppressed **across tables for the entire outcome** if any patient partition or
+sign cell contains 1–4. Bootstrap-replicate counts describe draws rather than individual patients and
+remain visible when no patient cell is suppressed. LOO count totals and failure histograms are suppressed
+together when small cells could reveal one deletion. This may hide otherwise
+usable aggregates; suppression never alters internal scientific classification.
+Task/outcome denominators are software coverage counts, not patient counts.
+Institutional disclosure review remains necessary before releasing any clinical
+CSV/JSON. The command does not publish a ZIP or send clinical outputs elsewhere.
+
+Each selected bundle publishes eight `07_*.csv` tables and QC JSON under:
+
+```text
+outputs/{tables,qc}/blockA/17_nonlinear_temporal_heterogeneity/
+  temporal-spline-v3/validation_global_v1/<basis>/clinical_baseline/delta<3|5>/main/
+```
+
+Tables are `07_outcome_validation_inventory`, `07_patient_temporal_coverage`,
+`07_within_patient_change`, `07_distribution_diagnostics`, `07_influence_summary`,
+`07_fit_stability`, `07_patient_bootstrap_qc`, and
+`07_scientific_validation_classification`. Inventory and scientific rows cover
+all outcomes × A/B/C, even when intensive work is inapplicable/pending; diagnostics
+cover all outcomes × groups. All rows retain canonical identity, domain/type/unit,
+threshold/basis/clock/scenario, sample fingerprint and validation version/depth.
+`reference_q_value` and `reference_family_n_tests` come unchanged from the original
+**full** V3 test family; C's curvature test is retained separately. Validation
+never recomputes FDR on a selected subset.
+
+`run_manifest.json` records provenance, code/upstream/reference/artifact hashes,
+UTC timestamp, versions and seed. `validation_summary.json` gives full inventory,
+model/domain denominators, task states, plan/budgets, limitations and a stability
+fraction whose visible denominator is **only intensively completed models**.
+Neither software PASS nor the same-cohort bootstrap constitutes independent
+clinical validation.
+
+Reproduce software checks with synthetic data only:
+
+```bash
+python -m pytest -q tests/test_temporal_spline_validation.py
+python -m pytest -q tests/test_temporal_spline_*.py \
+  tests/test_secondary_comparison_*.py tests/test_secondary_trajectories_by_essdai_pattern.py \
+  tests/test_observed_patterns_v2.py
+```

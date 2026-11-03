@@ -17,6 +17,58 @@ class Fit:
     bic: float = np.nan
 
 
+def fit_fixed_family(data, basis, model, family, spec, cfg):
+    """Validation-only refit: rebuild the frozen design and never fall back.
+
+    Uses the principal fit's rank/condition, separation, convergence, warning,
+    residual and covariance limits. Failure messages contain codes, never rows.
+    The ordinary nested-family selection in ``fit_family`` is unchanged.
+    """
+    from src.block_A.secondary_comparison_models import design
+    allowed = (('GEE_binomial_robust',) if spec.type == 'binary' else
+               ('MixedLM_ML_random_intercept', 'GEE_gaussian_robust'))
+    if family not in allowed or model not in ('A', 'B', 'C'):
+        return None, 'NONCOMPARABLE_FAMILY'
+    if data.empty or (basis is None and model != 'A'):
+        return None, 'FIT_FAILED_EMPTY_OR_NO_BASIS'
+    if data.groupby('patient_id').observed_pattern.nunique().gt(1).any():
+        raise ValueError('validation changed fixed group membership')
+    matrix = design(data) if model == 'A' else basis.matrix(data.observed_pattern, data.time, model)
+    if (np.linalg.matrix_rank(matrix) != matrix.shape[1] or
+            np.linalg.cond(matrix) > cfg.maximum_design_condition):
+        return None, 'FIT_FAILED_DESIGN'
+    y, ids = data.value.to_numpy(float), data.patient_id.to_numpy(str)
+    patterns = data.observed_pattern.to_numpy(str)
+    mixed, binary = family.startswith('MixedLM'), spec.type == 'binary'
+    if not all(np.any(patterns == g) for g in PATTERNS):
+        return None, 'FIT_FAILED_GROUP_MISSING'
+    for group in PATTERNS:
+        part = data.loc[data.observed_pattern.eq(group)]
+        histories = part.groupby('patient_id').variable_measurement_date.nunique()
+        if (len(histories) < cfg.minimum_patients_per_group or
+                histories.ge(2).sum() < cfg.minimum_repeated_per_group or
+                part.time.nunique() < cfg.minimum_distinct_times):
+            return None, 'FIT_FAILED_LONGITUDINAL_SUPPORT'
+        if binary and (part.loc[part.value.eq(1), 'patient_id'].nunique() < cfg.minimum_events_per_group or
+                       part.loc[part.value.eq(0), 'patient_id'].nunique() < cfg.minimum_nonevents_per_group):
+            return None, 'FIT_FAILED_BINARY_SUPPORT'
+    if binary and separation(y, matrix):
+        return None, 'FIT_FAILED_SEPARATION'
+    try:
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter('always')
+            result = mixed_fit(y, matrix, ids) if mixed else gee_fit(y, matrix, ids, binary)
+            beta, cov, reasons, _ = fit_qc(result, y, matrix, patterns, cfg, mixed, binary)
+        if any(w.category.__name__ in ('ConvergenceWarning', 'RuntimeWarning', 'IterationLimitWarning',
+                                       'PerfectSeparationWarning') for w in captured):
+            reasons.append('fit_warning_requires_rejection')
+        if reasons:
+            return None, 'FIT_FAILED_'+';'.join(sorted(set(reasons)))
+        return Fit(model, family, beta, cov, float(result.llf) if mixed else np.nan), ''
+    except (ValueError, ArithmeticError, np.linalg.LinAlgError):
+        return None, 'FIT_FAILED_NUMERICAL'
+
+
 def fit_qc(result, y, matrix, patterns, cfg, mixed, binary):
     p = matrix.shape[1]
     beta = np.asarray(result.fe_params if mixed else result.params, float)
