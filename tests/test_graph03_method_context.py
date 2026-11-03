@@ -216,6 +216,19 @@ def test_pipeline_frozen_release_and_historical_compatibility(configuration,tmp_
         assert (output/f'03_graph_{name}.csv').is_file()
     summary=json.loads((output/'03_graph_results_summary.json').read_text())
     assert not summary['confirmatory_validation'] and not summary['external_prediction_validated']
+    assert summary['temporal_resolution_version']=='graph03_episode_resolution_v1'
+    assert summary['n_endpoint_analyses']==len(manifest['eligible_representation_ids'])*len(cfg['validation']['longitudinal_endpoints'])
+    assert summary['pop_denominator_qc']['status']=='PASS' and summary['pop_denominator_qc']['crosswalk_reconciled']
+    for name in ['temporal_source_audit','episode_collision_summary','episode_resolution_audit',
+                 'longitudinal_denominator_audit','longitudinal_unresolved_reasons',
+                 'pop_denominator_audit','pop_transition_eligibility','clinical_marker_summary']:
+        table=pd.read_csv(output/f'03_graph_{name}.csv')
+        assert 'patient_id' not in table.columns
+        assert not any(patient in table.to_csv(index=False) for patient in frames['baseline_raw'].patient_id)
+    pop_audit=pd.read_csv(output/'03_graph_pop_denominator_audit.csv')
+    assert pop_audit[['n_pop1','n_pop2','n_pop3','n_unclassified_pop','n_missing_pop','n_invalid_pop']].sum(axis=1).eq(pop_audit.n_denominator).all()
+    assert (output/'figures/03_graph_figure_status.csv').is_file()
+
     inventory=pd.read_csv(output/'03_graph_artifact_inventory.csv')
     assert not inventory.shareable_export_allowed.any() and inventory.privacy_class.eq('INTERNAL_RESTRICTED').all()
     for figure in (output/'figures').glob('*.csv'):

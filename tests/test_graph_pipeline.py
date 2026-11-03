@@ -67,6 +67,8 @@ def configuration(tmp_path):
             data['resampling'].update(main_subsampling_replicates_per_variant=2,iterative_bootstrap_replicates=2,parameter_sensitivity_subsampling_replicates=2)
             data['iterative_regularized'].update(masked_validation_repeats=2)
         if name=='validation':
+            from tests.test_graph03_episode_resolution import synthetic_policy
+            data=synthetic_policy(data,['clinical_episode_id'])
             data['minimum_group_patients']=2; data['effect_ci_replicates']=20
         out=tmp_path/f'{name}.yaml'; out.write_text(yaml.safe_dump(data)); pipeline['includes'][name]=str(out)
     pipeline['paths'].update(integrated=str(source),pharma_candidates=str(profile.with_name(pharma.GRAPH_CANDIDATES_NAME)),
@@ -249,7 +251,8 @@ def test_circularity_includes_derived_proxies():
 
 
 def test_longitudinal_uses_strict_actual_post_index_dates():
-    cfg=pipe.load_pipeline()['validation']
+    from tests.test_graph03_episode_resolution import synthetic_policy
+    cfg=synthetic_policy(pipe.load_pipeline()['validation'])
     baseline=pd.DataFrame({'patient_id':['a'],'clinical_anchor_date':['2020-01-01']})
     master=pd.DataFrame({'patient_id':['a']*4,'clinical_anchor_date':['2019-12-31','2020-01-01','2020-02-01','2021-07-01'],
         'is_clinical_baseline':[False,True,False,False],'essdai__total':[99.,88.,1.,2.]})
@@ -298,7 +301,8 @@ def clinical_frames(n=90):
     membership=pd.DataFrame({'patient_id':baseline.patient_id,'representation_id':'R0','community_id':community,
         'hard_assignment':True,'mapper_covered':True,'membership_tie':False,'supported':True,'structural_stability_status':'stable'})
     manifest={'eligible_representation_ids':['R0'],'release_status':'PARTIAL_OR_EXPLORATORY'}
-    config=deepcopy(pipe.load_pipeline()['validation']); config['confounders']=[]; config['effect_ci_replicates']=30
+    from tests.test_graph03_episode_resolution import synthetic_policy
+    config=synthetic_policy(pipe.load_pipeline()['validation']); config['confounders']=[]; config['effect_ci_replicates']=30
     features=pd.DataFrame({'representation_id':['R0'],'source_column':['pro__sf36_pcs'],'feature':['pro__sf36_pcs'],'included':[True]})
     roles=feature_roles(features,baseline,config,['R0'])
     return baseline,membership,manifest,config,roles
