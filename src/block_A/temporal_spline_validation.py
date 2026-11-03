@@ -26,12 +26,19 @@ from src.block_A.temporal_spline_contrasts import function_and_gradient
 from src.block_A.temporal_spline_models import fit_fixed_family
 from src.block_A.temporal_spline_inference import simultaneous_critical
 
-VALIDATION_VERSION = 'validation_global_v1'
+VALIDATION_VERSION = 'validation_global_v2'
+BOOTSTRAP_POLICY = 'strict_original_support'
+SENSITIVITY_POLICY = 'fixed_original_grid_conditional'
+CALIBRATION_DENOMINATOR = 'all_requested_draws_per_policy'
+BOOTSTRAP_DEFINITION = dict(primary=BOOTSTRAP_POLICY, sensitivity=SENSITIVITY_POLICY,
+    denominator=CALIBRATION_DENOMINATOR, minimum_successes=100, minimum_success_fraction=.8,
+    standardization='original_standard_errors', quantile=.95, frozen_full_estimand_family=True)
 EARLY = (0., .5)
 LATE = (1.75, 2.5)
 TABLES = ('07_outcome_validation_inventory', '07_patient_temporal_coverage',
           '07_within_patient_change', '07_distribution_diagnostics', '07_influence_summary',
-          '07_fit_stability', '07_patient_bootstrap_qc', '07_scientific_validation_classification')
+          '07_fit_stability', '07_patient_bootstrap_qc', '07_bootstrap_failure_diagnostics',
+          '07_scientific_validation_classification')
 # Frozen descriptive thresholds, applied to every numeric outcome/model. These
 # are not clinical MCIDs. All continuous diagnostics remain in the tables.
 MATERIAL = dict(loo_standardized_shift_p95=1., loo_material_direction_fraction=.2,
@@ -77,7 +84,8 @@ def audit_payload(value, patient_ids=()):
     embedded = [re.escape(pid) for pid in ids if len(pid) >= 5 and not pid.isdigit()]
     embedded_ids = re.compile('|'.join(embedded)) if embedded else None
     forbidden = {'patient_id', 'clinical_episode_id', 'variable_measurement_date',
-        'clinical_baseline_date', 'essdai_index_date', 'omitted_patient', 'bootstrap_id'}
+        'clinical_baseline_date', 'essdai_index_date', 'omitted_patient', 'bootstrap_id',
+        'source_patient_ids', 'bootstrap_draw_indices', 'replicate_coefficients', 'pseudopatient_id'}
     def check(node):
         if isinstance(node, dict):
             if forbidden.intersection(node):
@@ -108,15 +116,26 @@ def suppress_table(table, patient_ids=(), sensitive_outcomes=()):
     sensitive = d.outcome_id.isin(sensitive_outcomes) if 'outcome_id' in d else pd.Series(False, index=d.index)
     tallies = [c for c in d if c.startswith('n_') and c not in
                ('n_supported_grid_times', 'n_supported_segments')]
-    if 'calibration_valid' in d:
-        # Bootstrap draws are not individuals. One failed replicate cannot
-        # identify a patient; preserve its audit denominator and failure rate.
-        tallies = [c for c in tallies if c not in ('n_requested', 'n_attempted', 'n_successful', 'n_failed')]
     small = pd.Series(False, index=d.index)
     for col in tallies:
         numeric = pd.to_numeric(d[col], errors='coerce')
         small |= numeric.between(1, 4)
-    hide = sensitive | small
+    # Nested partitions and previously suppressed rows must stay suppressed.
+    def small_partition(value):
+        try:
+            value = json.loads(value) if isinstance(value, str) else value
+        except (ValueError, TypeError):
+            return True
+        if isinstance(value, dict):
+            return any(small_partition(v) for v in value.values())
+        return isinstance(value, (int, float)) and 0 < value < 5
+    partitions = ('failure_reasons', 'refit_failure_category', 'support_loss_histogram',
+                  'stage_counts', 'refit_failure_reasons')
+    for col in partitions:
+        if col in d:
+            small |= d[col].map(small_partition)
+    prior = d.disclosure_status.eq('DISCLOSURE_SUPPRESSED') if 'disclosure_status' in d else False
+    hide = sensitive | small | prior
     # Metadata numbers (seed, threshold, model dimensions, time grid) do not
     # describe a patient's measurement. All other numeric metrics are linked.
     keep = {'seed', 'threshold_abs', 'queue_position', 'reference_q_value', 'reference_family_n_tests',
@@ -127,9 +146,31 @@ def suppress_table(table, patient_ids=(), sensitive_outcomes=()):
     for col in d:
         if col not in keep and pd.api.types.is_numeric_dtype(d[col]) and not pd.api.types.is_bool_dtype(d[col]):
             d.loc[hide, col] = np.nan
-    for col in ('failure_reasons', 'reference_tests'):
-        if col in d and col == 'failure_reasons':
+    for col in partitions:
+        if col in d:
             d.loc[hide, col] = '{}'
+    # Flags and status labels also reveal suppressed patient-derived facts.
+    for col in ('material_fragility_detected', 'loo_material_fragility_detected',
+                'calibration_valid', 'calibration_valid_strict', 'calibration_valid_conditional',
+                'bootstrap_strict_calibration_valid', 'bootstrap_conditional_calibration_valid'):
+        if col in d:
+            d[col] = d[col].astype(object)
+            d.loc[hide, col] = None
+    for col in ('loo_stability_status', 'bootstrap_calibration_status', 'loo_status', 'bootstrap_status',
+                'validation_reason_codes', 'failure_diagnosis'):
+        if col in d:
+            d.loc[hide, col] = 'DISCLOSURE_SUPPRESSED'
+    if 'scientific_validation_status' in d:
+        protected = d.scientific_validation_status.isin(
+            ['SUPPORTED_EXPLORATORY', 'FRAGILE', 'INCONCLUSIVE']) & hide
+        d.loc[protected, 'scientific_validation_status'] = 'INCONCLUSIVE'
+        d.loc[protected, 'status'] = 'INCONCLUSIVE'
+        if 'reason' in d:
+            d.loc[protected, 'reason'] = 'DISCLOSURE_SUPPRESSED'
+    if 'n_requested' in d and 'scientific_validation_status' not in d and 'status' in d:
+        d.loc[hide, 'status'] = 'DISCLOSURE_SUPPRESSED'
+        if 'reason' in d:
+            d.loc[hide, 'reason'] = 'DISCLOSURE_SUPPRESSED'
     d['disclosure_status'] = np.where(hide, 'DISCLOSURE_SUPPRESSED', 'AGGREGATE')
     safe_table(d, patient_ids)
     audit_payload(d.to_dict('records'), patient_ids)
@@ -598,56 +639,268 @@ def loo_summary(evaluation, fit, spec, cfg, seed):
     return summary, influence
 
 
+def _refit_category(reason):
+    """One exclusive, allowlisted QC category; never export exception text."""
+    text = str(reason).upper()
+    for category, tokens in (
+        ('DESIGN', ('DESIGN', 'BASIS', 'EMPTY')),
+        ('LONGITUDINAL_SUPPORT', ('LONGITUDINAL', 'GROUP_MISSING')),
+        ('BINARY_SUPPORT', ('BINARY', 'SEPARATION', 'LOGISTIC')),
+        ('COVARIANCE', ('COVARIANCE', 'INFORMATION_MATRIX', 'RANDOM_INTERCEPT')),
+        ('RESIDUAL_QC', ('RESIDUAL',)),
+        ('CONVERGENCE', ('CONVERGENCE', 'WARNING', 'ITERATION')),
+        ('NUMERICAL', ('NUMERICAL', 'NONFINITE', 'LIKELIHOOD')),
+        ('FAMILY', ('FAMILY',))):
+        if any(token in text for token in tokens):
+            return category
+    return 'OTHER'
+
+
+def source_support_diagnostic(data, replicate, rng_state, times, cfg):
+    """Replay ONLY the in-memory selections, before source identity is discarded.
+
+    The production resampler and its RNG stream remain unchanged. This observer
+    uses a private RNG with the pre-draw state and the identical stratified pool
+    order. Only nonidentifying fractions/distances leave this function.
+    """
+    rng = np.random.default_rng()
+    rng.bit_generator.state = rng_state
+    unique_fractions, pseudo_fractions, covered, distances = [], [], [], []
+    by_group = {}
+    draws = 0
+    for group in PATTERNS:
+        original = data.loc[data.observed_pattern.eq(group)]
+        pool = original.patient_id.unique()
+        chosen = rng.choice(pool, len(pool), replace=True)
+        draws += len(chosen)
+        group_start = len(covered)
+        selected = original.loc[original.patient_id.isin(set(chosen))]
+        pseudo = replicate.loc[replicate.observed_pattern.eq(group)]
+        for t in times:
+            local = selected.loc[selected.time.sub(t).abs().le(cfg.prediction_window_years/2)]
+            entries = pseudo.loc[pseudo.time.sub(t).abs().le(cfg.prediction_window_years/2)]
+            unique_fractions.append(local.patient_id.nunique()/len(pool))
+            pseudo_fractions.append(entries.patient_id.nunique()/len(pool))
+            covered.append(not selected.empty and selected.time.min() <= t <= selected.time.max())
+            distances.append(max(float(selected.time.min()-t), float(t-selected.time.max()), 0.)
+                             if not selected.empty else np.nan)
+        by_group['group_'+group+'_grid_coverage_fraction'] = float(np.mean(covered[group_start:]))
+        by_group['group_'+group+'_source_unique_local_fraction'] = float(np.mean(unique_fractions[group_start:]))
+    return dict(bootstrap_draw_count=draws, **by_group, source_unique_local_fraction=float(np.mean(unique_fractions)),
+        pseudo_local_fraction=float(np.mean(pseudo_fractions)), group_grid_coverage_fraction=float(np.mean(covered)),
+        grid_outside_observed_range_years=float(np.mean(distances)))
+
+
+def _comparable_fit(refit, fit, cfg):
+    if refit.model != fit.model or refit.family != fit.family:
+        return 'NONCOMPARABLE_FAMILY'
+    cov = np.asarray(refit.covariance)
+    if (len(refit.beta) != len(fit.beta) or cov.shape != fit.covariance.shape or
+            not np.isfinite(refit.beta).all()):
+        return 'FIT_FAILED_NUMERICAL'
+    if (not np.isfinite(cov).all() or not np.allclose(cov, cov.T) or
+            np.linalg.eigvalsh(cov).min() <= 0 or np.linalg.cond(cov) > cfg.maximum_design_condition):
+        return 'FIT_FAILED_COVARIANCE'
+    return ''
+
+
 def bootstrap_summary(evaluation, fit, spec, cfg, seed=None):
-    """Fixed-family stratified patient bootstrap, joint over model-specific family."""
+    """Two policies on identical draws/refits; maxima use ORIGINAL SEs, not bootstrap-t.
+
+    No draw, coefficient vector, individual prediction or source identity is
+    persisted. Conditional evaluation never changes the frozen target family.
+    """
+    from copy import deepcopy
     from src.block_A.temporal_spline_sensitivity import resample_patients
     seed = cfg.seed if seed is None else seed
     requested = cfg.bootstrap_replicates
     base = dict(model=fit.model, n_requested=requested, n_attempted=0, n_successful=0, n_failed=0,
+        n_refits_attempted=0, n_draw_completed=0,
         seed=seed, estimand_family=family_name(fit.model), failure_reasons='{}',
-        required_successes=max(100, math.ceil(.8*requested)), calibration_valid=False)
+        required_successes=max(100, math.ceil(.8*requested)), calibration_valid=False,
+        calibration_valid_strict=False, calibration_valid_conditional=False,
+        bootstrap_policy=BOOTSTRAP_POLICY, sensitivity_policy=SENSITIVITY_POLICY,
+        calibration_denominator=CALIBRATION_DENOMINATOR,
+        standardization='original_standard_errors_not_replicate_studentized',
+        n_accepted_conditional=0, n_failed_conditional=0, failure_reasons_conditional='{}')
     if spec.type == 'binary':
-        return dict(base, status='NOT_ESTIMABLE_METHOD', reason='Binary response bootstrap calibration is not validated')
+        return dict(base, status='NOT_ESTIMABLE_METHOD', bootstrap_calibration_status='NOT_ESTIMABLE_METHOD',
+                    reason='Binary response bootstrap calibration is not validated')
     rows, gradients, estimates = target_family(evaluation, fit)
     if not len(rows):
         return dict(base, status='NOT_ESTIMABLE', reason='No supported grid')
     se = np.sqrt(np.maximum(np.einsum('ij,jk,ik->i', gradients, fit.covariance, gradients), 0))
-    valid = se > 1e-12
-    if not valid.any():
-        return dict(base, status='NOT_ESTIMABLE', reason='No nondegenerate estimands')
+    valid = se > 1e-12  # Frozen zero-gradient anchors (e.g. C change at t0) stay in the family.
+    if not valid.any() or not np.isfinite(se).all() or not np.isfinite(estimates).all():
+        return dict(base, status='NOT_ESTIMABLE', reason='Nonfinite or degenerate original estimands')
     analytic = simultaneous_critical(gradients, fit.covariance, cfg.simulations, cfg.seed)
-    rng, maxima, failures = np.random.default_rng(seed), [], Counter()
+    rng = np.random.default_rng(seed)
+    maxima, conditional, failures, conditional_failures = [], [], Counter(), Counter()
+    stages, categories, loss_histogram = Counter(), Counter(), Counter()
+    support_metrics = defaultdict(list)
+    times = original_times(evaluation)
+    strict_rejections = Counter()
+    conditional_rejections = Counter()
+    regions = defaultdict(list)
+    n_refits = 0
     for _ in range(requested):
-        replicate = resample_patients(evaluation['data'], rng)
+        state = deepcopy(rng.bit_generator.state)
+        try:
+            replicate = resample_patients(evaluation['data'], rng)
+        except (ContractError, ValueError, ArithmeticError, np.linalg.LinAlgError):
+            strict_rejections['other'] += 1
+            conditional_rejections['other'] += 1
+            failures['DRAW_FAILED'] += 1
+            conditional_failures['DRAW_FAILED'] += 1
+            continue
+        stages['DRAW_COMPLETED'] += 1
+        n_refits += 1
         refit, reason = fit_fixed_family(replicate, evaluation['basis'], fit.model, fit.family, spec, cfg)
-        if refit is None:
-            failures[reason] += 1
+        reason = reason if refit is None else _comparable_fit(refit, fit, cfg)
+        if set(replicate.observed_pattern) != set(PATTERNS):
+            reason = 'FIT_FAILED_GROUP_MISSING'
+        if refit is None or reason:
+            category = _refit_category(reason)
+            categories[category] += 1
+            stages['REFIT_NOT_ESTIMABLE'] += 1
+            stages['FIT_QC_FAILED'] += 1
+            for tally in (strict_rejections, conditional_rejections):
+                tally['refit'] += 1
+            for tally in (failures, conditional_failures):
+                tally['REFIT_'+category] += 1
             continue
-        # Calibration requires the entire ORIGINAL family, never a smaller
-        # data-dependent set of supported contrasts in a successful replicate.
-        if supported_times(replicate, original_times(evaluation), cfg) != original_times(evaluation):
+        common = supported_times(replicate, times, cfg)
+        lost = len(times)-len(common)
+        stages['FIT_COMPARABLE_SUPPORT_LOST' if lost else 'FIT_COMPARABLE_SUPPORT_PRESERVED'] += 1
+        loss_histogram['two_or_more' if lost >= 2 else str(lost)] += 1
+        # Secondary diagnostics are not additional exclusive rejection causes.
+        for label, select in (('early', lambda t: t <= EARLY[1]),
+                              ('middle', lambda t: EARLY[1] < t < LATE[0]),
+                              ('late', lambda t: t >= LATE[0])):
+            selected = [t for t in times if select(t)]
+            if selected:
+                regions[label].append(sum(t not in common for t in selected)/len(selected))
+        try:
+            values = target_values(rows, evaluation, refit)
+            maximum = float(np.max(np.abs(values[valid]-estimates[valid])/se[valid]))
+            finite = values.shape == estimates.shape and np.isfinite(values).all() and np.isfinite(maximum)
+        except (ValueError, ArithmeticError, IndexError, np.linalg.LinAlgError):
+            finite = False
+        # Strict primary cause preserves V1's support-before-estimand order.
+        if lost:
+            strict_rejections['support'] += 1
             failures['ORIGINAL_SUPPORT_LOST'] += 1
+        elif not finite:
+            strict_rejections['estimand'] += 1
+            failures['TARGET_NONFINITE_OR_DEGENERATE'] += 1
+        else:
+            maxima.append(maximum)
+            stages['ACCEPTED_STRICT'] += 1
+        if not finite:
+            stages['TARGET_NONFINITE_OR_DEGENERATE'] += 1
+            conditional_rejections['estimand'] += 1
+            conditional_failures['TARGET_NONFINITE_OR_DEGENERATE'] += 1
             continue
-        values = target_values(rows, evaluation, refit)
-        maxima.append(float(np.max(np.abs(values[valid]-estimates[valid])/se[valid])))
-    enough = len(maxima) >= base['required_successes']
-    critical = float(np.quantile(maxima, .95)) if enough else np.nan
+        conditional.append(maximum)
+        support_metrics['support_loss_conditional'].append(lost/len(times))
+        metrics = source_support_diagnostic(evaluation['data'], replicate, state, times, cfg)
+        for key, value in metrics.items():
+            support_metrics[key].append(value)
+    result = dict(base, status='INCONCLUSIVE', n_attempted=requested,
+        n_draw_completed=stages['DRAW_COMPLETED'], n_refits_attempted=n_refits,
+        analytic_sup_t_critical=analytic, analytic_seed=cfg.seed,
+        stage_counts=json.dumps(stages, sort_keys=True), refit_failure_category=json.dumps(categories, sort_keys=True),
+        support_loss_histogram=json.dumps(loss_histogram, sort_keys=True),
+        support_loss_fraction=stages['FIT_COMPARABLE_SUPPORT_LOST']/max(1, sum(loss_histogram.values())),
+        support_diagnostic_denominator='comparable_fits; conditional_metrics_use_accepted_conditional_draws',
+        inference='Exploratory same-cohort stability; conditional grid is not empirical replicate support or validated coverage')
     analytic_sign = np.where(estimates-analytic*se > 0, 1, np.where(estimates+analytic*se < 0, -1, 0))
-    bootstrap_sign = np.where(estimates-critical*se > 0, 1, np.where(estimates+critical*se < 0, -1, 0))
-    return dict(base, status='CALIBRATED' if enough else 'INCONCLUSIVE', reason='' if enough else 'Insufficient comparable replicates',
-        n_attempted=requested, n_successful=len(maxima), n_failed=requested-len(maxima),
-        failure_reasons=json.dumps(failures, sort_keys=True), success_fraction=len(maxima)/requested if requested else 0.,
-        calibration_valid=enough, bootstrap_sup_t_critical=critical, analytic_sup_t_critical=analytic,
-        analytic_seed=cfg.seed,
-        critical_difference=critical-analytic, critical_ratio=critical/analytic,
-        global_sup_t_p50=float(np.quantile(maxima, .5)) if enough else np.nan,
-        global_sup_t_p90=float(np.quantile(maxima, .9)) if enough else np.nan,
-        band_agreement=float(np.mean(analytic_sign[valid] == bootstrap_sign[valid])) if enough else np.nan,
-        inference='Exploratory stability within the same cohort; not independent validation')
+    for suffix, values, reasons, rejected in (('', maxima, failures, strict_rejections),
+                                            ('_conditional', conditional, conditional_failures, conditional_rejections)):
+        enough = len(values) >= base['required_successes']
+        critical = float(np.quantile(values, .95)) if enough else np.nan
+        sign = np.where(estimates-critical*se > 0, 1, np.where(estimates+critical*se < 0, -1, 0))
+        fields = dict(n_successful=len(values), n_accepted=len(values), n_failed=requested-len(values),
+            calibration_valid=enough, bootstrap_sup_t_critical=critical,
+            failure_reasons=json.dumps(reasons, sort_keys=True), success_fraction=len(values)/requested if requested else 0.,
+            critical_difference=critical-analytic, critical_ratio=critical/analytic,
+            global_sup_t_p50=float(np.quantile(values, .5)) if enough else np.nan,
+            global_sup_t_p90=float(np.quantile(values, .9)) if enough else np.nan,
+            band_agreement=float(np.mean(analytic_sign[valid] == sign[valid])) if enough else np.nan,
+            n_rejected_refit=rejected['refit'], n_rejected_support=rejected['support'],
+            n_rejected_estimand=rejected['estimand'], n_other=rejected['other'])
+        assert requested == len(values)+sum(rejected.values())
+        result.update({key+suffix: value for key, value in fields.items()})
+    result.update(bootstrap_accepted_strict=len(maxima), n_failed_strict=requested-len(maxima),
+        calibration_valid_strict=result['calibration_valid'])
+    result['status'] = 'CALIBRATED' if result['calibration_valid'] else 'INCONCLUSIVE'
+    result['reason'] = '' if result['calibration_valid'] else 'Insufficient comparable strict replicates'
+    result['bootstrap_calibration_status'] = bootstrap_calibration_status(result)
+    for key, values in support_metrics.items():
+        result[key] = float(np.mean(values))
+    for key, values in regions.items():
+        result['support_loss_'+key+'_fraction'] = float(np.mean(values))
+    # Diagnose each policy's own exhaustive partition independently.
+    for suffix, partition in (('', strict_rejections), ('_conditional', conditional_rejections)):
+        rejected = sum(partition.values())
+        if partition['support'] > rejected/2:
+            diagnosis = 'SUPPORT_FILTER_DOMINANT'
+        elif partition['refit'] > rejected/2:
+            diagnosis = 'REFIT_QC_DOMINANT'
+        else:
+            diagnosis = 'NO_REJECTIONS' if not rejected else 'MIXED_FAILURES'
+        result['failure_diagnosis'+suffix] = diagnosis
+    return result
+
+
+def bootstrap_policy_rows(summary):
+    """Two independent denominators from the same draws; never sum across policies."""
+    conditional_fields = {k[:-12]: value for k, value in summary.items() if k.endswith('_conditional')}
+    strict = {k: value for k, value in summary.items() if not k.endswith('_conditional')}
+    conditional = dict(strict, **conditional_fields)
+    if 'n_attempted' in summary and summary['n_attempted']:
+        conditional['reason'] = ('Exploratory conditional original-grid calibration; not empirical replicate support'
+            if summary.get('calibration_valid_conditional') else 'Insufficient comparable conditional replicates')
+    conditional.update(bootstrap_policy=SENSITIVITY_POLICY, status=(
+        'CALIBRATED_CONDITIONAL_EXPLORATORY' if summary.get('calibration_valid_conditional') else summary['status']))
+    return [strict, conditional]
+
+
+def bootstrap_calibration_status(bootstrap):
+    if bootstrap is None:
+        return 'NOT_RUN'
+    if bootstrap.get('status') in ('NOT_ESTIMABLE_METHOD', 'NOT_COMPARABLE_REFERENCE'):
+        return bootstrap['status']
+    if bootstrap.get('calibration_valid'):
+        return 'CALIBRATED_STRICT'
+    if bootstrap.get('calibration_valid_conditional'):
+        return 'CONDITIONAL_ONLY'
+    return 'INCONCLUSIVE_STRICT'
+
+
+def loo_stability_status(loo):
+    if loo is None:
+        return 'LOO_NOT_RUN'
+    if loo.get('status') == 'NOT_COMPARABLE_REFERENCE':
+        return 'NOT_APPLICABLE'
+    # Material evidence takes precedence even if no other exclusion succeeded.
+    if (loo.get('material_fragility_detected', False) or
+            loo.get('standardized_shift_p95', 0.) > MATERIAL['loo_standardized_shift_p95'] or
+            loo.get('material_direction_fraction', 0.) > MATERIAL['loo_material_direction_fraction']):
+        return 'MATERIAL_INFLUENCE'
+    if not loo.get('n_successful'):
+        return 'LOO_INCONCLUSIVE'
+    failed = loo['n_failed']/max(1, loo['n_requested'])
+    if failed > MATERIAL['maximum_refit_failure_fraction']:
+        return 'MATERIAL_INFLUENCE'
+    required = ('standardized_shift_p95', 'material_direction_fraction', 'band_agreement')
+    if any(not np.isfinite(loo.get(k, np.nan)) for k in required):
+        return 'LOO_INCONCLUSIVE'
+    return 'STABLE_WITHIN_DEFINED_LIMITS'
 
 
 def scientific_status(inventory, overlap, loo=None, bootstrap=None):
-    """No p/q inputs are used for scientific classification."""
+    """Frozen material limits; material LOO evidence precedes bootstrap availability."""
     if not inventory['reference_comparable']:
         return 'NOT_COMPARABLE_REFERENCE'
     if inventory['status'] == 'NOT_APPLICABLE_TYPE':
@@ -656,23 +909,109 @@ def scientific_status(inventory, overlap, loo=None, bootstrap=None):
         return 'NOT_ESTIMABLE'
     if loo is None or bootstrap is None:
         return 'DEEP_PENDING_RESOURCE_BUDGET'
-    if loo.get('status') == 'NOT_COMPARABLE_REFERENCE':
+    if any(x.get('status') == 'NOT_COMPARABLE_REFERENCE' for x in (loo, bootstrap)):
         return 'NOT_COMPARABLE_REFERENCE'
-    if not loo.get('n_successful') or not bootstrap.get('calibration_valid'):
-        return 'INCONCLUSIVE'
-    failed = loo['n_failed']/max(1, loo['n_requested'])
-    if (failed > MATERIAL['maximum_refit_failure_fraction'] or
-            loo.get('material_fragility_detected', False) or
-            loo['standardized_shift_p95'] > MATERIAL['loo_standardized_shift_p95'] or
-            loo['material_direction_fraction'] > MATERIAL['loo_material_direction_fraction']):
+    stability = loo_stability_status(loo)
+    if stability == 'MATERIAL_INFLUENCE':
         return 'FRAGILE'
-    if (overlap < MATERIAL['minimum_longitudinal_overlap'] or
-            loo.get('support_fraction_p25', 1.) < MATERIAL['minimum_loo_support_fraction'] or
-            loo['band_agreement'] < MATERIAL['minimum_band_agreement'] or
-            bootstrap['band_agreement'] < MATERIAL['minimum_band_agreement'] or
-            bootstrap['critical_ratio'] > MATERIAL['maximum_critical_ratio']):
+    if stability != 'STABLE_WITHIN_DEFINED_LIMITS' or not bootstrap.get('calibration_valid'):
         return 'INCONCLUSIVE'
+    checks = ((overlap, MATERIAL['minimum_longitudinal_overlap'], 'minimum'),
+        (loo.get('support_fraction_p25', 1.), MATERIAL['minimum_loo_support_fraction'], 'minimum'),
+        (loo.get('band_agreement'), MATERIAL['minimum_band_agreement'], 'minimum'),
+        (bootstrap.get('band_agreement'), MATERIAL['minimum_band_agreement'], 'minimum'),
+        (bootstrap.get('critical_ratio'), MATERIAL['maximum_critical_ratio'], 'maximum'))
+    for value, limit, direction in checks:
+        if value is None or not np.isfinite(value) or (value < limit if direction == 'minimum' else value > limit):
+            return 'INCONCLUSIVE'
     return 'SUPPORTED_EXPLORATORY'
+
+
+def validation_dimensions(inventory, overlap, loo=None, bootstrap=None):
+    status = scientific_status(inventory, overlap, loo, bootstrap)
+    stability, calibration = loo_stability_status(loo), bootstrap_calibration_status(bootstrap)
+    applicable = inventory['eligible_for_deep'] and inventory['reference_comparable']
+    if not applicable:
+        stability, calibration = 'NOT_APPLICABLE', 'NOT_RUN'
+    if status == 'NOT_COMPARABLE_REFERENCE':
+        calibration = 'NOT_COMPARABLE_REFERENCE'
+    reasons = [status, stability, calibration]
+    if loo and loo.get('material_fragility_detected'):
+        reasons.append('LOO_MATERIAL_EXCLUSION_SHIFT')
+    if loo and loo.get('n_failed', 0)/max(1, loo.get('n_requested', 0)) > MATERIAL['maximum_refit_failure_fraction']:
+        reasons.append('LOO_REFIT_FAILURE_FRACTION')
+    return dict(scientific_validation_status=status, loo_stability_status=stability,
+        bootstrap_calibration_status=calibration,
+        loo_material_fragility_detected=stability == 'MATERIAL_INFLUENCE' if loo else None,
+        bootstrap_strict_calibration_valid=bool(bootstrap.get('calibration_valid')) if bootstrap else None,
+        bootstrap_conditional_calibration_valid=bool(bootstrap.get('calibration_valid_conditional')) if bootstrap else None,
+        validation_reason_codes=';'.join(reasons))
+
+
+def disclosed_accounting(accounting, suppressed):
+    """Actual attempts include failures. Do not reconstruct hidden task tallies."""
+    categories = accounting['reference_failure_categories']
+    hide = suppressed or any(0 < n < 5 for n in categories.values())
+    return dict(disclosure_status='DISCLOSURE_SUPPRESSED' if hide else 'AGGREGATE',
+        **{k: (None if hide else value) for k, value in accounting.items()})
+
+
+def diagnostic_summary(table):
+    summaries = {}
+    if 'bootstrap_policy' not in table:
+        return summaries
+    for policy, part in table.groupby('bootstrap_policy'):
+        hidden = part.disclosure_status.eq('DISCLOSURE_SUPPRESSED').any()
+        counts = {}
+        for col in ('n_attempted', 'n_accepted', 'n_failed', 'n_rejected_refit',
+                    'n_rejected_support', 'n_rejected_estimand', 'n_other'):
+            numeric = pd.to_numeric(part[col], errors='coerce') if col in part else pd.Series(dtype=float)
+            counts[col] = int(numeric.sum()) if not hidden and len(numeric) and numeric.notna().all() else None
+        summaries[policy] = dict(n_model_tasks=len(part), aggregate_counts=counts,
+            disclosure_status='DISCLOSURE_SUPPRESSED' if hidden else 'AGGREGATE',
+            diagnosis_counts=None if hidden or 'failure_diagnosis' not in part else part.failure_diagnosis.value_counts().to_dict(),
+            interpretation='Support filter dominant: comparable fits rejected by local support; refit QC dominant: estimability/QC; otherwise mixed',
+            suppressed_review='Authorized protected review in Biowulf; no automatic unsuppressed export' if hidden else None)
+    return summaries
+
+
+def refit_qc_summary(table):
+    """Never pool the denominators of policies evaluated on identical draws."""
+    if 'bootstrap_policy' in table and table.bootstrap_policy.notna().any():
+        return dict(by_policy={policy: refit_qc_summary(part.drop(columns='bootstrap_policy'))
+                              for policy, part in table.groupby('bootstrap_policy')})
+    return dict(status_counts=table.status.value_counts().to_dict(), aggregate_counts={
+        col: (int(pd.to_numeric(table[col], errors='coerce').sum())
+              if col in table and len(table) and pd.to_numeric(table[col], errors='coerce').notna().all() else None)
+        for col in ('n_requested', 'n_attempted', 'n_successful', 'n_failed')},
+        suppression='Counts omitted when any contributing task tally is disclosure-suppressed')
+
+
+def check_table_integrity(tables):
+    """Software QC is independent of legitimately inconclusive calibration."""
+    for name in ('07_outcome_validation_inventory', '07_scientific_validation_classification'):
+        table = tables[name]
+        if table.duplicated(KEYS+['model']).any():
+            raise ContractError('duplicate validation semantic keys')
+        if not table.groupby('outcome_id').model.nunique().eq(3).all():
+            raise ContractError('incomplete validation ABC inventory')
+    inventory = tables['07_outcome_validation_inventory']
+    classes = tables['07_scientific_validation_classification']
+    if set(map(tuple, inventory[KEYS+['model']].to_numpy())) != set(map(tuple, classes[KEYS+['model']].to_numpy())):
+        raise ContractError('classification inventory mismatch')
+    for name in ('07_patient_bootstrap_qc', '07_bootstrap_failure_diagnostics'):
+        table = tables[name]
+        if 'bootstrap_policy' in table and table.duplicated(KEYS+['model', 'bootstrap_policy']).any():
+            raise ContractError('duplicate bootstrap policy keys')
+        for row in table.to_dict('records'):
+            if row.get('disclosure_status') == 'DISCLOSURE_SUPPRESSED' or not row.get('n_attempted'):
+                continue
+            if row.get('n_accepted') is None or pd.isna(row.get('n_accepted')):
+                continue
+            if row['n_attempted'] != row['n_accepted']+row['n_failed']:
+                raise ContractError('bootstrap strategy denominator mismatch')
+            if row['n_failed'] != sum(row[k] for k in ('n_rejected_refit', 'n_rejected_support', 'n_rejected_estimand', 'n_other')):
+                raise ContractError('bootstrap rejection partition mismatch')
 
 
 class Checkpoints:
@@ -688,7 +1027,8 @@ class Checkpoints:
         if any(p.is_symlink() for p in [self.path, *self.path.parents]):
             raise ContractError('symlink in checkpoint path')
         self.path.mkdir(parents=True, exist_ok=True, mode=0o700)
-        contract = dict(context_hash=self.context_hash, plan_hash=self.plan_hash, plan=plan)
+        contract = dict(validation_version=VALIDATION_VERSION, bootstrap_definition=BOOTSTRAP_DEFINITION,
+                        context_hash=self.context_hash, plan_hash=self.plan_hash, plan=plan)
         self.contract = contract
         target = self.path/'plan.json'
         if target.is_symlink():
@@ -737,3 +1077,4 @@ class Checkpoints:
         payload = json_safe(payload)
         self._atomic(self.path/(task_id+'.json'), dict(context_hash=self.context_hash, task_id=task_id,
             payload_hash=digest(payload), payload=payload))
+

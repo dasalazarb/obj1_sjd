@@ -389,6 +389,9 @@ on identical authorized inputs in Biowulf; synthetic QC cannot certify that coun
 
 ## Global longitudinal validation supplement (`validation_global_v1`)
 
+Historical V1 contract. The current entrypoint writes V2; see
+[Step 17 validation V2](17_validation_global_v2.md) for current policies and commands.
+
 The supplement evaluates **every registered outcome**, including missing,
 noneligible, ordinal/count, mechanically derived and historical outcomes. It
 has its own command and namespace; the ordinary Step 17 command and its published
@@ -601,3 +604,4 @@ python -m pytest -q tests/test_temporal_spline_*.py \
   tests/test_secondary_comparison_*.py tests/test_secondary_trajectories_by_essdai_pattern.py \
   tests/test_observed_patterns_v2.py
 ```
+

@@ -49,7 +49,8 @@ def parse_args(argv=None):
     p.add_argument('--threshold', choices=('3', '5', 'both'), default='both')
     p.add_argument('--basis', choices=(*BASIS_SPECIFICATIONS, 'both'), default='both')
     p.add_argument('--depth', choices=('systematic', 'deep'), default='systematic')
-    p.add_argument('--bootstrap-replicates', type=int, default=200)
+    p.add_argument('--bootstrap-replicates', type=int, default=200,
+        help='Attempts per numeric task; strict and conditional policies share these draws/refits')
     p.add_argument('--seed', type=int, default=1701)
     p.add_argument('--outcomes-file', type=Path, help='JSON list of outcome_id values prioritizing deep tasks only')
     p.add_argument('--max-outcomes', type=int, help='Deep outcome budget per invocation; systematic inventory remains complete')
@@ -90,9 +91,15 @@ def _combine(rows):
     return frame
 
 
-def _reproduce_fit(reference, evaluation, spec, cfg, outcome_id):
+def _reproduce_fit(reference, evaluation, spec, cfg, outcome_id, accounting=None):
     """Refit the original coherent family once, then check all published terms."""
-    fits, _, _ = fit_family(evaluation, spec, cfg)
+    fits, attempts, _ = fit_family(evaluation, spec, cfg)
+    if accounting is not None:
+        accounting['reference_refits_attempted'] += len(attempts)
+        for attempt in attempts:
+            if attempt['status'] != 'ESTIMATED':
+                category = v._refit_category(attempt['reason'])
+                accounting['reference_failure_categories'][category] = accounting['reference_failure_categories'].get(category, 0)+1
     models = reference['tables']['01_model_comparison']
     coefficients = reference['tables']['01_model_coefficients']
     comparable = {}
@@ -219,7 +226,7 @@ def run(args):
         references={k: i['sha256'] for k, i in reference_snapshot.items()},
         code={k: i['sha256'] for k, i in code_snapshot.items()},
         parameters=parameters[0], validation_seed=args.seed,
-        bootstrap_replicates=args.bootstrap_replicates, materiality=v.MATERIAL,
+        bootstrap_replicates=args.bootstrap_replicates, bootstrap_definition=v.BOOTSTRAP_DEFINITION, materiality=v.MATERIAL,
         software=dict(python=platform.python_version(), numpy=np.__version__, pandas=pd.__version__,
                       scipy=scipy.__version__, statsmodels=statsmodels.__version__))
     cache = None
@@ -230,17 +237,21 @@ def run(args):
         cache = v.Checkpoints(cache_root/scope, context, plan, args.resume, patient_ids)
     lookup = {tuple(row[k] for k in ('outcome_id', 'threshold_abs', 'basis_specification', 'model')): row for row in inventory}
     consumed, selected_outcomes, task_states, deep_results, reproduced = 0, set(), [], {}, {}
+    accounting = dict(reference_refits_attempted=0, loo_exclusions_attempted=0,
+                      bootstrap_draws_attempted=0, bootstrap_refits_attempted=0, reference_failure_categories={})
     for task in plan['tasks']:
         key = (task['outcome_id'], task['threshold_abs'], task['basis_specification'])
         model = task['model']
         row = lookup[(*key, model)]
         payload = cache.load(task['task_id']) if cache else None
         source = 'CHECKPOINT' if payload else 'PENDING'
+        if payload and payload['dimensions'].get('disclosure_status') == 'DISCLOSURE_SUPPRESSED':
+            sensitive.add(task['outcome_id'])
         if cache and payload is None:
             evaluation, spec, meta = evaluations[key]
             # Budget includes original family reconstruction (up to two
             # families x three models), full LOO and requested bootstrap.
-            cost = evaluation['data'].patient_id.nunique()+args.bootstrap_replicates+(6 if key not in reproduced else 0)
+            cost = evaluation['data'].patient_id.nunique()+(0 if spec.type == 'binary' else args.bootstrap_replicates)+(6 if key not in reproduced else 0)
             within_outcomes = args.max_outcomes is None or task['outcome_id'] in selected_outcomes or len(selected_outcomes) < args.max_outcomes
             within_refits = args.max_patient_refits is None or consumed+cost <= args.max_patient_refits
             if within_outcomes and within_refits:
@@ -250,7 +261,7 @@ def run(args):
                     print(f'Step17 global validation deep task {task["queue_position"]}/{len(plan["tasks"])}: model {model}', flush=True)
                 task_start = time.monotonic()
                 if key not in reproduced:
-                    reproduced[key] = _reproduce_fit(references[(key[2], key[1])], evaluation, spec, cfg, key[0])
+                    reproduced[key] = _reproduce_fit(references[(key[2], key[1])], evaluation, spec, cfg, key[0], accounting)
                 fits, comparison = reproduced[key]
                 if not comparison[model] or model not in fits:
                     loo = dict(model=model, status='NOT_COMPARABLE_REFERENCE', reason='Reference family/coefficients/covariance not reproduced',
@@ -262,22 +273,35 @@ def run(args):
                 else:
                     loo, influence = v.loo_summary(evaluation, fits[model], spec, cfg, args.seed)
                     boot = bootstrap_patients(evaluation, fits, spec, deep_cfg, model=model, validation_seed=args.seed)
+                    accounting['loo_exclusions_attempted'] += loo.get('n_attempted', loo.get('n_requested', 0))
+                    accounting['bootstrap_draws_attempted'] += boot.get('n_attempted', 0)
+                    accounting['bootstrap_refits_attempted'] += boot.get('n_refits_attempted', boot.get('n_attempted', 0))
                     scientific = v.scientific_status(row, overlaps[key], loo, boot)
                 if not influence:
                     influence = [dict(model=model, status='NOT_ESTIMABLE',
                         reason='No comparable aggregate LOO estimands', n_requested=loo['n_requested'],
                         n_successful=loo['n_successful'], n_failed=loo['n_failed'])]
-                payload = dict(scientific_status=scientific, duration_seconds=time.monotonic()-task_start,
-                    loo=v.suppress_table(pd.DataFrame([dict(meta, **loo)]), patient_ids, sensitive).to_dict('records'),
-                    bootstrap=v.suppress_table(pd.DataFrame([dict(meta, **boot)]), patient_ids, sensitive).to_dict('records'),
-                    influence=v.suppress_table(pd.DataFrame([dict(meta, **i) for i in influence]), patient_ids, sensitive).to_dict('records'))
+                dimensions = v.validation_dimensions(row, overlaps[key], loo, boot)
+                raw = dict(loo=[dict(meta, **loo)], bootstrap=[dict(meta, **r) for r in v.bootstrap_policy_rows(boot)],
+                    influence=[dict(meta, **i) for i in influence],
+                    dimensions=[dict(meta, status=scientific, **dimensions)])
+                controlled = {k: v.suppress_table(pd.DataFrame(rows), patient_ids, sensitive) for k, rows in raw.items()}
+                # Complementary suppression covers EVERY view of a task, including
+                # its scientific label, before any checkpoint is persisted.
+                if any(t.disclosure_status.eq('DISCLOSURE_SUPPRESSED').any() for t in controlled.values()):
+                    sensitive.add(meta['outcome_id'])
+                    controlled = {k: v.suppress_table(t, patient_ids, sensitive) for k, t in controlled.items()}
+                dim = controlled['dimensions'].to_dict('records')[0]
+                payload = dict(scientific_status=dim['scientific_validation_status'],
+                    dimensions=dim, duration_seconds=time.monotonic()-task_start,
+                    **{k: t.to_dict('records') for k, t in controlled.items() if k != 'dimensions'})
                 cache.save(task['task_id'], payload)
                 source = 'EXECUTED'
         if payload:
             deep_results[(*key, model)] = payload
             target = bundles[(key[2], key[1])]
             for table_name, field in [('07_fit_stability', 'loo'), ('07_patient_bootstrap_qc', 'bootstrap'),
-                                      ('07_influence_summary', 'influence')]:
+                                      ('07_influence_summary', 'influence'), ('07_bootstrap_failure_diagnostics', 'bootstrap')]:
                 target[table_name].extend(dict(r, duration_seconds=payload['duration_seconds']) for r in payload[field])
         task_states.append(dict(task_id=task['task_id'], queue_position=task['queue_position'],
             status='DEEP_COMPLETE' if payload else 'DEEP_PENDING_RESOURCE_BUDGET', source=source))
@@ -291,6 +315,10 @@ def run(args):
         row['status'] = row['validation_coverage']
         row['loo_status'] = result['loo'][0]['status'] if result else 'NOT_RUN'
         row['bootstrap_status'] = result['bootstrap'][0]['status'] if result else 'NOT_RUN'
+        dimensions = (result['dimensions'] if result else v.validation_dimensions(row, overlaps[key]))
+        row.update({k: value for k, value in dimensions.items() if k in (
+            'loo_stability_status', 'bootstrap_calibration_status', 'loo_material_fragility_detected',
+            'bootstrap_strict_calibration_valid', 'bootstrap_conditional_calibration_valid', 'validation_reason_codes')})
         target = bundles[(key[2], key[1])]
         target['07_outcome_validation_inventory'].append(row)
         classification = dict(row, status=status, scientific_validation_status=status,
@@ -299,9 +327,13 @@ def run(args):
                                     'Exploratory descriptive stability; inspect continuous diagnostics'))
         target['07_scientific_validation_classification'].append(classification)
         if result is None:
-            for name in ('07_fit_stability', '07_patient_bootstrap_qc', '07_influence_summary'):
+            for name in ('07_fit_stability', '07_patient_bootstrap_qc', '07_bootstrap_failure_diagnostics', '07_influence_summary'):
                 target[name].append(dict(row, status=status, n_requested=0, n_successful=0, n_failed=0,
                     reason='No intensive result; see inventory eligibility and frozen queue'))
+    for collected in bundles.values():
+        for rows in collected.values():
+            controlled = v.suppress_table(_combine(rows), patient_ids, sensitive)
+            sensitive.update(controlled.loc[controlled.disclosure_status.eq('DISCLOSURE_SUPPRESSED'), 'outcome_id'])
     verify_unchanged(inputs)
     verify_unchanged(reference_snapshot)
     verify_unchanged(code_snapshot)
@@ -318,6 +350,7 @@ def run(args):
                 paths[area] = Path(temporary)/name
                 paths[area].mkdir(parents=True, mode=0o700)
                 staging[name] = paths[area]
+            v.check_table_integrity(tables)
             for name, table in tables.items():
                 write_table(table, paths['tables']/(name+'.csv'), patient_ids)
             inv = tables['07_outcome_validation_inventory']
@@ -325,7 +358,13 @@ def run(args):
             bundle_tasks = [task for task in plan['tasks'] if task['basis_specification'] == basis and task['threshold_abs'] == threshold]
             task_ids = {t['task_id'] for t in bundle_tasks}
             complete = classes.loc[classes.validation_coverage.eq('DEEP_COMPLETE')]
+            diagnostic = tables['07_bootstrap_failure_diagnostics']
+            calibration_counts = classes.bootstrap_calibration_status.value_counts().to_dict()
+            loo_counts = classes.loo_stability_status.value_counts().to_dict()
             summary = dict(validation_version=v.VALIDATION_VERSION,
+                bootstrap_failure_diagnostics=v.diagnostic_summary(diagnostic),
+                loo_stability_status_counts=loo_counts, bootstrap_calibration_status_counts=calibration_counts,
+                validation_denominators=dict(eligible=int(inv.eligible_for_deep.sum()), executed=len(complete)),
                 n_outcomes_inventory=inv.outcome_id.nunique(), n_outcome_models=len(inv),
                 by_model={m: dict(n_inventory=int(inv.model.eq(m).sum()),
                     n_eligible_for_deep=int((inv.model.eq(m) & inv.eligible_for_deep).sum()),
@@ -339,21 +378,22 @@ def run(args):
                 stability_fraction=float(complete.status.eq('SUPPORTED_EXPLORATORY').mean()) if len(complete) else None,
                 stability_scope='Only intensively completed models; selected subset is not population robustness',
                 tasks=[t for t in task_states if t['task_id'] in task_ids],
-                refit_qc={name: dict(
-                    status_counts=tables[name].status.value_counts().to_dict(),
-                    aggregate_counts={col: (int(pd.to_numeric(tables[name][col], errors='coerce').sum())
-                        if len(tables[name]) and pd.to_numeric(tables[name][col], errors='coerce').notna().all() else None)
-                        for col in ('n_requested', 'n_successful', 'n_failed')},
-                    suppression='Counts omitted when any contributing task tally is disclosure-suppressed')
+                refit_qc={name: v.refit_qc_summary(tables[name])
                     for name in ('07_fit_stability', '07_patient_bootstrap_qc')},
                 selection=plan, resource_budget=dict(max_patient_refits=args.max_patient_refits,
-                    max_outcomes=args.max_outcomes, reserved_refits_this_invocation=consumed),
+                    max_outcomes=args.max_outcomes,
+                    reserved_refits_this_invocation=None if selected_outcomes & sensitive else consumed,
+                    actual_this_invocation=v.disclosed_accounting(accounting, bool(selected_outcomes & sensitive)),
+                    scope='Per invocation; cached tasks consume no new budget; actual counts may be suppressed',
+                    selection='Frozen stratified queue independent of significance'),
                 limitations=['Retrospective associations, not causal progression/prediction',
                     'Same-cohort bootstrap is not independent validation',
                     'Three-knot specification introduced post hoc; exploratory inference',
                     'Local overlapping support windows do not establish individual continuity',
                     'Materiality thresholds are descriptive standardized rules, not clinical MCIDs',
-                    'Binary bootstrap not validated; binary models cannot be classified supported',
+                    'Binary bootstrap not validated; binary LOO material influence is retained',
+                    'Conditional grid calibration is exploratory and cannot establish scientific support',
+                    'Maxima use original SEs, not replicate-specific bootstrap-t standardization',
                     'Whole-model checkpoints; interrupted model restarts from its first refit',
                     'Conservative cross-table complementary suppression may hide usable aggregates'],
                 relationship_to_reference='Read-only V3 main; original full-family q values unchanged')
@@ -363,6 +403,10 @@ def run(args):
             manifest = dict(version=VERSION, validation_version=v.VALIDATION_VERSION,
                 basis_specification=basis, threshold_abs=threshold, time_axis='clinical_baseline', scenario='main',
                 c_support_policy=C_SUPPORT_POLICY, input_origin=args.input_origin, data_cutoff=args.data_cutoff,
+                bootstrap_policy=v.BOOTSTRAP_POLICY, original_support_policy=C_SUPPORT_POLICY,
+                sensitivity_policy=v.SENSITIVITY_POLICY, calibration_denominator=v.CALIBRATION_DENOMINATOR,
+                bootstrap_definition=v.BOOTSTRAP_DEFINITION,
+                sample_fingerprint={row['outcome_id']: row['sample_fingerprint'] for row in collected['07_outcome_validation_inventory']},
                 software_qc_status='FAIL' if classes.status.eq('NOT_COMPARABLE_REFERENCE').any() else 'PASS',
                 scientific_status='EXPLORATORY_NOT_CLINICALLY_REVIEWED', validation_depth=args.depth,
                 full_inventory_scope='all_registered_variables', parameters=parameters[0], materiality=v.MATERIAL,
@@ -402,3 +446,4 @@ def main(argv=None):
 
 if __name__ == '__main__':
     main()
+

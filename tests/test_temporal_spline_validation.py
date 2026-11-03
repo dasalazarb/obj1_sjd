@@ -365,6 +365,9 @@ def complete_reference(upstream, tmp_path):
 def test_systematic_all_catalog_four_bundles_immutable_reference_privacy_and_q(complete_reference, upstream, monkeypatch):
     root = complete_reference
     source = root/'synthetic_validation/outputs'
+    with monkeypatch.context() as historical:
+        historical.setattr(v, 'VALIDATION_VERSION', 'validation_global_v1')
+        cli.run(validation_args(upstream, root))
     before = {p: sha256(p) for p in source.rglob('*') if p.is_file()}
     monkeypatch.setattr(cli, 'fit_family', lambda *args: pytest.fail('systematic must not fit models'))
     result = cli.run(validation_args(upstream, root))
@@ -430,7 +433,7 @@ def test_deep_zero_budget_checkpoint_resume_and_backup_without_rewriting_V3(comp
     checkpoints = list((root/'synthetic_validation/work').rglob('plan.json'))
     assert len(checkpoints) == 1
     plan_before = checkpoints[0].read_bytes()
-    backup = root/'synthetic_validation/outputs/backups/17_nonlinear_temporal_heterogeneity/validation_global_v1/test'
+    backup = root/'synthetic_validation/outputs/backups/17_nonlinear_temporal_heterogeneity/validation_global_v2/test'
     args = validation_args(upstream, root, '--depth', 'deep', '--max-patient-refits', '0', '--resume', '--backup-root', str(backup))
     second = cli.run(args)
     assert first['n_deep_complete'] == second['n_deep_complete'] == 0
@@ -474,7 +477,7 @@ def test_deep_budget_completed_task_resume_and_reconstruction_gate(upstream, tmp
     assert first['n_deep_candidates'] == 12
     assert first['n_deep_complete'] == 1 and first['n_deep_pending'] == 11
     assert len(calls) == 2
-    backup = root/'synthetic_validation/outputs/backups/17_nonlinear_temporal_heterogeneity/validation_global_v1/test'
+    backup = root/'synthetic_validation/outputs/backups/17_nonlinear_temporal_heterogeneity/validation_global_v2/test'
     resumed = cli.run(validation_args(upstream, root, '--depth', 'deep', '--bootstrap-replicates', '100',
         '--max-patient-refits', '0', '--resume', '--backup-root', str(backup)))
     assert resumed['n_deep_complete'] == 1 and len(calls) == 2
@@ -526,7 +529,7 @@ def test_validation_staging_rollback_preserves_source_and_snapshot(complete_refe
                 raise OSError('synthetic publication interruption')
         return rename(source, destination)
     monkeypatch.setattr(outputs.os, 'replace', fail_after_first)
-    backup = root/'synthetic_validation/outputs/backups/17_nonlinear_temporal_heterogeneity/validation_global_v1/rollback'
+    backup = root/'synthetic_validation/outputs/backups/17_nonlinear_temporal_heterogeneity/validation_global_v2/rollback'
     with pytest.raises(OSError):
         cli.run(validation_args(upstream, root, '--depth', 'deep', '--max-patient-refits', '0', '--resume',
             '--backup-root', str(backup)))
@@ -578,13 +581,15 @@ def test_fixed_family_longitudinal_support_cannot_be_relaxed():
     assert fit is None and reason == 'FIT_FAILED_LONGITUDINAL_SUPPORT'
 
 
-def test_bootstrap_failure_tally_is_not_a_patient_cell():
+def test_bootstrap_failure_partition_uses_conservative_complementary_suppression():
     table = pd.DataFrame([dict(outcome_id='one', n_patients_analytic=50, n_observations_analytic=200,
         n_requested=200, n_attempted=200, n_successful=199, n_failed=1, calibration_valid=True,
         bootstrap_sup_t_critical=3., failure_reasons='{"FIT_FAILED_NUMERICAL":1}')])
     safe = v.suppress_table(table)
-    assert safe.n_failed.iloc[0] == 1 and safe.n_requested.iloc[0] == 200
-    assert safe.bootstrap_sup_t_critical.iloc[0] == 3.
+    assert safe.n_failed.isna().all() and safe.n_requested.isna().all()
+    assert safe.bootstrap_sup_t_critical.isna().all()
+    assert safe.calibration_valid.iloc[0] is None
+    assert safe.failure_reasons.iloc[0] == '{}'
 
 
 def test_actual_GEE_LOO_and_bootstrap_use_the_reference_family():
@@ -613,3 +618,4 @@ def test_absent_diagnostic_window_does_not_invalidate_full_horizon_histories():
         material_direction_fraction=0., band_agreement=1.)
     boot = dict(calibration_valid=True, band_agreement=1., critical_ratio=1.)
     assert v.scientific_status(candidate('one'), result['minimum_continuity_fraction'], good, boot) == 'SUPPORTED_EXPLORATORY'
+
