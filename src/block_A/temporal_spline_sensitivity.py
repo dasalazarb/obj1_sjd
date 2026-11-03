@@ -128,12 +128,35 @@ def consistency(tables):
     return result
 
 
-def bootstrap_patients(evaluation, fits, spec, cfg):
+def resample_patients(data, rng):
+    """Internal whole-patient stratified draw; duplicate trajectories get new IDs."""
+    from src.block_A.secondary_comparison_models import PATTERNS
+    if data.groupby('patient_id').observed_pattern.nunique().gt(1).any():
+        raise ContractError('bootstrap requires fixed patient groups')
+    by_patient = {pid: d for pid, d in data.groupby('patient_id')}
+    parts = []
+    for group in PATTERNS:
+        pool = data.loc[data.observed_pattern.eq(group), 'patient_id'].unique()
+        if not len(pool):
+            raise ContractError('bootstrap group missing')
+        for index, pid in enumerate(rng.choice(pool, len(pool), replace=True)):
+            part = by_patient[pid].copy()
+            part['patient_id'] = group+'_bootstrap_'+str(index)
+            parts.append(part)
+    return pd.concat(parts, ignore_index=True)
+
+
+def bootstrap_patients(evaluation, fits, spec, cfg, *, model=None, validation_seed=None):
     """Optional shortlist validation of C covariance bands by whole-patient resampling.
 
     Freeze sample, knots, projection, grid, and model family. Failed replicates
     remain failures. Outputs are aggregate quantiles only; no individual rows.
     """
+    if model is not None:
+        # Explicit opt-in for the global validation runner; legacy Step 17's
+        # signature, shortlist, defaults and calibration are preserved.
+        from src.block_A.temporal_spline_validation import bootstrap_summary
+        return bootstrap_summary(evaluation, fits[model], spec, cfg, validation_seed)
     from src.block_A.temporal_spline_models import fit_family
     from src.block_A.temporal_spline_contrasts import function_and_gradient
     from src.block_A.secondary_comparison_models import PATTERNS
@@ -158,16 +181,8 @@ def bootstrap_patients(evaluation, fits, spec, cfg):
     se = np.sqrt(np.maximum(np.einsum('ij,jk,ik->i', gradients, original.covariance, gradients), 0))
     valid = se > 1e-12
     rng, maxima = np.random.default_rng(cfg.seed+2), []
-    by_patient = {pid: d for pid, d in data.groupby('patient_id')}
-    pools = {g: data.loc[data.observed_pattern.eq(g), 'patient_id'].unique() for g in PATTERNS}
     for _ in range(cfg.bootstrap_replicates):
-        parts = []
-        for g in PATTERNS:
-            for index, pid in enumerate(rng.choice(pools[g], len(pools[g]), replace=True)):
-                part = by_patient[pid].copy()
-                part['patient_id'] = g+'_bootstrap_'+str(index)
-                parts.append(part)
-        replicate = pd.concat(parts, ignore_index=True)
+        replicate = resample_patients(data, rng)
         ev = dict(evaluation, data=replicate,
                   matrices={m: basis.matrix(replicate.observed_pattern, replicate.time, m) for m in fits})
         boot, _, _ = fit_family(ev, spec, cfg)
