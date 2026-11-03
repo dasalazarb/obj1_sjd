@@ -6,13 +6,20 @@ from .s03_statistics import bh_qvalues, cliffs_delta, odds_ratio_2x2
 from .s03_release_reader import hard_members
 
 
+def observed_values(series):
+    tokens=series.astype('string').str.strip().str.lower()
+    unknown=tokens.isin(['unknown','not tested','not_tested','not reported','indeterminate',
+                         'not available','unavailable','missing','na','n/a','unknown_detail','uninterpretable',
+                         'not_measured','not measured','not_requested','not requested',
+                         'outside_window','source_absent','structural',''])
+    return series.mask(unknown)
+
+
 def numeric(series):
     # Unknown/not-tested are missing, never negative or zero.
-    values=series.replace(['unknown','not tested','not_tested','not reported','indeterminate'],np.nan)
+    values=observed_values(series)
     binary={'positive':1.,'negative':0.,'pos':1.,'neg':0.,'reactive':1.,'nonreactive':0.,'detected':1.,'not detected':0.}
-    tokens=values.dropna().astype(str).str.strip().str.lower()
-    if len(tokens) and set(tokens)<=binary.keys():
-        values=values.astype('string').str.strip().str.lower().map(binary)
+    values=values.map(lambda value: binary.get(str(value).strip().lower(),value))
     return pd.to_numeric(values,errors='coerce').replace([np.inf,-np.inf],np.nan)
 
 
@@ -34,7 +41,15 @@ def profile_tables(baseline,membership,roles,manifest,validation,seed):
         populations=membership.loc[membership.representation_id.eq(identifier)].drop_duplicates('patient_id')
         flow.append({'representation_id':identifier,'n_baseline':len(baseline),'n_mapper_covered':int(populations.mapper_covered.sum()),
             'n_ties':int(populations.membership_tie.sum()),'n_hard_supported':len(members),'n_not_in_analysis':len(baseline)-len(members),
-            'analysis_population':'covered_untied_supported_hard_assignment'})
+            'analysis_population':'covered_untied_supported_hard_assignment',
+            'n_uncovered':int((~populations.mapper_covered).sum()),'n_supported_hard':len(members),
+            'n_stable_hard':int(members.structural_stability_status.eq('stable').sum()),
+            'n_provisional_hard':int(members.structural_stability_status.ne('stable').sum()),
+            'n_descriptive':len(members),
+            'n_inference':len(members) if len(members) and members.structural_stability_status.eq('stable').all() and manifest['release_status']!='NO_STABLE_STRUCTURE' else 0,
+            'inference_eligibility':'topology_gate_only_endpoint_support_and_covariates_required',
+            'n_unclassifiable':int(populations.community_id.isna().sum()),
+            'denominator_n_patients':len(baseline)})
         if members.empty:
             for source in validation['anchors']:
                 declared=part_roles.loc[part_roles.source_column.eq(source['source_column']),'validation_role']
@@ -45,9 +60,10 @@ def profile_tables(baseline,membership,roles,manifest,validation,seed):
         for role in part_roles.itertuples():
             column=role.source_column
             if role.validation_role=='unavailable' or column not in frame: continue
-            series=numeric(frame[column]); numeric_kind=series.notna().sum()==frame[column].notna().sum() and series.notna().any()
+            clean=observed_values(frame[column]); series=numeric(clean)
+            numeric_kind=role.type=='numeric' or (series.notna().sum()==clean.notna().sum() and series.notna().any())
             for community,group in frame.groupby('community_id',sort=True):
-                observed=series.loc[group.index].dropna() if numeric_kind else group[column].dropna()
+                observed=series.loc[group.index].dropna() if numeric_kind else clean.loc[group.index].dropna()
                 baseline_rows.append({'representation_id':identifier,'community_id':community,'source_column':column,
                     'validation_role':role.validation_role,'n_patients':len(group),'n_observed':len(observed),
                     'n_missing':len(group)-len(observed),'unit':role.unit,'data_type':'numeric' if numeric_kind else 'categorical',
@@ -56,7 +72,7 @@ def profile_tables(baseline,membership,roles,manifest,validation,seed):
                     'q75':float(observed.quantile(.75)) if numeric_kind and len(observed) else np.nan,
                     'category_counts':observed.value_counts().to_json() if not numeric_kind else None})
                 missing.append({'representation_id':identifier,'community_id':community,'source_column':column,
-                    'n_patients':len(group),'n_missing':len(group)-len(observed),'missing_fraction':1-len(observed)/len(group)})
+                    'n_patients':len(group),'n_observed':len(observed),'n_missing':len(group)-len(observed),'missing_fraction':1-len(observed)/len(group)})
                 if role.validation_role not in {'defining','derived_from_defining','independent_baseline_anchor'}: continue
                 row={'representation_id':identifier,'community_id':community,'source_column':column,
                     'validation_role':role.validation_role,'unit':role.unit,'analysis_population':'covered_untied_supported_hard_assignment',
@@ -72,7 +88,7 @@ def profile_tables(baseline,membership,roles,manifest,validation,seed):
                     row.update(status='COMPLETE',reason='',hypothesis_family=f'{identifier}/independent_baseline_anchors')
                     x=series.loc[group.index].dropna().to_numpy(float)
                     y=series.loc[frame.community_id.ne(community)].dropna().to_numpy(float)
-                    if manifest['release_status']=='NO_STABLE_STRUCTURE' or not group.structural_stability_status.eq('stable').all():
+                    if manifest['release_status']=='NO_STABLE_STRUCTURE' or not frame.structural_stability_status.eq('stable').all():
                         row.update(status='NOT_ESTIMABLE',reason='TOPOLOGY_NOT_STABLE_FOR_ANCHOR_INFERENCE')
                     elif not numeric_kind or min(len(x),len(y))<int(validation['minimum_group_patients']):
                         row.update(status='NOT_ESTIMABLE',reason='INSUFFICIENT_OBSERVED_GROUP_OR_REST')
@@ -109,3 +125,57 @@ def profile_tables(baseline,membership,roles,manifest,validation,seed):
         qlookup={(r.representation_id,str(getattr(r,'community_id','')),r.source_column):r.q_value for r in anchors.itertuples()}
         signatures['q_value']=[qlookup.get((r.representation_id,str(r.community_id),r.source_column),np.nan) for r in signatures.itertuples()]
     return {'baseline':pd.DataFrame(baseline_rows),'signatures':signatures,'anchors':anchors,'missingness':pd.DataFrame(missing),'flow':pd.DataFrame(flow)}
+
+
+
+def clinical_domains(baseline,membership,roles,registry,manifest,minimum_cell):
+    """Describe frozen, observed clinical sources without adding discovery inputs."""
+    rows=[]
+    if registry.empty or not {'source_column','clinical_domain'}<=set(registry):
+        return pd.DataFrame([{'status':'NOT_ESTIMABLE','reason':'FROZEN_CLINICAL_DOMAIN_MAP_UNAVAILABLE'}])
+    metadata=registry.loc[registry.clinical_domain.isin([f'D{i:02d}' for i in range(1,8)])].drop_duplicates('source_column')
+    for identifier in manifest['eligible_representation_ids']:
+        members=hard_members(membership,identifier)
+        data=members.merge(baseline,on='patient_id',validate='one_to_one')
+        rolemap=roles.loc[roles.representation_id.eq(identifier)].set_index('source_column')
+        for meta in metadata.to_dict('records'):
+            source=meta['source_column']
+            for community,group in data.groupby('community_id'):
+                values=observed_values(group[source]) if source in group else pd.Series(np.nan,index=group.index)
+                n=int(values.notna().sum()); absent=len(group)-n
+                role=rolemap.loc[source,'validation_role'] if source in rolemap.index else 'unavailable'
+                small=len(group)<minimum_cell or 0<n<minimum_cell or 0<absent<minimum_cell
+                num=numeric(values)
+                is_numeric=n>0 and num.notna().sum()==n
+                rows.append(dict(representation_id=identifier,community_id=community,source_column=source,
+                    construct=meta.get('derivation_group',meta.get('semantic_feature_id',source)),
+                    clinical_domain=meta['clinical_domain'],validation_role=role,
+                    discovery_relation='selected_or_dependent' if role in {'defining','derived_from_defining'} else 'external_descriptive_source_not_clinical_approval',
+                    n_group=np.nan if small else len(group),n_observed=np.nan if small else n,n_missing=np.nan if small else absent,
+                    observed_fraction=np.nan if small else n/len(group),
+                    observed_value=float(num.median()) if is_numeric and not small else np.nan,
+                    category_counts=values.dropna().value_counts().to_json() if not is_numeric and not small and (values.dropna().value_counts()>=minimum_cell).all() else None,
+                    value_summary='median_original_observed_source_units' if is_numeric else 'category_counts',
+                    unit=meta.get('unit','source_units'),status='SUPPRESSED_SMALL_CELL' if small else 'DESCRIPTIVE',
+                    reason='NO_OBSERVED_SOURCE_VALUES' if n==0 else '',inferential_scope='descriptive_not_independent_validation'))
+    return pd.DataFrame(rows) if rows else pd.DataFrame([{'status':'NOT_ESTIMABLE','reason':'NO_SUPPORTED_COMMUNITIES'}])
+
+
+def uncovered_profiles(baseline,membership,roles,manifest,minimum_cell):
+    """Coverage audit only: the uncovered population is never a community."""
+    rows=[]
+    for identifier in manifest['eligible_representation_ids']:
+        part=membership.loc[membership.representation_id.eq(identifier)].drop_duplicates('patient_id')
+        ids=part.loc[~part.mapper_covered,'patient_id']
+        group=baseline.loc[baseline.patient_id.isin(ids)]
+        for role in roles.loc[roles.representation_id.eq(identifier)].itertuples():
+            if role.source_column not in group: continue
+            values=observed_values(group[role.source_column]); num=numeric(values)
+            n=int(values.notna().sum()); missing=len(group)-n
+            small=len(group)<minimum_cell or 0<n<minimum_cell or 0<missing<minimum_cell
+            rows.append(dict(representation_id=identifier,analysis_population='uncovered_coverage_audit_not_a_community',
+                source_column=role.source_column,n_patients=np.nan if small else len(group),
+                n_observed=np.nan if small else n,n_missing=np.nan if small else missing,
+                median=float(num.median()) if not small and n and num.notna().sum()==n else np.nan,
+                status='SUPPRESSED_SMALL_CELL' if small else 'DESCRIPTIVE'))
+    return pd.DataFrame(rows)
