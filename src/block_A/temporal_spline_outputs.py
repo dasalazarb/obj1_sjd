@@ -4,10 +4,10 @@ from src.block_A.secondary_trajectory_analysis import ContractError
 from src.block_A.secondary_comparison_outputs import (  # noqa: F401
     artifact_manifest, install_bundle, safe_table, write_manifest, write_table,
 )
-from src.block_A.temporal_spline_config import STEM, VERSION
+from src.block_A.temporal_spline_config import STEM, VERSION, BASIS_SPECIFICATIONS
 
 TABLES = (
-    '00_variable_eligibility', '00_local_temporal_support', '00_group_support', '00_aggregated_observations',
+    '00_variable_eligibility', '00_local_temporal_support', '00_group_support', '00_aggregated_observations', '00_design_diagnostics',
     '01_model_comparison', '01_fit_attempts', '01_model_coefficients', '01_linear_pairwise_slopes', '02_global_temporal_tests',
     '03_group_curves', '03_within_group_change', '04_temporal_derivatives',
     '04_pairwise_temporal_differences', '04_simultaneous_bands', '05_separation_intervals',
@@ -17,9 +17,11 @@ TABLES = (
 )
 
 
-def directories(root, axis, threshold, scenario, analysis='all'):
+def directories(root, axis, threshold, scenario, analysis='all', basis_specification='four_knots'):
+    if basis_specification not in BASIS_SPECIFICATIONS:
+        raise ValueError('unknown basis specification')
     # Partial modes have separate namespaces and never replace a complete run.
-    suffix = Path(VERSION)/axis/f'delta{threshold}'/scenario
+    suffix = Path(VERSION)/basis_specification/axis/f'delta{threshold}'/scenario
     if analysis != 'all':
         suffix /= analysis
     return {area: Path(root)/'outputs'/area/'blockA'/STEM/suffix for area in ('tables', 'figures', 'qc')}

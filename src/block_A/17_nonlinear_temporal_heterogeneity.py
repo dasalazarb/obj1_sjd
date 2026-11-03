@@ -34,7 +34,7 @@ from src.block_A.temporal_spline_sensitivity import scenarios, consistency, boot
 from src.block_A.temporal_spline_outputs import (
     TABLES, annotate, artifact_manifest, directories, install_bundle, preflight, write_manifest, write_table,
 )
-from src.block_A.temporal_spline_results import TEST_MODELS, classify, qc_summary
+from src.block_A.temporal_spline_results import TEST_MODELS, classify, qc_summary, validate_bundle
 
 MAPPING = dict(curves='03_group_curves', changes='03_within_group_change', derivatives='04_temporal_derivatives',
     pairs='04_pairwise_temporal_differences', bands='04_simultaneous_bands', intervals='05_separation_intervals',
@@ -91,6 +91,10 @@ def combine(parts):
 
 def analyze(evaluation, spec, cfg, meta, do_models, do_temporal):
     collected = {k: [] for k in TABLES}
+    basis_name = evaluation.get('basis_specification', 'four_knots')
+    k = 2 if basis_name == 'four_knots' else 1
+    meta = dict(meta, basis_specification=basis_name, n_knots=k+2, nonlinear_df=k,
+                analysis_role=ANALYSIS_ROLE, support_policy=cfg.c_support_policy, version=cfg.version)
     small_group = evaluation['counts'].n_patients.between(1, 4).any()
     if small_group:
         # A total plus the other three groups would reconstruct a suppressed cell.
@@ -103,10 +107,11 @@ def analyze(evaluation, spec, cfg, meta, do_models, do_temporal):
                 d['n_patients'] = np.nan
             collected[name].append(annotate(d, meta))
     gate, basis = evaluation['gate'], evaluation['basis']
-    add('00_variable_eligibility', [dict(**gate, observation_semantics=spec.observation_semantics,
+    add('00_variable_eligibility', [dict(**{k: v for k, v in gate.items() if k != 'support_policy'}, observation_semantics=spec.observation_semantics,
         basis=json.dumps(basis.as_dict(), sort_keys=True) if basis else '')])
     add('00_local_temporal_support', evaluation['support'])
     add('00_group_support', evaluation['counts'])
+    add('00_design_diagnostics', evaluation['designs'])
     data = evaluation['data']
     if len(data) and spec.type in ('numeric', 'binary'):
         # Only numeric outcomes admit means and quantiles; categorical outcomes
@@ -144,7 +149,9 @@ def analyze(evaluation, spec, cfg, meta, do_models, do_temporal):
                 **effect(float(vector@fits['A'].beta), vector, fits['A'].covariance))])
     for model in 'ABC':
         fit = fits.get(model)
-        failures = [a['reason'] for a in attempts if a['model'] == model and a['status'] != 'ESTIMATED']
+        final_family = attempts[-1]['model_family'] if attempts else None
+        failures = [a['reason'] for a in attempts if a['model'] == model and a['status'] != 'ESTIMATED'
+                    and a['model_family'] == final_family]
         reason = gate['reason_'+model] or ('; '.join(failures) or 'required_lower_model_failed' if do_models else 'models_not_requested')
         fit_status = ('ESTIMATED' if fit else 'NOT_ESTIMABLE' if not gate['eligible_'+model]
                       else 'FIT_FAILED' if do_models else 'NOT_REQUESTED')
@@ -229,33 +236,44 @@ def run(args):
             frame, observation_status, qc, unit = measurements(x, groups, original_spec, args.data_cutoff, args.time_axis, cfg)
             spec = replace(original_spec, unit=unit)
             for scenario, subset, axis, fit_cap, inference_cap in scenarios(frame, args.time_axis, cfg, args.sensitivity):
-                ev = evaluate(subset, groups, spec, cfg, axis, fit_cap, inference_cap)
-                sample_hash = sample_fingerprint(ev['data'])
-                meta = dict(metadata(spec, threshold, axis, cfg), scenario=scenario,
-                    analysis_role=ANALYSIS_ROLE, c_support_policy=cfg.c_support_policy,
-                    scenario_role='primary' if threshold == 3 and scenario == 'main' and axis == 'clinical_baseline' else 'sensitivity',
-                    sample_fingerprint=sample_hash, n_patients=ev['gate']['n_patients'],
-                    fit_horizon_cap=fit_cap, inference_horizon_cap=inference_cap,
-                    observation_status=observation_status)
-                if ev['counts'].n_patients.between(1, 4).any():
-                    meta['n_patients'] = np.nan
-                result, fits = analyze(ev, spec, cfg, meta,
-                    do_models=not args.dry_run and args.analysis != 'feasibility',
-                    do_temporal=not args.dry_run and args.analysis in ('temporal', 'all'))
-                if not args.dry_run and args.analysis in ('all', 'models') and scenario == 'main':
-                    result['07_step16_reconciliation'] = annotate(reconcile_step16(ev, fits, spec, cfg, axis), meta)
-                key = (threshold, axis, scenario)
-                destination = directories(root, axis, threshold, scenario, args.analysis)
-                for area, path in destination.items():
-                    destinations[f'{area}/delta{threshold}/{axis}/{scenario}'] = path
-                target = bundles.setdefault(key, {name: [] for name in TABLES})
-                for name, table in result.items():
-                    if len(table):
-                        target[name].append(table)
-                if scenario == 'main':
-                    report['thresholds'].setdefault(str(threshold), dict(group_counts=groups.observed_pattern.value_counts().to_dict(), feasibility=[]))
-                    report['thresholds'][str(threshold)]['feasibility'].append(dict(variable=spec.variable_id,
-                        domain=spec.domain, outcome_id=meta['outcome_id'], **ev['gate']))
+                frozen_sample = None
+                frozen_support = None
+                for basis_name in cfg.basis_specifications:
+                    ev = evaluate(subset, groups, spec, cfg, axis, fit_cap, inference_cap, basis_name)
+                    sample_hash = sample_fingerprint(ev['data'])
+                    if frozen_sample is not None:
+                        if sample_hash != frozen_sample:
+                            raise ContractError('basis specifications changed estimation sample')
+                        pd.testing.assert_frame_equal(ev['support'], frozen_support)
+                    frozen_sample, frozen_support = sample_hash, ev['support'].copy(deep=True)
+                    meta = dict(metadata(spec, threshold, axis, cfg), scenario=scenario,
+                        analysis_role=ANALYSIS_ROLE, c_support_policy=cfg.c_support_policy,
+                        scenario_role='primary' if threshold == 3 and scenario == 'main' and axis == 'clinical_baseline' else 'sensitivity',
+                        sample_fingerprint=sample_hash, n_patients=ev['gate']['n_patients'],
+                        fit_horizon_cap=fit_cap, inference_horizon_cap=inference_cap,
+                        observation_status=observation_status, basis_specification=basis_name,
+                        n_knots=4 if basis_name == 'four_knots' else 3,
+                        nonlinear_df=2 if basis_name == 'four_knots' else 1, support_policy=cfg.c_support_policy)
+                    if ev['counts'].n_patients.between(1, 4).any():
+                        meta['n_patients'] = np.nan
+                    result, fits = analyze(ev, spec, cfg, meta,
+                        do_models=not args.dry_run and args.analysis != 'feasibility',
+                        do_temporal=not args.dry_run and args.analysis in ('temporal', 'all'))
+                    if not args.dry_run and args.analysis in ('all', 'models') and scenario == 'main':
+                        result['07_step16_reconciliation'] = annotate(reconcile_step16(ev, fits, spec, cfg, axis), meta)
+                    key = (threshold, axis, scenario, basis_name)
+                    destination = directories(root, axis, threshold, scenario, args.analysis, basis_name)
+                    for area, path in destination.items():
+                        destinations[f'{area}/{basis_name}/delta{threshold}/{axis}/{scenario}'] = path
+                    target = bundles.setdefault(key, {name: [] for name in TABLES})
+                    for name, table in result.items():
+                        if len(table):
+                            target[name].append(table)
+                    if scenario == 'main':
+                        details = report['thresholds'].setdefault(str(threshold), dict(
+                            group_counts=groups.observed_pattern.value_counts().to_dict(), bases={}))
+                        details['bases'].setdefault(basis_name, dict(feasibility=[]))['feasibility'].append(dict(
+                            variable=spec.variable_id, domain=spec.domain, outcome_id=meta['outcome_id'], **ev['gate']))
             pd.testing.assert_frame_equal(groups, immutable)
     tables_by_key = {key: {name: combine(parts) for name, parts in collected.items()} for key, collected in bundles.items()}
     for tables in tables_by_key.values():
@@ -263,19 +281,30 @@ def run(args):
         tables['02_global_temporal_tests'] = tests
         tables['05_heterogeneity_classification'] = classify(tables['00_variable_eligibility'],
             tables['01_model_comparison'], tests, cfg.c_support_policy)
-    for (threshold, axis, scenario), tables in tables_by_key.items():
+    for (threshold, axis, scenario, basis_name), tables in tables_by_key.items():
         if scenario == 'main':
-            report['thresholds'][str(threshold)]['models'] = qc_summary(tables)
+            report['thresholds'][str(threshold)]['bases'][basis_name]['models'] = qc_summary(tables)
     consistency_table = consistency(tables_by_key)
-    for (threshold, axis, scenario), tables in tables_by_key.items():
+    for (threshold, axis, scenario, basis_name), tables in tables_by_key.items():
         if len(consistency_table):
             tables['06_sensitivity_and_threshold_consistency'] = consistency_table.loc[
-                consistency_table.threshold_abs.eq(threshold) & consistency_table.time_axis.eq(axis) & consistency_table.scenario.eq(scenario)].copy()
+                consistency_table.threshold_abs.eq(threshold) & consistency_table.time_axis.eq(axis) & consistency_table.scenario.eq(scenario) &
+                consistency_table.basis_specification.eq(basis_name)].copy()
+        # Fill metadata on derived cross-scenario rows and typed empty tables too.
+        inventory = tables['00_variable_eligibility'].set_index('outcome_id')
+        columns = ['version', 'basis_specification', 'n_knots', 'nonlinear_df', 'analysis_role',
+                   'support_policy', 'sample_fingerprint', 'unit', 'threshold_abs', 'time_axis', 'scenario']
+        for name, table in tables.items():
+            for col in columns:
+                if col not in table:
+                    table[col] = table.outcome_id.map(inventory[col]) if len(table) else pd.Series(dtype=inventory[col].dtype)
+        validate_bundle(tables, temporal_requested=not args.dry_run and args.analysis in ('temporal', 'all'))
     verify_unchanged(inputs)
     verify_unchanged(code_hashes)
     for details in report['thresholds'].values():
         details['group_counts'] = {k: v if v == 0 or v >= 5 else None for k, v in details['group_counts'].items()}
-        details['feasibility'] = disclosure_table(pd.DataFrame(details['feasibility'])).to_dict('records')
+        for detail in details['bases'].values():
+            detail['feasibility'] = disclosure_table(pd.DataFrame(detail['feasibility'])).to_dict('records')
     if args.dry_run:
         report.update(analysis_seconds=time.monotonic()-start, code=identity,
                       c_support_policy=cfg.c_support_policy, analysis_role=ANALYSIS_ROLE)
@@ -287,10 +316,10 @@ def run(args):
         os.chmod(temporary, 0o700)
         stage, staging = Path(temporary), {}
         for key, tables in tables_by_key.items():
-            threshold, axis, scenario = key
+            threshold, axis, scenario, basis_name = key
             paths = {}
             for area in ('tables', 'figures', 'qc'):
-                name = f'{area}/delta{threshold}/{axis}/{scenario}'
+                name = f'{area}/{basis_name}/delta{threshold}/{axis}/{scenario}'
                 paths[area] = stage/name
                 paths[area].mkdir(parents=True, exist_ok=True, mode=0o700)
                 staging[name] = paths[area]
@@ -302,17 +331,22 @@ def run(args):
                 rendered = render({name: disclosure_table(table) for name, table in tables.items()},
                     paths['figures'], cfg, args.figures, args.dpi, args.input_origin)
             write_manifest(paths['qc']/'run_manifest.json', dict(
-                version=VERSION, qc_status='PASS', scientific_status='PRELIMINARY',
+                version=VERSION, basis_specification=basis_name,
+                n_knots=4 if basis_name == 'four_knots' else 3,
+                nonlinear_df=2 if basis_name == 'four_knots' else 1,
+                basis_execution_mode='both_for_all_applicable_outcomes',
+                support_policy=cfg.c_support_policy, qc_status='PASS', scientific_status='PRELIMINARY',
                 c_support_policy=cfg.c_support_policy, analysis_role=ANALYSIS_ROLE,
                 model_counts=qc_summary(tables),
                 supported_temporal_coverage=tables['00_variable_eligibility'][[
-                    'outcome_id', 'n_supported_grid_times', 'supported_grid_span_years',
+                    'outcome_id', 'sample_fingerprint', 'n_supported_grid_times', 'supported_grid_span_years',
                     'n_supported_regions', 'n_supported_annual_windows']].to_dict('records'),
                 clinical_review_status='NOT_CLINICALLY_REVIEWED',
                 input_origin=args.input_origin, upstream_status=upstream.get('qc_status'),
                 threshold_abs=threshold, time_axis=axis, scenario=scenario, analysis=args.analysis,
                 data_cutoff=args.data_cutoff, parameters=cfg.as_dict(), code=identity,
                 invocation=vars(args), selected_variables=[s.variable_id for s in selected],
+                fdr_policy='BH per test/threshold/axis/scenario/basis; domain q secondary; no joint cross-basis discovery claim',
                 fdr_selection_scope='explicit_variable_subset' if args.variables else 'all_registered_variables',
                 preliminary_dirty_code=identity['worktree_dirty'], inputs=inputs, code_hashes=code_hashes,
                 created_at=datetime.now(timezone.utc).isoformat(), figures=rendered,
@@ -341,7 +375,7 @@ def disclosure_table(table):
     small_row = pd.Series(False, index=d.index)
     for col in d:
         if (col.startswith(('n_', 'N_')) and pd.api.types.is_numeric_dtype(d[col])
-                and col not in ('n_fixed_parameters', 'n_columns', 'n_supported_regions', 'n_supported_annual_windows', 'n_supported_grid_times')):
+                and col not in ('n_fixed_parameters', 'n_columns', 'n_knots', 'n_supported_regions', 'n_supported_annual_windows', 'n_supported_grid_times')):
             mask = d[col].between(1, 4)
             small_row |= mask
             d.loc[mask, col] = np.nan

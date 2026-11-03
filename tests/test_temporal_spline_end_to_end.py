@@ -7,7 +7,7 @@ from temporal_spline_fixtures import args_for, cli, fixture
 from src.block_A.secondary_trajectory_analysis import sha256, ContractError
 from src.block_A.temporal_spline_outputs import directories, TABLES, safe_table
 from src.block_A.temporal_spline_sensitivity import scenarios
-from src.block_A.temporal_spline_config import SplineConfig, VERSION, C_SUPPORT_POLICY, ANALYSIS_ROLE
+from src.block_A.temporal_spline_config import SplineConfig, VERSION, C_SUPPORT_POLICY, ANALYSIS_ROLE, BASIS_SPECIFICATIONS
 
 
 def test_dry_run_design_and_support_zero_writes(upstream, tmp_path, monkeypatch):
@@ -26,23 +26,31 @@ def test_bundle_both_thresholds_registry_privacy_manifests_and_no_upstream_chang
     before = {p: sha256(p) for p in upstream['root'].rglob('*') if p.is_file()}
     args = args_for(upstream, tmp_path/'output', '--variables', 'esspri_total', 'anti_ro_ssa', '--sensitivity', 'none')
     report = cli.run(args)
-    assert report['qc_status'] == 'PASS' and report['published_bundles'] == 2
+    assert report['qc_status'] == 'PASS' and report['published_bundles'] == 4
     for threshold in (3, 5):
-        dirs = directories(tmp_path/'output/synthetic_validation', 'clinical_baseline', threshold, 'main')
-        manifest = json.loads((dirs['qc']/'run_manifest.json').read_text())
-        assert manifest['data_cutoff'] == '2025-01-01' and manifest['input_origin'] == 'synthetic_validation'
-        assert manifest['qc_status'] == 'PASS' and manifest['code_hashes']
-        assert manifest['version'] == VERSION and manifest['c_support_policy'] == C_SUPPORT_POLICY
-        assert manifest['analysis_role'] == ANALYSIS_ROLE
-        assert set('ABC').issubset(manifest['model_counts'])
-        assert manifest['supported_temporal_coverage']
-        for name in TABLES:
-            table = pd.read_csv(dirs['tables']/(name+'.csv'))
-            safe_table(table, upstream['p'].patient_id)
-            if len(table) and 'threshold_abs' in table:
-                assert table.threshold_abs.eq(threshold).all()
-        tests = pd.read_csv(dirs['tables']/'02_global_temporal_tests.csv')
-        assert tests.p.isna().all() and tests.q_value.isna().all()
+        for basis_name in BASIS_SPECIFICATIONS:
+            dirs = directories(tmp_path/'output/synthetic_validation', 'clinical_baseline', threshold, 'main', basis_specification=basis_name)
+            manifest = json.loads((dirs['qc']/'run_manifest.json').read_text())
+            assert manifest['data_cutoff'] == '2025-01-01' and manifest['input_origin'] == 'synthetic_validation'
+            assert manifest['basis_specification'] == basis_name
+            assert manifest['basis_execution_mode'] == 'both_for_all_applicable_outcomes'
+            assert manifest['n_knots'] == (4 if basis_name == 'four_knots' else 3)
+            assert manifest['qc_status'] == 'PASS' and manifest['code_hashes']
+            assert manifest['version'] == VERSION and manifest['c_support_policy'] == C_SUPPORT_POLICY
+            assert manifest['analysis_role'] == ANALYSIS_ROLE
+            assert set('ABC').issubset(manifest['model_counts'])
+            assert manifest['supported_temporal_coverage']
+            for name in TABLES:
+                table = pd.read_csv(dirs['tables']/(name+'.csv'))
+                safe_table(table, upstream['p'].patient_id)
+                assert {'version', 'basis_specification', 'n_knots', 'nonlinear_df', 'analysis_role', 'support_policy', 'sample_fingerprint', 'unit'} <= set(table)
+                if len(table):
+                    assert table.basis_specification.eq(basis_name).all()
+                    assert table.n_knots.eq(manifest['n_knots']).all()
+                if len(table) and 'threshold_abs' in table:
+                    assert table.threshold_abs.eq(threshold).all()
+            tests = pd.read_csv(dirs['tables']/'02_global_temporal_tests.csv')
+            assert tests.p.isna().all() and tests.q_value.isna().all()
     assert before == {p: sha256(p) for p in before}
     with pytest.raises(FileExistsError):
         cli.run(args)
@@ -62,21 +70,23 @@ def test_one_command_all_with_supported_synthetic_outcome(upstream, tmp_path, mo
     args = args_for(upstream, tmp_path/'out', '--threshold', '3', '--sensitivity', 'none', '--figures', 'all')
     report = cli.run(args)
     assert report['qc_status'] == 'PASS'
-    dirs = directories(tmp_path/'out/synthetic_validation', 'clinical_baseline', 3, 'main')
-    tests = pd.read_csv(dirs['tables']/'02_global_temporal_tests.csv')
-    assert tests.status.eq('ESTIMATED').all()
-    bands = pd.read_csv(dirs['tables']/'04_simultaneous_bands.csv')
-    assert bands.contrast.nunique() == 6 and bands.contrast_type.nunique() == 3
-    assert len(list(dirs['figures'].glob('*.png'))) >= 8
-    reconcile = pd.read_csv(dirs['tables']/'07_step16_reconciliation.csv')
-    assert reconcile.status.iloc[0] in ('RECONCILED', 'DIFFERENT_VALIDATED_FAMILY')
-    manifest = json.loads((dirs['qc']/'run_manifest.json').read_text())
-    for artifact in manifest['artifacts']:
-        if artifact['path'].startswith('figures/'):
-            path = dirs['figures']/artifact['path'].removeprefix('figures/')
-        else:
-            path = dirs['tables']/artifact['path']
-        assert sha256(path) == artifact['sha256']
+    assert report['published_bundles'] == 2
+    for basis_name in BASIS_SPECIFICATIONS:
+        dirs = directories(tmp_path/'out/synthetic_validation', 'clinical_baseline', 3, 'main', basis_specification=basis_name)
+        tests = pd.read_csv(dirs['tables']/'02_global_temporal_tests.csv')
+        assert tests.status.eq('ESTIMATED').all()
+        bands = pd.read_csv(dirs['tables']/'04_simultaneous_bands.csv')
+        assert bands.contrast.nunique() == 6 and bands.contrast_type.nunique() == 3
+        assert len(list(dirs['figures'].glob('*.png'))) >= 8
+        reconcile = pd.read_csv(dirs['tables']/'07_step16_reconciliation.csv')
+        assert reconcile.status.iloc[0] in ('RECONCILED', 'DIFFERENT_VALIDATED_FAMILY')
+        manifest = json.loads((dirs['qc']/'run_manifest.json').read_text())
+        for artifact in manifest['artifacts']:
+            if artifact['path'].startswith('figures/'):
+                path = dirs['figures']/artifact['path'].removeprefix('figures/')
+            else:
+                path = dirs['tables']/artifact['path']
+            assert sha256(path) == artifact['sha256']
 
 
 def test_zero_argument_full_run_defaults_and_sensitivities_keep_same_full_sample():
@@ -87,6 +97,7 @@ def test_zero_argument_full_run_defaults_and_sensitivities_keep_same_full_sample
     assert args.figures == 'priority' and args.dry_run is False
     assert args.output_root == cli.common.PROJECT_ROOT
     assert SplineConfig().max_primary_years == 3.
+    assert SplineConfig().basis_specifications == BASIS_SPECIFICATIONS
     assert cli.parse_args(['--data-cutoff', '2025-01-01']).data_cutoff == '2025-01-01'
     with pytest.raises(SystemExit):
         cli.parse_args(['--data-cutoff', 'invalid'])
@@ -99,7 +110,7 @@ def test_zero_argument_full_run_defaults_and_sensitivities_keep_same_full_sample
 
 def test_standard_sensitivities_publish_independent_namespaces(upstream, tmp_path):
     report = cli.run(args_for(upstream, tmp_path/'out', '--threshold', '3', '--variables', 'esspri_total'))
-    assert report['published_bundles'] == 8
+    assert report['published_bundles'] == 16
     root = tmp_path/'out/synthetic_validation'
     alternate = directories(root, 'essdai_index', 3, 'alternate_time_axis')
     assert (alternate['qc']/'run_manifest.json').is_file()
@@ -126,3 +137,64 @@ def test_upstream_change_aborts_publication(upstream, tmp_path, monkeypatch):
     with pytest.raises(ContractError, match='changed during run'):
         cli.run(args_for(u, tmp_path/'out', '--variables', 'esspri_total', '--sensitivity', 'none'))
     assert not list((tmp_path/'out').rglob('run_manifest.json'))
+
+
+def test_A_only_degenerate_basis_end_to_end_reproducibility_and_V2_preservation(upstream, tmp_path, monkeypatch):
+    from src.block_A.secondary_comparison_models import PATTERNS
+    data, groups, spec = fixture(n=14)
+    keep = data.time.eq(0.)
+    for group in PATTERNS:
+        ids = groups.loc[groups.observed_pattern.eq(group), 'patient_id'].tolist()
+        keep |= data.patient_id.isin(ids[:8]) & data.time.eq(3.)
+        keep |= data.patient_id.eq(ids[8]) & data.time.eq(1.5)
+    data = data.loc[keep].copy()
+    # Median and lower tertile coincide with the boundary; A is still full rank.
+    original = cli.load_inputs
+    def load(args):
+        x, b, p, specs, catalog, inputs, manifest = original(args)
+        return x, b, p, {spec.canonical_column: spec}, catalog, inputs, manifest
+    monkeypatch.setattr(cli, 'load_inputs', load)
+    monkeypatch.setattr(cli, 'fixed_groups', lambda patterns, threshold: groups.copy())
+    monkeypatch.setattr(cli, 'measurements', lambda *a: (data.copy(), 'AVAILABLE', [], spec.unit))
+    roots = [tmp_path/'first', tmp_path/'repeat']
+    manifests = []
+    snapshots = []
+    for root in roots:
+        v2 = root/'synthetic_validation/outputs/qc/blockA/17_nonlinear_temporal_heterogeneity/temporal-spline-v2/clinical_baseline/delta3/main/run_manifest.json'
+        v2.parent.mkdir(parents=True)
+        v2.write_text('{"version":"temporal-spline-v2","sentinel":"historical bundle"}\n')
+        before = sha256(v2)
+        args = args_for(upstream, root, '--threshold', '3', '--sensitivity', 'none')
+        report = cli.run(args)
+        assert report['qc_status'] == 'PASS' and report['published_bundles'] == 2
+        tables_by_basis = {}
+        for basis in BASIS_SPECIFICATIONS:
+            dirs = directories(root/'synthetic_validation', 'clinical_baseline', 3, 'main', basis_specification=basis)
+            models = pd.read_csv(dirs['tables']/'01_model_comparison.csv').set_index('model')
+            assert models.loc['A', 'fit_status'] == 'ESTIMATED'
+            assert models.loc[['B', 'C'], 'fit_status'].eq('NOT_ESTIMABLE').all()
+            curves = pd.read_csv(dirs['tables']/'03_group_curves.csv')
+            support = pd.read_csv(dirs['tables']/'00_local_temporal_support.csv')
+            supported = support.loc[support.four_group_supported]
+            assert len(curves) == len(supported) > 0
+            assert curves.model.eq('A').all() and curves.n_observed_local.ge(5).all()
+            assert set(curves.time) == set(supported.time)
+            manifest = json.loads((dirs['qc']/'run_manifest.json').read_text())
+            assert manifest['model_counts']['n_outcomes_with_supported_A_curves'] == 1
+            assert manifest['model_counts']['n_outcomes_with_supported_C_curves'] == 0
+            assert manifest['supported_temporal_coverage'][0]['n_supported_grid_times'] == curves.time.nunique()
+            for name in TABLES:
+                table = pd.read_csv(dirs['tables']/(name+'.csv'))
+                safe_table(table, groups.patient_id)
+            tables_by_basis[basis] = {a['path']: a['sha256'] for a in manifest['artifacts']}
+            manifests.append(manifest)
+        snapshots.append(tables_by_basis)
+        assert sha256(v2) == before
+    assert snapshots[0] == snapshots[1]
+    assert len({json.dumps(m['inputs'], sort_keys=True) for m in manifests}) == 1
+    assert len({json.dumps(m['code_hashes'], sort_keys=True) for m in manifests}) == 1
+    # Only V3 destinations are backed up when overwrite is explicitly requested.
+    backup = roots[0]/'synthetic_validation/outputs/backups/17_nonlinear_temporal_heterogeneity/temporal-spline-v3/test'
+    report = cli.run(args_for(upstream, roots[0], '--threshold', '3', '--sensitivity', 'none', '--overwrite', '--backup-root', str(backup)))
+    assert report['qc_status'] == 'PASS'
+    assert len(list(backup.rglob('run_manifest.json'))) == 2

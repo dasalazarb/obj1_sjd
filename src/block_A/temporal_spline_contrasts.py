@@ -3,13 +3,27 @@ from itertools import combinations
 import numpy as np
 import pandas as pd
 from scipy.special import expit
-from src.block_A.secondary_comparison_models import PATTERNS
+from src.block_A.secondary_comparison_models import PATTERNS, design_row
 from src.block_A.temporal_spline_inference import simultaneous_critical, separation_intervals
 
 
+def model_design_and_derivative(basis, fit, group, time):
+    """A is linear even when the nonlinear basis could not be frozen."""
+    if fit.model == 'A':
+        x = design_row(group, time)
+        dx = design_row(group, 1.)-design_row(group, 0.)
+    else:
+        if basis is None:
+            raise ValueError('nonlinear fit requires frozen basis')
+        x = basis.row(group, time, fit.model)
+        dx = basis.row(group, time, fit.model, derivative=1)
+    if x.shape != dx.shape or x.shape != fit.beta.shape:
+        raise ValueError('fit and frozen design dimensions differ')
+    return x, dx
+
+
 def function_and_gradient(basis, fit, group, t, kind='level', reference=None, binary=False):
-    x = basis.row(group, t, fit.model)
-    dx = basis.row(group, t, fit.model, derivative=1)
+    x, dx = model_design_and_derivative(basis, fit, group, t)
     beta = fit.beta
     if binary:
         probability = expit(x@beta)
@@ -40,9 +54,14 @@ def characterize(evaluation, fits, spec, cfg):
     output = {k: [] for k in ('curves', 'changes', 'derivatives', 'pairs', 'bands', 'intervals', 'characteristics', 'registry')}
     support, basis = evaluation['support'], evaluation['basis']
     times = sorted(support.loc[support.four_group_supported, 'time'].unique())
-    if basis is None or not times:
-        output['registry'].append(dict(component='temporal_functions', status='NOT_ESTIMABLE', reason='no_supported_grid_or_basis'))
+    if not times:
+        output['registry'].append(dict(component='temporal_functions', status='NOT_ESTIMABLE', reason='no_four_group_supported_grid'))
         return {k: pd.DataFrame(v) for k, v in output.items()}
+    if basis is None:
+        for model in 'BC':
+            output['registry'].append(dict(component=model+'_temporal_functions', status='NOT_ESTIMABLE',
+                                           reason='nonlinear_fit_requires_frozen_basis'))
+        fits = {model: fit for model, fit in fits.items() if model == 'A'}
     binary = spec.type == 'binary'
     # Deterministic common reference, first supported prespecified grid point (0 preferred).
     reference = float(times[0])
@@ -51,11 +70,11 @@ def characterize(evaluation, fits, spec, cfg):
             for group in PATTERNS:
                 value, gradient = function_and_gradient(basis, fit, group, t, binary=binary)
                 local_n = int(support.loc[support.observed_pattern.eq(group) & support.time.eq(t), 'n_observed_local'].iloc[0])
-                row = dict(model=model, observed_pattern=group, time=float(t), n_observed_local=local_n,
+                row = dict(model=model, model_family=fit.family, observed_pattern=group, time=float(t), n_observed_local=local_n,
                     status='ESTIMATED', effect_scale='probability' if binary else spec.unit, **effect(value, gradient, fit.covariance))
                 if binary:
                     # CI for a probability via the linear predictor; differences use delta method.
-                    x = basis.row(group, t, model)
+                    x, _ = model_design_and_derivative(basis, fit, group, t)
                     eta = effect(float(x@fit.beta), x, fit.covariance)
                     row.update(ci95_low=expit(eta['ci95_low']), ci95_high=expit(eta['ci95_high']))
                 output['curves'].append(row)

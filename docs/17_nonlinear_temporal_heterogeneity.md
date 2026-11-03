@@ -6,6 +6,40 @@ ESSDAI memberships at ±3 and ±5 are fitted separately. These are associations
 conditional on the observed history, not prediction, causation, onset or latent
 patient states. Nonestimability is a result, not evidence of equal trajectories.
 
+## V3: A curve repair and exploratory three-knot alternative
+
+A previously fitted linear model could lose every curve when spline freezing
+failed. V3 uses `secondary_comparison_models.design_row` for A levels and the
+exact difference between its rows at years 1 and 0 for its derivative. Pointwise
+Wald limits remain `ci95_*`; binary limits transform a logit interval with expit.
+Only points marked `four_group_supported=True` are published. If none exist,
+`no_four_group_supported_grid` is recorded; no replacement grid is invented.
+Changes, velocities and simultaneous bands specific to C still require valid C.
+An A-only outcome receives an atlas with the existing supported segments.
+
+The three-knot alternative was proposed after observing failures of four-knot C.
+It is **exploratory post hoc**, even when q < .05, and cannot replace the reference
+based on significance. Both bases use exactly the same longitudinal rows, groups,
+three-year main horizon and local support; the runner checks sample digests and
+support equality before fitting. Different rank/fit eligibility is allowed.
+
+| Specification | Frozen normalized knots | A / B / C parameters | B–A / C–B / C global df |
+|---|---|---|---|
+| `four_knots` | 0, pooled 1/3, pooled 2/3, 1 | 8 / 10 / 16 | 2 / 6 / 9 |
+| `three_knots` | 0, pooled median, 1 | 8 / 9 / 12 | 1 / 3 / 6 |
+
+Methods are `restricted_cubic_pooled_quantiles_1_3_2_3_projected` and
+`restricted_cubic_pooled_median_projected`. The alternative reduces dimension;
+it does not guarantee identifiability, convergence, valid covariance or evidence.
+`C_RELAXED_SUPPORT_V1` and every model/covariance check remain fixed. There is
+no pseudoinverse, covariance repair, ad hoc regularization or relaxed fitting.
+
+BH families and figure panels are separate for each basis. Their tests have
+different degrees of freedom and are not direct replications. This implementation
+**does not implement joint cross-basis FDR**: do not select the minimum p/q or claim
+confirmed discoveries from comparing bases. `family_n_tests` and the manifest
+state the denominator and the separate exploratory family policy.
+
 ## Design and implementation
 
 - `temporal_spline_config`: versioned, response-independent limits, priority list
@@ -19,12 +53,17 @@ patient states. Nonestimability is a result, not evidence of equal trajectories.
   spline with four knots (boundaries, pooled 1/3 and 2/3 quantiles), giving time
   plus two nonlinear columns. Project nonlinear terms off intercept/time once.
   The serialized transform is reused in analytic predictions and derivatives.
-  A (8 columns) is a literal prefix of B (10), itself a prefix of C (16).
+  Four knots remain the reference (A/B/C: 8/10/16 columns). Three pooled knots
+  (boundaries and median) provide the alternative (8/9/12 columns). A is a
+  literal prefix of B and B of C in both designs; default `freeze(time)` stays
+  four knots. Projection, scaling, prediction and derivatives use one frozen object.
 - `temporal_spline_models.fit_family`: ML random-intercept A/B/C with QC; if any
   fails, discard the partial family and refit all eligible models with robust
   Gaussian GEE. Binary repeated outcomes use robust binomial GEE. No jumps over
   a failed A/B. A/B remain possible when C support fails. Degenerate spline knots
-  leave A only; no silent change to a different spline family.
+  leave A only within that specification; A curves use the exact eight-column
+  linear design and time gradient independently of `FrozenBasis`. There is no
+  nonlinear basis fallback inside a specification.
 - `temporal_spline_contrasts` / `inference`: supported group means, common-reference
   changes, analytic velocities, and six response-scale pairwise differences.
   Reproducible coefficient simulations provide a joint 95% sup-t band across
@@ -63,20 +102,22 @@ Default parameters:
 - Input origin: `canonical`; output root: `common.PROJECT_ROOT`.
 - `--threshold both`, `--time-axis clinical_baseline`, `--analysis all`.
 - `--sensitivity standard`, `--max-primary-years 3` (via SplineConfig).
+- Both bases, in frozen order: `four_knots`, then `three_knots`, for every applicable outcome.
+  There is no failure-triggered or p-value-triggered basis selection.
 - `--figures priority`, `--progress` (enabled), 250 DPI.
 - `--dry-run` disabled; outputs are written and existing output paths
   remain overwrite-protected.
 
 When successful, the final JSON contains `qc_status: PASS`, the bundle count,
 the cutoff and output directory paths. CSV/PNG/manifest files live under
-`<project>/outputs/{tables,figures,qc}/blockA/17_nonlinear_temporal_heterogeneity/temporal-spline-v2/`
-with `<time_axis>/delta<3|5>/<scenario>/` suffixes. Previous published results
+`<project>/outputs/{tables,figures,qc}/blockA/17_nonlinear_temporal_heterogeneity/temporal-spline-v3/`
+with `<basis_specification>/<time_axis>/delta<3|5>/<scenario>/` suffixes. Previous published results
 are never overwritten silently. `--overwrite` still requires a valid
 `--backup-root`.
 
 The `--analysis all` default fits eligible A/B/C models, tests temporal
 heterogeneity, applies multiplicity control, makes priority figures and
-publishes both thresholds. `--analysis temporal` also fits its own models;
+publishes both bases at both thresholds. `--analysis temporal` also fits its own models;
 `feasibility` and `models` get distinct partial-output namespaces.
 
 Optional diagnostics / custom runs:
@@ -103,7 +144,7 @@ minimum 500), `--figures none|priority|all`, `--dpi` (minimum 200).
 Configuration is a JSON object of `SplineConfig` fields. Example:
 
 ```json
-{"version": "temporal-spline-v2", "max_primary_years": 3,
+{"version": "temporal-spline-v3", "max_primary_years": 3,
  "grid_step": 0.25, "c_support_policy": "C_RELAXED_SUPPORT_V1",
  "minimum_c_supported_regions": 2, "minimum_c_supported_annual_windows": 2,
  "minimum_c_supported_grid_points": 4, "minimum_c_supported_grid_span_years": 1.0,
@@ -114,7 +155,7 @@ Configuration is a JSON object of `SplineConfig` fields. Example:
 No checkpoint/resume is implemented. In-memory patient rows are discarded
 after each variable. Existing destinations are blocked unless both
 `--overwrite` and `--backup-root` are provided. Backups must be under
-`<output-root>/outputs/backups/17_nonlinear_temporal_heterogeneity/temporal-spline-v2/`
+`<output-root>/outputs/backups/17_nonlinear_temporal_heterogeneity/temporal-spline-v3/`
 (and under `synthetic_validation/` for synthetic inputs).
 
 ## Support and estimands
@@ -133,14 +174,14 @@ These are operational limits, not power guarantees.
 
 This uniform, versioned revision was selected after inspecting prior C
 feasibility failures. The analysis role is therefore
-`exploratory_posthoc_support_revision` for both thresholds and every outcome.
+`exploratory_posthoc_basis_specification` for both bases, thresholds and every outcome.
 C results, including p/q and simultaneous bands, are exploratory. Significance,
-BH-FDR, four-knot cubic basis, A/B requirements, rank, condition, convergence,
+BH-FDR within each base, the four-knot reference estimands, A/B requirements, rank, condition, convergence,
 model-family and covariance QC remain unchanged. Failed C fits do not yield p/q.
 Support thresholds for this named policy cannot be overridden individually in
 configuration; another policy requires an explicit specification/version change.
 The three-year primary horizon and retrospective group definitions are unchanged.
-V2 destinations include `temporal-spline-v2/`, so V1 artifacts are preserved.
+V3 destinations include a mandatory basis directory under `temporal-spline-v3/`; V1/V2 artifacts and manifests remain untouched. Use the historical V2 commit to reproduce a V2 run.
 
 The fixed grid is 0, .25, .5, … within the common range. A point is supported
 only if all four groups have at least five distinct patients in ±.5 years.
@@ -158,10 +199,10 @@ known ordinal/count metadata (including ocular Oxford/van Bijsterveld scores).
 ## Tests and multiplicity
 
 - A: joint group × time Wald test (3 df).
-- B vs A: common nonlinear terms (2 df), ML LRT for regular comparable mixed
+- B vs A: common nonlinear terms (2 df for four knots; 1 for three), ML LRT for regular comparable mixed
   models or robust Wald for GEE.
-- C vs B: group-specific curvature (6 df), appropriate LRT/Wald as above.
-- Primary C test: **joint linear and nonlinear group interactions (9 df)**,
+- C vs B: group-specific curvature (6 df for four knots; 3 for three), appropriate LRT/Wald as above.
+- Primary C test: **joint linear and nonlinear group interactions (9 df for four knots; 6 for three)**,
   excluding group intercept differences.
 
 The same records, family, random structure, knots and scales are used for all
@@ -171,7 +212,7 @@ and random-intercept boundary checks. Failed fits/tests have no p-values.
 AIC/BIC/log-likelihood are exported only for ML models; GEE fields are undefined.
 
 BH-FDR covers **all estimable independent variables** separately for each
-prespecified test, threshold, scenario and clock. It does not split the primary
+test, threshold, scenario, clock and basis specification. It does not split the primary
 family into favorable priority subsets. Domain-specific BH is supplementary;
 both denominators are recorded. There are no discoveries selected by AIC or by
 a Step 16 p-value. Pairwise separation uses the simultaneous bands, never the
@@ -190,7 +231,8 @@ validated uncertainty is asserted by this version.
 ## Export identity and evidence classification
 
 Canonical `outcome_id` encodes domain and canonical source column; variable,
-domain, outcome type and unit are checked together in result joins. Homonymous
+domain, outcome type, unit, threshold, clock, scenario and basis specification
+are checked together in result joins. Homonymous
 lab/serology variables cannot exchange tests, comparisons or figures. Duplicate
 outcome/test rows raise a contract error before publication. Primary BH families
 continue across domains; supplementary domain q-values never drive classification.
@@ -215,9 +257,14 @@ four global tests and their original across-domain q-values/denominators:
 - The global C interaction has a separate exploratory global classification;
   it cannot establish nonlinear group evidence by itself.
 
-The run manifest includes policy/version, exploratory role, effective parameters,
+All CSV schemas include version, basis specification, number of knots, nonlinear
+df, analysis role, support policy, sample fingerprint and unit. The run manifest
+includes policy/version, basis execution mode, exploratory role, effective parameters,
 cutoff, commit/code and input hashes, counts of eligible/estimated/failed models
 A/B/C, valid C tests, estimator families, reasons and supported temporal coverage.
+Per-bundle QC also reports inventory totals, covariance/convergence/other C failures,
+A/C curve coverage and supported grid times per outcome. Fit failure summaries
+use the final coherent family; all earlier ML attempts remain in the attempts CSV.
 QC PASS certifies software and provenance checks, not confirmatory or clinical validity.
 
 ## Sensitivities and Step 16 reconciliation
@@ -252,17 +299,18 @@ nor horizon depends on the observed sign of IgA.
 Every bundle has:
 
 ```text
-outputs/{tables,figures,qc}/blockA/17_nonlinear_temporal_heterogeneity/temporal-spline-v2/
-  <time_axis>/delta<3|5>/<scenario>/
+outputs/{tables,figures,qc}/blockA/17_nonlinear_temporal_heterogeneity/temporal-spline-v3/
+  <four_knots|three_knots>/<time_axis>/delta<3|5>/<scenario>/
 ```
 
-The `main` scenario is the prespecified capped analysis. Synthetic inputs always
+The `main` scenario uses the frozen capped horizon; the three-knot specification remains post-hoc exploratory. Synthetic inputs always
 get an additional `synthetic_validation/` root. Empty tables have readable headers.
 
 | Table | Contents |
 |---|---|
 | `00_variable_eligibility` | A/B/C decisions, reasons, semantic type, sample counts and serialized basis |
 | `00_local_temporal_support` | Local unique counts, percent, span and four-group support at every grid point |
+| `00_design_diagnostics` | Per-model rank, number of columns and design condition, including rejected designs |
 | `00_group_support` | Per-group patient/repeated/three-date/date counts |
 | `00_aggregated_observations` | Patient-balanced annual descriptive means/quantiles; small cells suppressed |
 | `01_model_comparison` | A/B/C family, status, parameters, ML criteria and basis |
@@ -332,3 +380,8 @@ python -m pytest tests/test_temporal_spline_*.py tests/test_secondary_comparison
 ```
 
 Revision validation (2026-10-29): see the [C_RELAXED_SUPPORT_V1 software QC report](17_c_relaxed_support_v1_validation.md) for the executed 88-test regression, synthetic A/B/C counts and blocked institutional prerequisite check.
+
+V3 acceptance coverage and numerical V2 compatibility are recorded in
+[the V3 software validation report](17_temporal_spline_v3_validation.md). Clinical
+recovery of the previously reported 23 + 7 A-only outcomes is pending execution
+on identical authorized inputs in Biowulf; synthetic QC cannot certify that count.

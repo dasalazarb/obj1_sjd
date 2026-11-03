@@ -17,9 +17,11 @@ def _segments(d, step):
 def render(tables, destination, cfg, selection='priority', dpi=250, origin='canonical'):
     destination.mkdir(parents=True, exist_ok=True)
     paths = []
+    inventory = tables['00_variable_eligibility']
+    basis_label = str(inventory.basis_specification.iloc[0]) if len(inventory) and 'basis_specification' in inventory else 'four_knots'
     def save(fig, name):
         path = destination/(name+'.png')
-        fig.suptitle(fig._suptitle.get_text()+f'\n{origin}; exploratory support revision; retrospective associations, no causal/onset interpretation', fontsize=10)
+        fig.suptitle(fig._suptitle.get_text()+f'\n{origin}; {basis_label}; exploratory post-hoc specification; retrospective associations, no causal/onset interpretation', fontsize=10)
         fig.savefig(path, dpi=dpi, bbox_inches='tight')
         plt.close(fig)
         paths.append(path.name)

@@ -6,10 +6,12 @@ from src.block_A.secondary_comparison_contract import inference_frame
 from src.block_A.secondary_comparison_models import PATTERNS
 from src.block_A.secondary_trajectory_analysis import ContractError
 from src.block_A.temporal_spline_design import FrozenBasis
-from src.block_A.temporal_spline_config import ANALYSIS_ROLE
+from src.block_A.temporal_spline_config import ANALYSIS_ROLE, BASIS_SPECIFICATIONS
 
 
-def evaluate(frame, groups, spec, cfg, axis, fit_horizon=None, report_horizon=None):
+def evaluate(frame, groups, spec, cfg, axis, fit_horizon=None, report_horizon=None, basis_specification='four_knots'):
+    if basis_specification not in BASIS_SPECIFICATIONS:
+        raise ValueError('unknown basis specification')
     data = inference_frame(frame, axis)
     if len(data):
         if (data.threshold_abs.nunique() != 1 or data.groupby('patient_id').observed_pattern.nunique().gt(1).any()
@@ -105,12 +107,13 @@ def evaluate(frame, groups, spec, cfg, axis, fit_horizon=None, report_horizon=No
         c_reasons.append('insufficient_c_supported_grid_points')
     if supported_span < cfg.minimum_c_supported_grid_span_years:
         c_reasons.append('insufficient_c_supported_grid_span_years')
-    basis, matrices, designs = None, {}, []
+    basis, matrices, designs, basis_failure = None, {}, [], ''
     if not reasons:
         try:
-            basis = FrozenBasis.freeze(data.time)
+            basis = FrozenBasis.freeze(data.time, basis_specification)
         except ValueError as error:
-            c_reasons.append(str(error))
+            basis_failure = str(error)
+            c_reasons.append(basis_failure)
         for model in ('A', 'B', 'C'):
             # A remains possible even if spline knots are degenerate.
             if basis is None and model != 'A':
@@ -132,6 +135,7 @@ def evaluate(frame, groups, spec, cfg, axis, fit_horizon=None, report_horizon=No
     gate = dict(status='ELIGIBLE' if not a_reason else 'NOT_ESTIMABLE',
         reason=a_reason, eligible_A=not bool(a_reason), eligible_B=not bool(b_reason), eligible_C=not bool(c_reason),
         reason_A=a_reason, reason_B=b_reason, reason_C=c_reason,
+        nonlinear_basis_failure_reason=basis_failure,
         eligibility_status_A='ELIGIBLE' if not a_reason else 'NOT_ELIGIBLE',
         eligibility_status_B='ELIGIBLE' if not b_reason else 'NOT_ELIGIBLE',
         eligibility_status_C='ELIGIBLE' if not c_reason else 'NOT_ELIGIBLE',
@@ -142,4 +146,5 @@ def evaluate(frame, groups, spec, cfg, axis, fit_horizon=None, report_horizon=No
         n_observations=len(data), n_supported_regions=region_n, n_supported_annual_windows=annual_n,
         n_supported_grid_times=len(ok_times), supported_grid_span_years=supported_span,
         n_per_group=json.dumps(dict(zip(counts.observed_pattern, counts.n_patients)), sort_keys=True))
-    return dict(data=data, gate=gate, support=support, counts=counts, basis=basis, matrices=matrices, designs=designs)
+    return dict(data=data, gate=gate, support=support, counts=counts, basis=basis, matrices=matrices, designs=designs,
+                basis_specification=basis_specification)

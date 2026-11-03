@@ -122,10 +122,14 @@ def wald(fit, indices):
 
 def tests(fits):
     rows = []
+    # Dimensions come from the selected frozen design, including partial families.
+    k = len(fits['B'].beta)-8 if 'B' in fits else (len(fits['C'].beta)-8)//4 if 'C' in fits else 0
+    if ('B' in fits or 'C' in fits) and (k not in (1, 2) or ('C' in fits and len(fits['C'].beta) != 8+4*k)):
+        raise ValueError('incompatible nested spline designs')
     if 'A' in fits:
         rows.append(dict(test='linear_group_time', model='A', **wald(fits['A'], [5, 6, 7])))
-    for lower, upper, name, indices in [('A', 'B', 'common_nonlinearity', [8, 9]),
-                                        ('B', 'C', 'group_specific_curvature', list(range(10, 16)))]:
+    for lower, upper, name, indices in [('A', 'B', 'common_nonlinearity', list(range(8, 8+k))),
+                                        ('B', 'C', 'group_specific_curvature', list(range(8+k, 8+4*k)))]:
         if lower not in fits or upper not in fits:
             continue
         a, b = fits[lower], fits[upper]
@@ -140,7 +144,7 @@ def tests(fits):
             result = wald(b, indices)
         rows.append(dict(test=name, model=upper, **result))
     if 'C' in fits:
-        rows.append(dict(test='global_temporal_heterogeneity', model='C', **wald(fits['C'], [5, 6, 7, *range(10, 16)])))
+        rows.append(dict(test='global_temporal_heterogeneity', model='C', **wald(fits['C'], [5, 6, 7, *range(8+k, 8+4*k)])))
     for row in rows:
         row['model_family'] = fits[row['model']].family
     return rows

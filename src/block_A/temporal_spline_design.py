@@ -1,12 +1,13 @@
 """Serializable restricted cubic spline: A is a literal prefix of B and C.
 
-Four pooled-time knots (boundaries and 1/3, 2/3 quantiles) give three
-nonconstant degrees of freedom: time plus two nonlinear terms. The nonlinear
-terms are projected off [1, time] once, on the frozen estimation sample.
+The four-knot reference uses pooled 1/3 and 2/3 quantiles (two nonlinear terms).
+The three-knot alternative uses the pooled median (one nonlinear term).
+Nonlinear terms are projected off [1, time] once on the frozen estimation sample.
 """
 from dataclasses import asdict, dataclass
 import numpy as np
 from src.block_A.secondary_comparison_models import PATTERNS
+from src.block_A.temporal_spline_config import BASIS_METHODS
 
 
 @dataclass(frozen=True)
@@ -19,13 +20,16 @@ class FrozenBasis:
     method: str = 'restricted_cubic_pooled_quantiles_1_3_2_3_projected'
 
     @classmethod
-    def freeze(cls, time):
+    def freeze(cls, time, specification='four_knots'):
+        if specification not in BASIS_METHODS:
+            raise ValueError('unknown basis specification')
         t = np.asarray(time, dtype=float)
         lo, hi = float(t.min()), float(t.max())
         if not np.isfinite(t).all() or hi <= lo:
             raise ValueError('invalid spline bounds')
         z = (t-lo)/(hi-lo)
-        knots = (0., *np.quantile(z, [1/3, 2/3]), 1.)
+        quantiles = [1/3, 2/3] if specification == 'four_knots' else [.5]
+        knots = (0., *np.quantile(z, quantiles), 1.)
         if np.min(np.diff(knots)) < 1e-6:
             raise ValueError('nonunique_pooled_quantile_knots')
         raw = cls._raw(z, knots)
@@ -34,7 +38,8 @@ class FrozenBasis:
         scales = np.sqrt(np.mean(h*h, axis=0))
         if np.min(scales) < 1e-10:
             raise ValueError('degenerate_nonlinear_basis')
-        return cls(lo, hi, tuple(float(k) for k in knots), tuple(map(tuple, projection)), tuple(scales))
+        return cls(lo, hi, tuple(float(k) for k in knots), tuple(map(tuple, projection)), tuple(scales),
+                   method=BASIS_METHODS[specification])
 
     @staticmethod
     def _raw(z, knots, derivative=0):
@@ -78,4 +83,5 @@ class FrozenBasis:
 
     def as_dict(self):
         return dict(**asdict(self), knots_years=[self.lower+k*(self.upper-self.lower) for k in self.knots],
-                    df_total=3, nonlinear_df=2, natural_boundary_constraint='second derivative zero at both boundaries')
+                    df_total=len(self.knots)-1, nonlinear_df=len(self.knots)-2,
+                    natural_boundary_constraint='second derivative zero at both boundaries')
