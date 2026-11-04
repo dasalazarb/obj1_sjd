@@ -33,6 +33,7 @@ def effect_interval(x,y,kind,replicates,seed):
 
 
 def profile_tables(baseline,membership,roles,manifest,validation,seed):
+    from .s03_construct_validation import independence_block
     baseline_rows=[]; signatures=[]; anchor_rows=[]; missing=[]; flow=[]
     for identifier in manifest['eligible_representation_ids']:
         members=hard_members(membership,identifier)
@@ -60,7 +61,7 @@ def profile_tables(baseline,membership,roles,manifest,validation,seed):
                 declared=part_roles.loc[part_roles.source_column.eq(source['source_column']),'validation_role']
                 if len(declared) and declared.iloc[0] in {'defining','derived_from_defining'}: continue
                 anchor_rows.append({'representation_id':identifier,'source_column':source['source_column'],
-                    'validation_role':'independent_baseline_anchor','status':'NOT_ESTIMABLE','reason':'NO_SUPPORTED_HARD_ASSIGNMENTS'})
+                    'validation_role':'independent_baseline_anchor','status':'NOT_ESTIMABLE','reason':independence_block(part_roles.loc[part_roles.source_column.eq(source['source_column'])].iloc[0].to_dict()) or 'NO_SUPPORTED_HARD_ASSIGNMENTS'})
             continue
         for role in part_roles.itertuples():
             column=role.source_column
@@ -93,7 +94,10 @@ def profile_tables(baseline,membership,roles,manifest,validation,seed):
                     row.update(status='COMPLETE',reason='',hypothesis_family=f'{identifier}/independent_baseline_anchors')
                     x=series.loc[group.index].dropna().to_numpy(float)
                     y=series.loc[frame.community_id.ne(community)].dropna().to_numpy(float)
-                    if manifest['release_status']=='NO_STABLE_STRUCTURE' or not frame.structural_stability_status.eq('stable').all():
+                    block=independence_block(role._asdict())
+                    if block:
+                        row.update(status='NOT_ESTIMABLE',reason=block)
+                    elif manifest['release_status']=='NO_STABLE_STRUCTURE' or not frame.structural_stability_status.eq('stable').all():
                         row.update(status='NOT_ESTIMABLE',reason='TOPOLOGY_NOT_STABLE_FOR_ANCHOR_INFERENCE')
                     elif not numeric_kind or min(len(x),len(y))<int(validation['minimum_group_patients']):
                         row.update(status='NOT_ESTIMABLE',reason='INSUFFICIENT_OBSERVED_GROUP_OR_REST')
@@ -106,6 +110,9 @@ def profile_tables(baseline,membership,roles,manifest,validation,seed):
                         row.update(effect=effect,effect_type='odds_ratio' if binary else 'cliffs_delta',ci_low=lo,ci_high=hi,p_value=float(p),
                             inference_scope='in_sample_exploratory_conditional_on_frozen_labels',community_selection_uncertainty='not_included_conditional_intervals')
                     anchor_rows.append(row.copy())
+                row.update(n_group=len(group),n_observed=len(observed),n_missing=len(group)-len(observed),
+                    n_stable_hard=int(group.structural_stability_status.eq('stable').sum()),
+                    n_provisional_hard=int(group.structural_stability_status.ne('stable').sum()))
                 signatures.append(row)
         # Unavailable anchors are explicit rows, rather than disappearing.
         for role in part_roles.loc[part_roles.validation_role.eq('unavailable')].itertuples():
@@ -129,7 +136,8 @@ def profile_tables(baseline,membership,roles,manifest,validation,seed):
     if not signatures.empty and not anchors.empty:
         qlookup={(r.representation_id,str(getattr(r,'community_id','')),r.source_column):r.q_value for r in anchors.itertuples()}
         signatures['q_value']=[qlookup.get((r.representation_id,str(r.community_id),r.source_column),np.nan) for r in signatures.itertuples()]
-    return {'baseline':pd.DataFrame(baseline_rows),'signatures':signatures,'anchors':anchors,'missingness':pd.DataFrame(missing),'flow':pd.DataFrame(flow)}
+    return {'baseline':enrich_roles(pd.DataFrame(baseline_rows),roles),'signatures':enrich_roles(signatures,roles),
+            'anchors':enrich_roles(anchors,roles),'missingness':pd.DataFrame(missing),'flow':pd.DataFrame(flow)}
 
 
 
@@ -163,7 +171,7 @@ def clinical_domains(baseline,membership,roles,registry,manifest,minimum_cell):
                     value_summary='median_original_observed_source_units' if is_numeric else 'category_counts',
                     unit=meta.get('unit','source_units'),status='SUPPRESSED_SMALL_CELL' if small else 'DESCRIPTIVE',
                     reason='NO_OBSERVED_SOURCE_VALUES' if n==0 else '',inferential_scope='descriptive_not_independent_validation'))
-    return pd.DataFrame(rows) if rows else pd.DataFrame([{'status':'NOT_ESTIMABLE','reason':'NO_SUPPORTED_COMMUNITIES'}])
+    return enrich_roles(pd.DataFrame(rows),roles) if rows else pd.DataFrame([{'status':'NOT_ESTIMABLE','reason':'NO_SUPPORTED_COMMUNITIES'}])
 
 
 def uncovered_profiles(baseline,membership,roles,manifest,minimum_cell):
@@ -241,4 +249,15 @@ def clinical_marker_summaries(baseline,membership,roles,manifest,validation):
                     status=('DESCRIPTIVE_PROVISIONAL' if identifier=='R2' or not group.structural_stability_status.eq('stable').all() else 'DESCRIPTIVE') if len(values) else 'NOT_ESTIMABLE',
                     reason='' if len(values) else 'NO_OBSERVED_NUMERIC_MARKER',
                     inference_scope='observed_baseline_description_not_independent_validation'))
-    return pd.DataFrame(rows)
+    return enrich_roles(pd.DataFrame(rows),roles)
+
+
+def enrich_roles(frame,roles):
+    """Add the versioned gate without changing historical values or roles."""
+    if frame.empty or not {'representation_id','source_column'}<=set(frame): return frame
+    keys=['representation_id','source_column']
+    columns=[c for c in ['tier','independence_status','evidence_level','inferential_eligible',
+                        'blocking_reasons','relationship_type','classification_policy_version'] if c in roles and c not in frame]
+    frame=frame.merge(roles[keys+columns],on=keys,how='left',validate='many_to_one')
+    if 'n_patients' in frame and 'n_group' not in frame: frame['n_group']=frame.n_patients
+    return frame

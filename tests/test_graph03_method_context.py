@@ -102,7 +102,8 @@ def test_transitive_lineage_blocks_instruments_and_proxies_per_representation():
     features=pd.DataFrame([dict(representation_id=rep,source_column=c,feature=c,included=True)
         for rep,cols in [('R0',['essdai__activity','esspri__pain','pro__sf36_pcs','discovery_lab']),('R2',['independent_lab'])] for c in cols])
     registry=pd.DataFrame([dict(source_column='bridge',derived_from='discovery_lab'),
-                           dict(source_column='pop__status',derived_from='essdai__total')])
+                           dict(source_column='pop__status',derived_from='essdai__total'),
+                           dict(source_column='essdai__activity',derived_from='essdai__total')])
     roles=feature_roles(features,baseline,cfg,['R0','R2'],registry)
     for source in ['essdai__total','esspri__total','proxy','pro__sf36_mcs','pop__status']:
         assert roles.query("representation_id=='R0' and source_column==@source").validation_role.iloc[0]=='derived_from_defining'
@@ -219,6 +220,29 @@ def test_pipeline_frozen_release_and_historical_compatibility(configuration,tmp_
     assert summary['temporal_resolution_version']=='graph03_episode_resolution_v1'
     assert summary['n_endpoint_analyses']==len(manifest['eligible_representation_ids'])*len(cfg['validation']['longitudinal_endpoints'])
     assert summary['pop_denominator_qc']['status']=='PASS' and summary['pop_denominator_qc']['crosswalk_reconciled']
+    assert summary['characterization_qc_status']=='PASS'
+    role_inventory=pd.read_csv(output/'03_graph_characterization_role_inventory.csv')
+    assert not role_inventory.duplicated(['graph02_run_id','representation_id','source_column']).any()
+    assert role_inventory.graph02_release_sha256.eq(frozen_hash).all()
+    assert not role_inventory.loc[role_inventory.tier.ne('N3_REVIEWED'),'inferential_eligible'].any()
+    matrix=pd.read_csv(output/'03_graph_characterization_clinical_matrix.csv')
+    assert (matrix.n_observed+matrix.n_missing).eq(matrix.n_group).all()
+    tier_qc=json.loads((output/'03_graph_characterization_qc.json').read_text())
+    assert tier_qc['status']=='PASS' and tier_qc['graph02_unchanged']
+    for row in tier_qc['denominators']:
+        from src.studies.graph.stage03.s03_release_reader import hard_members
+        assert row['n_hard_supported']==len(hard_members(frames['membership'],row['representation_id']))
+    for name in ['role_inventory','tier_counts','clinical_matrix','independence_audit','evidence_summary']:
+        table=pd.read_csv(output/f'03_graph_characterization_{name}.csv')
+        assert 'patient_id' not in table
+    for name in ['N1_R0','N1_R2','N2_R0','N2_R2','N3_R0','N3_R2','role_crosswalk','availability']:
+        for ext in ['csv','png','pdf']:
+            assert (output/f'figures/03_graph_characterization_{name}.{ext}').is_file()
+    pending=pd.read_csv(output/'03_graph_independent_anchor_validation.csv')
+    if not pending.empty:
+        assert pending.status.eq('NOT_ESTIMABLE').all() and pending.p_value.isna().all()
+    assert pipe.digest(path)==frozen_hash and pipe.digest(pointer)==pointer_hash
+
     for name in ['temporal_source_audit','episode_collision_summary','episode_resolution_audit',
                  'longitudinal_denominator_audit','longitudinal_unresolved_reasons',
                  'pop_denominator_audit','pop_transition_eligibility','clinical_marker_summary']:

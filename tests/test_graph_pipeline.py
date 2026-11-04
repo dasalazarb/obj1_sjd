@@ -304,6 +304,8 @@ def clinical_frames(n=90):
     from tests.test_graph03_episode_resolution import synthetic_policy
     config=synthetic_policy(pipe.load_pipeline()['validation']); config['confounders']=[]; config['effect_ci_replicates']=30
     features=pd.DataFrame({'representation_id':['R0'],'source_column':['pro__sf36_pcs'],'feature':['pro__sf36_pcs'],'included':[True]})
+    from tests.test_graph_characterization_tiers import approve_synthetic
+    for source in ['essdai__total','esspri__total']: approve_synthetic(config,source,'R0')
     roles=feature_roles(features,baseline,config,['R0'])
     return baseline,membership,manifest,config,roles
 

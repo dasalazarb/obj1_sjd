@@ -240,3 +240,105 @@ def save_figure_copy(fig,folder,name,source):
     folder.mkdir(parents=True,exist_ok=True)
     source.to_csv(folder/f'{name}.csv',index=False)
     for extension in ('png','pdf'): fig.savefig(folder/f'{name}.{extension}',bbox_inches='tight',dpi=180)
+
+
+def safe_characterization_panels(matrix, minimum):
+    """Suppress the entire representation/source partition, including complements.
+
+    Identical suppression feeds clinical and availability views, so another panel
+    cannot reconstruct an omitted count. Groups at the minimum require review.
+    """
+    if matrix.empty: return matrix.copy()
+    counts=[c for c in ['n_group','n_observed','n_missing','n_tested','n_unknown','n_not_tested',
+                        'n_pos','n_neg','n_category','n_stable_hard','n_provisional_hard'] if c in matrix]
+    bad=pd.Series(False,index=matrix.index)
+    for column in counts:
+        values=pd.to_numeric(matrix[column],errors='coerce')
+        bad |= values.gt(0) & values.lt(minimum)
+    bad |= matrix.n_group.le(minimum)
+    excluded=set(map(tuple,matrix.loc[bad,['representation_id','source_column']].to_numpy()))
+    return matrix.loc[[tuple(k) not in excluded for k in matrix[['representation_id','source_column']].to_numpy()]].copy()
+
+
+def characterization_figures(matrix, roles, folder, validation, minimum_cell=5):
+    panel=validation.get('clinical_marker_panels',[])
+    labels={m['source_column']:m['label'] for m in panel}
+    protocol_sources=validation.get('characterization',{}).get('figure_sources',[m['source_column'] for m in panel])
+    all_sources=[m['source_column'] for m in panel]
+    safe=safe_characterization_panels(matrix,minimum_cell)
+    safe=safe.loc[safe.source_column.isin(all_sources)].copy() if not safe.empty else safe
+    inventory=[]
+    titles={'N1':'Variables used to construct the embedding — descriptive only',
+            'N2':'Related sources — documented dependence / descriptive only',
+            'N3':'Independent candidates — review and statistical gates required'}
+    for rep in ['R0','R2']:
+        for level,tiers in [('N1',['N1_DEFINING']),('N2',['N2_RELATED']),('N3',['N3_CANDIDATE','N3_REVIEWED'])]:
+            raw_roles=roles.loc[roles.representation_id.eq(rep) & roles.tier.isin(tiers) & roles.source_column.isin(all_sources)]
+            sources=[s for s in (protocol_sources if level=='N1' else all_sources) if s in set(raw_roles.source_column)]
+            fig,axes=plt.subplots(max(1,(len(sources)+1)//2),2,figsize=(13,3.6*max(1,(len(sources)+1)//2)),squeeze=False,constrained_layout=True)
+            plotted=[]
+            for ax,source in zip(axes.flat,sources):
+                part=safe.loc[safe.representation_id.eq(rep) & safe.source_column.eq(source) & safe.n_observed.gt(0)].copy() if not safe.empty else safe
+                if part.empty:
+                    row=raw_roles.loc[raw_roles.source_column.eq(source)].iloc[0]
+                    _empty(ax,('REVIEW_PENDING / ' if row.tier=='N3_CANDIDATE' else '')+'NOT_ESTIMABLE\nNo publishable observed source panel; source absent or disclosure control')
+                else:
+                    part=part.sort_values(['community_id','category'])
+                    x=np.arange(len(part)); is_numeric=part.data_type.eq('numeric').all()
+                    if is_numeric:
+                        ax.errorbar(x,part['median'],yerr=np.array([part['median']-part.q25,part.q75-part['median']]),fmt='o',capsize=3)
+                    else: ax.plot(x,part.proportion,'o'); ax.set_ylim(0,1)
+                    ticks=[]
+                    for row in part.itertuples():
+                        state='\n'+row.inference_status if level=='N3' else ''
+                        ticks.append(f'C{row.community_id}'+(f'/{row.category}' if row.category else '')+f'\nn={row.n_observed}/{row.n_group}'+state)
+                    ax.set(xticks=x,xticklabels=ticks,ylabel=part.unit.iloc[0] if is_numeric else 'Observed proportion')
+                    plotted.append(part)
+                relation='\n'+str(raw_roles.loc[raw_roles.source_column.eq(source),'relationship_type'].iloc[0]) if level=='N2' else ''
+                ax.set_title(labels.get(source,source)+relation,fontsize=9)
+            for ax in list(axes.flat)[len(sources):]: ax.axis('off')
+            if not sources:
+                axes.flat[0].axis('on'); _empty(axes.flat[0],f'NOT_ESTIMABLE\nNo {level} sources in the prespecified panel.\nNo relationships or independence approvals inferred.')
+            fig.suptitle(f'{rep}'+(' — EXPLORATORY_PROVISIONAL' if rep=='R2' else ' — primary reference')+'\n'+titles[level]+'\nObserved medians / IQR or category proportions; clinical provenance review pending',fontsize=11)
+            name=f'03_graph_characterization_{level}_{rep}'
+            data=pd.concat(plotted,ignore_index=True) if plotted else pd.DataFrame(columns=['representation_id','source_column','status','reason'])
+            save_figure(fig,folder,name,data)
+            inventory.append(dict(figure=name,status='DESCRIPTIVE' if len(data) else 'NOT_ESTIMABLE',reason='' if len(data) else 'NO_PUBLISHABLE_PRESPECIFIED_TIER_PANEL'))
+    crosswalk=roles.loc[roles.representation_id.isin(['R0','R2']) & roles.source_column.isin(all_sources),
+        ['source_column','representation_id','tier','independence_status','relationship_type','blocking_reasons']].copy()
+    fig,ax=plt.subplots(figsize=(8,8),constrained_layout=True)
+    codes={'N1_DEFINING':0,'N2_RELATED':1,'N3_CANDIDATE':2,'N3_REVIEWED':3,'PENDING_REVIEW':4,'UNAVAILABLE':5}
+    if not crosswalk.empty:
+        grid=crosswalk.pivot(index='source_column',columns='representation_id',values='tier').reindex(index=all_sources,columns=['R0','R2'])
+        values=grid.apply(lambda column:column.map(codes)).to_numpy(float)
+        ax.imshow(values,aspect='auto',vmin=0,vmax=5,cmap=plt.get_cmap('tab10',6))
+        for i,source in enumerate(grid.index):
+            for j,rep in enumerate(grid.columns):
+                value=grid.loc[source,rep]; ax.text(j,i,str(value).replace('_',' '),ha='center',va='center',fontsize=7)
+        ax.set(xticks=[0,1],xticklabels=['R0 primary','R2 provisional'],yticks=range(len(grid)),yticklabels=[labels[s] for s in grid.index])
+    else: _empty(ax)
+    ax.set_title('Prespecified source roles by frozen representation\nNo patient measurements; absence is not independence')
+    save_figure(fig,folder,'03_graph_characterization_role_crosswalk',crosswalk)
+    inventory.append(dict(figure='03_graph_characterization_role_crosswalk',status='DESCRIPTIVE' if len(crosswalk) else 'NOT_ESTIMABLE',reason=''))
+    availability=safe.drop_duplicates(['representation_id','community_id','source_column']).copy() if not safe.empty else safe
+    columns=['representation_id','community_id','source_column','tier','n_group','n_observed','n_missing','n_tested','n_unknown','n_not_tested','status']
+    availability=availability.reindex(columns=columns)
+    availability['observed_fraction']=availability.n_observed/availability.n_group
+    fig,ax=plt.subplots(figsize=(12,8),constrained_layout=True)
+    if not availability.empty:
+        availability['group_label']=availability.representation_id+'/C'+availability.community_id.astype(str)
+        grid=availability.pivot(index='source_column',columns='group_label',values='observed_fraction')
+        art=ax.imshow(grid,aspect='auto',vmin=0,vmax=1)
+        for i,source in enumerate(grid.index):
+            for j,group in enumerate(grid.columns):
+                row=availability.loc[availability.source_column.eq(source)&availability.group_label.eq(group)]
+                if len(row): ax.text(j,i,f'{int(row.n_observed.iloc[0])}/{int(row.n_group.iloc[0])}',ha='center',va='center',fontsize=7)
+        ax.set(xticks=range(len(grid.columns)),xticklabels=grid.columns,yticks=range(len(grid)),yticklabels=[labels[s] for s in grid.index])
+        fig.colorbar(art,ax=ax,label='Observed / hard supported; unknown and not tested are not negative')
+    else: _empty(ax)
+    ax.set_title('Source availability — separate from clinical magnitude\nR2 provisional; whole source panels suppressed for disclosure control')
+    save_figure(fig,folder,'03_graph_characterization_availability',availability)
+    inventory.append(dict(figure='03_graph_characterization_availability',status='DESCRIPTIVE' if len(availability) else 'NOT_ESTIMABLE',reason=''))
+    path=folder/'03_graph_figure_status.csv'
+    old=pd.read_csv(path) if path.exists() else pd.DataFrame()
+    pd.concat([old,pd.DataFrame(inventory)],ignore_index=True).to_csv(path,index=False)

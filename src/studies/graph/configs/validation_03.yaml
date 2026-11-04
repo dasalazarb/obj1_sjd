@@ -61,18 +61,90 @@ temporal_resolution:
   preserve_strict_post_index: true
   endpoint_policies: {}
 clinical_marker_panels:
+- source_column: ext__ocular_schirmer_min
+  label: Schirmer minimum
+  unit: source_units_pending_review
+  clinical_domain: D01
+- source_column: ext__ocular_oxford_max
+  label: Oxford maximum
+  unit: source_units_pending_review
+  clinical_domain: D01
+- source_column: ext__salivary_flow_unstimulated
+  label: Unstimulated salivary flow
+  unit: source_units_pending_review
+  clinical_domain: D02
+- source_column: lab__anti_ro_ssa__text
+  label: Anti-Ro/SSA
+  unit: reported_category
+  clinical_domain: D03
+- source_column: lab__anti_la_ssb__text
+  label: Anti-La/SSB
+  unit: reported_category
+  clinical_domain: D03
+- source_column: lab__igg__value
+  label: IgG
+  unit: source_units_pending_review
+  clinical_domain: D04
+- source_column: lab__complement_c3__value
+  label: Complement C3
+  unit: source_units_pending_review
+  clinical_domain: D04
+- source_column: lab__complement_c4__value
+  label: Complement C4
+  unit: source_units_pending_review
+  clinical_domain: D04
+- source_column: lab__esr__value
+  label: ESR
+  unit: source_units_pending_review
+  clinical_domain: D05
 - source_column: essdai__total
   label: ESSDAI total
   unit: ESSDAI points
+  clinical_domain: D07
 - source_column: esspri__total
   label: ESSPRI total
   unit: ESSPRI points
+  clinical_domain: D06
 - source_column: pro__sf36_pcs
   label: SF-36 PCS
   unit: SF-36 PCS points
+  clinical_domain: D06
 - source_column: pro__profad_total
   label: PROFAD total
   unit: PROFAD points
+  clinical_domain: D06
 - source_column: pro__mdafs_global
   label: MDAFS global
   unit: MDAFS points
+  clinical_domain: D06
+
+# Source-level roles are representation-specific. This contract never approves
+# endpoint dates, the R2 clinical map, or independence by absence of conflicts.
+characterization:
+  schema_version: graph03_characterization_v1
+  figure_sources: [ext__ocular_schirmer_min, ext__ocular_oxford_max,
+    ext__salivary_flow_unstimulated, lab__igg__value, lab__complement_c3__value,
+    pro__sf36_pcs, pro__profad_total, pro__mdafs_global]
+  independence_reviews: []
+  # Review records require exact representation_id/source_column, reviewer,
+  # source_reference, baseline_window, temporal_baseline_status: VERIFIED, and
+  # APPROVED lineage/clinical/origin/proxy/discovery_exclusion_review_status.
+  instruments:
+  - instrument: ESSPRI
+    source_reference: src/block_A/13_disease_activity_progression.py:ESSPRI
+    source_columns: [esspri__total, esspri__dryness, esspri__fatigue, esspri__pain]
+  - instrument: SF36
+    source_reference: src/derivations/pro_scoring.py
+    source_columns: [pro__sf36_pcs, pro__sf36_mcs, pro__sf36_physical_functioning,
+      pro__sf36_role_physical, pro__sf36_bodily_pain, pro__sf36_general_health,
+      pro__sf36_vitality, pro__sf36_social_functioning, pro__sf36_role_emotional,
+      pro__sf36_mental_health]
+  relationships:
+  - source_column: pop__status
+    target_source: essdai__total
+    relationship_type: composite_component
+    source_reference: src/block_A/observed_patterns.py:verified_baseline_pop
+  - source_column: pop__status
+    target_source: esspri__total
+    relationship_type: composite_component
+    source_reference: src/block_A/observed_patterns.py:verified_baseline_pop

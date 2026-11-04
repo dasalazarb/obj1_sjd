@@ -6,6 +6,7 @@ import statsmodels.formula.api as smf
 from .s03_release_reader import hard_members
 from .s03_profiles import numeric,observed_values
 from .s03_statistics import bh_qvalues
+from .s03_construct_validation import independence_block
 
 
 def pop_crosswalk(baseline,membership,identifiers,config):
@@ -29,13 +30,16 @@ def incremental_models(baseline,membership,roles,manifest,config):
     for identifier in manifest['eligible_representation_ids']:
         members=hard_members(membership,identifier)
         frame=members.merge(baseline,on='patient_id',validate='one_to_one')
-        role_map=roles.loc[roles.representation_id.eq(identifier)].set_index('source_column').validation_role.to_dict()
+        role_map=roles.loc[roles.representation_id.eq(identifier)].set_index('source_column').to_dict('index')
         for anchor in config['anchors']:
             column=anchor['source_column']; row={'representation_id':identifier,'endpoint':column,'status':'NOT_ESTIMABLE',
                 'inference_scope':'in_sample_exploratory_conditional_on_frozen_labels','hypothesis_family':f'{identifier}/incremental',
                 'community_selection_uncertainty':'not_included_conditional_intervals','p_value':np.nan,
                 'interpretation':'in_sample_delta_r2_not_external_predictive_utility'}
-            if role_map.get(column)!='independent_baseline_anchor': row['reason']='ENDPOINT_UNAVAILABLE_OR_CIRCULAR'
+            role=role_map.get(column,{})
+            row.update({key:role.get(key) for key in ['tier','independence_status','inferential_eligible']})
+            block=independence_block(role)
+            if block: row['reason']=block
             elif manifest['release_status']=='NO_STABLE_STRUCTURE' or not frame.structural_stability_status.eq('stable').all(): row['reason']='TOPOLOGY_NOT_STABLE'
             elif config['pop_column'] not in frame: row['reason']='POP_UNAVAILABLE'
             else:
