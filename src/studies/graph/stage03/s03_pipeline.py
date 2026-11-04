@@ -12,12 +12,14 @@ from .s03_longitudinal import longitudinal,pop_transitions,comparable_longitudin
 from .s03_episode_audit import resolve_all_endpoints, VERSION
 from .s03_rare_events import rare_event_table
 from .s03_reporting import figures,characterization_figures,safe_characterization_panels
+from .s03_figure_qc import figure_qc,validate_figure_policy
 from .s03_characterization import statistical_role_gates,characterization_tables,characterization_qc
 from .s03_uncertainty import discovery_sensitivity
 from .s03_method_context import method_context,missingness_interpretation,representation_evidence
 
 
 def run(cfg, *, graph02_release=None,root=None,run_id=None,preflight_only=False):
+    validate_figure_policy(cfg['validation'])
     manifest,path,frames=read_release(cfg,graph02_release)
     pointer=output_root(cfg,'02')/'latest_completed_02.json'
     pointer_sha=digest(pointer) if pointer.exists() else None
@@ -127,12 +129,18 @@ def run(cfg, *, graph02_release=None,root=None,run_id=None,preflight_only=False)
         safe_markers=markers.merge(safe_keys,on=['representation_id','source_column'],how='inner') if not markers.empty else markers
         safe_domains=domains.merge(safe_keys,on=['representation_id','source_column'],how='inner') if 'source_column' in domains else domains
         safe_anchors=tables['anchors'].merge(safe_keys,on=['representation_id','source_column'],how='inner') if not tables['anchors'].empty else tables['anchors']
-        figures(safe_anchors,trajectories,pop,run_dir/'figures',flow=tables['flow'],domains=safe_domains,
+        figure_sources=figures(safe_anchors,trajectories,pop,run_dir/'figures',flow=tables['flow'],domains=safe_domains,
             context=context,missingness=missingness,minimum_cell=minimum_cell,primary_reference_id=manifest['primary_reference_id'],
-            baseline_table=safe_markers,marker_config=validation.get('clinical_marker_panels',[]))
-        characterization_figures(characterization['clinical_matrix'],roles,run_dir/'figures',validation,minimum_cell)
+            baseline_table=safe_markers,marker_config=validation.get('clinical_marker_panels',[]),
+            raw_matrix=characterization['clinical_matrix'],roles=roles)
+        presentation=characterization_figures(characterization['clinical_matrix'],roles,run_dir/'figures',validation,minimum_cell,provenance=provenance)
+        save_table(run_dir/'03_graph_characterization_N2_source_selection.csv',presentation['selection'])
+        figure_sources.update(presentation['sources'])
+        presentation_qc=figure_qc(run_dir/'figures',figure_sources,{**provenance,'graph03_run_id':run_dir.name},protected_matrix=safe_matrix)
+        write_json(run_dir/'03_graph_figure_qc.json',presentation_qc)
+        if presentation_qc['status']=='FAILED': raise ValueError('GRAPH03_FIGURE_QC_FAILED')
         (run_dir/'figures/README.md').write_text('Aggregate internal figures and source CSVs. Publication review is required; no automatic public export. Small cells are suppressed using the configured publication minimum.\n')
-        limited=any(row['status'] not in {'COMPLETE','DESCRIPTIVE'} for row in statuses)
+        limited=any(row['status'] not in {'COMPLETE','DESCRIPTIVE'} for row in statuses) or presentation_qc['status']!='PASS'
         status='COMPLETE_WITH_LIMITATIONS' if limited else 'COMPLETE'
         (run_dir/'03_graph_results_summary.md').write_text(f'# Graph03 exploratory interpretation\n\nEXPLORATORY: no confirmatory clinical or predictive claims.\n\nFrozen Graph02 run: {manifest["run_id"]}; release SHA: {digest(path)}.\n\nPatients: {len(baseline)}; execution: {status}. Raw observed baseline values only; no imputation or discovery refit.\n\nCommunity and time effects are conditional on estimated frozen labels; intervals do not incorporate discovery uncertainty. See validation status for every unavailable or circular hypothesis.\n\nR0 is the frozen primary reference; R2 clinical comparison retains the release mapping and evidence status; other eligible representations are technical comparators.\n\n'
             + evidence[['representation_id','analysis_role','clinical_mapping_status','evidence_level','limitation_reason']].to_csv(index=False)
@@ -143,6 +151,14 @@ def run(cfg, *, graph02_release=None,root=None,run_id=None,preflight_only=False)
         n_models=int(eligibility.status.eq('COMPLETE').sum())
         n_unresolved=int(temporal_tables['resolution'].n_unresolved_groups.sum())
         with (run_dir/'03_graph_results_summary.md').open('a') as stream:
+            stream.write(f'\nCharacterization table QC: {tier_qc["status"]}. Figure QC: {presentation_qc["status"]}. '
+                f'R0/R2 clinical figures displayed: {presentation_qc["n_r0_r2_clinical_figures_displayed"]}.\n\n')
+            stream.write('COMPLETE_WITH_LIMITATIONS does not imply clinically shareable figures. '
+                'Disclosure withholding is a presentation restriction, not absent clinical evidence or scientific non-estimability. '
+                'Candidate independence review and display status are separate. See 03_graph_figure_qc.json and figures/03_graph_figure_status.csv.\n\n')
+            stream.write(presentation['inventory'][['figure','display_status','inference_status','reason']].to_csv(index=False))
+            stream.write('\nN2 selections and documented N1-to-N2 lineage (metadata only):\n\n')
+            stream.write(presentation['selection'].to_csv(index=False))
             stream.write('\nSource characterization levels: N1 explains internal structure; N2 is related descriptive evidence; N3 candidates are not validated. Only documented reviewed N3 sources may enter exploratory conditional inference after statistical gates. Pending review is NOT_ESTIMABLE / INDEPENDENCE_REVIEW_PENDING.\n\n')
             stream.write(characterization['tier_counts'].to_csv(index=False))
             stream.write('\nSee characterization_independence_audit.csv and characterization_qc.json for exact sources requiring clinical/lineage/baseline review. Longitudinal endpoint approvals are separate and unchanged.\n')
@@ -162,6 +178,10 @@ def run(cfg, *, graph02_release=None,root=None,run_id=None,preflight_only=False)
             'characterization_policy_version':tier_qc['classification_policy_version'],
             'characterization_tier_counts':tier_qc['tier_counts'],
             'characterization_qc_status':tier_qc['status'],
+            'figure_qc_status':presentation_qc['status'],
+            'figure_qc_artifact':'03_graph_figure_qc.json',
+            'n_r0_r2_clinical_figures_displayed':presentation_qc['n_r0_r2_clinical_figures_displayed'],
+            'r0_r2_display_limitation':presentation_qc['r0_r2_display_limitation'],
             'n_review_pending_sources':int(roles.tier.eq('N3_CANDIDATE').sum()),
             'n_reviewed_independent_sources':int(roles.tier.eq('N3_REVIEWED').sum()),
             'temporal_resolution_version':VERSION,'n_endpoint_analyses':len(eligibility),

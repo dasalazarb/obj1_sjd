@@ -125,6 +125,37 @@ characterization:
   figure_sources: [ext__ocular_schirmer_min, ext__ocular_oxford_max,
     ext__salivary_flow_unstimulated, lab__igg__value, lab__complement_c3__value,
     pro__sf36_pcs, pro__profad_total, pro__mdafs_global]
+  # Plot selection never supplies lineage evidence or changes source roles.
+  figure_sources_N2:
+  - source_column: ext__ocular_schirmer_right
+    label: Schirmer right (component of minimum)
+    related_to: ext__ocular_schirmer_min
+    expected_relationship: component_of
+    clinical_domain: D01
+    selection_reason: interpretability_of_objective_ocular_construct
+    review_status: descriptive_selection_not_clinical_approval
+  - source_column: lab__igg__text
+    label: IgG reported interpretation
+    related_to: lab__igg__value
+    expected_relationship: same_raw_source
+    clinical_domain: D04
+    selection_reason: qualitative_companion_to_quantitative_assay
+    review_status: descriptive_selection_not_clinical_approval
+  - source_column: lab__complement_c3__text
+    label: C3 reported interpretation
+    related_to: lab__complement_c3__value
+    expected_relationship: same_raw_source
+    clinical_domain: D04
+    selection_reason: qualitative_companion_to_quantitative_assay
+    review_status: descriptive_selection_not_clinical_approval
+  figure_policy:
+    disclosure_mode: conservative_whole_source_partition_v1
+    restricted_view:
+      enabled: false
+      authorization_reference: null
+      approved_output_root: null
+      automatic_packaging: false
+      publication_eligible: false
   independence_reviews: []
   # Review records require exact representation_id/source_column, reviewer,
   # source_reference, baseline_window, temporal_baseline_status: VERIFIED, and
