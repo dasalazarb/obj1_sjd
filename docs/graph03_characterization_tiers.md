@@ -112,3 +112,44 @@ release integration, and the empty-Mapper pipeline. `git diff --check` passed.
 The real zero-argument run stopped at `MISSING_COMPLETED_GRAPH02_RELEASE` because
 this workspace contains neither the completed clinical release nor its source
 dataset. No real discovery run was launched and no clinical approval was added.
+
+## Protected figure presentation (2026-11-04)
+
+`safe_characterization_panels` remains the single disclosure policy. It removes
+whole representation/source partitions, including groups at the publication
+minimum. Historical clinical panels, tier panels and availability consume that
+protected view. Historical median/IQR panels display numeric sources only;
+binary and categorical sources retain their typed tier panels. Their CSV adds
+`source_column` for provenance; historical table schemas and values are unchanged.
+
+`characterization.figure_sources_N2` selects dependent descriptions without
+adding lineage edges, changing roles, or approving inference. Each source is
+checked separately for R0/R2 against its N2 role, expected relationship, defining
+target and frozen lineage evidence. Nonstandard laboratory text is marked
+`NOT_INTERPRETABLE_UNITS_OR_LEVELS`; it is never standardized by this renderer.
+`03_graph_characterization_N2_source_selection.csv` records decisions and frozen
+release provenance, including unavailable or rejected selections.
+
+The existing figure inventory retains `figure,status,reason` and adds tier,
+representation, requested/matching/observed/displayable source counts, withheld
+partition counts, displayed community counts, disclosure policy, visibility,
+and separate display/inference states. Counts refer to source metadata; withheld
+patient values and counts are never included. Non-source historical panels use
+empty metadata counts where those quantities do not apply. A candidate can have
+`inference_status=REVIEW_PENDING` and
+`display_status=WITHHELD_DISCLOSURE_CONTROL` simultaneously.
+
+`03_graph_figure_qc.json` checks the complete expected figure set, artifact
+presence/signatures, unique inventory entries, content/status agreement, exact
+rendering CSVs and clinical rows against the protected view. It references hashes
+in the existing `03_graph_artifact_inventory.csv`. Legitimate withholding yields
+`PASS_WITH_PRESENTATION_LIMITATIONS`; missing or inconsistent artifacts yield
+`FAILED`. Markdown/JSON summaries report table and figure QC separately.
+Availability names the representations actually visible and explicitly records
+`NO_R0_R2_DISPLAYABLE_PANELS` when both primary clinical panels are absent.
+
+All products remain `INTERNAL_RESTRICTED`, with publication review required and
+automatic shareable export disabled. The restricted-view contract is disabled;
+enabling it without authorization/destination fails, and this implementation
+also rejects authorized activation because no alternate renderer is implemented.
+No restricted output directory or review ZIP is created.

@@ -331,3 +331,283 @@ def test_boolean_summaries_preserve_frozen_tiers_memberships_and_figure_privacy(
         content=path.read_text()
         assert 'patient_id' not in content
         assert not any(identifier in content for identifier in baseline.patient_id)
+
+
+# Presentation tests below use only invented source values and frozen labels.
+from src.studies.graph.stage03.s03_figure_qc import (
+    evaluate_characterization_panel, select_n2_sources, figure_qc, validate_figure_policy)
+
+
+def presentation_fixture():
+    cfg,baseline,membership,meta,features=fixture()
+    baseline['related']=np.arange(len(baseline),dtype=float)
+    cfg['clinical_marker_panels']=[dict(source_column='unused',label='Invented defining',unit='synthetic_units',clinical_domain='D04'),
+        dict(source_column='independent',label='Invented candidate',unit='synthetic_units',clinical_domain='D04')]
+    cfg['characterization']['figure_sources']=['unused']
+    cfg['characterization']['figure_sources_N2']=[dict(source_column='related',label='Invented related',
+        related_to='unused',expected_relationship='derived_from',clinical_domain='D04',
+        selection_reason='SYNTHETIC_TEST_ONLY:dependent_description',review_status='descriptive_selection_not_clinical_approval')]
+    cfg['characterization']['relationships'].append(dict(source_column='related',target_source='unused',
+        relationship_type='derived_from',source_reference='SYNTHETIC_TEST_ONLY:invented_derivation'))
+    membership=pd.concat([membership,membership.assign(representation_id='R2')],ignore_index=True)
+    features=pd.concat([features,features.assign(representation_id='R2')],ignore_index=True)
+    meta['eligible_representation_ids']=['R0','R2']
+    registry=pd.DataFrame([dict(source_column='related',clinical_domain='D04')])
+    roles=feature_roles(features,baseline,cfg,['R0','R2'],registry)
+    return cfg,baseline,membership,meta,roles
+
+
+def presentation_matrix(baseline,membership,roles,meta,cfg):
+    return characterization_tables(baseline,membership,roles,meta,cfg,pd.DataFrame())['clinical_matrix']
+
+
+@pytest.mark.parametrize('size',[4,5])
+def test_exact_publication_boundary_withholds_entire_partition(size):
+    cfg,baseline,membership,meta,roles=presentation_fixture()
+    membership['community_id']=np.tile([0]*(60-size)+[1]*size,2)
+    raw=presentation_matrix(baseline,membership,roles,meta,cfg)
+    original=raw.copy(deep=True)
+    safe=safe_characterization_panels(raw,5)
+    assert safe.empty
+    for tier,source in [('N1','unused'),('N2','related'),('N3','independent')]:
+        state=evaluate_characterization_panel(raw,safe,roles,representation_id='R0',tier=tier,
+            selected_sources=[source],minimum_cell=5)
+        assert state['display_status']=='WITHHELD_DISCLOSURE_CONTROL'
+        assert state['n_sources_with_observations']==1
+        assert state['n_source_partitions_withheld']==1
+        assert state['n_displayable_sources']==state['n_communities_displayed']==0
+        assert state['inference_status']==('REVIEW_PENDING' if tier=='N3' else
+            'DESCRIPTIVE_DEFINING' if tier=='N1' else 'DESCRIPTIVE_DEPENDENT')
+        assert 'n_group' not in state and 'median' not in state
+    pd.testing.assert_frame_equal(raw,original)
+
+
+def test_no_selection_absent_measurements_and_actual_display_are_distinct():
+    cfg,baseline,membership,meta,roles=presentation_fixture()
+    raw=presentation_matrix(baseline,membership,roles,meta,cfg)
+    safe=safe_characterization_panels(raw,5)
+    def evaluate(selected,view=raw):
+        return evaluate_characterization_panel(view,safe_characterization_panels(view,5),roles,
+            representation_id='R0',tier='N2',selected_sources=selected,minimum_cell=5)
+    assert evaluate([])['status']=='NO_PRESPECIFIED_TIER_SOURCES'
+    assert evaluate(['independent'])['status']=='NO_PRESPECIFIED_TIER_SOURCES'
+    assert evaluate(['related'])['status']=='DISPLAYED_DESCRIPTIVE'
+    missing=raw.copy(); missing.loc[missing.source_column.eq('related'),'n_observed']=0
+    assert evaluate(['related'],missing)['status']=='SOURCE_UNAVAILABLE'
+    assert evaluate_characterization_panel(raw,safe,roles,representation_id='R0',tier='N2',
+        selected_sources=['related'],eligible_sources=[],minimum_cell=5)['status']=='SOURCE_SELECTION_REJECTED'
+
+
+@pytest.mark.parametrize('change,expected',[
+    ('valid','SELECTED_DESCRIPTIVE'),('wrong_relation','REJECTED'),('wrong_target','REJECTED'),
+    ('missing_evidence','REJECTED'),('missing_label','REJECTED'),('bad_domain','REJECTED'),
+    ('duplicate','REJECTED'),('r0_only','SELECTED_DESCRIPTIVE'),('no_values','SELECTED_DESCRIPTIVE')])
+def test_n2_selection_validates_frozen_lineage_without_changing_roles(change,expected):
+    cfg,baseline,membership,meta,roles=presentation_fixture()
+    spec=cfg['characterization']['figure_sources_N2'][0]
+    if change=='wrong_relation': spec['expected_relationship']='same_raw_source'
+    if change=='wrong_target': spec['related_to']='independent'
+    if change=='missing_label': del spec['label']
+    if change=='bad_domain': spec['clinical_domain']='D09'
+    if change=='duplicate': cfg['characterization']['figure_sources_N2'].append(deepcopy(spec))
+    if change=='missing_evidence':
+        roles.loc[roles.source_column.eq('related'),'conflicting_defining_sources']=''
+        roles.loc[roles.source_column.eq('related'),'lineage_evidence']='[]'
+    if change=='r0_only': roles.loc[roles.source_column.eq('related') & roles.representation_id.eq('R2'),'tier']='PENDING_REVIEW'
+    if change=='no_values': baseline['related']=np.nan
+    frozen=roles.copy(deep=True)
+    raw=presentation_matrix(baseline,membership,roles,meta,cfg)
+    selected=select_n2_sources(raw,safe_characterization_panels(raw,5),roles,cfg,5,
+        {'graph02_run_id':'invented_frozen_run','graph02_release_sha256':'invented_sha'})
+    assert selected.loc[selected.representation_id.eq('R0'),'selection_status'].eq(expected).all()
+    if change=='r0_only': assert selected.loc[selected.representation_id.eq('R2'),'selection_status'].eq('REJECTED').all()
+    if change=='no_values': assert selected.display_status.eq('SOURCE_UNAVAILABLE').all() and not selected.has_observed_values.any()
+    assert selected.graph02_release_sha256.eq('invented_sha').all()
+    pd.testing.assert_frame_equal(roles,frozen)
+    assert not any(c in selected for c in ['n_group','n_observed','median','patient_id'])
+
+
+@pytest.mark.parametrize('kind',['component_of','same_raw_source'])
+def test_n2_accepts_documented_components_and_same_source(kind):
+    cfg,baseline,membership,meta,roles=presentation_fixture()
+    mask=roles.source_column.eq('related')
+    roles.loc[mask,'relationship_type']=kind
+    cfg['characterization']['figure_sources_N2'][0]['expected_relationship']=kind
+    raw=presentation_matrix(baseline,membership,roles,meta,cfg)
+    selected=select_n2_sources(raw,safe_characterization_panels(raw,5),roles,cfg,5)
+    assert selected.selection_status.eq('SELECTED_DESCRIPTIVE').all()
+    assert selected.display_status.eq('DISPLAYED_DESCRIPTIVE').all()
+    assert roles.loc[mask,'tier'].eq('N2_RELATED').all()
+    assert not roles.loc[mask,'inferential_eligible'].any()
+
+
+@pytest.mark.parametrize('values,expected',[
+    (['nonstandard invented lab narrative','another invented narrative'],'NOT_INTERPRETABLE_UNITS_OR_LEVELS'),
+    (['positive','negative'],'SELECTED_DESCRIPTIVE')])
+def test_n2_laboratory_text_never_gets_arbitrary_standardization(values,expected):
+    cfg,baseline,membership,meta,roles=presentation_fixture()
+    source='lab__igg__text'
+    baseline=baseline.rename(columns={'related':source})
+    baseline[source]=values*30
+    roles.loc[roles.source_column.eq('related'),'source_column']=source
+    cfg['characterization']['figure_sources_N2'][0]['source_column']=source
+    raw=presentation_matrix(baseline,membership,roles,meta,cfg)
+    selected=select_n2_sources(raw,safe_characterization_panels(raw,5),roles,cfg,5)
+    assert selected.selection_status.eq(expected).all()
+    assert baseline[source].tolist()==values*30
+
+
+def test_all_withheld_figures_metadata_qc_and_no_rendered_values(tmp_path,monkeypatch):
+    import src.studies.graph.stage03.s03_reporting as reporting
+    cfg,baseline,membership,meta,roles=presentation_fixture()
+    membership['community_id']=np.tile([0]*55+[1]*5,2)
+    # No genuine patient data or clinical approval exists in this test.
+    baseline[['unused','related','independent']]=918273.125
+    raw=presentation_matrix(baseline,membership,roles,meta,cfg)
+    frozen_roles=roles.copy(deep=True); frozen_membership=membership.copy(deep=True)
+    originals=reporting.save_figure; rendered={}
+    def capture(fig,folder,name,source):
+        rendered[name]=dict(text=' '.join(t.get_text() for ax in fig.axes for t in ax.texts),
+            lines=sum(len(ax.lines) for ax in fig.axes))
+        originals(fig,folder,name,source)
+    monkeypatch.setattr(reporting,'save_figure',capture)
+    result=characterization_figures(raw,roles,tmp_path,cfg,5)
+    qc=figure_qc(tmp_path,result['sources'],{'graph02_run_id':'invented_release'})
+    assert qc['status']=='PASS_WITH_PRESENTATION_LIMITATIONS' and not qc['errors']
+    assert qc['n_figures_expected']==qc['n_figures_generated']==8
+    assert qc['n_r0_r2_clinical_figures_displayed']==0 and qc['n_withheld']==7
+    assert qc['publication_review_required'] and not qc['shareable_export_allowed']
+    status=pd.read_csv(tmp_path/'03_graph_figure_status.csv')
+    assert status.figure.is_unique
+    clinical=status.loc[status.tier.isin(['N1','N2','N3'])]
+    assert clinical.display_status.eq('WITHHELD_DISCLOSURE_CONTROL').all()
+    assert clinical.loc[clinical.tier.eq('N3'),'inference_status'].eq('REVIEW_PENDING').all()
+    assert result['selection'].display_status.eq('WITHHELD_DISCLOSURE_CONTROL').all()
+    assert result['selection'].selection_status.eq('SELECTED_DESCRIPTIVE').all()
+    for name in clinical.figure:
+        assert rendered[name]['lines']==0
+        assert 'WITHHELD_DISCLOSURE_CONTROL' in rendered[name]['text']
+        assert 'NOT_ESTIMABLE' not in rendered[name]['text']
+        assert pd.read_csv(tmp_path/f'{name}.csv').empty
+    availability=status.loc[status.figure.str.endswith('availability')].iloc[0]
+    assert 'NO_R0_R2_DISPLAYABLE_PANELS' in availability.reason
+    for item in rendered.values():
+        assert 'n=4' not in item['text'] and 'n=5' not in item['text'] and '918273' not in item['text']
+    for path in tmp_path.glob('*.csv'):
+        assert '918273' not in path.read_text() and 'patient_id' not in path.read_text()
+    # Rerendering replaces, rather than duplicates, inventory entries.
+    characterization_figures(raw,roles,tmp_path,cfg,5)
+    assert pd.read_csv(tmp_path/'03_graph_figure_status.csv').figure.is_unique
+    pd.testing.assert_frame_equal(roles,frozen_roles)
+    pd.testing.assert_frame_equal(membership,frozen_membership)
+    # Privacy violations and artifact loss fail QC; legitimate withholding did not.
+    name='03_graph_characterization_N1_R0'
+    raw.to_csv(tmp_path/f'{name}.csv',index=False)
+    assert figure_qc(tmp_path,result['sources'])['status']=='FAILED'
+    result['sources'][name].to_csv(tmp_path/f'{name}.csv',index=False)
+    (tmp_path/f'{name}.pdf').unlink()
+    assert figure_qc(tmp_path,result['sources'])['status']=='FAILED'
+
+
+def test_verified_n2_only_sources_are_drawn_for_both_representations(tmp_path):
+    cfg,baseline,membership,meta,roles=presentation_fixture()
+    result=characterization_figures(presentation_matrix(baseline,membership,roles,meta,cfg),roles,tmp_path,cfg,5)
+    qc=figure_qc(tmp_path,result['sources'])
+    assert qc['status']=='PASS' and qc['n_r0_r2_clinical_figures_displayed']==6
+    availability=pd.read_csv(tmp_path/'03_graph_characterization_availability.csv')
+    assert set(availability.loc[availability.source_column.eq('related'),'representation_id'])=={'R0','R2'}
+    for rep in ['R0','R2']:
+        displayed=pd.read_csv(tmp_path/f'03_graph_characterization_N2_{rep}.csv')
+        assert set(displayed.source_column)=={'related'} and displayed.tier.eq('N2_RELATED').all()
+        assert not displayed.inferential_eligible.any()
+
+
+@pytest.mark.parametrize('variant',['default','enabled','authorized_unimplemented','packaging','publication','unknown_policy'])
+def test_restricted_figure_route_is_disabled_and_fails_closed(variant):
+    cfg=deepcopy(pipe.load_pipeline()['validation'])
+    restricted=cfg['characterization']['figure_policy']['restricted_view']
+    assert restricted==dict(enabled=False,authorization_reference=None,approved_output_root=None,
+        automatic_packaging=False,publication_eligible=False)
+    if variant=='default':
+        validate_figure_policy(cfg)
+        return
+    if variant in {'enabled','authorized_unimplemented'}: restricted['enabled']=True
+    if variant=='authorized_unimplemented': restricted.update(authorization_reference='SYNTHETIC_ONLY',approved_output_root='/invented')
+    if variant=='packaging': restricted['automatic_packaging']=True
+    if variant=='publication': restricted['publication_eligible']=True
+    if variant=='unknown_policy': cfg['characterization']['figure_policy']['disclosure_mode']='permissive'
+    with pytest.raises(ValueError): validate_figure_policy(cfg)
+
+
+def test_availability_names_visible_comparators_when_r0_r2_are_withheld(tmp_path,monkeypatch):
+    import src.studies.graph.stage03.s03_reporting as reporting
+    cfg,baseline,membership,meta,roles=presentation_fixture()
+    raw=presentation_matrix(baseline,membership,roles,meta,cfg)
+    comparator=raw.loc[raw.representation_id.eq('R0')].assign(representation_id='R1')
+    raw.loc[raw.community_id.astype(str).eq('1'),['n_group','n_observed','n_missing']]=[5,5,0]
+    raw=pd.concat([raw,comparator],ignore_index=True)
+    roles=pd.concat([roles,roles.loc[roles.representation_id.eq('R0')].assign(representation_id='R1')],ignore_index=True)
+    titles={}; save=reporting.save_figure
+    def capture(fig,folder,name,source):
+        titles[name]=' '.join(ax.get_title() for ax in fig.axes)
+        save(fig,folder,name,source)
+    monkeypatch.setattr(reporting,'save_figure',capture)
+    result=characterization_figures(raw,roles,tmp_path,cfg,5)
+    source=result['sources']['03_graph_characterization_availability']
+    assert set(source.representation_id)=={'R1'}
+    title=titles['03_graph_characterization_availability']
+    assert 'visible representations: R1' in title and 'NO_R0_R2_DISPLAYABLE_PANELS' in title
+    assert figure_qc(tmp_path,result['sources'],protected_matrix=safe_characterization_panels(raw,5))['status']=='PASS_WITH_PRESENTATION_LIMITATIONS'
+
+
+def test_historical_clinical_figures_and_qc_cannot_reintroduce_withheld_rows(tmp_path):
+    from src.studies.graph.stage03.s03_reporting import figures
+    cfg,baseline,membership,meta,roles=presentation_fixture()
+    membership['community_id']=np.tile([0]*56+[1]*4,2)
+    raw=presentation_matrix(baseline,membership,roles,meta,cfg)
+    markers=raw.rename(columns={'n_group':'n_patients'})
+    historical=figures(pd.DataFrame(),pd.DataFrame(),pd.DataFrame(),tmp_path,
+        baseline_table=markers,marker_config=cfg['clinical_marker_panels'],raw_matrix=raw,roles=roles,domains=raw)
+    result=characterization_figures(raw,roles,tmp_path,cfg,5)
+    historical.update(result['sources'])
+    protected=safe_characterization_panels(raw,5)
+    qc=figure_qc(tmp_path,historical,protected_matrix=protected)
+    assert qc['status']=='PASS_WITH_PRESENTATION_LIMITATIONS'
+    assert qc['n_figures_expected']==qc['n_figures_generated'] and qc['n_figures_expected']>8
+    for name,source in historical.items():
+        if name.startswith('03_graph_clinical_marker_panels_') or name=='03_graph_domains_heatmap':
+            assert source.empty
+    # Even a renderer input/CSV that agree with each other must be rejected
+    # if the input itself contains a withheld source partition.
+    name='03_graph_characterization_N1_R0'
+    historical[name]=raw.loc[raw.source_column.eq('unused') & raw.representation_id.eq('R0')]
+    historical[name].to_csv(tmp_path/f'{name}.csv',index=False)
+    qc=figure_qc(tmp_path,historical,protected_matrix=protected)
+    assert qc['status']=='FAILED'
+    assert f'CLINICAL_FIGURE_OUTSIDE_PROTECTED_VIEW:{name}' in qc['errors']
+
+
+def test_binary_history_uses_typed_tier_panel_and_metadata_counts_are_checked(tmp_path):
+    from src.studies.graph.stage03.s03_reporting import figures
+    cfg,baseline,membership,meta,roles=presentation_fixture()
+    baseline['unused']=[1,0]*30
+    roles.loc[roles.source_column.eq('unused'),'type']='binary'
+    raw=presentation_matrix(baseline,membership,roles,meta,cfg)
+    # Invented legacy numeric summaries of a binary source must not be drawn
+    # as continuous clinical magnitudes in historical median/IQR panels.
+    markers=raw.rename(columns={'n_group':'n_patients'}).copy()
+    markers[['median','q25','q75']]=.5
+    history=figures(pd.DataFrame(),pd.DataFrame(),pd.DataFrame(),tmp_path,baseline_table=markers,
+        marker_config=[cfg['clinical_marker_panels'][0]],raw_matrix=raw,roles=roles)
+    assert history['03_graph_clinical_marker_panels_unused'].empty
+    result=characterization_figures(raw,roles,tmp_path,cfg,5)
+    history.update(result['sources'])
+    protected=safe_characterization_panels(raw,5)
+    assert figure_qc(tmp_path,history,protected_matrix=protected)['status']=='PASS'
+    inventory=tmp_path/'03_graph_figure_status.csv'
+    data=pd.read_csv(inventory)
+    data.loc[data.figure.eq('03_graph_characterization_N1_R0'),'n_communities_displayed']=100
+    data.to_csv(inventory,index=False)
+    qc=figure_qc(tmp_path,history,protected_matrix=protected)
+    assert qc['status']=='FAILED'
+    assert 'FIGURE_METADATA_COUNT_MISMATCH:03_graph_characterization_N1_R0' in qc['errors']

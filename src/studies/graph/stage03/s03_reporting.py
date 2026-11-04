@@ -9,6 +9,8 @@ import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from .s03_figure_qc import (DISCLOSURE_POLICY_VERSION, WITHHELD_MESSAGE, TIERS,
+    validate_figure_policy, evaluate_characterization_panel, select_n2_sources, drawable_panel)
 
 CAPTION='EXPLORATORY / conditional on frozen labels; no clinical validation'
 
@@ -37,11 +39,12 @@ def suppress_rows(frame,counts,minimum):
 
 
 def _empty(ax,message='NOT_ESTIMABLE / unavailable or small cells suppressed'):
+    ax.set(xticks=[],yticks=[])
     ax.text(.5,.5,message,ha='center',va='center',wrap=True,transform=ax.transAxes)
 
 
 def figures(anchors,trajectories,pop,folder, *, flow=None,domains=None,context=None,
-            missingness=None,minimum_cell=5,primary_reference_id='R0',baseline_table=None,marker_config=None):
+            missingness=None,minimum_cell=5,primary_reference_id='R0',baseline_table=None,marker_config=None,raw_matrix=None,roles=None):
     flow=flow if flow is not None else pd.DataFrame()
     domains=domains if domains is not None else pd.DataFrame()
     context=context if context is not None else pd.DataFrame()
@@ -49,6 +52,24 @@ def figures(anchors,trajectories,pop,folder, *, flow=None,domains=None,context=N
     baseline_table=baseline_table if baseline_table is not None else pd.DataFrame()
     marker_config=marker_config or []
     inventory=[]
+    sources={}
+    def emit(fig,folder,name,source):
+        save_figure(fig,folder,name,source)
+        sources[name]=source.copy()
+    def emit_copy(fig,folder,name,source):
+        save_figure_copy(fig,folder,name,source)
+        sources[name]=source.copy()
+    if raw_matrix is not None:
+        # One whole-source privacy view feeds every historical clinical panel.
+        protected_matrix=safe_characterization_panels(raw_matrix,minimum_cell)
+        keys=protected_matrix[['representation_id','source_column']].drop_duplicates()
+        baseline_table=baseline_table.merge(keys,on=['representation_id','source_column'],how='inner') if not baseline_table.empty else baseline_table
+        if not baseline_table.empty:
+            # Historical marker plots are numeric median/IQR panels. Binary or
+            # categorical sources retain their typed displays in the tier panels.
+            numeric_keys=protected_matrix.loc[protected_matrix.data_type.eq('numeric'),['representation_id','source_column']].drop_duplicates()
+            baseline_table=baseline_table.merge(numeric_keys,on=['representation_id','source_column'],how='inner')
+        domains=domains.merge(keys,on=['representation_id','source_column'],how='inner') if 'source_column' in domains else domains
     fig,ax=plt.subplots(figsize=(9,5))
     part=anchors.loc[anchors.status.eq('COMPLETE')].copy() if not anchors.empty else anchors
     part=suppress_rows(part,['n_group','n_rest'],minimum_cell)
@@ -59,7 +80,7 @@ def figures(anchors,trajectories,pop,folder, *, flow=None,domains=None,context=N
         ax.set(yticks=range(len(continuous)),yticklabels=[f'{r.representation_id}/C{r.community_id}: {r.source_column}' for r in continuous.itertuples()])
     else: _empty(ax,'Independent anchor inference is not estimable; see validation status.')
     ax.axvline(0,color='gray',lw=.8); ax.set(title='Independent anchors: conditional 95% intervals',xlabel="Cliff's delta")
-    save_figure(fig,folder,'03_graph_independent_anchors',continuous)
+    emit(fig,folder,'03_graph_independent_anchors',continuous)
 
     # Separate instruments and representations. Points are observed medians at
     # real median visit times; IQRs are descriptive, never confidence intervals.
@@ -89,8 +110,8 @@ def figures(anchors,trajectories,pop,folder, *, flow=None,domains=None,context=N
         fig.suptitle(str(endpoint or 'Longitudinal observations')+' — median / IQR by time window')
         name='03_graph_longitudinal_'+re.sub(r'[^A-Za-z0-9_-]','_',endpoint) if endpoint else '03_graph_trajectories'
         if endpoints and endpoint==endpoints[0]:
-            save_figure_copy(fig,folder,'03_graph_trajectories',part)
-        save_figure(fig,folder,name,part)
+            emit_copy(fig,folder,'03_graph_trajectories',part)
+        emit(fig,folder,name,part)
         inventory.append(dict(figure=name,status='DESCRIPTIVE' if not part.empty else 'NOT_ESTIMABLE',reason='' if not part.empty else 'NO_VERIFIED_PUBLISHABLE_FOLLOWUP'))
 
     fig,ax=plt.subplots(figsize=(9,4))
@@ -107,7 +128,7 @@ def figures(anchors,trajectories,pop,folder, *, flow=None,domains=None,context=N
     if not part.empty:
         part=part[['representation_id','community_id','population','n_patients']]
     ax.set(title='Frozen primary communities and observed Pop labels',ylabel='Patients')
-    save_figure(fig,folder,'03_graph_pop_crosswalk',part)
+    emit(fig,folder,'03_graph_pop_crosswalk',part)
 
     # Sequential partitions have separate panels and explicit parent totals.
     flow_parts=[]
@@ -131,7 +152,7 @@ def figures(anchors,trajectories,pop,folder, *, flow=None,domains=None,context=N
         else: _empty(ax)
         ax.set(title=title,xlabel='Patients')
         if not part.empty: ax.legend(fontsize=6)
-    save_figure(fig,folder,'03_graph_population_flow',pd.concat(flow_parts,ignore_index=True) if flow_parts else pd.DataFrame(columns=['representation_id','stage','status']))
+    emit(fig,folder,'03_graph_population_flow',pd.concat(flow_parts,ignore_index=True) if flow_parts else pd.DataFrame(columns=['representation_id','stage','status']))
 
     fig,ax=plt.subplots(figsize=(10,4),constrained_layout=True)
     pop_columns=['n_pop1','n_pop2','n_pop3','n_unclassified_pop','n_missing_pop','n_invalid_pop']
@@ -141,7 +162,7 @@ def figures(anchors,trajectories,pop,folder, *, flow=None,domains=None,context=N
         part.set_index('representation_id')[pop_columns].plot.barh(stacked=True,ax=ax)
     else: _empty(ax)
     ax.set(title='Published baseline Pop within supported hard assignments',xlabel='Patients (parent: n hard supported)')
-    save_figure(fig,folder,'03_graph_population_flow_pop',part)
+    emit(fig,folder,'03_graph_population_flow_pop',part)
 
     # Availability combines counts of patient-source cells, never clinical medians.
     domain_rows=[]
@@ -161,9 +182,18 @@ def figures(anchors,trajectories,pop,folder, *, flow=None,domains=None,context=N
         artist=ax.imshow(matrix,aspect='auto',vmin=0,vmax=1)
         ax.set(xticks=range(len(matrix.columns)),xticklabels=matrix.columns,yticks=range(len(matrix)),yticklabels=matrix.index)
         fig.colorbar(artist,ax=ax,label='Observed / eligible patient-source cells')
-    else: _empty(ax)
-    ax.set_title('D01–D07 availability; clinical magnitudes are shown separately')
-    save_figure(fig,folder,'03_graph_domains_heatmap',part)
+    else:
+        if raw_matrix is not None and roles is not None:
+            diagnostic=evaluate_characterization_panel(raw_matrix,protected_matrix,roles,
+                representation_id='|'.join(sorted(set(raw_matrix.representation_id) | {'R0','R2'})),
+                tier='transversal',selected_sources=list(raw_matrix.source_column.unique()),minimum_cell=minimum_cell)
+            _empty(ax,WITHHELD_MESSAGE if diagnostic['status']=='WITHHELD_DISCLOSURE_CONTROL'
+                else 'NO_DISPLAYABLE_DOMAIN_AVAILABILITY / see source presentation inventory')
+        else: _empty(ax)
+    visible=sorted(set(part.representation_id)) if not part.empty else []
+    limitation=' / NO_R0_R2_DISPLAYABLE_PANELS' if not set(visible)&{'R0','R2'} else ''
+    ax.set_title('D01–D07 availability; visible: '+(', '.join(visible) or 'none')+limitation)
+    emit(fig,folder,'03_graph_domains_heatmap',part)
 
     for marker in marker_config:
         source=marker['source_column']
@@ -171,7 +201,7 @@ def figures(anchors,trajectories,pop,folder, *, flow=None,domains=None,context=N
         part=suppress_rows(part,['n_patients','n_observed','n_missing'],minimum_cell)
         if not part.empty: part=part.loc[part.n_observed.gt(0) & part['median'].notna()]
         if not part.empty:
-            part=part[['representation_id','community_id','validation_role','n_patients','n_observed','n_missing','median','q25','q75']].copy()
+            part=part[['representation_id','community_id','source_column','validation_role','n_patients','n_observed','n_missing','median','q25','q75']].copy()
             part['unit']=marker['unit']; part['status']=np.where(part.representation_id.eq('R2'),'DESCRIPTIVE_PROVISIONAL','DESCRIPTIVE')
             part['interpretation']='observed_baseline_not_independent_validation'
         fig,axes=plt.subplots(1,2,figsize=(12,4),constrained_layout=True)
@@ -180,12 +210,31 @@ def figures(anchors,trajectories,pop,folder, *, flow=None,domains=None,context=N
             if not group.empty:
                 x=np.arange(len(group)); ax.errorbar(x,group['median'].to_numpy(),yerr=np.array([group['median']-group.q25,group.q75-group['median']]),fmt='o',capsize=4)
                 ax.set(xticks=x,xticklabels=[f'C{r.community_id}\nn={r.n_observed}/{r.n_patients}'+('\ndefining/descriptive' if r.validation_role in {'defining','derived_from_defining'} else '') for r in group.itertuples()])
-            else: _empty(ax)
+            else:
+                if raw_matrix is not None and roles is not None:
+                    diagnostic=evaluate_characterization_panel(raw_matrix,protected_matrix,roles,
+                        representation_id=rep,tier='transversal',selected_sources=[source],minimum_cell=minimum_cell)
+                    if diagnostic['status']=='DISPLAYED_DESCRIPTIVE':
+                        diagnostic.update(status='NOT_INTERPRETABLE_UNITS_OR_LEVELS',
+                            reason='No drawable frozen numeric summary; no recoding was applied.')
+                    _empty(ax,WITHHELD_MESSAGE if diagnostic['status']=='WITHHELD_DISCLOSURE_CONTROL'
+                        else diagnostic['status']+'\n'+diagnostic['reason'])
+                else: _empty(ax)
             ax.set(title=rep+(' EXPLORATORY_PROVISIONAL' if rep=='R2' else ' primary reference'),ylabel=marker['unit'])
         fig.suptitle(marker['label']+' — observed baseline median / IQR')
         name='03_graph_clinical_marker_panels_'+re.sub(r'[^A-Za-z0-9_-]','_',source)
-        save_figure(fig,folder,name,part)
-        inventory.append(dict(figure=name,status='DESCRIPTIVE' if not part.empty else 'NOT_ESTIMABLE',reason='' if not part.empty else 'NO_PUBLISHABLE_OBSERVED_MARKER'))
+        emit(fig,folder,name,part)
+        if raw_matrix is not None and roles is not None:
+            diagnostic=evaluate_characterization_panel(raw_matrix,protected_matrix,roles,
+                representation_id='R0|R2',tier='transversal',selected_sources=[source],minimum_cell=minimum_cell)
+            diagnostic.update(n_displayable_sources=int(not part.empty),
+                n_communities_displayed=len(part[['representation_id','community_id']].drop_duplicates()) if not part.empty else 0)
+            if part.empty and diagnostic['status']=='DISPLAYED_DESCRIPTIVE':
+                diagnostic.update(status='NOT_INTERPRETABLE_UNITS_OR_LEVELS',display_status='NOT_INTERPRETABLE_UNITS_OR_LEVELS',
+                    reason='No drawable frozen numeric summary; no recoding was applied.')
+            inventory.append(dict(figure=name,**diagnostic))
+        else:
+            inventory.append(dict(figure=name,status='DESCRIPTIVE' if not part.empty else 'NOT_ESTIMABLE',reason='' if not part.empty else 'NO_PUBLISHABLE_OBSERVED_MARKER'))
 
     fig,axes=plt.subplots(1,3,figsize=(16,5),constrained_layout=True)
     parts=[]
@@ -206,7 +255,7 @@ def figures(anchors,trajectories,pop,folder, *, flow=None,domains=None,context=N
             ax.barh(labels,values); parts.append(part[['experiment_id','source_table',metric,denom,'status','mapper_or_sparse_graph']].assign(figure_metric=kind))
         else: _empty(ax)
         ax.set_title(kind,fontsize=10)
-    save_figure(fig,folder,'03_graph_method_robustness',pd.concat(parts,ignore_index=True) if parts else pd.DataFrame(columns=['status','figure_metric']))
+    emit(fig,folder,'03_graph_method_robustness',pd.concat(parts,ignore_index=True) if parts else pd.DataFrame(columns=['status','figure_metric']))
 
     part=missingness.loc[missingness.measurement_basis.eq('source_observation_units') & missingness.group_type.eq('clinical_domain')].copy() if {'measurement_basis','group_type'}<=set(missingness) else pd.DataFrame()
     part=suppress_rows(part,['n_patients'],minimum_cell)
@@ -225,14 +274,26 @@ def figures(anchors,trajectories,pop,folder, *, flow=None,domains=None,context=N
         if not group.empty: ax.barh(group['group'],group.observed_fraction)
         else: _empty(ax)
         ax.set(title=rep+' source observation units',xlim=(0,1),xlabel='Observed / (patients × source units)')
-    save_figure(fig,folder,'03_graph_missingness_domain',part)
+    emit(fig,folder,'03_graph_missingness_domain',part)
     registered={row['figure'] for row in inventory}
-    for source in sorted(folder.glob('*.csv')):
-        if source.stem in registered or source.stem=='03_graph_figure_status': continue
-        frame=pd.read_csv(source)
-        inventory.append(dict(figure=source.stem,status='DESCRIPTIVE' if len(frame) else 'NOT_ESTIMABLE',
-            reason='' if len(frame) else 'NO_PUBLISHABLE_SUPPORT_OR_SOURCE_UNAVAILABLE'))
+    for name,frame in sources.items():
+        if name not in registered:
+            inventory.append(dict(figure=name,status='DESCRIPTIVE' if len(frame) else 'NOT_ESTIMABLE',
+                reason='Descriptive content displayed.' if len(frame) else 'NO_PUBLISHABLE_SUPPORT_OR_SOURCE_UNAVAILABLE'))
+    for row in inventory:
+        frame=sources[row['figure']]
+        defaults=dict(representation_id='|'.join(sorted(set(frame.representation_id))) if 'representation_id' in frame else 'not_applicable',
+            tier='transversal',display_status=row['status'],inference_status='EXISTING_ANALYSIS_GATES',
+            clinical_inference_status='EXISTING_ANALYSIS_GATES',visibility='INTERNAL_RESTRICTED',
+            disclosure_policy_version=DISCLOSURE_POLICY_VERSION,
+            n_prespecified_sources=None,n_sources_matching_tier=None,n_sources_with_observations=None,
+            n_displayable_sources=frame.source_column.nunique() if 'source_column' in frame else None,
+            n_source_partitions_withheld=None,
+            n_communities_displayed=len(frame[['representation_id','community_id']].drop_duplicates())
+                if {'representation_id','community_id'}<=set(frame) else 0)
+        for key,value in defaults.items(): row.setdefault(key,value)
     pd.DataFrame(inventory).to_csv(folder/'03_graph_figure_status.csv',index=False)
+    return sources
 
 
 def save_figure_copy(fig,folder,name,source):
@@ -260,53 +321,82 @@ def safe_characterization_panels(matrix, minimum):
     return matrix.loc[[tuple(k) not in excluded for k in matrix[['representation_id','source_column']].to_numpy()]].copy()
 
 
-def characterization_figures(matrix, roles, folder, validation, minimum_cell=5):
+def characterization_figures(matrix, roles, folder, validation, minimum_cell=5, *, provenance=None):
+    """Render only the conservative view; preserve metadata for withheld panels."""
+    validate_figure_policy(validation)
     panel=validation.get('clinical_marker_panels',[])
+    policy=validation.get('characterization',{})
     labels={m['source_column']:m['label'] for m in panel}
-    protocol_sources=validation.get('characterization',{}).get('figure_sources',[m['source_column'] for m in panel])
-    all_sources=[m['source_column'] for m in panel]
+    protocol_sources=policy.get('figure_sources',[m['source_column'] for m in panel])
+    n2_specs={m['source_column']:m for m in policy.get('figure_sources_N2',[]) if m.get('source_column')}
+    labels.update({source:spec.get('label',source) for source,spec in n2_specs.items()})
+    all_sources=list(dict.fromkeys([m['source_column'] for m in panel]+list(n2_specs)))
     safe=safe_characterization_panels(matrix,minimum_cell)
-    safe=safe.loc[safe.source_column.isin(all_sources)].copy() if not safe.empty else safe
-    inventory=[]
-    titles={'N1':'Variables used to construct the embedding — descriptive only',
+    selection=select_n2_sources(matrix,safe,roles,validation,minimum_cell,provenance)
+    inventory=[]; figure_sources={}
+    titles={'N1':'Defining sources — descriptive internal structure',
             'N2':'Related sources — documented dependence / descriptive only',
             'N3':'Independent candidates — review and statistical gates required'}
     for rep in ['R0','R2']:
-        for level,tiers in [('N1',['N1_DEFINING']),('N2',['N2_RELATED']),('N3',['N3_CANDIDATE','N3_REVIEWED'])]:
-            raw_roles=roles.loc[roles.representation_id.eq(rep) & roles.tier.isin(tiers) & roles.source_column.isin(all_sources)]
-            sources=[s for s in (protocol_sources if level=='N1' else all_sources) if s in set(raw_roles.source_column)]
-            fig,axes=plt.subplots(max(1,(len(sources)+1)//2),2,figsize=(13,3.6*max(1,(len(sources)+1)//2)),squeeze=False,constrained_layout=True)
+        for level,tiers in TIERS.items():
+            raw_roles=roles.loc[roles.representation_id.eq(rep) & roles.tier.isin(tiers)]
+            requested=(protocol_sources if level=='N1' else list(n2_specs) if level=='N2'
+                       else [m['source_column'] for m in panel if m['source_column'] in set(raw_roles.source_column)])
+            sources=list(dict.fromkeys(s for s in requested if s in set(raw_roles.source_column)))
+            selections=selection.loc[selection.representation_id.eq(rep)]
+            eligible=(selections.loc[selections.selection_status.eq('SELECTED_DESCRIPTIVE'),'source_column'].tolist()
+                      if level=='N2' else sources)
+            diagnostic=evaluate_characterization_panel(matrix,safe,roles,representation_id=rep,
+                tier=level,selected_sources=requested,eligible_sources=eligible,minimum_cell=minimum_cell)
+            if level=='N2' and not eligible and len(selections) and selections.selection_status.eq('NOT_INTERPRETABLE_UNITS_OR_LEVELS').any():
+                diagnostic.update(status='NOT_INTERPRETABLE_UNITS_OR_LEVELS',display_status='NOT_INTERPRETABLE_UNITS_OR_LEVELS',
+                    reason='Selected laboratory text lacks standardized frozen levels or units; no recoding was applied.')
+            fig,axes=plt.subplots(max(1,(len(sources)+1)//2),2,
+                figsize=(13,3.8*max(1,(len(sources)+1)//2)),squeeze=False,constrained_layout=True)
             plotted=[]
             for ax,source in zip(axes.flat,sources):
-                part=safe.loc[safe.representation_id.eq(rep) & safe.source_column.eq(source) & safe.n_observed.gt(0)].copy() if not safe.empty else safe
+                state=evaluate_characterization_panel(matrix,safe,roles,representation_id=rep,
+                    tier=level,selected_sources=[source],eligible_sources=eligible,minimum_cell=minimum_cell)
+                part=drawable_panel(safe.loc[safe.representation_id.eq(rep) & safe.source_column.eq(source)]) if source in eligible else safe.iloc[:0].copy()
                 if part.empty:
-                    row=raw_roles.loc[raw_roles.source_column.eq(source)].iloc[0]
-                    _empty(ax,('REVIEW_PENDING / ' if row.tier=='N3_CANDIDATE' else '')+'NOT_ESTIMABLE\nNo publishable observed source panel; source absent or disclosure control')
+                    if level=='N2' and source not in eligible:
+                        row=selections.loc[selections.source_column.eq(source)].iloc[0]
+                        state.update(status=row.display_status,reason=row.reason)
+                    message=WITHHELD_MESSAGE if state['status']=='WITHHELD_DISCLOSURE_CONTROL' else state['status']+'\n'+state['reason']
+                    if state['inference_status']=='REVIEW_PENDING': message+='\nIndependence review pending.'
+                    _empty(ax,message)
                 else:
                     part=part.sort_values(['community_id','category'])
                     x=np.arange(len(part)); is_numeric=part.data_type.eq('numeric').all()
                     if is_numeric:
                         ax.errorbar(x,part['median'],yerr=np.array([part['median']-part.q25,part.q75-part['median']]),fmt='o',capsize=3)
-                    else: ax.plot(x,part.proportion,'o'); ax.set_ylim(0,1)
+                    else:
+                        ax.plot(x,part.proportion,'o'); ax.set_ylim(0,1)
                     ticks=[]
                     for row in part.itertuples():
-                        state='\n'+row.inference_status if level=='N3' else ''
-                        ticks.append(f'C{row.community_id}'+(f'/{row.category}' if row.category else '')+f'\nn={row.n_observed}/{row.n_group}'+state)
-                    ax.set(xticks=x,xticklabels=ticks,ylabel=part.unit.iloc[0] if is_numeric else 'Observed proportion')
+                        state_label='\n'+row.inference_status if level=='N3' else ''
+                        ticks.append(f'C{row.community_id}'+(f'/{row.category}' if row.category else '')+f'\nn={row.n_observed}/{row.n_group}'+state_label)
+                    # Never invent or assert reviewed units from generic metadata.
+                    unit=str(part.unit.iloc[0])
+                    if unit in {'source_units','source_type',''} or 'pending' in unit.lower():
+                        unit='Frozen source scale (units unverified)'
+                    ax.set(xticks=x,xticklabels=ticks,ylabel=unit if is_numeric else 'Observed proportion')
                     plotted.append(part)
-                relation='\n'+str(raw_roles.loc[raw_roles.source_column.eq(source),'relationship_type'].iloc[0]) if level=='N2' else ''
-                ax.set_title(labels.get(source,source)+relation,fontsize=9)
+                if level=='N2':
+                    spec=n2_specs[source]
+                    ax.set_xlabel(f"N1 {spec.get('related_to','')} → {spec.get('expected_relationship','')} → N2 {source}\nDependent description; no independent validation",fontsize=7)
+                ax.set_title(labels.get(source,source),fontsize=9)
             for ax in list(axes.flat)[len(sources):]: ax.axis('off')
             if not sources:
-                axes.flat[0].axis('on'); _empty(axes.flat[0],f'NOT_ESTIMABLE\nNo {level} sources in the prespecified panel.\nNo relationships or independence approvals inferred.')
-            fig.suptitle(f'{rep}'+(' — EXPLORATORY_PROVISIONAL' if rep=='R2' else ' — primary reference')+'\n'+titles[level]+'\nObserved medians / IQR or category proportions; clinical provenance review pending',fontsize=11)
+                axes.flat[0].axis('on'); _empty(axes.flat[0],diagnostic['status']+'\n'+diagnostic['reason'])
+            fig.suptitle(f'{rep}'+(' — exploratory provisional' if rep=='R2' else ' — primary reference')+'\n'+titles[level],fontsize=11)
             name=f'03_graph_characterization_{level}_{rep}'
-            data=pd.concat(plotted,ignore_index=True) if plotted else pd.DataFrame(columns=['representation_id','source_column','status','reason'])
-            save_figure(fig,folder,name,data)
-            inventory.append(dict(figure=name,status='DESCRIPTIVE' if len(data) else 'NOT_ESTIMABLE',reason='' if len(data) else 'NO_PUBLISHABLE_PRESPECIFIED_TIER_PANEL'))
+            data=pd.concat(plotted,ignore_index=True) if plotted else matrix.iloc[:0].copy()
+            save_figure(fig,folder,name,data); figure_sources[name]=data
+            inventory.append(dict(figure=name,**diagnostic))
     crosswalk=roles.loc[roles.representation_id.isin(['R0','R2']) & roles.source_column.isin(all_sources),
         ['source_column','representation_id','tier','independence_status','relationship_type','blocking_reasons']].copy()
-    fig,ax=plt.subplots(figsize=(8,8),constrained_layout=True)
+    fig,ax=plt.subplots(figsize=(11,max(5,len(all_sources)*.6)),constrained_layout=True)
     codes={'N1_DEFINING':0,'N2_RELATED':1,'N3_CANDIDATE':2,'N3_REVIEWED':3,'PENDING_REVIEW':4,'UNAVAILABLE':5}
     if not crosswalk.empty:
         grid=crosswalk.pivot(index='source_column',columns='representation_id',values='tier').reindex(index=all_sources,columns=['R0','R2'])
@@ -314,31 +404,58 @@ def characterization_figures(matrix, roles, folder, validation, minimum_cell=5):
         ax.imshow(values,aspect='auto',vmin=0,vmax=5,cmap=plt.get_cmap('tab10',6))
         for i,source in enumerate(grid.index):
             for j,rep in enumerate(grid.columns):
-                value=grid.loc[source,rep]; ax.text(j,i,str(value).replace('_',' '),ha='center',va='center',fontsize=7)
+                value=grid.loc[source,rep]
+                ax.text(j,i,str(value).replace('_',' ') if pd.notna(value) else 'SOURCE UNAVAILABLE',ha='center',va='center',fontsize=7)
         ax.set(xticks=[0,1],xticklabels=['R0 primary','R2 provisional'],yticks=range(len(grid)),yticklabels=[labels[s] for s in grid.index])
-    else: _empty(ax)
+    else: _empty(ax,'SOURCE_UNAVAILABLE / no source-role metadata')
     ax.set_title('Prespecified source roles by frozen representation\nNo patient measurements; absence is not independence')
-    save_figure(fig,folder,'03_graph_characterization_role_crosswalk',crosswalk)
-    inventory.append(dict(figure='03_graph_characterization_role_crosswalk',status='DESCRIPTIVE' if len(crosswalk) else 'NOT_ESTIMABLE',reason=''))
-    availability=safe.drop_duplicates(['representation_id','community_id','source_column']).copy() if not safe.empty else safe
+    name='03_graph_characterization_role_crosswalk'
+    save_figure(fig,folder,name,crosswalk); figure_sources[name]=crosswalk
+    metadata=evaluate_characterization_panel(matrix,safe,roles,representation_id='R0|R2',tier='transversal',
+        selected_sources=all_sources,minimum_cell=minimum_cell)
+    metadata.update(status='DISPLAYED_DESCRIPTIVE' if len(crosswalk) else 'SOURCE_UNAVAILABLE',
+        display_status='DISPLAYED_DESCRIPTIVE' if len(crosswalk) else 'SOURCE_UNAVAILABLE',
+        reason='Source-role metadata only; no patient measurements.',n_displayable_sources=crosswalk.source_column.nunique(),
+        n_communities_displayed=0,n_source_partitions_withheld=0)
+    inventory.append(dict(figure=name,**metadata))
+    # The historical availability panel includes the actual visible universe.
+    # N2 additions enter only for representations whose selection was verified.
+    available=safe.loc[safe.source_column.isin([m['source_column'] for m in panel])].copy()
+    for rep in ['R0','R2']:
+        selected=selection.loc[selection.representation_id.eq(rep) & selection.selection_status.eq('SELECTED_DESCRIPTIVE'),'source_column']
+        extra=safe.loc[safe.representation_id.eq(rep) & safe.source_column.isin(selected)
+            & ~safe.source_column.isin([m['source_column'] for m in panel])]
+        available=pd.concat([available,extra],ignore_index=True)
+    availability=available.drop_duplicates(['representation_id','community_id','source_column']).copy()
     columns=['representation_id','community_id','source_column','tier','n_group','n_observed','n_missing','n_tested','n_unknown','n_not_tested','status']
     availability=availability.reindex(columns=columns)
     availability['observed_fraction']=availability.n_observed/availability.n_group
     fig,ax=plt.subplots(figsize=(12,8),constrained_layout=True)
+    visible_reps=sorted(set(availability.representation_id))
+    r0_r2_visible=bool(set(visible_reps) & {'R0','R2'})
     if not availability.empty:
         availability['group_label']=availability.representation_id+'/C'+availability.community_id.astype(str)
         grid=availability.pivot(index='source_column',columns='group_label',values='observed_fraction')
         art=ax.imshow(grid,aspect='auto',vmin=0,vmax=1)
-        for i,source in enumerate(grid.index):
-            for j,group in enumerate(grid.columns):
-                row=availability.loc[availability.source_column.eq(source)&availability.group_label.eq(group)]
-                if len(row): ax.text(j,i,f'{int(row.n_observed.iloc[0])}/{int(row.n_group.iloc[0])}',ha='center',va='center',fontsize=7)
-        ax.set(xticks=range(len(grid.columns)),xticklabels=grid.columns,yticks=range(len(grid)),yticklabels=[labels[s] for s in grid.index])
+        ax.set(xticks=range(len(grid.columns)),xticklabels=grid.columns,yticks=range(len(grid)),yticklabels=[labels.get(s,s) for s in grid.index])
         fig.colorbar(art,ax=ax,label='Observed / hard supported; unknown and not tested are not negative')
-    else: _empty(ax)
-    ax.set_title('Source availability — separate from clinical magnitude\nR2 provisional; whole source panels suppressed for disclosure control')
-    save_figure(fig,folder,'03_graph_characterization_availability',availability)
-    inventory.append(dict(figure='03_graph_characterization_availability',status='DESCRIPTIVE' if len(availability) else 'NOT_ESTIMABLE',reason=''))
+    else:
+        _empty(ax,WITHHELD_MESSAGE if any(i['status']=='WITHHELD_DISCLOSURE_CONTROL' for i in inventory) else 'SOURCE_UNAVAILABLE / no displayable source availability')
+    limitation='NO_R0_R2_DISPLAYABLE_PANELS' if not r0_r2_visible else 'Excluded from this view: '+(', '.join(sorted({'R0','R2'}-set(visible_reps))) or 'none')
+    ax.set_title('Source availability — visible representations: '+(', '.join(visible_reps) or 'none')+'\n'+limitation)
+    name='03_graph_characterization_availability'
+    save_figure(fig,folder,name,availability); figure_sources[name]=availability
+    reps='|'.join(sorted(set(matrix.representation_id) | {'R0','R2'}))
+    metadata=evaluate_characterization_panel(matrix,safe,roles,representation_id=reps,tier='transversal',selected_sources=all_sources,minimum_cell=minimum_cell)
+    if not availability.empty:
+        metadata.update(status='DISPLAYED_DESCRIPTIVE',display_status='DISPLAYED_DESCRIPTIVE',
+            n_displayable_sources=availability.source_column.nunique(),
+            n_communities_displayed=len(availability[['representation_id','community_id']].drop_duplicates()))
+    metadata['reason']=limitation+'; '+metadata['reason']
+    metadata['representations_displayed']='|'.join(visible_reps)
+    inventory.append(dict(figure=name,**metadata))
     path=folder/'03_graph_figure_status.csv'
-    old=pd.read_csv(path) if path.exists() else pd.DataFrame()
+    old=pd.read_csv(path) if path.exists() else pd.DataFrame(columns=['figure','status','reason'])
+    old=old.loc[~old.figure.isin([i['figure'] for i in inventory])]
     pd.concat([old,pd.DataFrame(inventory)],ignore_index=True).to_csv(path,index=False)
+    return dict(sources=figure_sources,selection=selection,inventory=pd.DataFrame(inventory))
