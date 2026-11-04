@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import shutil
 import sys
 import tempfile
 import time
@@ -56,7 +57,7 @@ def parse_args(argv=None):
     p.add_argument('--max-patient-refits', type=int, help='Deep refit budget per invocation; whole model tasks only')
     p.add_argument('--all-fitted', action='store_true', help='Explicitly include every fitted model in the deep queue (also the default)')
     p.add_argument('--resume', action='store_true', help='Reuse hash-verified aggregate checkpoints and publish a new snapshot')
-    p.add_argument('--backup-root', type=Path, help='Required when resume replaces a published validation snapshot')
+    p.add_argument('--backup-root', type=Path, help='Optional persistent backup of replaced validation outputs')
     p.add_argument('--progress', action=argparse.BooleanOptionalAction, default=True)
     args = p.parse_args(argv)
     args.config = None  # upstream adapter; use authenticated reference parameters
@@ -158,13 +159,23 @@ def run(args):
     destinations = {f'{area}/{basis}/delta{threshold}': path
         for basis in bases for threshold in thresholds
         for area, path in v.directories(output_root, basis, threshold).items()}
-    # Resume is explicit authorization to replace ONLY a validation snapshot;
-    # the original namespace can never appear among these destinations.
-    existing = any(p.exists() for p in destinations.values())
-    if existing and args.resume and not args.backup_root:
-        raise ContractError('--resume replacing validation output requires --backup-root')
-    preflight(output_root, destinations, dict(inputs, **reference_snapshot),
-              overwrite=args.resume, backup_root=args.backup_root)
+    # Overwrite ONLY validation destinations. Original V3 references are never destinations.
+    existing = any(path.exists() for path in destinations.values())
+    auto_backup_root = None
+    replacement_backup_root = args.backup_root
+    if existing and replacement_backup_root is None:
+        backup_parent = output_root / 'outputs' / 'backups' / STEM
+        backup_parent.mkdir(parents=True, exist_ok=True)
+        auto_backup_root = Path(tempfile.mkdtemp(
+            prefix='validation-autoreplace-', dir=backup_parent
+        ))
+        replacement_backup_root = auto_backup_root
+
+    preflight(
+        output_root, destinations, dict(inputs, **reference_snapshot),
+        overwrite=existing or args.resume,
+        backup_root=replacement_backup_root,
+    )
     bundles, evaluations, inventory, sensitive, overlaps = {}, {}, [], set(), {}
     for threshold in thresholds:
         groups = fixed_groups(patterns, threshold)
@@ -379,7 +390,9 @@ def run(args):
         verify_unchanged(inputs)
         verify_unchanged(reference_snapshot)
         verify_unchanged(code_snapshot)
-        install_bundle(staging, destinations, args.backup_root)
+        install_bundle(staging, destinations, replacement_backup_root)
+        if auto_backup_root is not None:
+            shutil.rmtree(auto_backup_root)
     mismatch = any(not row['reference_comparable'] for row in inventory) or any(
         result['scientific_status'] == 'NOT_COMPARABLE_REFERENCE' for result in deep_results.values())
     return dict(validation_version=v.VALIDATION_VERSION, input_origin=args.input_origin,

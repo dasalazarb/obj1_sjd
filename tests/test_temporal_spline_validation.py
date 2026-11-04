@@ -166,6 +166,8 @@ def test_checkpoint_atomic_idempotence_context_and_corruption(tmp_path):
     task_id = plan['tasks'][0]['task_id']
     assert c.load(task_id) is None
     c.save(task_id, {'status': 'COMPLETE', 'aggregate': 7})
+    with pytest.raises(FileExistsError, match='checkpoint exists; use --resume'):
+        v.Checkpoints(c.path, context, plan)
     resumed = v.Checkpoints(c.path, context, plan, resume=True)
     assert resumed.load(task_id)['aggregate'] == 7
     with pytest.raises(FileExistsError):
@@ -362,14 +364,31 @@ def complete_reference(upstream, tmp_path):
     return root
 
 
-def test_systematic_all_catalog_four_bundles_immutable_reference_privacy_and_q(complete_reference, upstream, monkeypatch):
+@pytest.mark.parametrize('validation_version', [v.VALIDATION_VERSION, 'validation_test_v2'])
+def test_systematic_all_catalog_four_bundles_immutable_reference_privacy_and_q(complete_reference, upstream, monkeypatch, validation_version):
+    monkeypatch.setattr(v, 'VALIDATION_VERSION', validation_version)
     root = complete_reference
     source = root/'synthetic_validation/outputs'
     before = {p: sha256(p) for p in source.rglob('*') if p.is_file()}
+    before.update({p: sha256(p) for p in upstream['root'].rglob('*') if p.is_file()})
     monkeypatch.setattr(cli, 'fit_family', lambda *args: pytest.fail('systematic must not fit models'))
     result = cli.run(validation_args(upstream, root))
     assert result['software_qc_status'] == 'PASS' and result['published_bundles'] == 4
     assert result['data_cutoff'] == '2025-01-01'
+    published_tables, stale = {}, []
+    for basis in BASIS_SPECIFICATIONS:
+        for threshold in (3, 5):
+            for area, path in v.directories(root/'synthetic_validation', basis, threshold).items():
+                if area == 'tables':
+                    published_tables.update({p: sha256(p) for p in path.glob('*.csv')})
+                marker = path/'stale.txt'
+                marker.write_text('old validation output')
+                stale.append(marker)
+    second = cli.run(validation_args(upstream, root))
+    assert second['software_qc_status'] == 'PASS' and second['published_bundles'] == 4
+    assert all(not p.exists() for p in stale)
+    assert all(sha256(p) == value for p, value in published_tables.items())
+    assert not list(source.rglob('validation-autoreplace-*'))
     for basis in BASIS_SPECIFICATIONS:
         for threshold in (3, 5):
             source_dirs = reference_directories(root/'synthetic_validation', 'clinical_baseline', threshold, 'main', basis_specification=basis)
@@ -399,8 +418,6 @@ def test_systematic_all_catalog_four_bundles_immutable_reference_privacy_and_q(c
             coverage = pd.read_csv(paths['tables']/'07_patient_temporal_coverage.csv')
             assert len(coverage) == 4*len(original)
     assert all(sha256(p) == before[p] for p in before)
-    with pytest.raises(FileExistsError):
-        cli.run(validation_args(upstream, root))
 
 
 def test_invalid_reference_hash_scope_cutoff_and_outcome_sample(complete_reference, upstream):
@@ -430,12 +447,19 @@ def test_deep_zero_budget_checkpoint_resume_and_backup_without_rewriting_V3(comp
     checkpoints = list((root/'synthetic_validation/work').rglob('plan.json'))
     assert len(checkpoints) == 1
     plan_before = checkpoints[0].read_bytes()
+    resumed = cli.run(validation_args(upstream, root, '--depth', 'deep', '--max-patient-refits', '0', '--resume'))
+    assert resumed['n_deep_complete'] == 0
+    assert checkpoints[0].read_bytes() == plan_before
+    assert not list((root/'synthetic_validation/outputs').rglob('validation-autoreplace-*'))
     backup = root/'synthetic_validation/outputs/backups/17_nonlinear_temporal_heterogeneity/validation_global_v1/test'
     args = validation_args(upstream, root, '--depth', 'deep', '--max-patient-refits', '0', '--resume', '--backup-root', str(backup))
     second = cli.run(args)
     assert first['n_deep_complete'] == second['n_deep_complete'] == 0
     assert checkpoints[0].read_bytes() == plan_before
     assert len(list(backup.rglob('validation_summary.json'))) == 4
+    with pytest.raises(FileExistsError, match='checkpoint exists; use --resume'):
+        cli.run(validation_args(upstream, root, '--depth', 'deep', '--max-patient-refits', '0'))
+    assert checkpoints[0].read_bytes() == plan_before
     args.seed += 1
     with pytest.raises(ContractError, match='hash mismatch'):
         cli.run(args)
@@ -512,11 +536,13 @@ def test_invalid_reference_manifest_contracts_block(complete_reference, field, v
         v.authenticate_reference(root, 'four_knots', 3, 'synthetic_validation')
 
 
-def test_validation_staging_rollback_preserves_source_and_snapshot(complete_reference, upstream, monkeypatch):
+@pytest.mark.parametrize('persistent_backup', [False, True])
+def test_validation_staging_rollback_preserves_source_and_snapshot(complete_reference, upstream, monkeypatch, persistent_backup):
     from src.block_A import secondary_comparison_outputs as outputs
     root = complete_reference
-    cli.run(validation_args(upstream, root, '--depth', 'deep', '--max-patient-refits', '0'))
+    cli.run(validation_args(upstream, root))
     before = {p: sha256(p) for p in (root/'synthetic_validation/outputs').rglob('*') if p.is_file()}
+    before.update({p: sha256(p) for p in upstream['root'].rglob('*') if p.is_file()})
     rename = outputs.os.replace
     installed = []
     def fail_after_first(source, destination):
@@ -527,10 +553,15 @@ def test_validation_staging_rollback_preserves_source_and_snapshot(complete_refe
         return rename(source, destination)
     monkeypatch.setattr(outputs.os, 'replace', fail_after_first)
     backup = root/'synthetic_validation/outputs/backups/17_nonlinear_temporal_heterogeneity/validation_global_v1/rollback'
+    flags = ('--backup-root', str(backup)) if persistent_backup else ()
     with pytest.raises(OSError):
-        cli.run(validation_args(upstream, root, '--depth', 'deep', '--max-patient-refits', '0', '--resume',
-            '--backup-root', str(backup)))
-    assert installed and all(sha256(p) == value for p, value in before.items())
+        cli.run(validation_args(upstream, root, *flags))
+    assert len(installed) == 2 and all(sha256(p) == value for p, value in before.items())
+    if not persistent_backup:
+        backups = list((root/'synthetic_validation/outputs').rglob('validation-autoreplace-*'))
+        assert len(backups) == 1
+        backup = backups[0]
+    assert len(list(backup.rglob('validation_summary.json'))) == 4
     assert not list((root/'synthetic_validation/work').glob('step17-validation-stage-*'))
 
 
