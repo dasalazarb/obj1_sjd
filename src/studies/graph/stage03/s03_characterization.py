@@ -57,16 +57,26 @@ def characterization_tables(baseline, membership, roles, manifest, validation, a
                 continue
             for community, group in frame.groupby('community_id'):
                 raw = group[source] if source in group else pd.Series(np.nan, index=group.index)
-                values = observed_values(raw); num = numeric(values)
-                numeric_kind = role['type'] in {'numeric', 'binary'} or pd.api.types.is_numeric_dtype(raw) or (values.notna().any() and num.notna().sum() == values.notna().sum())
-                valid = num.dropna() if numeric_kind else values.dropna()
+                values = observed_values(raw)
+                num_raw = numeric(values)
+                # Retain observation states independently of value classification.
                 tokens = raw.astype('string').str.strip().str.lower()
                 not_tested = tokens.isin(['not tested','not_tested','not_measured','not measured','not_requested','not requested'])
                 unknown = tokens.isin(['unknown','unknown_detail','indeterminate','uninterpretable','not reported'])
+                # Detect real booleans before float conversion; text true/false
+                # requires a documented source encoding and is not reclassified.
+                boolean_dtype = any(pd.api.types.is_bool_dtype(s.dtype) for s in (raw, values, num_raw))
                 observed_tokens=values.dropna().astype('string').str.strip().str.lower()
-                binary = role['type'] == 'binary' or (len(observed_tokens)>0 and set(observed_tokens) <= {
-                    'positive','negative','pos','neg','reactive','nonreactive','detected','not detected'})
-                if binary: valid=num.loc[num.isin([0,1])]
+                label_binary = bool(len(observed_tokens)) and set(observed_tokens) <= {
+                    'positive','negative','pos','neg','reactive','nonreactive','detected','not detected'}
+                binary = role['type'] == 'binary' or boolean_dtype or label_binary
+                # Quantiles must never reach numpy with bool/nullable bool dtype.
+                num = pd.to_numeric(num_raw, errors='coerce').astype('float64')
+                numeric_kind = (role['type'] in {'numeric', 'binary'} or boolean_dtype
+                    or pd.api.types.is_numeric_dtype(raw)
+                    or (values.notna().any() and num.notna().sum() == values.notna().sum()))
+                valid = num.loc[num.isin([0.0, 1.0])] if binary else (
+                    num.dropna() if numeric_kind else values.dropna())
                 n_pos = int(num.eq(1).sum()) if binary else np.nan
                 n_neg = int(num.eq(0).sum()) if binary else np.nan
                 row = {k: role[k] for k in ['representation_id','source_column','clinical_domain','subdomain','instrument','tier',
@@ -78,9 +88,10 @@ def characterization_tables(baseline, membership, roles, manifest, validation, a
                     n_stable_hard=int(group.structural_stability_status.eq('stable').sum()),
                     n_provisional_hard=int(group.structural_stability_status.ne('stable').sum()),
                     data_type='binary' if binary else 'numeric' if numeric_kind else 'categorical',
-                    median=float(num.median()) if numeric_kind and len(valid) and not binary else np.nan,
-                    q25=float(num.quantile(.25)) if numeric_kind and len(valid) and not binary else np.nan,
-                    q75=float(num.quantile(.75)) if numeric_kind and len(valid) and not binary else np.nan,
+                    type_consistency_note='BOOLEAN_SOURCE_DECLARED_NUMERIC' if boolean_dtype and role['type']=='numeric' else '',
+                    median=float(valid.median()) if numeric_kind and len(valid) and not binary else np.nan,
+                    q25=float(valid.quantile(.25)) if numeric_kind and len(valid) and not binary else np.nan,
+                    q75=float(valid.quantile(.75)) if numeric_kind and len(valid) and not binary else np.nan,
                     category='', n_category=np.nan, proportion=np.nan,
                     status=('DESCRIPTIVE_PROVISIONAL' if identifier == 'R2' or not group.structural_stability_status.eq('stable').all() else 'DESCRIPTIVE') if len(valid) else 'NOT_ESTIMABLE',
                     inference_status='REVIEW_PENDING' if role['tier'] == 'N3_CANDIDATE' else 'NOT_ESTIMABLE',

@@ -223,3 +223,111 @@ def test_broad_metadata_and_unreviewed_proxy_are_not_evidence():
     roles=feature_roles(features,baseline,cfg,['R0'],registry).set_index('source_column')
     assert roles.loc['independent','tier']=='N3_CANDIDATE'
     assert roles.loc['independent','conflicting_defining_sources']==''
+
+
+@pytest.mark.parametrize('values,dtype,declared,expected_type,expected_counts', [
+    pytest.param([True,False], 'bool', 'numeric', 'binary', (6,6,0,0), id='bool-declared-numeric'),
+    pytest.param([True,False], 'bool', 'binary', 'binary', (6,6,0,0), id='bool-declared-binary'),
+    pytest.param([True,False], 'bool', 'source_type', 'binary', (6,6,0,0), id='bool-source-type'),
+    pytest.param([True,False,pd.NA], 'boolean', 'numeric', 'binary', (4,4,0,0), id='nullable-declared-numeric'),
+    pytest.param([True,False,pd.NA], 'boolean', 'binary', 'binary', (4,4,0,0), id='nullable-declared-binary'),
+    pytest.param([pd.NA], 'boolean', 'numeric', 'binary', (0,0,0,0), id='nullable-all-missing'),
+    pytest.param(['positive','negative','unknown','not tested'], 'string', 'source_type', 'binary', (3,3,3,3), id='text-assay'),
+    pytest.param(['positive','negative','unknown','not tested'], 'string', 'binary', 'binary', (3,3,3,3), id='text-declared-binary'),
+    pytest.param([1.,2.,3.,4.], 'float64', 'numeric', 'numeric', None, id='continuous'),
+    pytest.param([1.,2.,3.,4.], 'float64', 'source_type', 'numeric', None, id='inferred-continuous'),
+    pytest.param([np.nan], 'float64', 'numeric', 'numeric', None, id='continuous-all-missing'),
+    pytest.param(['true','false'], 'string', 'source_type', 'categorical', None, id='unvalidated-text-booleans'),
+])
+def test_characterization_value_types_and_observation_states(values,dtype,declared,expected_type,expected_counts):
+    cfg,baseline,membership,meta,features=fixture()
+    baseline=baseline.iloc[:24].copy()
+    membership=membership.iloc[:24].copy().assign(community_id=np.repeat([0,1],12))
+    baseline['assay']=pd.Series(values*(24//len(values)),dtype=dtype)
+    cfg['clinical_marker_panels'].append(dict(source_column='assay',label='Invented assay',
+        unit='synthetic_units',clinical_domain='D04',type=declared))
+    features=features.assign(source_column='assay',feature='assay__encoded')
+    roles=feature_roles(features,baseline,cfg,['R0'])
+    original_roles=roles.copy(deep=True)
+    tables=characterization_tables(baseline,membership,roles,meta,cfg,pd.DataFrame())
+    assay=tables['clinical_matrix'].loc[lambda rows:rows.source_column.eq('assay')]
+    assert not assay.empty and assay.data_type.eq(expected_type).all()
+    assert (assay.n_observed+assay.n_missing).eq(assay.n_group).all()
+    if expected_counts is not None:
+        pos,neg,unknown,not_tested=expected_counts
+        assert assay.n_pos.eq(pos).all() and assay.n_neg.eq(neg).all()
+        assert assay.n_tested.eq(pos+neg).all() and assay.n_observed.eq(pos+neg).all()
+        assert assay.n_unknown.eq(unknown).all() and assay.n_not_tested.eq(not_tested).all()
+        assert assay[['median','q25','q75']].isna().all().all()
+        if pos+neg: assert assay.proportion.eq(pos/(pos+neg)).all()
+        else: assert assay.proportion.isna().all()
+    elif expected_type=='numeric' and not baseline.assay.isna().all():
+        np.testing.assert_allclose(assay[['median','q25','q75']], [[2.5,1.75,3.25]]*len(assay))
+        assert assay.n_observed.eq(12).all()
+        assert assay[['n_pos','n_neg','n_tested','proportion']].isna().all().all()
+    if baseline.assay.isna().all():
+        assert assay.status.eq('NOT_ESTIMABLE').all() and assay.n_observed.eq(0).all()
+        assert assay[['median','q25','q75']].isna().all().all()
+    expected_note='BOOLEAN_SOURCE_DECLARED_NUMERIC' if pd.api.types.is_bool_dtype(dtype) and declared=='numeric' else ''
+    assert assay.type_consistency_note.eq(expected_note).all()
+    pd.testing.assert_frame_equal(roles,original_roles)
+    pd.testing.assert_frame_equal(tables['role_inventory'],original_roles)
+    assert characterization_qc(tables,baseline,membership,{'graph02_run_id':'synthetic'},True)['status']=='PASS'
+    safe=safe_characterization_panels(assay,5)
+    if expected_counts is not None and any(0<n<5 for n in expected_counts): assert safe.empty
+    for table in [*tables.values(),safe]:
+        assert 'patient_id' not in table
+        assert not any(identifier in table.to_csv(index=False) for identifier in baseline.patient_id)
+
+
+def test_boolean_summaries_preserve_frozen_tiers_memberships_and_figure_privacy(tmp_path):
+    cfg,baseline,membership,meta,features=fixture()
+    baseline['unused']=pd.Series([True,False]*30,dtype=bool)
+    baseline['related']=pd.Series([True,False,pd.NA]*20,dtype='boolean')
+    baseline['independent']=pd.Series([True,False]*30,dtype=bool)
+    representations=['R0','R2']
+    meta['eligible_representation_ids']=representations
+    membership=pd.concat([membership,membership.assign(representation_id='R2')],ignore_index=True)
+    features=pd.concat([features,features.assign(representation_id='R2')],ignore_index=True)
+    cfg['clinical_marker_panels']=[dict(source_column=s,label='Invented '+s,unit='synthetic_units',
+        clinical_domain='D04',type='numeric') for s in ['unused','related','independent']]
+    cfg['characterization']['figure_sources']=['unused']
+    cfg['characterization']['relationships'].append(dict(source_column='related',target_source='unused',
+        relationship_type='derived_from',source_reference='SYNTHETIC_TEST_ONLY:invented_derivation'))
+    approve_synthetic(cfg,'independent','R0')
+    roles=feature_roles(features,baseline,cfg,representations)
+    expected={('R0','unused'):'N1_DEFINING',('R2','unused'):'N1_DEFINING',
+        ('R0','related'):'N2_RELATED',('R2','related'):'N2_RELATED',
+        ('R0','independent'):'N3_REVIEWED',('R2','independent'):'N3_CANDIDATE'}
+    rolemap=roles.set_index(['representation_id','source_column'])
+    for key,tier in expected.items(): assert rolemap.loc[key,'tier']==tier
+    frozen_baseline=baseline.copy(deep=True); frozen_membership=membership.copy(deep=True)
+    frozen_roles=roles.copy(deep=True); frozen_config=deepcopy(cfg); frozen_meta=deepcopy(meta)
+    tables=characterization_tables(baseline,membership,roles,meta,cfg,pd.DataFrame())
+    matrix=tables['clinical_matrix'].loc[lambda rows:rows.source_column.isin(['unused','related','independent'])]
+    assert len(matrix)==12 and matrix.data_type.eq('binary').all()
+    assert matrix.type_consistency_note.eq('BOOLEAN_SOURCE_DECLARED_NUMERIC').all()
+    assert (matrix.n_pos+matrix.n_neg).eq(matrix.n_tested).all()
+    assert matrix.n_tested.eq(matrix.n_observed).all()
+    assert matrix[['median','q25','q75']].isna().all().all()
+    assert matrix.loc[matrix.representation_id.eq('R2'),'status'].eq('DESCRIPTIVE_PROVISIONAL').all()
+    qc=characterization_qc(tables,baseline,membership,{'graph02_release_sha256':'synthetic_frozen_sha'},True)
+    assert qc['status']=='PASS' and qc['graph02_unchanged']
+    pd.testing.assert_frame_equal(baseline,frozen_baseline)
+    pd.testing.assert_frame_equal(membership,frozen_membership)
+    pd.testing.assert_frame_equal(roles,frozen_roles)
+    pd.testing.assert_frame_equal(tables['role_inventory'],frozen_roles)
+    assert cfg==frozen_config and meta==frozen_meta
+    # A rare positive suppresses the full source panel, including its complement.
+    sensitive=baseline.copy(); sensitive['unused']=False; sensitive.loc[0,'unused']=True
+    suppressed=characterization_tables(sensitive,membership,roles,meta,cfg,pd.DataFrame())['clinical_matrix']
+    characterization_figures(suppressed,roles,tmp_path,cfg,5)
+    availability=pd.read_csv(tmp_path/'03_graph_characterization_availability.csv')
+    assert not availability.source_column.eq('unused').any()
+    assert set(availability.source_column)=={'related','independent'}
+    for rep in representations:
+        assert pd.read_csv(tmp_path/f'03_graph_characterization_N1_{rep}.csv').empty
+    for path in tmp_path.glob('*.csv'):
+        content=path.read_text()
+        assert 'patient_id' not in content
+        assert not any(identifier in content for identifier in baseline.patient_id)
