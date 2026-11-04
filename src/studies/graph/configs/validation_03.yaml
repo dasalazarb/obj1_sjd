@@ -179,3 +179,30 @@ characterization:
     target_source: esspri__total
     relationship_type: composite_component
     source_reference: src/block_A/observed_patterns.py:verified_baseline_pop
+
+# Phase A runs without choosing or approving any outcome. These reviews concern
+# basal measurements only; temporal_resolution.endpoint_policies is unchanged.
+n3_validation:
+  schema_version: graph03_n3_audit_v1
+  enabled: true
+  run_candidate_inventory: true
+  auto_approve_independence: false
+  allow_undocumented_source_promotion: false
+  enforce_representation_specific_roles: true
+  require_temporal_baseline_evidence: true
+  require_clinical_proxy_review: true
+  exclude_current_embedding_features: true
+  retain_existing_stability_gates: true
+  longitudinal_endpoints_not_in_scope: true
+  allow_out_of_sample_prediction_claims: false
+  comparator_policy:
+    use_common_complete_case_population: true
+    forbid_pop_if_outcome_defines_pop: true
+    compare_with_source_features_if_estimable: true
+    report_in_sample_only: true
+  prespecified_outcomes: []
+  additional_candidate_reviews: []
+  measurement_policies: []
+  baseline_era_reviews: []
+  pop_comparator_reviews: []
+  source_comparators: []
