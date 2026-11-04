@@ -1,0 +1,48 @@
+schema_version: graph03_n3_phasec_v1
+auto_approve_independence: false
+privacy_class: INTERNAL_RESTRICTED
+minimum_disclosure_cell: 5
+# Change these pins explicitly for another release; never select "latest".
+input_contract:
+  graph03_run_id: 20261104T180702279234Z_961ffc6f
+  graph02_run_id: 20261103T141918515545Z_fd43fde0
+  graph02_release_sha256: 02151f4cfec041cd30ddfea1a10d1df175f3d47d06f8a922335eb40be3d9a6fc
+  implementation_commit_sha: 585876b3c27355d5ab3e462c783026d5d7b18b9d
+  n3_schema_version: graph03_n3_audit_v1
+families:
+  systemic_activity:
+    sources: [essdai__total]
+    status: PENDING_REVIEW
+  symptoms:
+    sources: [esspri__total]
+    status: PENDING_REVIEW
+  glandular_histopathology:
+    sources: [ext__biopsy_focus_score]
+    status: PENDING_REVIEW
+  ana:
+    sources: [lab__ana_status__text, lab__ana_hep2_status__text]
+    status: PENDING_REVIEW
+  rheumatoid_factor:
+    sources: [lab__rheumatoid_factor__text, lab__rheumatoid_factor__value]
+    status: PENDING_REVIEW
+  qualitative_proteinuria:
+    sources: [lab__urine_protein_qualitative__text]
+    status: PENDING_REVIEW
+# Representation/source scoped documentary records only. No final clinical approval
+# is accepted or written by Phase C. Record expert signoffs in the existing,
+# separately reviewed Graph03 contracts after completing this audit.
+# candidate_reviews:
+#   - representation_id: R0
+#     source_column: esspri__total
+#     status: PENDING_REVIEW
+#     source_reference: docs/your_review.md
+#     source_sha256: <sha256 of that document>
+#     baseline_definition: unknown
+#     date_semantics: unknown
+#     derived_from_future: unknown
+#     unit_status: PENDING_REVIEW
+#     category_status: PENDING_REVIEW
+#     independence_status: PENDING_REVIEW
+candidate_reviews: []
+protocol_reviews: []
+baseline_era_reviews: []
