@@ -5,6 +5,7 @@ import pandas as pd
 from .._pipeline import (load_pipeline,output_root,new_run,save_table,write_json,digest,utc_now,
                         artifact_inventory,version_info,base_parser)
 from .s03_release_reader import read_release
+from .s03_n3_validation import run_n3_validation,n3_validation_qc,enforce_n3_review_gates
 from .s03_construct_validation import feature_roles,assert_independent,anchor_lineage_audit
 from .s03_profiles import profile_tables,clinical_domains,uncovered_profiles,pop_denominator_audit,clinical_marker_summaries
 from .s03_incremental_value import pop_crosswalk,incremental_models
@@ -33,6 +34,9 @@ def run(cfg, *, graph02_release=None,root=None,run_id=None,preflight_only=False)
         baseline=frames['baseline_raw']; membership=frames['membership']; validation=cfg['validation']
         roles=feature_roles(frames['feature_sets'],baseline,validation,manifest['eligible_representation_ids'],frames.get('clinical_registry',pd.DataFrame()))
         roles=statistical_role_gates(roles,baseline,membership,manifest,validation)
+        # Phase A is committed before historical analyses or Phase B can fail.
+        n3_tables,n3_qc=run_n3_validation(run_dir,frames,roles,manifest,validation,provenance,cfg['_config_sha256'])
+        roles=enforce_n3_review_gates(roles,n3_tables['source_inventory'])
         lineage=anchor_lineage_audit(roles,validation)
         tables=profile_tables(baseline,membership,roles,manifest,validation,int(manifest['random_seed']))
         characterization=characterization_tables(baseline,membership,roles,manifest,validation,tables['anchors'])
@@ -82,6 +86,8 @@ def run(cfg, *, graph02_release=None,root=None,run_id=None,preflight_only=False)
                 statuses.append({'analysis':'method_sensitivity_context','representation_id':row['experiment_id'],
                     'status':row['status'],'reason':'MISSINGNESS_METHOD_NONESTIMABLE' if row['status']=='NOT_ESTIMABLE' else row.get('reason','SENSITIVITY_SOURCE_UNAVAILABLE'),
                     'source_reason':row.get('method_reason',row.get('reason',''))})
+        for row in n3_tables['incremental_eligibility'].to_dict('records'):
+            statuses.append({'analysis':'n3_incremental',**{k:row[k] for k in ['representation_id','source_column','model','status','reason','n_patients']}})
         for row in statuses:
             reason=row.get('reason','')
             row['reason_category']=('UNVERIFIED_DATE' if any(t in reason for t in ['UNVERIFIED','INDEX_DATE_UNAVAILABLE']) else
@@ -118,6 +124,10 @@ def run(cfg, *, graph02_release=None,root=None,run_id=None,preflight_only=False)
             for relative in manifest['relative_paths'].values() if relative in manifest['sha256_by_artifact'])
         tier_qc=characterization_qc(characterization,baseline,membership,provenance,frozen_unchanged)
         write_json(run_dir/'03_graph_characterization_qc.json',tier_qc)
+        n3_qc.update(n3_validation_qc(n3_tables,baseline,membership,manifest,
+            {**provenance,'graph03_run_id':run_dir.name,'implementation_commit_sha':n3_qc['implementation_commit_sha'],
+             'config_sha256':cfg['_config_sha256']},frozen_unchanged,characterization['clinical_matrix']))
+        write_json(run_dir/'03_graph_n3_validation_qc.json',n3_qc)
         for name,frame in table_map.items():
             frame=frame.copy()
             for key,value in provenance.items(): frame[key]=value
@@ -159,6 +169,9 @@ def run(cfg, *, graph02_release=None,root=None,run_id=None,preflight_only=False)
             for p in sorted(run_dir.rglob('*')) if p.is_file()]
         save_table(run_dir/'03_graph_artifact_inventory.csv',pd.DataFrame(inventory))
         summary={**provenance,'schema_version':'graph03_results_v1','execution_status':status,'created_at_utc':utc_now(),
+            'n3_validation':{key:n3_qc[key] for key in ['schema_version','status','phase_a_status','phase_b_status',
+                'n_inventory_rows','source_counts_by_representation','n_candidates_for_review','n_reviewed_independent_sources',
+                'n_models_complete','n_outcomes_modeled','n_not_estimable_models','n_comparisons_complete']},
             'characterization_policy_version':tier_qc['classification_policy_version'],
             'characterization_tier_counts':tier_qc['tier_counts'],
             'characterization_qc_status':tier_qc['status'],

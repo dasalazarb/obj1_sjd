@@ -104,8 +104,14 @@ def test_zero_argument_full_study_and_standalone_entries(configuration,monkeypat
     assert manifest['study_mode']=='exploratory'
     assert manifest['release_status'] in {'NO_STABLE_STRUCTURE','PARTIAL_OR_EXPLORATORY'}
     registry=pd.read_csv(path.parent/'02_graph_experiment_registry.csv')
-    for identifier in ['S0','S1','S2','S3','S4','R0','R1','R2','R3','R4','D1','D2','D3','D4','D5']:
+    for identifier in ['S0','S1','S2','S3','S4','R0','R1','R2','R3','R4','D1','D2','D3','D4']:
         assert identifier in set(registry.experiment_id)
+    # With optional UMAP installed, the frozen implementation records each seed,
+    # while an unavailable dependency records the aggregate D5 blocker.
+    if 'D5' in set(registry.experiment_id):
+        assert registry.loc[registry.experiment_id.eq('D5'),'status'].eq('NOT_ESTIMABLE').all()
+    else:
+        assert {f'D5/seed_{seed}' for seed in cfg['experiments']['umap_seeds']}<=set(registry.experiment_id)
     assert registry.loc[registry.experiment_id.eq('R2'),'status'].iloc[0]=='COMPLETE'
     assert manifest['representations']['R2']['evidence_level']=='EXPLORATORY_PROVISIONAL'
     assert manifest['clinical_mapping']['review_status']=='pending_clinical_review'
@@ -152,6 +158,20 @@ def test_zero_argument_full_study_and_standalone_entries(configuration,monkeypat
         assert anchors.validation_role.eq('independent_baseline_anchor').all()
         summary=json.loads((run/'03_graph_results_summary.json').read_text())
         assert summary['graph02_run_id']
+        n3=summary['n3_validation']
+        assert n3['n_reviewed_independent_sources']==0 and n3['n_models_complete']==0
+        inventory=pd.read_csv(run/'03_graph_n3_source_inventory.csv')
+        assert not inventory.duplicated(['representation_id','source_column']).any()
+        assert inventory.groupby('representation_id').size().nunique()==1
+        assert 'patient_id' not in inventory
+        for name in ['source_inventory','candidate_screen','lineage_review_queue','review_status','endpoint_support',
+                     'descriptive_profiles','incremental_eligibility','incremental_models','model_comparison']:
+            filename=f'03_graph_n3_{name}.csv'
+            assert len(pd.read_csv(run/filename).columns)>1
+            assert pipe.digest(run/filename)==summary['sha256_by_artifact'][filename]
+        qc=json.loads((run/'03_graph_n3_validation_qc.json').read_text())
+        assert qc['graph02_unchanged'] and qc['no_refit'] and qc['no_unapproved_estimates']
+        assert pd.read_csv(run/'03_graph_n3_model_comparison.csv').empty
         assert list((run/'figures').glob('*.pdf'))
 
 
