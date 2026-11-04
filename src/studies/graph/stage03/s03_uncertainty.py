@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 from .s03_profiles import numeric
 from .s03_statistics import cliffs_delta
+from .s03_construct_validation import independence_block
 
 
 def discovery_sensitivity(refits,baseline,roles,anchors,settings,validation):
@@ -14,7 +15,10 @@ def discovery_sensitivity(refits,baseline,roles,anchors,settings,validation):
         row={'representation_id':identifier,'community_id':community,'source_column':column,
             'uncertainty_type':'empirical_discovery_refit_sensitivity_not_confirmatory_CI',
             'n_requested':int(settings['final_subsampling_replicates'] if identifier in settings['final_representation_ids'] else settings['secondary_subsampling_replicates']),'status':'NOT_ESTIMABLE'}
-        if getattr(anchor,'status','')!='COMPLETE': row['reason']='PRIMARY_ANCHOR_TEST_NOT_ESTIMABLE'
+        role=roles.loc[roles.representation_id.eq(identifier) & roles.source_column.eq(column)]
+        block=independence_block(role.iloc[0].to_dict() if len(role)==1 else {})
+        if block: row['reason']=block
+        elif getattr(anchor,'status','')!='COMPLETE': row['reason']='PRIMARY_ANCHOR_TEST_NOT_ESTIMABLE'
         elif refits.empty or column not in baseline: row['reason']='FROZEN_REFIT_ASSIGNMENTS_OR_ANCHOR_UNAVAILABLE'
         else:
             part=refits.loc[refits.representation_id.eq(identifier)].merge(baseline[['patient_id',column]],on='patient_id',validate='many_to_one')

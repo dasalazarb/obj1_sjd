@@ -11,13 +11,16 @@ from .s03_incremental_value import pop_crosswalk,incremental_models
 from .s03_longitudinal import longitudinal,pop_transitions,comparable_longitudinal_summary
 from .s03_episode_audit import resolve_all_endpoints, VERSION
 from .s03_rare_events import rare_event_table
-from .s03_reporting import figures
+from .s03_reporting import figures,characterization_figures,safe_characterization_panels
+from .s03_characterization import statistical_role_gates,characterization_tables,characterization_qc
 from .s03_uncertainty import discovery_sensitivity
 from .s03_method_context import method_context,missingness_interpretation,representation_evidence
 
 
 def run(cfg, *, graph02_release=None,root=None,run_id=None,preflight_only=False):
     manifest,path,frames=read_release(cfg,graph02_release)
+    pointer=output_root(cfg,'02')/'latest_completed_02.json'
+    pointer_sha=digest(pointer) if pointer.exists() else None
     root=Path(root) if root else output_root(cfg,'03')
     run_dir=new_run(root,run_id)
     provenance={'graph02_run_id':manifest['run_id'],'graph02_release_sha256':digest(path),
@@ -29,8 +32,10 @@ def run(cfg, *, graph02_release=None,root=None,run_id=None,preflight_only=False)
     try:
         baseline=frames['baseline_raw']; membership=frames['membership']; validation=cfg['validation']
         roles=feature_roles(frames['feature_sets'],baseline,validation,manifest['eligible_representation_ids'],frames.get('clinical_registry',pd.DataFrame()))
+        roles=statistical_role_gates(roles,baseline,membership,manifest,validation)
         lineage=anchor_lineage_audit(roles,validation)
         tables=profile_tables(baseline,membership,roles,manifest,validation,int(manifest['random_seed']))
+        characterization=characterization_tables(baseline,membership,roles,manifest,validation,tables['anchors'])
         markers=clinical_marker_summaries(baseline,membership,roles,manifest,validation)
         minimum_cell=int(cfg['experiments'].get('minimum_publication_cell',5))
         domains=clinical_domains(baseline,membership,roles,frames.get('clinical_registry',pd.DataFrame()),manifest,minimum_cell)
@@ -60,7 +65,10 @@ def run(cfg, *, graph02_release=None,root=None,run_id=None,preflight_only=False)
             if frame.empty: statuses.append({'analysis':name,'status':'NOT_ESTIMABLE','reason':'NO_ELIGIBLE_HYPOTHESES'})
             else:
                 for row in frame.to_dict('records'):
-                    statuses.append({'analysis':name,**{k:row[k] for k in ['representation_id','source_column','endpoint','event','status','reason','n_patients','n_visits','temporal_resolution_status','descriptive_status','model_status','date_semantics_review_status','temporal_exclusion_reasons'] if k in row}})
+                    statuses.append({'analysis':name,**{k:row[k] for k in ['representation_id','source_column','endpoint','event','status','reason','n_patients','n_visits','temporal_resolution_status','descriptive_status','model_status','date_semantics_review_status','temporal_exclusion_reasons','tier','independence_status','inferential_eligible'] if k in row}})
+        for role in roles.loc[roles.is_prespecified_anchor].to_dict('records'):
+            statuses.append({'analysis':'characterization_independence_gate',**{k:role[k] for k in ['representation_id','source_column','tier','independence_status','inferential_eligible']},
+                'status':'COMPLETE' if role['inferential_eligible'] else 'NOT_ESTIMABLE','reason':role['blocking_reasons']})
         statuses.extend([{'analysis':'baseline_characterization','status':'COMPLETE' if not tables['baseline'].empty else 'NOT_ESTIMABLE','reason':'' if not tables['baseline'].empty else 'NO_SUPPORTED_COMMUNITIES'},
             {'analysis':'pop_crosswalk','status':'COMPLETE' if not pop.empty and 'n_patients' in pop else 'NOT_ESTIMABLE','reason':'' if not pop.empty and 'n_patients' in pop else 'NO_SUPPORTED_POP_PATIENTS'},
             {'analysis':'external_projection','status':'NOT_ESTIMABLE','reason':validation['projection']['reason']},
@@ -104,13 +112,25 @@ def run(cfg, *, graph02_release=None,root=None,run_id=None,preflight_only=False)
             '03_graph_community_trajectory_summary.csv':trajectories,'03_graph_missingness_by_community.csv':tables['missingness'],
             '03_graph_rare_events.csv':rare,'03_graph_anchor_discovery_sensitivity.csv':uncertainty,'03_graph_validation_status.csv':pd.DataFrame(statuses),
             '03_graph_cross_representation_alignment.csv':frames.get('alignment',pd.DataFrame())}
+        table_map.update({f'03_graph_characterization_{name}.csv':frame for name,frame in characterization.items()})
+        frozen_unchanged=(digest(pointer) if pointer.exists() else None)==pointer_sha and digest(path)==provenance['graph02_release_sha256'] and all(
+            digest(path.parent / relative)==manifest['sha256_by_artifact'][relative]
+            for relative in manifest['relative_paths'].values() if relative in manifest['sha256_by_artifact'])
+        tier_qc=characterization_qc(characterization,baseline,membership,provenance,frozen_unchanged)
+        write_json(run_dir/'03_graph_characterization_qc.json',tier_qc)
         for name,frame in table_map.items():
             frame=frame.copy()
             for key,value in provenance.items(): frame[key]=value
             save_table(run_dir/name,frame)
-        figures(tables['anchors'],trajectories,pop,run_dir/'figures',flow=tables['flow'],domains=domains,
+        safe_matrix=safe_characterization_panels(characterization['clinical_matrix'],minimum_cell)
+        safe_keys=safe_matrix[['representation_id','source_column']].drop_duplicates()
+        safe_markers=markers.merge(safe_keys,on=['representation_id','source_column'],how='inner') if not markers.empty else markers
+        safe_domains=domains.merge(safe_keys,on=['representation_id','source_column'],how='inner') if 'source_column' in domains else domains
+        safe_anchors=tables['anchors'].merge(safe_keys,on=['representation_id','source_column'],how='inner') if not tables['anchors'].empty else tables['anchors']
+        figures(safe_anchors,trajectories,pop,run_dir/'figures',flow=tables['flow'],domains=safe_domains,
             context=context,missingness=missingness,minimum_cell=minimum_cell,primary_reference_id=manifest['primary_reference_id'],
-            baseline_table=markers,marker_config=validation.get('clinical_marker_panels',[]))
+            baseline_table=safe_markers,marker_config=validation.get('clinical_marker_panels',[]))
+        characterization_figures(characterization['clinical_matrix'],roles,run_dir/'figures',validation,minimum_cell)
         (run_dir/'figures/README.md').write_text('Aggregate internal figures and source CSVs. Publication review is required; no automatic public export. Small cells are suppressed using the configured publication minimum.\n')
         limited=any(row['status'] not in {'COMPLETE','DESCRIPTIVE'} for row in statuses)
         status='COMPLETE_WITH_LIMITATIONS' if limited else 'COMPLETE'
@@ -123,6 +143,9 @@ def run(cfg, *, graph02_release=None,root=None,run_id=None,preflight_only=False)
         n_models=int(eligibility.status.eq('COMPLETE').sum())
         n_unresolved=int(temporal_tables['resolution'].n_unresolved_groups.sum())
         with (run_dir/'03_graph_results_summary.md').open('a') as stream:
+            stream.write('\nSource characterization levels: N1 explains internal structure; N2 is related descriptive evidence; N3 candidates are not validated. Only documented reviewed N3 sources may enter exploratory conditional inference after statistical gates. Pending review is NOT_ESTIMABLE / INDEPENDENCE_REVIEW_PENDING.\n\n')
+            stream.write(characterization['tier_counts'].to_csv(index=False))
+            stream.write('\nSee characterization_independence_audit.csv and characterization_qc.json for exact sources requiring clinical/lineage/baseline review. Longitudinal endpoint approvals are separate and unchanged.\n')
             stream.write(f'\nTemporal resolution: {VERSION}. Endpoint analyses: {len(eligibility)}; descriptive: {n_descriptive}; estimable models: {n_models}; unresolved endpoint/source groups: {n_unresolved}.\n\n')
             stream.write('Measurement dates require endpoint-specific reviewed evidence; a clinical spine anchor alone is insufficient. Unresolved units are excluded without inventing dates or outcomes. Descriptions use verified visits; models additionally require repeated observations, stability, support and all prespecified covariates. Frozen stability labels are not clinical bootstrap validation.\n\n')
             stream.write(temporal_tables['temporal_source'][['endpoint','date_field_used','date_semantics_review_status','status','reason']].to_csv(index=False))
@@ -136,6 +159,11 @@ def run(cfg, *, graph02_release=None,root=None,run_id=None,preflight_only=False)
             for p in sorted(run_dir.rglob('*')) if p.is_file()]
         save_table(run_dir/'03_graph_artifact_inventory.csv',pd.DataFrame(inventory))
         summary={**provenance,'schema_version':'graph03_results_v1','execution_status':status,'created_at_utc':utc_now(),
+            'characterization_policy_version':tier_qc['classification_policy_version'],
+            'characterization_tier_counts':tier_qc['tier_counts'],
+            'characterization_qc_status':tier_qc['status'],
+            'n_review_pending_sources':int(roles.tier.eq('N3_CANDIDATE').sum()),
+            'n_reviewed_independent_sources':int(roles.tier.eq('N3_REVIEWED').sum()),
             'temporal_resolution_version':VERSION,'n_endpoint_analyses':len(eligibility),
             'n_longitudinal_descriptive':n_descriptive,'n_longitudinal_models_complete':n_models,
             'n_longitudinal_not_estimable':int(eligibility.status.eq('NOT_ESTIMABLE').sum()),
