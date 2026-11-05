@@ -1,243 +1,226 @@
-# Graph03 Phase D: frozen resolution preflight
+# Graph03 C/D: ejecución autónoma y resolución de bloqueos
 
-Phase D adds an auditable evidence package after Phase C. Integrity QC may PASS
-while scientific status remains `COMPLETE_WITH_BLOCKERS`. It never estimates a
-model, trains/projects Mapper, applies a crosswalk, imputes, drops a confounder,
-alters a frozen artifact or edits either existing Graph03 configuration.
+## Cambio mínimo y auditoría arquitectónica
 
-The historical A/B/C/D records are preparation rows, not fitted models. Forty
-representation/source candidates produce 160 preparation rows when the explicit
-release contains R0–R4. Missing candidate inventory keys are reported in QC;
-there is still an explicit unavailable-candidate record, not a patient record.
+Base revisada: `cafb5f0` (main, 2026-11-05). El checkout inicial estaba en
+`583bac2`; se actualizó antes de modificar Graph03 porque Phase D ya existía
+upstream. No se crearon fases E/F ni se cambiaron Graph02, Mapper o EDA.
 
-## Implementation map
+Árbol relevante: los entrypoints C/D llaman `run_phasec` / `run_resolution`;
+D reutiliza `load_phasec_inputs`, los contratos de Graph02 y
+`support_diagnostics`. `s03_n3_validation` produce Phase A con
+`s03_n3_candidate_audit`; `s03_n3_incremental` ya implementa modelos revisados
+sobre casos completos comunes y no necesita otro estimador en Phase D.
 
-| File | Responsibility |
+La fricción estaba en flags obligatorios, YAMLs con runs/commits/hashes de una
+sola ejecución y la política que bloqueaba cualquier cambio documental del
+código. Esos pins no son contratos científicos. En cambio, los SHA almacenados
+en manifests/inventarios de datos, esquemas, claves, membresías, denominadores y
+referencias entre runs sí protegen contra corrupción o mezcla de cohortes.
+Se conservaron, junto con las restricciones de divulgación y revisión humana.
+
+| Piezas reutilizadas | Uso |
 |---|---|
-| `src/studies/graph/03d_graph_n3_resolution_preflight.py` | Explicit-input CLI, always preflight only |
-| `src/studies/graph/stage03/s03_n3_resolution.py` | Frozen reader, evidence reconciliation, D1–D5, artifacts and disclosure |
-| `src/studies/graph/stage03/s03_n3_resolution_support.py` | D6 complete-case union, design rank/df, events and separation feasibility |
-| `src/studies/graph/configs/n3_phase_d_resolution.yaml` | Separate v1 pins, prohibitions and scoped documentary proposals |
-| `tests/test_graph03_n3_resolution.py` | Synthetic positive, negative, integrity, privacy and regression contracts |
+| `common.PROJECT_ROOT` / raíz del entrypoint; `pipeline.yaml`, `config_path` | Rutas existentes; `OBJ1_SJD_ROOT` solo cambia la raíz de datos/outputs |
+| `validate_release`, `safe_artifact`, `load_phasec_inputs` | Integridad, esquemas, claves, pertenencia y denominadores |
+| `hard_members`, `observed_values`, `support_diagnostics` | Universo congelado y soporte A/B/C/D; sensibilidad R0 estable |
+| `review_record`, `candidate_evidence_matrix`, `human_review_queue` | Evidencia firmada y adjudicación humana |
+| Nueva `graph_paths` | Adapta las rutas del pipeline existente a la raíz de despliegue |
+| Nueva `resolve_latest_compatible` | Único selector, parametrizado por dependencia, archivos y validador |
+| Nueva `resolve_graph03_dependencies` | Vincula pares/tríos usando el selector; no mezcla ramas |
+| Nueva `reviewed_pop_values` | Una normalización de Pop, únicamente con equivalencia humana firmada |
+| Duplicación eliminada | Pins de producción en ambos YAML, recálculos SHA dentro del lector C y segunda plantilla de revisión idéntica de D |
 
-The implementation reuses the Phase C frozen-input reader, `safe_artifact`,
-`hard_members`, typed dependency traversal and observed-value missingness rules.
-It implements the existing Pop comparator guard without importing the module
-that contains model estimators; a parity test checks ESSDAI/ESSPRI derivatives.
+Los cambios funcionales están en los dos entrypoints, sus dos YAML, los lectores
+C/D, el pequeño módulo compartido `s03_run_resolution.py`, las pruebas existentes
+y `test_graph03_run_resolution.py`. El workflow de Graph incluye ahora la regresión N3. El README y este documento describen el
+contrato vigente. Los outputs históricos permanecen intactos.
 
-## Provenance and production differences
+## Un comando por fase
 
-The initial local checkout was `583bac20fa6d3ff4d7dbed29412e807e6e35a363`.
-The verified production/main revision was
-`d770387b4ee6356c036c78a38dd22a758adcf416`; its additional changes concern Step17,
-not Graph03. The work branch is based on that production revision. Phase A's
-separate implementation pin remains
-`585876b3c27355d5ab3e462c783026d5d7b18b9d`. Production execution must check its own
-exact inputs rather than assume a branch name establishes provenance.
-
-Three trust anchors were not supplied in the modification plan and cannot be
-invented. Independently verify and fill these in a restricted copy of the new
-config before production use:
-
-- `graph03_summary_sha256`: `03_graph_results_summary.json` in the explicit Phase A run.
-- `phasec_qc_sha256`: `03_graph_n3_phasec_qc.json` in the explicit Phase C run.
-- `phasec_inventory_sha256`: `03_graph_n3_phasec_artifact_inventory.csv` in that run.
-
-The defaults are null and fail closed. The command does not compute-and-trust
-missing anchors. An operator may inspect hashes with `sha256sum` in the protected
-site and reconcile them against independently approved release evidence before
-recording pins. No real release, review ZIP, Step11 table or original clinical
-form was available for the synthetic software checks.
-
-Phase C is identified by its pinned QC run_id, not its directory name. QC must
-be PASS with documentary blockers, no approvals, no estimation and unchanged
-inputs. Every inventoried Phase C file, all Phase A summary hashes and all
-Graph02 manifest hashes are verified. Candidate and A/B/C/D keys and provenance
-must reconcile. The source manifest inventories all three entire frozen trees.
-Symlinks inside frozen trees and traversal/escaping paths are rejected.
-
-`code_drift: report_and_block` records current versus Phase C documentary hashes
-and blocks review readiness on changed files; `reject` aborts. Newly added
-Phase D modules are distinguished from changed historical code. Current code
-hashes and the implementation commit are recorded separately. Code and review
-documents are checked for changes during execution, including error paths.
-
-## Running at the protected site
+Desde la raíz, con las dependencias Python del proyecto instaladas:
 
 ```bash
-BASE=/data/salazarda/data/obj1_sjd
-PY=/usr/local/Anaconda/envs/py3.10/bin/python
-GRAPH03_RUN="$BASE/outputs/tables/studies/graph/03_graph_community_characterization/runs/20261104T180702279234Z_961ffc6f"
-GRAPH02_RELEASE="$BASE/outputs/tables/studies/graph/02_graph_representation_sensitivity/runs/20261103T141918515545Z_fd43fde0/02_graph_release_manifest.json"
-PHASEC_RUN=/operator/verified/phasec/run
-PHASED_CONFIG=/protected/reviewed/n3_phase_d_resolution.yaml
-OUTPUT_DIR="$BASE/outputs/tables/studies/graph/03d_graph_n3_resolution_preflight/operator_unique_run"
-
-"$PY" "$BASE/src/studies/graph/03d_graph_n3_resolution_preflight.py" \
-  --graph03-run "$GRAPH03_RUN" \
-  --graph02-release "$GRAPH02_RELEASE" \
-  --phasec-run "$PHASEC_RUN" \
-  --config "$PHASED_CONFIG" \
-  --output-dir "$OUTPUT_DIR" \
-  --preflight-only
+python src/studies/graph/03c_graph_n3_clinical_adjudication.py
+python src/studies/graph/03d_graph_n3_resolution_preflight.py
 ```
 
-Supply the actual verified Phase C path and a new output directory. No latest-run
-selection exists. `--preflight-only` documents intent; omitting it still cannot
-enable estimation. The output path cannot exist, contain a frozen tree, or be
-inside one (including through a symlink). Each package receives its own run_id,
-mode 0700 directory and mode 0600 files. Incomplete packages are removed on
-failure; frozen checks run in `finally` on both success and failure.
+También funcionan con una ruta absoluta al script desde otro directorio. La
+raíz se obtiene del código; `OBJ1_SJD_ROOT` permite otro despliegue de datos sin
+copiar código ni crear configuraciones paralelas. Los outputs Graph02/Phase A
+se toman de `configs/pipeline.yaml`. Las colecciones nuevas son, bajo
+`outputs/tables/studies/graph/`:
 
-## Documentary signoffs
+- `03_graph_n3_clinical_adjudication/runs/<nuevo_id>`
+- `03_graph_n3_resolution_preflight/runs/<nuevo_id>`
 
-Each config section is scoped to representation_id. Measurement, independence
-and statistical-design decisions also require the exact source_column. Duplicate,
-unscoped and final `APPROVED` records are rejected. Empty reviews stay pending.
+Se exploran exclusivamente los directorios `runs/` de esas colecciones y las
+colecciones Graph02/Phase A configuradas. Una Phase C histórica fuera de ellas
+puede seleccionarse con `--phasec-run`; no se busca por todo el disco.
 
-Use a separately reviewed YAML/JSON decision document under `docs/`, `src/` or
-`tests/` in the protected repository. The document must equal the config record
-apart from source_reference/source_sha256, plus its review_section. For example,
-this **illustrative pending record is not a signoff**:
+Todos los flags son opcionales: `--graph03-run`, `--graph02-release`,
+`--phasec-run` (D), `--output-dir` y `--config`. El override de output conserva
+su significado histórico: **directorio exacto nuevo**, no una colección.
+Ningún override evita la validación. Sin candidatos, se explica dónde se buscó,
+los descartes y qué script upstream ejecutar. `--verbose` permite traceback.
+`--preflight-only` de D se conserva por compatibilidad; D siempre es preflight.
 
-```yaml
-review_section: protocol
-representation_id: R0
-status: PENDING_REVIEW
-review_id: institution_assigned_review_id
-reviewer: null
-human_signoff: false
-original_source: ids__protocol
-canonical_target: demo__protocol
-cohort_scope: R0
-meaning: research_protocol
-code_dictionary_review: PENDING_REVIEW
-multiple_protocol_rule_review: PENDING_REVIEW
-equivalent_to_prespecified_confounder: false
-```
+El selector ordena por el timestamp UTC del run ID canónico
+`YYYYMMDDTHHMMSSffffffZ_<8 hex>`; para IDs históricos usa `created_at_utc` con
+zona horaria. Mtime solo desempata fechas iguales. Un ID sin fecha verificable
+requiere un override explícito. Antes de aceptar un candidato, comprueba sus
+contratos y su ascendencia. Phase D parte de Phase C y resuelve su Phase A y su
+Graph02 como una unidad. Se imprimen ruta, run ID, motivo y hasta cinco
+descartes; se registra la misma evidencia en `dependency_resolution` del QC.
 
-After human review, the config record contains those same fields except
-review_section, and the document's repository-relative source_reference and
-verified source_sha256. `DOCUMENTED` requires human_signoff true, nonempty
-reviewer/review_id, the matching content and scoped review. `REJECTED` is observed
-without promoting eligibility. A modified document, mismatched signoff or file
-existence alone cannot establish evidence. Cryptographic file consistency does
-not authenticate reviewer identity or competence; institutional verification
-remains required. Reviewer names and arbitrary review prose are not exported.
+Ejemplo sintético probado: entre Phase A
+`20261101T020000000000Z_00000003` y
+`20261102T020000000000Z_00000003` se elige la segunda. Si le falta
+`03_graph_n3_source_inventory.csv`, se descarta y se usa la primera con su
+Graph02 `20261101T010000000000Z_00000002`. Si Phase C referencia la primera,
+D conserva ese par aunque existan Phase A/Graph02 más recientes.
 
-Measurement records require `date_semantics: instrument_measurement`,
-`instrument_measurement_date_verified: true`, `derived_from_future: false`,
-`timezone_review: DOCUMENTED`, `baseline_temporal_order_review: DOCUMENTED`, plus
-nonempty baseline_definition, lookback_rule, measurement_source_reference and
-repeated_measurement_rule. Unit/category reviews are separately required.
-An episode anchor or an era review cannot substitute for these fields.
+## Integridad normal y estricta
 
-Official-baseline and baseline-era decisions are separate sections. Each needs
-a verified date_column, official_baseline_definition_review, timezone_review
-and lookahead_review. Era additionally needs `era_rule: fixed_five_year_strata`.
-No era is synthesized from an unreviewed date. Protocol aliases never enter
-the current design; a verified equivalence only proposes a new derived release.
+Normal comprueba siempre los hashes existentes de artefactos, manifiestos e
+inventarios, el esquema, la finalización y las referencias entre releases.
+No pide hashes al investigador ni compara el commit actual con un pin histórico.
+Un cambio de código queda registrado como `REPORTED_CODE_DRIFT`; no autoriza
+ningún endpoint. La alteración de datos consumidos sigue siendo un error.
 
-Independence records need separate documented clinical, origin, proxy and
-discovery-exclusion reviews. Code dependencies remain blocking independently.
-Statistical records require reviewed covariate categories, hypothesis family,
-multiplicity and uncertainty; reduced N1 columns must be unique, prespecified
-and defining in that representation. Records must include hypothesis_family,
-`multiplicity_method: fdr_bh`, uncertainty_plan and
-`missingness_policy: common_complete_case`. D requires an explicit include_model_d.
-Text-to-binary assay conventions are left for a future versioned contract;
-this preflight only handles reviewed numeric_0_1 binary encoding. Unknown
-category conventions never enter a design matrix.
+`--strict` comprueba además los pins históricos **disponibles** en un config
+explícito y aplica el control de drift documental. No obliga a inventar pins
+ausentes. Conserva el mecanismo existente de evidencia humana firmada: la
+existencia de un archivo o la ausencia de alertas nunca equivale a aprobación.
 
-A Pop equivalence proposal requires a signed pop_semantics document with
-`equivalence_review: DOCUMENTED` and an explicit crosswalk restricted to
-Unclassifiable/Unclassified. It is reported as an unapplied proposal; clinical
-categories, missing and invalid values cannot be reassigned. Canonical Pop
-origin is `01_pop_distribution.py`; `observed_patterns.py` verifies its output.
-Step10 keeps protocol-related context outside the analytic master, which
-explains why code aliases alone cannot repair missing demo__protocol.
+C/D crean exclusivamente directorios nuevos, restringidos, y rechazan outputs
+superpuestos con entradas congeladas. D conserva sus snapshots y comprobaciones
+en `finally`, y elimina paquetes incompletos en caso de fallo.
 
-## Outputs and disclosure
+## Bloqueos: evidencia y remedios
 
-The package includes every required `03_graph_n3_phased_` artifact: qc.json,
-summary.md, source_manifest.csv, protocol_source_inventory.csv,
-baseline_date_lineage.csv, endpoint_date_readiness.csv,
-candidate_evidence_matrix.csv, circularity_dependency_report.csv,
-pop_crosswalk_proposal.csv, pop_reconciliation_qc.json,
-topology_stability_audit.csv, model_preflight.csv, human_review_queue.csv,
-proposed_contract_changes.md and tests_summary.json.
+No hay releases privados, diccionario consolidado ni formularios originales en
+este entorno. Las observaciones siguientes proceden del código y fixtures;
+no establecen cobertura real de pacientes ni validez clínica.
 
-Additional artifacts are chronology_qc.json, clinical_review_template.md,
-pop_reviewer_decision_template.md and artifact_inventory.csv. The latter hashes
-every other output; it cannot contain its own hash. Every artifact carries the
-three input identities/hashes, implementation/config provenance, restriction
-flags and gate states. Runtime tests_summary records integrity assertions;
-it explicitly does not claim to have executed pytest.
+| Bloqueo | Estado en ausencia de evidencia revisada | Evidencia / remedio |
+|---|---|---|
+| Flags, pins manuales y mezcla de runs | `RESOLVED` | CLI sin argumentos, contratos y ascendencia comprobados |
+| `demo__protocol` | `PENDING_SOURCE` o `PENDING_HUMAN_REVIEW` si hay alias observado | Step10 `classify_spine_column` clasifica `source_protocol` como CONTEXT; `classify_pro_column` hace lo mismo con `parent_protocol`; `derive_public_name` genera `spine__source_protocol` / `pro__parent_protocol`. Step01 Pop selecciona un campo original y lo copia a `protocol` (contexto `pop__protocol`). Estos nombres se auditan en C/D; no prueban equivalencia con el ajuste metodológico |
+| Baseline / era | `PENDING_HUMAN_REVIEW` | Step00 conserva el episodio y el indicador oficiales; Step11 `validate_integrated` selecciona `is_clinical_baseline`. El ancla es fecha del episodio, no del instrumento ni de ingreso a la base |
+| Fechas de instrumentos | `PENDING_SOURCE` | Exigir formulario/ensayo, fecha real, zona horaria, ventana baseline y regla de repetición. Un basal consolidado sin fecha sigue descriptivo. No se crea timestamp |
+| Serología | `PENDING_SOURCE` y revisión humana | `01_serological_profile.py:select_episode_analytes` conserva `selected_lab_date` desde `lab_date`, reglas de selección del ensayo, conflictos y unidades; su proximidad al ancla puede incluir observaciones posteriores. No se extrapola esta regla a cuestionarios |
+| Pop | `PENDING_HUMAN_REVIEW` | `observed_patterns.py:verified_baseline_pop` conserva `Unclassifiable`; un DISPLAY de Step01 no aprueba equivalencia con `Unclassified`. Sin firma se conservan separados; con crosswalk verificado se normaliza una copia en memoria y se reconcilian frecuencias antes/después sin reasignar Pop1/2/3 |
+| Independencia de candidatos | `PENDING_HUMAN_REVIEW` | Matriz existente por representación/fuente separa dependencia directa, mismo ensayo, instrumento y proxy. Biopsia, ANA, RF y proteinuria siguen pendientes de evidencia de ensayo/codificación/unidad/observación. ESSDAI/ESSPRI conservan veto de circularidad con Pop |
+| Soporte R0 estable | `RESOLVED` técnicamente; inferencia pendiente | Se evalúa la subpoblación hard, covered, untied, supported, stable antes de mirar outcomes. Columnas `r0_stable_only_*` en el preflight existente; no se afirma estabilidad de todo R0 |
+| Topología completa y R2 | `PENDING_HUMAN_REVIEW` | Membresías intactas; R2 exploratoria; gates originales preservados |
+| Modelos A/B/C/D | `NOT_ESTIMABLE` sin contratos revisados | Una muestra común por contraste, umbrales originales, rango/df/eventos/separación/multiplicidad. `primary_reason` y `possible_remedy` identifican la acción principal; no hay coeficientes, p-valores ni aprobación automática |
 
-**Conservative disclosure choice:** patient partitions overlap across endpoints,
-Pop universes, topology and complete-case tables. This version withholds all
-patient counts, zeros, denominators, design dimensions and residual df across
-the entire package. It calculates exact support and reconciliations in memory
-before withholding them. This is stronger than row-only suppression of cells
-1–4, which can leak through subtraction across tables. Counts cannot be
-recovered from percentages because no such percentages are exported. Scientific
-gates retain conservative statuses; institutional review is still mandatory
-before any external sharing. No public-export or packaging route is provided.
+El inventario de protocolo calcula la cobertura por campo observado; las tablas
+de Pop calculan frecuencias y reconciliación de pacientes. D mantiene la política
+existente de suprimir **todos** los conteos y denominadores en el paquete para
+impedir reconstrucción entre tablas; no se relaja para publicar un número.
+No se puede informar cobertura clínica real sin los insumos privados.
 
-A synthetic run's expected status excerpt (not clinical evidence):
+`candidate_evidence_matrix` y `human_review_queue` siguen siendo la matriz y cola
+existentes, sin nuevos reportes de adjudicación. `adjudication_status` es
+`PENDING` o `REJECTED` cuando hay un rechazo humano verificado. Este software
+no produce `APPROVED`. Un contrato de inferencia aprobado se debe aplicar en
+la implementación de modelos existente, después de resolver sus gates.
 
-```text
-integrity_gate: PASS
-phased_status: COMPLETE_WITH_BLOCKERS
-historical_phasec_status: NOT_ESTIMABLE
-status: NOT_ESTIMABLE
-decision_status: ESTIMATION_BLOCKED
-clinical_approval_granted: false
-shareable_export_allowed: false
-no_inference: true
-no_refit: true
-```
+Outputs principales: QC C/D con dependencias, matriz/cola de evidencia,
+`model_preflight.csv` con sensibilidad estable y razón/remedio, inventarios de
+protocolo, cronología y Pop. La equivalencia Pop solo afecta una copia derivada;
+publicar otro dataset requiere un release nuevo. No hay exportación de IDs,
+fechas exactas, valores libres o categorías pequeñas.
 
-## Verification and remaining decisions
+## Verificación real
+
+Se utilizó `/workspace/.venvs/obj1_sjd/bin/python` (Python 3.12), con las
+bibliotecas del entorno ya instaladas. No se descargaron datos privados.
 
 ```bash
-python -m pytest -q tests/test_graph03_n3_resolution.py \
-  tests/test_graph03_n3_phasec_adjudication.py \
-  tests/test_graph03_n3_candidate_audit.py tests/test_graph03_n3_incremental.py
-python src/studies/graph/03d_graph_n3_resolution_preflight.py --help
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m pytest -q \
+  tests/test_graph03*.py tests/test_graph_pipeline.py \
+  tests/test_graph_representation_sensitivity.py \
+  tests/test_graph_characterization_tiers.py tests/test_graph_bootstrap_qc.py \
+  tests/test_graph_feature_catalog.py tests/test_graph_lab_contract_v2.py \
+  tests/test_graph_lab_ingestion.py tests/test_topological_phenotyping.py
+# 376 passed, 273 warnings, 413.08 s
+
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m pytest -q \
+  tests/test_graph03_run_resolution.py::test_normal_d_reports_downstream_code_drift_without_adding_a_blocker
+# 1 passed, 4.21 s (adición posterior a la colección anterior)
 ```
 
-The synthetic suite exercises five-representation key reconciliation, hash/run/
-commit corruption, incomplete Phase A, failed/incongruent Phase C, collisions,
-symlinks/traversal, frozen identity on errors, partial/rejected/invalid signoffs,
-changed documents, protocol aliases, separate dates, future-derived outcomes,
-Pop distinctions, assay variants, real dependency paths, ESSDAI/ESSPRI comparator
-parity, R2/R0 restrictions, unknown categories, union complete cases, insufficient
-community support, collinearity, residual df, separation feasibility and linked
-disclosure. No fitted coefficients, p-values or predictions are produced.
+La regresión amplia y la prueba de drift aprobaron **377 pruebas relacionadas**, incluyendo Graph02 → Phase A,
+Phase C → D, ausencia de estimación sin revisión, alteración real de artefactos,
+overrides, selección cronológica, ramas incompatibles, privacidad e idempotencia.
+Los warnings no se ocultaron. El workflow existente incluye estas pruebas.
 
-Real-release regression must be run at the authorized protected site. Original
-forms/assays, research protocol equivalence, multiple-protocol adjudication,
-instrument dates/timezones, clinical independence, selection bias, hypothesis
-families and topology sensitivity require independent human evidence. Neither
-QC PASS nor numerical support establishes clinical validity, external validation
-or prognostic utility. A separately approved new contract/release is required
-before any later Graph03 analysis.
+`--help` de ambos entrypoints terminó con código 0. Ambos scripts se ejecutaron
+sin flags desde fuera del checkout usando `OBJ1_SJD_ROOT` para el fixture:
+Phase C produjo `COMPLETE_WITH_DOCUMENTARY_BLOCKERS` (11 archivos) y Phase D
+`COMPLETE_WITH_BLOCKERS` (18 archivos). Seleccionaron el run válido del
+2026-11-02 y descartaron el del 2026-11-03 por inventario ausente. Esos son
+contratos sintéticos; no constituyen una corrida clínica ni cobertura real.
 
-## Synthetic acceptance result
+Una ejecución intermedia terminó con un segfault nativo en el lector C de
+pandas. La regresión ampliada anterior se ejecutó de nuevo con los hilos
+numéricos limitados y terminó sin ese fallo; no se modificó el análisis para
+ocultarlo. `compileall` y `git diff --check` también terminaron correctamente.
 
-The final targeted run passed all 185 tests (zero failures, errors or skips):
+La ejecución clínica completa sigue pendiente de los releases y fuentes
+originales autorizados. Los contratos de medición/independencia y las decisiones
+humanas siguen siendo restricciones reales.
 
-| Suite | PASS | FAIL |
-|---|---:|---:|
-| `test_graph03_n3_candidate_audit` | 24 | 0 |
-| `test_graph03_n3_incremental` | 17 | 0 |
-| `test_graph03_n3_phasec_adjudication` | 24 | 0 |
-| `test_graph03_n3_resolution` | 58 | 0 |
-| `test_graph03_pop_denominators` | 2 | 0 |
-| `test_graph_characterization_tiers` | 60 | 0 |
+La última comprobación de C/D añadió los casos de resumen `FAILED` y marcador
+`03_graph_failure.json`, y volvió a ejecutar todos sus contratos sobre el código
+final:
 
-The standalone CLI also completed against a synthetic five-representation
-bundle, producing all required restricted artifacts with integrity PASS and
-COMPLETE_WITH_BLOCKERS. Compilation, CLI help and Git whitespace checks passed.
-Real HPC regression was not run because the protected releases were unavailable.
+```bash
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m pytest -q \
+  tests/test_graph03_run_resolution.py \
+  tests/test_graph03_n3_phasec_adjudication.py tests/test_graph03_n3_resolution.py
+# 96 passed, 1 warning, 22.78 s (incluye pruebas de la regresión anterior)
+```
+
+También se ejecutó la suite global real:
+
+```bash
+python -m pytest -q
+# Se detuvo en colección: 2 errores por archivos ya ausentes en main.
+python -m pytest -q --continue-on-collection-errors
+# 1682 passed, 12 failed, 1 skipped, 2 errors, 4017 warnings, 1307.31 s
+```
+
+Los doce fallos son preexistentes: se reprodujeron en un worktree limpio de
+`cafb5f0`, sin estos cambios. No se modificaron esos módulos para ocultarlos.
+Once casos fallaron de nuevo en 6.33 s con este comando en la base:
+
+```bash
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m pytest -q \
+  tests/test_08_medication_temporal_matching.py::test_leap_year_boundaries_priority_and_patient_isolation \
+  tests/test_comorbidities.py::test_family_burdens_are_separate_and_no_combined_total_exists \
+  tests/test_cross_domain_correlations.py::test_pairwise_complete_n_and_uninterpretable_serology \
+  tests/test_cross_domain_correlations.py::test_pcs_prespecified_formula_excludes_forbidden_variables \
+  tests/test_explainwhy_inclusive_v2.py::test_historical_scientific_functions_and_inputs_remain_exact \
+  tests/test_missingness_observation_process.py::test_pattern_deterministic_and_completeness_distinct \
+  tests/test_missingness_observation_process.py::test_actual_max_gap_and_membership_reconcile \
+  tests/test_missingness_observation_process.py::test_python39_compatible_no_pep604_union \
+  tests/test_observed_patterns_v2.py::test_v1_endpoints_outputs_and_step14_source_are_unchanged \
+  tests/test_pharma_main_plots.py::test_domain_ordinal_delta_preserves_score_levels \
+  tests/test_pros_longitudinal_labels.py::test_longitudinal_descriptives_are_labelled_as_available_measurements
+# 11 failed
+python -m pytest -q tests/test_visit_dates.py::test_date_fragments
+# El duodécimo fallo también se reprodujo en main.
+python -m pytest -q tests/test_btris_unmapped_lab_audit.py tests/test_pharma.py
+# 2 errores de colección también reproducidos en main.
+```
+
+Los errores de colección se deben a los archivos ausentes
+`src/20_btris_visit_date_match_report.py` y
+`src/studies/pharma/01_run_pharma.py`. Los fallos restantes corresponden a
+medicación, comorbilidades, correlaciones, observación/missingness, snapshots
+históricos, etiquetas PRO y fechas; ninguno corresponde a Graph03. La suite
+global **no está en verde**; la regresión relacionada sí aprobó.

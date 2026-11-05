@@ -77,7 +77,7 @@ def bundle(tmp_path, *, all_reps=False, missing_source=False):
 
 
 def run(paths, output, root=ROOT):
-    return D.run_resolution(*paths[:3], output, paths[3], root)
+    return D.run_resolution(*paths[:3], output, paths[3], root, strict=True)
 
 
 def hashes(paths):
@@ -418,22 +418,24 @@ def test_code_drift_reports_and_blocks_or_rejects(tmp_path):
         run(paths, tmp_path / 'rejected')
 
 
-def test_no_fit_refit_projection_or_pipeline_imports_and_cli_requires_paths():
+def test_no_fit_refit_projection_or_pipeline_imports_and_cli_explains_missing_dependency():
     script = ROOT / 'src/studies/graph/03d_graph_n3_resolution_preflight.py'
     result = subprocess.run([PYTHON, str(script), '--help'], capture_output=True, text=True)
     assert result.returncode == 0 and '--phasec-run' in result.stdout and '--preflight-only' in result.stdout
     result = subprocess.run([PYTHON, str(script)], capture_output=True, text=True)
     assert result.returncode != 0
+    assert 'No se encontró un run compatible' in result.stderr
+    assert 'Traceback' not in result.stderr
     for path in [script, Path(D.__file__), ROOT / 'src/studies/graph/stage03/s03_n3_resolution_support.py']:
         code = path.read_text()
         for forbidden in ['.fit(', '.predict(', 'import statsmodels', 'import sklearn', 's03_pipeline import', 's02_mapper_engine import']:
             assert forbidden not in code
 
 
-def test_default_config_fails_closed_without_independent_hpc_hashes():
+def test_default_config_requires_no_operator_hashes():
     cfg = yaml.safe_load(CONFIG.read_text())
-    with pytest.raises(ValueError, match='INDEPENDENT_HASH_PIN'):
-        D.validate_config(cfg)
+    D.validate_config(cfg)
+    assert cfg['input_contract'] == {'n3_schema_version': 'graph03_n3_audit_v1'}
 
 
 def test_phasec_corruption_reaches_independent_inventory_boundary(tmp_path):
@@ -455,7 +457,7 @@ def test_incomplete_phase_a_rejected_with_valid_summary_hash(tmp_path):
     summary['sha256_by_artifact'][target.name] = digest(target)
     summary_path.write_text(json.dumps(summary))
     edit_cfg(paths, lambda cfg: cfg['input_contract'].update(graph03_summary_sha256=digest(summary_path)))
-    with pytest.raises(ValueError, match='PHASE_A_VERSION_COMMIT_OR_COMPLETION'):
+    with pytest.raises(ValueError, match='PHASE_A_SCHEMA_OR_COMPLETION'):
         run(paths, tmp_path / 'invalid')
 
 
@@ -486,7 +488,7 @@ def test_review_traversal_and_internal_symlink_never_authorize(tmp_path):
     assert not D.review_record(cfg, 'measurement', 'R0', 'esspri__total', root)['verified']
 
 
-def test_signed_pop_crosswalk_is_unapplied_proposal_and_r2_stays_exploratory(tmp_path, monkeypatch):
+def test_signed_pop_crosswalk_uses_derived_copy_and_r2_stays_exploratory(tmp_path, monkeypatch):
     paths = bundle(tmp_path)
     cfg = yaml.safe_load(paths[3].read_text())
     inputs = D.load_inputs(*paths[:3], cfg)
@@ -502,11 +504,14 @@ def test_signed_pop_crosswalk_is_unapplied_proposal_and_r2_stays_exploratory(tmp
     tables, reconciled = D.build_tables(inputs, cfg, ROOT, validation)
     cross = tables['pop_crosswalk_proposal']
     assert cross.loc[cross.original_category.eq('Unclassifiable'), 'proposed_category'].eq('Unclassified').all()
-    assert not cross.mapping_applied.any() and reconciled
+    assert cross.mapping_applied.all() and reconciled
+    for _, rows in cross.groupby(['representation_id', 'universe']):
+        assert rows.n_category.sum() == rows.n_proposed_category.sum() == rows.n_universe.iloc[0]
     pd.testing.assert_frame_equal(original, inputs['frozen']['baseline_raw'])
     topo = tables['topology_stability_audit']
     assert topo.loc[topo.representation_id.eq('R2'), 'decision_status'].eq('descriptive_only').all()
-    assert not topo.r0_stable_only_executed.any()
+    assert topo.loc[topo.representation_id.eq('R0'), 'r0_stable_only_executed'].all()
+    assert not topo.loc[topo.representation_id.eq('R2'), 'r0_stable_only_executed'].any()
 
 
 def test_unknown_categories_do_not_construct_design_and_all_models_share_union():

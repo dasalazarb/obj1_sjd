@@ -24,6 +24,9 @@ jobs:
           python -m pytest -q tests/test_graph_pipeline.py
           tests/test_graph_characterization_tiers.py tests/test_graph03_method_context.py
           tests/test_graph03_episode_resolution.py tests/test_graph03_pop_denominators.py
+          tests/test_graph03_n3_phasec_adjudication.py tests/test_graph03_n3_resolution.py
+          tests/test_graph03_run_resolution.py tests/test_graph03_n3_candidate_audit.py
+          tests/test_graph03_n3_incremental.py
           tests/test_graph_representation_sensitivity.py tests/test_graph_bootstrap_qc.py
           tests/test_graph_feature_catalog.py tests/test_graph_lab_contract_v2.py
           tests/test_graph_lab_ingestion.py tests/test_topological_phenotyping.py
