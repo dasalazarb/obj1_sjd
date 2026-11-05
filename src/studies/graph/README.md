@@ -305,3 +305,13 @@ Referencias: Josse y Husson, *missMDA* (2016), DOI
 [`missMDA::imputeMFA`](https://search.r-project.org/CRAN/refmans/missMDA/html/imputeMFA.html).
 La validación con enmascaramiento artificial no identifica el mecanismo real de
 missingness; estabilidad técnica no establece validez clínica.
+
+### Phase D: documentary resolution and preflight
+
+Run `03d_graph_n3_resolution_preflight.py` only with explicit Graph02, Phase A
+and Phase C paths, a new restricted output directory and independently verified
+hash pins. It preserves every historical blocker and produces evidence/proposals
+without estimation, recoding or Mapper refit. See
+[`docs/graph03_phase_d_resolution.md`](../../../docs/graph03_phase_d_resolution.md)
+for trust anchors, Biowulf commands, signoff schemas, conservative disclosure,
+synthetic tests and the human decisions still required.
