@@ -1,0 +1,38 @@
+schema_version: graph03_n3_phased_v1
+privacy_class: INTERNAL_RESTRICTED
+minimum_disclosure_cell: 5
+input_contract:
+  graph03_run_id: 20261104T180702279234Z_961ffc6f
+  graph02_run_id: 20261103T141918515545Z_fd43fde0
+  graph02_release_sha256: 02151f4cfec041cd30ddfea1a10d1df175f3d47d06f8a922335eb40be3d9a6fc
+  phasec_run_id: 20261105T171340726220Z_ade1b01c
+  graph03_implementation_commit_sha: 585876b3c27355d5ab3e462c783026d5d7b18b9d
+  # Operator-reported production SHA; differences must be explicitly reviewed.
+  phasec_implementation_commit_sha: d770387b4ee6356c036c78a38dd22a758adcf416
+  n3_schema_version: graph03_n3_audit_v1
+  # Required trust anchors. Obtain independently from the frozen HPC releases;
+  # absence fails closed. Never compute-and-trust them inside this command.
+  graph03_summary_sha256: null
+  phasec_qc_sha256: null
+  phasec_inventory_sha256: null
+policy:
+  require_human_signoff: true
+  allow_auto_approval: false
+  allow_source_recode: false
+  allow_discovery_refit: false
+  allow_model_estimation: false
+  allow_endpoint_policy_changes: false
+  allow_public_export: false
+  allow_implicit_latest_release: false
+  allow_covariate_drop: false
+  allow_constant_imputation: false
+  code_drift: report_and_block
+proposed_reviews:
+  protocol: []
+  baseline_date: []
+  baseline_era: []
+  measurement: []
+  candidate_independence: []
+  pop_semantics: []
+  topology_sensitivity: []
+  statistical_design: []
