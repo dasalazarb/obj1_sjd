@@ -14,7 +14,7 @@ input_contract:
   # absence fails closed. Never compute-and-trust them inside this command.
   graph03_summary_sha256: "7fcd3d29e52e25da2b05ed9e662dcce764a0d1cb39325dad4217585632d94dc8"
   phasec_qc_sha256: "36712d870aed817d7a4b7774ec172fafac70bc8d2284ce7e6a72b33cc5ce42d8"
-phasec_inventory_sha256: "67368c85a2a1941928878000f7e171d5768a2145620c6de31539dae68038fac7"
+  phasec_inventory_sha256: "67368c85a2a1941928878000f7e171d5768a2145620c6de31539dae68038fac7"
 policy:
   require_human_signoff: true
   allow_auto_approval: false
