@@ -40,6 +40,9 @@ INPUT_FILES = [f'03_graph_n3_{name}.csv' for name in (
      '03_graph_results_summary.json', '03_graph_release_input_qc.json',
      '03_graph_clinical_feature_roles.csv']
 PREFIX = '03_graph_n3_phasec_'
+# Actual context namespaces retained by Step10; presence is not equivalence.
+PROTOCOL_ALIASES = ['demo__protocol', 'protocol', 'ids__protocol', 'ids__protocol_number',
+    'parent_protocol', 'source_protocol', 'spine__source_protocol', 'pop__protocol', 'pro__parent_protocol']
 # These are documentary mappings established by inspecting code, not clinical
 # measurement assertions. Laboratory original fields/assay selection stay pending.
 LINEAGE = {
@@ -67,6 +70,7 @@ DOCUMENTARY_FILES = [
     'src/studies/_shared.py', 'src/studies/graph/stage02/s02_missingness.py',
     'src/studies/graph/stage03/s03_profiles.py',
     'src/studies/graph/stage03/s03_n3_phasec_adjudication.py',
+    'src/studies/graph/stage03/s03_run_resolution.py',
     'src/studies/graph/03c_graph_n3_clinical_adjudication.py',
 ]
 ACTION = 'DOCUMENT_LINEAGE_MEASUREMENT_DATE_UNITS_CATEGORIES_AND_CONCEPTUAL_INDEPENDENCE'
@@ -86,7 +90,7 @@ def _number(row, field):
 
 
 def validate_phasec_config(config):
-    if config.get('schema_version') != VERSION:
+    if not isinstance(config, dict) or config.get('schema_version') != VERSION:
         raise ValueError('UNSUPPORTED_PHASEC_SCHEMA')
     if config.get('auto_approve_independence') is not False:
         raise ValueError('AUTOMATIC_PHASEC_APPROVAL_FORBIDDEN')
@@ -95,14 +99,13 @@ def validate_phasec_config(config):
     if int(config.get('minimum_disclosure_cell', 0)) < 5:
         raise ValueError('PHASEC_DISCLOSURE_THRESHOLD_TOO_LOW')
     contract = config.get('input_contract', {})
-    for field in ['graph03_run_id', 'graph02_run_id', 'implementation_commit_sha',
-                  'graph02_release_sha256', 'n3_schema_version']:
-        if not contract.get(field):
-            raise ValueError('MISSING_PHASEC_INPUT_PIN')
-    if not re.fullmatch('[a-f0-9]{64}', contract['graph02_release_sha256']):
-        raise ValueError('INVALID_GRAPH02_SHA_PIN')
-    if not re.fullmatch('[a-f0-9]{40}', contract['implementation_commit_sha']):
-        raise ValueError('INVALID_IMPLEMENTATION_COMMIT_PIN')
+    if not isinstance(contract, dict):
+        raise ValueError('PHASEC_INPUT_CONTRACT_MUST_BE_MAPPING')
+    if contract.get('n3_schema_version') != 'graph03_n3_audit_v1':
+        raise ValueError('UNSUPPORTED_PHASE_A_SCHEMA')
+    for field, size in [('graph02_release_sha256', 64), ('implementation_commit_sha', 40)]:
+        if field in contract and not re.fullmatch('[a-f0-9]{%d}' % size, str(contract[field])):
+            raise ValueError('INVALID_PHASEC_PIN_' + field)
     declared = {source: family for family, record in config.get('families', {}).items()
                 for source in record.get('sources', [])}
     if declared != CANDIDATES:
@@ -238,7 +241,7 @@ def audit_phasec_covariates(frozen_baseline_schema, upstream_code, config):
     """Inspect availability only; never join aliases into the frozen baseline."""
     frame = frozen_baseline_schema
     canonical = 'demo__protocol'
-    aliases = [c for c in ['protocol','ids__protocol','ids__protocol_number','parent_protocol'] if c in frame]
+    aliases = [c for c in PROTOCOL_ALIASES[1:] if c in frame]
     present = canonical in frame
     status = 'ABSENT' if not present else 'ALL_NULL' if frame[canonical].isna().all() else 'AVAILABLE'
     decision = 'ABSENT_IN_FROZEN_BASELINE' if not present else 'NOT_REVIEWED'
@@ -421,33 +424,46 @@ def _reconcile_reference(inventory, qc):
                 raise ValueError('REFERENCE_ENDPOINT_COVERAGE_DIVERGED')
 
 
-def load_phasec_inputs(graph03_run, graph02_release, config):
+def load_phasec_inputs(graph03_run, graph02_release, config, *, strict=False):
     """Verify all contracts and hashes before generating conclusions or outputs."""
     validate_phasec_config(config)
     contract = config['input_contract']
     manifest, release = validate_release(graph02_release,
-                                        expected_sha=contract['graph02_release_sha256'])
-    if manifest['run_id'] != contract['graph02_run_id']:
-        raise ValueError('GRAPH02_PIN_MISMATCH')
+        expected_sha=contract.get('graph02_release_sha256') if strict else None)
+    release_sha = digest(release)
     root = Path(graph03_run).resolve()
-    if root.name != contract['graph03_run_id']:
-        raise ValueError('EXPLICIT_GRAPH03_RUN_PIN_MISMATCH')
+    if strict and (contract.get('graph02_run_id', manifest['run_id']) != manifest['run_id'] or
+                   contract.get('graph03_run_id', root.name) != root.name):
+        raise ValueError('FROZEN_RUN_PIN_MISMATCH')
     paths = {name:safe_artifact(root,name) for name in INPUT_FILES}
     summary = json.loads(paths['03_graph_results_summary.json'].read_text())
     qc = json.loads(paths['03_graph_n3_validation_qc.json'].read_text())
     input_qc = json.loads(paths['03_graph_release_input_qc.json'].read_text())
-    for name, path in paths.items():
-        if name != '03_graph_results_summary.json' and summary.get('sha256_by_artifact',{}).get(name) != digest(path):
+    if any(not isinstance(doc, dict) for doc in [summary, qc, input_qc]):
+        raise ValueError('PHASE_A_METADATA_MUST_BE_JSON_OBJECT')
+    if summary.get('schema_version') != 'graph03_results_v1':
+        raise ValueError('UNSUPPORTED_GRAPH03_SUMMARY_SCHEMA')
+    if (summary.get('execution_status') not in {'COMPLETE', 'COMPLETE_WITH_LIMITATIONS'} or
+            (root / '03_graph_failure.json').exists()):
+        raise ValueError('GRAPH03_FAILED_OR_INCOMPLETE_RUN')
+    if not isinstance(summary.get('sha256_by_artifact'), dict):
+        raise ValueError('GRAPH03_ARTIFACT_HASH_INVENTORY_MUST_BE_MAPPING')
+    input_hashes = {name:digest(path) for name,path in paths.items()}
+    for name in paths:
+        if name != '03_graph_results_summary.json' and summary.get('sha256_by_artifact',{}).get(name) != input_hashes[name]:
             raise ValueError('GRAPH03_INPUT_SHA_MISMATCH')
     for document in [summary,qc,input_qc]:
-        if (document.get('graph02_release_sha256') != contract['graph02_release_sha256'] or
+        if (document.get('graph02_release_sha256') != release_sha or
                 document.get('graph02_run_id') != manifest['run_id']):
-            raise ValueError('GRAPH03_FROZEN_RELEASE_PROVENANCE_MISMATCH')
+            raise ValueError('GRAPH03_FROZEN_RELEASE_SHA_OR_PROVENANCE_MISMATCH')
     if (qc.get('graph03_run_id') != root.name or qc.get('phase_a_status') != 'COMPLETE' or
         qc.get('schema_version') != contract['n3_schema_version'] or
-        qc.get('implementation_commit_sha') != contract['implementation_commit_sha'] or
         qc.get('status') not in {'PASS','COMPLETE_WITH_LIMITATIONS'} or input_qc.get('status') != 'PASS'):
-        raise ValueError('PHASE_A_VERSION_COMMIT_OR_COMPLETION_MISMATCH')
+        raise ValueError('PHASE_A_SCHEMA_OR_COMPLETION_MISMATCH')
+    if not re.fullmatch('[a-f0-9]{40}', str(qc.get('implementation_commit_sha', ''))):
+        raise ValueError('INVALID_PHASE_A_CODE_PROVENANCE')
+    if strict and qc['implementation_commit_sha'] != contract.get('implementation_commit_sha', qc['implementation_commit_sha']):
+        raise ValueError('PHASE_A_IMPLEMENTATION_PIN_MISMATCH')
     tables = {name.removeprefix('03_graph_n3_').removesuffix('.csv'):pd.read_csv(path)
               for name,path in paths.items() if name.startswith('03_graph_n3_') and name.endswith('.csv')}
     roles = pd.read_csv(paths['03_graph_clinical_feature_roles.csv'])
@@ -510,12 +526,10 @@ def load_phasec_inputs(graph03_run, graph02_release, config):
             raise ValueError('FROZEN_SUPPORT_OR_STABILITY_NOT_RECONCILED')
     if root.name == REFERENCE_RUN:
         _reconcile_reference(inventory,qc)
-    input_hashes = {name:digest(path) for name,path in paths.items()}
-    protected = {path:digest(path) for path in paths.values()}
-    protected[release] = digest(release)
-    for rel in manifest['sha256_by_artifact']:
-        path = safe_artifact(release.parent,rel)
-        protected[path] = digest(path)
+    protected = {path:input_hashes[name] for name,path in paths.items()}
+    protected[release] = release_sha
+    for rel, sha in manifest['sha256_by_artifact'].items():
+        protected[safe_artifact(release.parent,rel)] = sha
     return dict(tables=tables,roles=roles,manifest=manifest,release=release,qc=qc,
                 frozen=frozen,input_hashes=input_hashes,protected=protected)
 
@@ -550,11 +564,16 @@ def _privacy_check(tables, baseline):
             raise ValueError('EXACT_DATE_IN_PHASEC_OUTPUT')
 
 
-def run_phasec(graph03_run, graph02_release, output_dir, config_path, repository_root):
+def run_phasec(graph03_run, graph02_release, output_dir, config_path, repository_root, *,
+               strict=False, dependency_resolution=None):
     """Produce eleven restricted artifacts in a new directory, preserving inputs."""
     cfg_path, repo = Path(config_path).resolve(), Path(repository_root).resolve()
     config = yaml.safe_load(cfg_path.read_text())
-    inputs = load_phasec_inputs(graph03_run,graph02_release,config)
+    inputs = load_phasec_inputs(graph03_run,graph02_release,config,strict=strict)
+    run_id = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')+'_'+uuid4().hex[:8]
+    if output_dir is None:
+        from .s03_run_resolution import graph_paths
+        output_dir = graph_paths(repository_root)['phasec'] / 'runs' / run_id
     output = Path(output_dir).resolve()
     roots = [Path(graph03_run).resolve(),inputs['release'].parent]
     if any(output.is_relative_to(root) or root.is_relative_to(output) for root in roots):
@@ -590,7 +609,6 @@ def run_phasec(graph03_run, graph02_release, output_dir, config_path, repository
                            step11_raw_value_comparison='SOURCE_UNAVAILABLE_CODE_CONTRACT_ONLY'))
     tables.update(covariate_audit=pd.DataFrame(covariates), baseline_era_audit=pd.DataFrame(era),
                   pop_vocabulary_audit=pd.DataFrame(pop))
-    run_id = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')+'_'+uuid4().hex[:8]
     metadata = dict(run_id=run_id, input_graph03_run_id=Path(graph03_run).name,
         graph02_run_id=inputs['manifest']['run_id'],
         input_implementation_commit_sha=inputs['qc']['implementation_commit_sha'],
@@ -614,6 +632,7 @@ def run_phasec(graph03_run, graph02_release, output_dir, config_path, repository
     if any(digest(path) != sha for path,sha in inputs['protected'].items()):
         raise ValueError('FROZEN_INPUT_CHANGED_DURING_PHASEC')
     qc = dict(**metadata, status='PASS', phasec_status='COMPLETE_WITH_DOCUMENTARY_BLOCKERS',
+        dependency_resolution=dependency_resolution or [], validation_mode='strict' if strict else 'normal',
         source_keys_unique=unique, graph02_unchanged=True, graph03_unchanged=True,
         n_candidate_rows=len(candidates), n_candidate_families=candidates.candidate_family.nunique(),
         n_models_complete=0,n_automatic_approvals=0, n_model_readiness_rows=len(tables['model_readiness']),
@@ -628,8 +647,10 @@ def run_phasec(graph03_run, graph02_release, output_dir, config_path, repository
         no_refit=True, no_source_recoding=True, no_inference=True, longitudinal_policies_unchanged=True)
     # All validation succeeds before making the output directory. Inputs are never
     # opened for writing; exclusive directory creation prevents overwriting runs.
-    output.mkdir(parents=True,exist_ok=False)
-    for name, table in tables.items(): table.to_csv(output/f'{PREFIX}{name}.csv',index=False)
+    output.mkdir(parents=True,exist_ok=False,mode=0o700)
+    for name, table in tables.items():
+        table.to_csv(output/f'{PREFIX}{name}.csv',index=False)
+        (output/f'{PREFIX}{name}.csv').chmod(0o600)
     write_json(output/f'{PREFIX}qc.json',qc)
     summary = [
         '# Graph03 Phase C — documentary endpoint audit', '',
@@ -676,4 +697,7 @@ def run_phasec(graph03_run, graph02_release, output_dir, config_path, repository
             'sha256':digest(path),'size_bytes':path.stat().st_size})
     # A hash inventory cannot contain its own hash. It covers the other ten files.
     pd.DataFrame(artifacts).to_csv(output/f'{PREFIX}artifact_inventory.csv',index=False)
-    return dict(status='PASS',run_id=run_id,output_dir=str(output),n_models_complete=0)
+    for path in output.iterdir():
+        path.chmod(0o600)
+    return dict(status='PASS',phasec_status='COMPLETE_WITH_DOCUMENTARY_BLOCKERS',
+                run_id=run_id,output_dir=str(output),n_models_complete=0)

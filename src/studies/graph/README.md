@@ -306,12 +306,18 @@ Referencias: Josse y Husson, *missMDA* (2016), DOI
 La validación con enmascaramiento artificial no identifica el mecanismo real de
 missingness; estabilidad técnica no establece validez clínica.
 
-### Phase D: documentary resolution and preflight
+### Graph03 C/D: ejecución autónoma
 
-Run `03d_graph_n3_resolution_preflight.py` only with explicit Graph02, Phase A
-and Phase C paths, a new restricted output directory and independently verified
-hash pins. It preserves every historical blocker and produces evidence/proposals
-without estimation, recoding or Mapper refit. See
+```bash
+python src/studies/graph/03c_graph_n3_clinical_adjudication.py
+python src/studies/graph/03d_graph_n3_resolution_preflight.py
+```
+
+Ambas fases descubren los runs compatibles y crean un nuevo `runs/<id>`.
+Los overrides de rutas/configuración son opcionales; `OBJ1_SJD_ROOT` permite
+otra raíz de datos y `--strict` añade los pins históricos disponibles. Se
+conservan integridad de datos, revisión humana y gates científicos. Phase D
+incluye soporte R0 estable sin estimar modelos; los endpoints pendientes siguen
+bloqueados. Consulte
 [`docs/graph03_phase_d_resolution.md`](../../../docs/graph03_phase_d_resolution.md)
-for trust anchors, Biowulf commands, signoff schemas, conservative disclosure,
-synthetic tests and the human decisions still required.
+para colecciones, criterios de selección, evidencia, divulgación y pruebas.

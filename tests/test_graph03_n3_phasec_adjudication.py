@@ -194,7 +194,8 @@ def synthetic_bundle(tmp_path):
         phase_a_status='COMPLETE',schema_version='graph03_n3_audit_v1',status='PASS')))
     (graph03/'03_graph_release_input_qc.json').write_text(json.dumps(dict(**meta,status='PASS')))
     (graph03/'03_graph_n3_results_summary.md').write_text('Synthetic audit only')
-    summary=dict(graph02_run_id=graph02.name,graph02_release_sha256=digest(release),
+    summary=dict(schema_version='graph03_results_v1',execution_status='COMPLETE',
+                 graph02_run_id=graph02.name,graph02_release_sha256=digest(release),
                  sha256_by_artifact={p.name:digest(p) for p in graph03.iterdir()})
     (graph03/'03_graph_results_summary.json').write_text(json.dumps(summary))
     cfg=config()
@@ -211,7 +212,7 @@ def test_tampered_release_fails_before_output_creation(tmp_path):
     release.write_text(release.read_text()+' ')
     out = tmp_path/'must_not_exist'
     with pytest.raises(ValueError, match='SHA'):
-        run_phasec(graph03,release,out,cfg,ROOT)
+        run_phasec(graph03,release,out,cfg,ROOT,strict=True)
     assert not out.exists()
 
 
@@ -343,7 +344,7 @@ def test_bad_phase_a_contracts_fail_before_writes(tmp_path, change):
         summary['sha256_by_artifact'][target.name]=digest(target)
     summary_path.write_text(json.dumps(summary))
     out=tmp_path/'invalid_audit'
-    with pytest.raises(ValueError): run_phasec(graph03,release,out,cfg,ROOT)
+    with pytest.raises(ValueError): run_phasec(graph03,release,out,cfg,ROOT,strict=True)
     assert not out.exists()
 
 

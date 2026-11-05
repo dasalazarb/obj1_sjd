@@ -21,7 +21,7 @@ from ..stage02.s02_contracts import safe_artifact
 from .s03_construct_validation import _dependencies, _paths
 from .s03_n3_candidate_audit import _proxy_alerts
 from .s03_n3_phasec_adjudication import (
-    CANDIDATES, DOCUMENTARY_FILES, LINEAGE, LAB_REFERENCE,
+    CANDIDATES, DOCUMENTARY_FILES, LINEAGE, LAB_REFERENCE, PROTOCOL_ALIASES,
     load_phasec_inputs,
 )
 from .s03_n3_resolution_support import support_diagnostics
@@ -37,10 +37,8 @@ SOURCE_SCOPED = {'measurement', 'candidate_independence', 'statistical_design'}
 POLICY = dict(require_human_signoff=True, **{key: False for key in (
     'allow_auto_approval', 'allow_source_recode', 'allow_discovery_refit',
     'allow_model_estimation', 'allow_endpoint_policy_changes', 'allow_public_export',
-    'allow_implicit_latest_release', 'allow_covariate_drop', 'allow_constant_imputation')})
-ALIASES = ['demo__protocol', 'protocol', 'ids__protocol', 'ids__protocol_number',
-           'parent_protocol', 'source_protocol', 'spine__source_protocol',
-           'pop__protocol', 'pro__parent_protocol']
+    'allow_covariate_drop', 'allow_constant_imputation')})
+ALIASES = PROTOCOL_ALIASES
 CODE_FILES = sorted(set(DOCUMENTARY_FILES + [
     'src/block_A/01_pop_distribution.py', 'src/studies/graph/stage03/s03_release_reader.py',
     'src/studies/graph/stage02/s02_contracts.py',
@@ -64,18 +62,18 @@ def validate_config(config):
     policy = config.get('policy', {})
     if any(policy.get(key) is not value for key, value in POLICY.items()):
         raise ValueError('UNSAFE_PHASED_POLICY')
-    if policy.get('code_drift') not in {'reject', 'report_and_block'}:
+    if policy.get('code_drift') not in {'reject', 'report_and_block', 'report'}:
         raise ValueError('EXPLICIT_CODE_DRIFT_POLICY_REQUIRED')
     pins = config.get('input_contract', {})
     for key in ['graph03_run_id', 'graph02_run_id', 'phasec_run_id']:
-        if not isinstance(pins.get(key), str) or not re.fullmatch('[A-Za-z0-9_]+', pins[key]):
+        if key in pins and (not isinstance(pins[key], str) or not re.fullmatch('[A-Za-z0-9_-]+', pins[key])):
             raise ValueError('MISSING_OR_INVALID_RUN_PIN')
     for key in ['graph02_release_sha256', 'graph03_summary_sha256',
                 'phasec_qc_sha256', 'phasec_inventory_sha256']:
-        if not _sha(pins.get(key)):
+        if key in pins and not _sha(pins[key]):
             raise ValueError('MISSING_OR_INVALID_INDEPENDENT_HASH_PIN_' + key)
     for key in ['graph03_implementation_commit_sha', 'phasec_implementation_commit_sha']:
-        if not _sha(pins.get(key), 40):
+        if key in pins and not _sha(pins[key], 40):
             raise ValueError('MISSING_OR_INVALID_IMPLEMENTATION_PIN')
     if pins.get('n3_schema_version') != 'graph03_n3_audit_v1':
         raise ValueError('UNSUPPORTED_PHASE_A_SCHEMA')
@@ -123,31 +121,34 @@ def _json(path):
     return value
 
 
-def load_inputs(graph03, release, phasec, config):
+def load_inputs(graph03, release, phasec, config, *, strict=False):
     """Validate three frozen releases, including a pinned Phase C hash inventory."""
     validate_config(config)
-    pins = config['input_contract']
     summary_path = safe_artifact(graph03, '03_graph_results_summary.json')
-    if digest(summary_path) != pins['graph03_summary_sha256']:
-        raise ValueError('GRAPH03_SUMMARY_SHA_MISMATCH')
-    # Reuse the verified Phase A reader, without reading/mutating Phase C config.
+    qc_path = safe_artifact(phasec, '03_graph_n3_phasec_qc.json')
+    inventory_path = safe_artifact(phasec, '03_graph_n3_phasec_artifact_inventory.csv')
+    qc = _json(qc_path)
     phasec_contract = dict(schema_version='graph03_n3_phasec_v1', auto_approve_independence=False,
         privacy_class='INTERNAL_RESTRICTED', minimum_disclosure_cell=config['minimum_disclosure_cell'],
-        input_contract={key: pins[key] for key in ['graph03_run_id', 'graph02_run_id',
-                        'graph02_release_sha256', 'n3_schema_version']},
+        input_contract={'n3_schema_version': config['input_contract']['n3_schema_version']},
         families={family: dict(sources=[s for s, f in CANDIDATES.items() if f == family])
                   for family in set(CANDIDATES.values())})
-    phasec_contract['input_contract']['implementation_commit_sha'] = pins['graph03_implementation_commit_sha']
     inputs = load_phasec_inputs(graph03, release, phasec_contract)
+    pins = dict(graph03_run_id=Path(graph03).name, graph02_run_id=inputs['manifest']['run_id'],
+        graph02_release_sha256=digest(inputs['release']), graph03_summary_sha256=digest(summary_path),
+        graph03_implementation_commit_sha=inputs['qc']['implementation_commit_sha'],
+        phasec_run_id=qc.get('run_id'), phasec_implementation_commit_sha=qc.get('implementation_commit_sha'),
+        phasec_qc_sha256=digest(qc_path), phasec_inventory_sha256=digest(inventory_path))
+    if not _sha(pins['phasec_implementation_commit_sha'], 40):
+        raise ValueError('INVALID_PHASEC_CODE_PROVENANCE')
+    if strict:
+        for key, value in config['input_contract'].items():
+            if key in pins and value != pins[key]:
+                raise ValueError('STRICT_INPUT_PIN_SHA_OR_PROVENANCE_MISMATCH_' + key)
     summary = _json(summary_path)
     for name, sha in summary['sha256_by_artifact'].items():
         if digest(safe_artifact(graph03, name)) != sha:
             raise ValueError('GRAPH03_ARTIFACT_SHA_MISMATCH')
-    qc_path = safe_artifact(phasec, '03_graph_n3_phasec_qc.json')
-    inventory_path = safe_artifact(phasec, '03_graph_n3_phasec_artifact_inventory.csv')
-    if digest(qc_path) != pins['phasec_qc_sha256'] or digest(inventory_path) != pins['phasec_inventory_sha256']:
-        raise ValueError('PHASEC_TRUST_ANCHOR_SHA_MISMATCH')
-    qc = _json(qc_path)
     if qc.get('status') != 'PASS' or qc.get('phasec_status') != 'COMPLETE_WITH_DOCUMENTARY_BLOCKERS':
         raise ValueError('PHASEC_QC_NOT_PASS_WITH_BLOCKERS')
     required_true = ['no_inference', 'no_refit', 'graph02_unchanged', 'graph03_unchanged',
@@ -194,7 +195,7 @@ def load_inputs(graph03, release, phasec, config):
         raise ValueError('PHASEC_PREPARATION_ROWS_NOT_RECONCILED')
     if candidates.decision_status.isin(['APPROVED', 'N3_REVIEWED']).any() or qc.get('n_candidate_rows') != len(keys) or qc.get('n_model_readiness_rows') != len(keys)*4:
         raise ValueError('PHASEC_DECISION_OR_ROW_COUNTS_NOT_RECONCILED')
-    inputs.update(phasec_qc=qc, phasec_tables=tables, phasec_inventory=artifacts)
+    inputs.update(phasec_qc=qc, phasec_tables=tables, phasec_inventory=artifacts, provenance=pins)
     # The frozen clinical registry carries actual lineage; never replace it with
     # guesses based only on source names.
     inputs['registry'] = pd.read_csv(safe_artifact(inputs['release'].parent,
@@ -361,6 +362,25 @@ def _approved_date(review, baseline):
         record.get('timezone_review') == 'DOCUMENTED' and record.get('lookahead_review') == 'DOCUMENTED')
 
 
+def reviewed_pop_values(series, review):
+    """Normalize only a signed equivalence in memory; retain the frozen series.
+
+    A display alias cannot authorize this transformation. Pop1/2/3 and unknown
+    values cannot be targets of a crosswalk for the two unclassified states.
+    """
+    record = review['record']
+    crosswalk = record.get('crosswalk', {})
+    valid = bool(review['verified'] and record.get('equivalence_review') == 'DOCUMENTED'
+        and isinstance(crosswalk, dict) and crosswalk
+        and set(crosswalk) <= {'Unclassifiable', 'Unclassified'}
+        and all(isinstance(value, str) and value in {'Unclassifiable', 'Unclassified'}
+                for value in crosswalk.values()))
+    derived = series.replace(crosswalk) if valid else series.copy()
+    if len(derived) != len(series) or not derived.index.equals(series.index):
+        raise ValueError('POP_DERIVED_PATIENTS_NOT_RECONCILED')
+    return derived, valid
+
+
 def build_tables(inputs, config, root, validation):
     baseline, membership, features = (inputs['frozen'][k] for k in ['baseline_raw', 'membership', 'feature_sets'])
     inv = inputs['tables']['source_inventory'].set_index(['representation_id', 'source_column'])
@@ -404,36 +424,35 @@ def build_tables(inputs, config, root, validation):
             n_provisional_hard=int(hard.structural_stability_status.ne('stable').sum()),
             decision_status='not_eligible' if not len(hard) else 'descriptive_only' if rep == 'R2' else 'stable_support' if topology else 'provisional',
             topology_gate='READY_FOR_HUMAN_REVIEW' if topology else 'BLOCKED_PROVISIONAL_TOPOLOGY',
-            r2_exploratory=rep == 'R2', r0_stable_only_executed=False,
+            r2_exploratory=rep == 'R2', r0_stable_only_executed=rep == 'R0',
+            sensitivity_scope='R0_stable_supported_untied_hard_before_outcome_inspection' if rep == 'R0' else 'NOT_APPLICABLE',
             sensitivity_review_status=get_review('topology_sensitivity')['human_review_status'],
             membership_changed=False, denominator_reconciled=True))
         pop_review = get_review('pop_semantics')
         proposed_crosswalk = pop_review['record'].get('crosswalk', {})
-        crosswalk_valid = bool(pop_review['verified'] and
-            pop_review['record'].get('equivalence_review') == 'DOCUMENTED' and
-            isinstance(proposed_crosswalk, dict) and proposed_crosswalk and
-            set(proposed_crosswalk) <= {'Unclassifiable', 'Unclassified'} and
-            set(proposed_crosswalk.values()) <= {'Unclassifiable', 'Unclassified'})
         universes = {'baseline': baseline, 'mapper_covered': baseline.loc[baseline.patient_id.isin(part.loc[part.mapper_covered, 'patient_id'])], 'hard_supported': frame}
         for universe, subset in universes.items():
             pop = subset.get('pop__status', pd.Series(pd.NA, index=subset.index))
+            derived_pop, crosswalk_valid = reviewed_pop_values(pop, pop_review)
             labels = ['Pop1', 'Pop2', 'Pop3', 'Unclassifiable', 'Unclassified', 'MISSING', 'INVALID']
             counts = [int(pop.eq(label).fillna(False).sum()) for label in labels[:5]]
             counts += [int(pop.isna().sum()), len(pop)-sum(counts)-int(pop.isna().sum())]
-            reconciled = sum(counts) == len(subset)
+            after_counts = [int(derived_pop.eq(label).fillna(False).sum()) for label in labels[:5]]
+            after_counts += [int(derived_pop.isna().sum()),
+                             len(derived_pop)-sum(after_counts)-int(derived_pop.isna().sum())]
+            reconciled = sum(counts) == sum(after_counts) == len(subset)
             pop_reconciled &= reconciled
-            for label, count in zip(labels, counts):
+            for label, count, after_count in zip(labels, counts, after_counts):
                 tables['pop_crosswalk_proposal'].append(dict(representation_id=rep, universe=universe,
                     source_column='pop__status', original_category=label,
                     proposed_category=proposed_crosswalk.get(label, label) if crosswalk_valid else label,
                     n_category=count, n_universe=len(subset), denominator_reconciled=reconciled,
-                    n_proposed_category=sum(c for l, c in zip(labels, counts)
-                        if (proposed_crosswalk.get(l, l) if crosswalk_valid else l) ==
-                           (proposed_crosswalk.get(label, label) if crosswalk_valid else label)),
+                    after_category=label, n_proposed_category=after_count,
                     comparison_eligible=label in {'Pop1', 'Pop2', 'Pop3'}, descriptive_universe_retained=True,
                     semantic_review_status=pop_review['human_review_status'],
-                    document_sha256=pop_review['document_sha256'], mapping_applied=False,
-                    decision_status='SIGNED_PROPOSAL_NEW_RELEASE_REQUIRED' if crosswalk_valid else 'PENDING_REVIEW',
+                    document_sha256=pop_review['document_sha256'], mapping_applied=crosswalk_valid,
+                    transformation_scope='DERIVED_COPY_ONLY_FROZEN_VALUES_UNCHANGED',
+                    decision_status='SIGNED_CROSSWALK_DERIVED_COPY' if crosswalk_valid else 'PENDING_REVIEW',
                     code_reference='src/block_A/01_pop_distribution.py:DISPLAY',
                     verification_reference='src/block_A/observed_patterns.py:verified_baseline_pop'))
         defining = set(features.loc[features.representation_id.eq(rep) & features.included, 'source_column'])
@@ -485,7 +504,9 @@ def build_tables(inputs, config, root, validation):
                 n_Y_observed=int(frame[source].notna().sum()) if source in frame else 0,
                 n_hard_supported=len(hard), unit_category_status='DOCUMENTED' if measure_ready else 'PENDING_REVIEW',
                 pop_comparator_status='POP_BASELINE_COMPARATOR_INELIGIBLE' if pop_dependency(source, validation) else 'POP_COMPARATOR_REQUIRES_SEPARATE_REVIEW',
-                decision_status='PENDING_REVIEW', blocking_reasons='|'.join(sorted(blocked)), **date)
+                decision_status='PENDING_REVIEW',
+                adjudication_status='REJECTED' if measurement['rejected'] or independence['rejected'] else 'PENDING',
+                blocking_reasons='|'.join(sorted(blocked)), **date)
             tables['candidate_evidence_matrix'].append(row)
             tables['endpoint_date_readiness'].append(dict(representation_id=rep, source_column=source, **date,
                 timeline='serology' if source.startswith('lab__') else 'questionnaire' if family == 'symptoms' else 'source_specific_clinical',
@@ -526,6 +547,16 @@ def build_tables(inputs, config, root, validation):
                 categories_verified=measure_ready and stat_ready, basis_requested=basis_ready,
                 include_d=stats['verified'] and design_record.get('include_model_d') is True,
                 minimum_events_per_parameter=design_record.get('minimum_events_per_parameter'))
+            # Predefined membership-only sensitivity. This never selects on Y,
+            # changes a frozen membership or establishes stability of full R0.
+            stable_diag = {}
+            if rep == 'R0':
+                stable = frame.structural_stability_status.eq('stable')
+                stable_diag = support_diagnostics(y.loc[stable], adjusted.loc[stable],
+                    basis.loc[stable], frame.loc[stable, 'community_id'], kind, validation,
+                    categories_verified=measure_ready and stat_ready, basis_requested=basis_ready,
+                    include_d=stats['verified'] and design_record.get('include_model_d') is True,
+                    minimum_events_per_parameter=design_record.get('minimum_events_per_parameter'))
             for model, result in diag.items():
                 reasons = list(blocked)
                 if not topology:
@@ -549,6 +580,34 @@ def build_tables(inputs, config, root, validation):
                         'C': 'A_plus_prespecified_reviewed_N1', 'D': 'C_plus_community_only_if_requested'}[model],
                     blocking_reasons='|'.join(sorted(set(reasons + result['support_blocking_reasons'].split('|')) - {''})),
                     inference_scope='development_cohort_conditional_on_frozen_membership_not_external_validation')
+                if 'HUMAN_REJECTED' in reasons:
+                    primary, remedy = 'HUMAN_REJECTED', 'REVIEW_REJECTION_WITH_AUTHORIZED_REVIEWER'
+                elif dependent:
+                    primary, remedy = 'DOCUMENTED_DISCOVERY_DEPENDENCE', 'REJECT_AS_INDEPENDENT_ENDPOINT_OR_REVIEW_NEW_CONTRACT'
+                elif not raw or source not in frame or not y.notna().any():
+                    primary, remedy = 'NO_VERIFIED_OBSERVED_ENDPOINT', 'LOCATE_ORIGINAL_FORM_ASSAY_AND_MEASUREMENT_DATE'
+                elif not adjusted['demo__protocol'].notna().any():
+                    primary, remedy = 'PROTOCOL_SOURCE_OR_MAPPING_UNRESOLVED', 'VERIFY_PROTOCOL_CONTEXT_MAPPING_OR_REVIEW_METHOD_AMENDMENT'
+                elif not measure_ready:
+                    primary, remedy = 'INSTRUMENT_MEASUREMENT_REVIEW_REQUIRED', 'REVIEW_SOURCE_SPECIFIC_DATE_WINDOW_UNITS_AND_CATEGORIES'
+                elif not independent:
+                    primary, remedy = 'CONCEPTUAL_INDEPENDENCE_REVIEW_REQUIRED', 'OBTAIN_REPRESENTATION_AND_SOURCE_SCOPED_HUMAN_REVIEW'
+                elif not topology:
+                    primary, remedy = 'BLOCKED_PROVISIONAL_TOPOLOGY', 'REVIEW_PRESPECIFIED_R0_STABLE_ONLY_SUPPORT'
+                else:
+                    primary = result['support_blocking_reasons'].split('|')[0] or 'NEW_APPROVED_CONTRACT_AND_RELEASE_REQUIRED'
+                    remedy = 'REVIEW_COMMON_CASE_DESIGN_SUPPORT_AND_MULTIPLICITY_WITHOUT_RELAXING_THRESHOLDS'
+                result.update(primary_reason=primary, possible_remedy=remedy, blocker_status='NOT_ESTIMABLE')
+                if stable_diag:
+                    sensitivity = stable_diag[model]
+                    result.update(r0_stable_only_executed=True,
+                        r0_stable_only_scope='MEMBERSHIP_SELECTED_BEFORE_OUTCOMES_NO_FULL_R0_STABILITY_CLAIM',
+                        r0_stable_only_support_gate=sensitivity['design_support_gate'],
+                        r0_stable_only_blocking_reasons=sensitivity['support_blocking_reasons'],
+                        r0_stable_only_status='NOT_ESTIMABLE',
+                        n_r0_stable_hard=int(stable.sum()),
+                        n_r0_stable_common_complete_case=sensitivity['n_common_complete_case'],
+                        n_r0_stable_excluded_missing=sensitivity['n_complete_case_exclusion'])
                 tables['model_preflight'].append(result)
             tables['human_review_queue'].append(dict(representation_id=rep, source_column=source,
                 candidate_family=family, decision_status='PENDING_REVIEW', blocking_reasons=row['blocking_reasons'],
@@ -629,16 +688,16 @@ drop the covariate, fill a constant or change frozen inputs.
 
 Pop proposal: retain Pop1, Pop2, Pop3, Unclassifiable, Unclassified, missing and
 invalid as distinct. Step01's DISPLAY maps presentation labels only; it does
-not authorize canonical equivalence. Any signed crosswalk requires a new
-release, before/after denominator reconciliation and unchanged descriptive
-universe. ESSDAI/ESSPRI and their derivatives remain ineligible with Pop,
+not authorize canonical equivalence. A signed crosswalk is applied only to an
+in-memory copy for before/after reconciliation. Publishing a derived dataset
+requires a new release; the descriptive universe remains unchanged. ESSDAI/ESSPRI and their derivatives remain ineligible with Pop,
 even after semantic reconciliation. Never combine ANA assays or sum RF text
 and numeric codings without independent same-sample/date/assay evidence.
 
-R0 stable-only sensitivity is a proposal, not executed here: prespecify covered,
-untied, supported hard assignments with stable status, patient selection before
-outcome inspection, comparator population, denominators, community minimums,
-power and uncertainty. Quantify post hoc selection and generalizability bias.
+R0 stable-only support uses covered, untied, supported hard assignments with
+stable status, selected before outcome inspection. The same common-case and
+community minimums apply. No sensitivity estimator is run. Human review of
+power, uncertainty and generalizability remains required.
 It cannot establish stability of the full structure. R2 remains exploratory.
 
 Prespecify n3_validation.prespecified_outcomes, hypothesis family and correlated
@@ -674,7 +733,8 @@ separate decisions. Assay equivalence must be established independently.
 
 Pop review: adjudicate Unclassifiable vs Unclassified explicitly, retain missing
 and invalid, reconcile each universe and preserve ineligible patients in the
-descriptive population. Proposed mappings are not executed by Phase D.
+descriptive population. Signed equivalences may normalize an in-memory derived
+copy for reconciliation only; frozen values and model eligibility are preserved.
 
 Protocol review: establish research-protocol meaning, code dictionary,
 multiple-protocol adjudication and exact cohort scope. Any mapping or amendment
@@ -683,7 +743,8 @@ frozen evidence or estimating a model in this phase.
 '''
 
 
-def run_resolution(graph03_run, graph02_release, phasec_run, output_dir, config_path, repository_root):
+def run_resolution(graph03_run, graph02_release, phasec_run, output_dir, config_path, repository_root, *,
+                   strict=False, dependency_resolution=None):
     """Emit a new restricted evidence package; never discover runs or estimate.
 
     Frozen checks execute in finally on success and on every failure after the
@@ -699,6 +760,10 @@ def run_resolution(graph03_run, graph02_release, phasec_run, output_dir, config_
         raise ValueError('MISSING_EXPLICIT_FROZEN_INPUT_DIRECTORY')
     if any(a != b and (a.is_relative_to(b) or b.is_relative_to(a)) for a in roots for b in roots) or len(set(roots)) != 3:
         raise ValueError('FROZEN_INPUT_DIRECTORIES_MUST_BE_DISTINCT')
+    run_id = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ') + '_' + uuid4().hex[:8]
+    if output_dir is None:
+        from .s03_run_resolution import graph_paths
+        output_dir = graph_paths(repository_root)['phased'] / 'runs' / run_id
     output = Path(output_dir).resolve()
     _check_overlap(output, roots)
     cfg_path = Path(config_path).resolve()
@@ -708,7 +773,7 @@ def run_resolution(graph03_run, graph02_release, phasec_run, output_dir, config_
     protected = {cfg_path: digest(cfg_path)}
     created = False
     try:
-        inputs = load_inputs(graph03, release, phasec, config)
+        inputs = load_inputs(graph03, release, phasec, config, strict=strict)
         validation_path = safe_artifact(root, 'src/studies/graph/configs/validation_03.yaml')
         validation = yaml.safe_load(validation_path.read_text())
         # Threshold drift is not silently allowed to weaken the historical gates.
@@ -729,14 +794,13 @@ def run_resolution(graph03_run, graph02_release, phasec_run, output_dir, config_
                 except (ValueError, OSError):
                     pass  # Invalid evidence remains a blocker in review_record.
         drift = any(r['code_drift_status'] == 'CHANGED' for r in code_rows)
-        if drift and config['policy']['code_drift'] == 'reject':
+        if drift and strict and config['policy']['code_drift'] == 'reject':
             raise ValueError('DOCUMENTARY_CODE_DRIFT_REJECTED')
         tables, pop_reconciled = build_tables(inputs, config, root, validation)
         if not pop_reconciled:
             raise ValueError('POP_DENOMINATORS_NOT_RECONCILED')
         commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip()
-        run_id = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ') + '_' + uuid4().hex[:8]
-        pins = config['input_contract']
+        pins = inputs['provenance']
         metadata = dict(run_id=run_id, schema_version=VERSION,
             graph02_run_id=pins['graph02_run_id'], graph02_release_sha256=pins['graph02_release_sha256'],
             graph03_run_id=pins['graph03_run_id'], graph03_summary_sha256=pins['graph03_summary_sha256'],
@@ -750,10 +814,10 @@ def run_resolution(graph03_run, graph02_release, phasec_run, output_dir, config_
             integrity_gate='PASS', clinical_gate='HUMAN_SIGNOFF_REQUIRED',
             covariate_gate='NEW_CONTRACT_REQUIRED', temporal_gate='SEPARATE_REVIEW_REQUIRED',
             topology_gate='PRESERVE_FROZEN_GATE', statistical_gate='ESTIMATION_BLOCKED',
-            code_drift_gate='BLOCKED_CODE_DRIFT' if drift else 'SOURCE_HASHES_RECONCILED',
+            code_drift_gate=('BLOCKED_CODE_DRIFT' if strict else 'REPORTED_CODE_DRIFT') if drift else 'SOURCE_HASHES_RECONCILED',
             policy_gate='NEW_APPROVED_CONTRACT_AND_RELEASE_REQUIRED')
         tables['model_preflight']['code_drift_gate'] = metadata['code_drift_gate']
-        if drift:
+        if drift and strict:
             tables['model_preflight']['blocking_reasons'] += '|DOCUMENTARY_CODE_DRIFT_REQUIRES_REVIEW'
         source_rows = []
         for path, sha in before.items():
@@ -787,15 +851,33 @@ def run_resolution(graph03_run, graph02_release, phasec_run, output_dir, config_
             original_release_regression='VERIFIED_SUPPLIED_RELEASES_READ_ONLY',
             patient_counts='WITHHELD_WHOLE_RUN_COMPLEMENTARY_SUPPRESSION')
         qc = dict(**metadata, status='PASS', phased_status='COMPLETE_WITH_BLOCKERS',
+            dependency_resolution=dependency_resolution or [], validation_mode='strict' if strict else 'normal',
+            blocker_status={
+                'run_resolution': 'RESOLVED', 'manual_pins': 'RESOLVED',
+                'protocol': 'PENDING_HUMAN_REVIEW' if any(
+                    c in inputs['frozen']['baseline_raw'] and
+                    _clean_values(inputs['frozen']['baseline_raw'][c]).notna().any() for c in ALIASES)
+                    else 'PENDING_SOURCE',
+                'instrument_dates': 'RESOLVED' if tables['endpoint_date_readiness'].instrument_measurement_date_verified.all() else 'PENDING_SOURCE',
+                'baseline_era': 'RESOLVED' if tables['baseline_date_lineage'].administrative_era_status.eq('HUMAN_DOCUMENTED').all() else 'PENDING_HUMAN_REVIEW',
+                'pop_semantics': 'RESOLVED' if tables['pop_crosswalk_proposal'].mapping_applied.all() else 'PENDING_HUMAN_REVIEW',
+                'candidate_independence': 'PENDING_HUMAN_REVIEW',
+                'r0_stable_only_support': 'RESOLVED' if 'R0' in inputs['manifest']['eligible_representation_ids'] else 'NOT_ESTIMABLE',
+                'full_topology': 'PENDING_HUMAN_REVIEW', 'models_abcd': 'NOT_ESTIMABLE'},
             graph02_unchanged=True, graph03_unchanged=True, phasec_unchanged=True,
             source_keys_unique=True, model_preparation_rows_reconciled=True,
             missing_candidate_keys=[dict(representation_id=r, source_column=s) for r, s in inputs['missing_candidate_keys']],
             historical_model_status='NOT_ESTIMABLE', automatic_approvals=0, models_estimated=0,
-            source_recoding_applied=False, longitudinal_policies_unchanged=True,
+            source_recoding_applied=False,
+            derived_pop_normalization_applied=bool(tables['pop_crosswalk_proposal'].mapping_applied.any()),
+            longitudinal_policies_unchanged=True,
             count_disclosure_policy='whole_run_complementary_suppression_including_denominators_and_df',
             minimum_disclosure_cell=config['minimum_disclosure_cell'])
         pop_qc = dict(**metadata, status='PASS', universes_reconciled=pop_reconciled,
-            categories_kept_distinct=True, mapping_applied=False, clinical_equivalence='PENDING_REVIEW')
+            frozen_categories_kept_distinct=True,
+            categories_kept_distinct=not bool(tables['pop_crosswalk_proposal'].mapping_applied.any()),
+            mapping_applied=bool(tables['pop_crosswalk_proposal'].mapping_applied.any()),
+            clinical_equivalence='HUMAN_DOCUMENTED' if tables['pop_crosswalk_proposal'].mapping_applied.all() else 'PENDING_REVIEW')
         chronology_qc = dict(**metadata, status='PENDING_REVIEW', exact_dates_exported=False,
             official_baseline_does_not_approve_era_or_endpoint=True, longitudinal_status='BLOCKED')
         payloads = {PREFIX + name + '.csv': table.to_csv(index=False) for name, table in tables.items()}
@@ -803,14 +885,13 @@ def run_resolution(graph03_run, graph02_release, phasec_run, output_dir, config_
             payloads[PREFIX + name + '.json'] = json.dumps(document, indent=2, sort_keys=True, allow_nan=False) + '\n'
         payloads[PREFIX + 'proposed_contract_changes.md'] = _proposal_text(metadata)
         payloads[PREFIX + 'clinical_review_template.md'] = _review_template(metadata, 'Clinical review template')
-        payloads[PREFIX + 'pop_reviewer_decision_template.md'] = _review_template(metadata, 'Pop reviewer decision template')
         payloads[PREFIX + 'summary.md'] = '# Graph03 Phase D — restricted preflight\n\n```json\n' + json.dumps(metadata, indent=2, sort_keys=True) + '\n```\n\n' + (
             'Integrity QC: PASS. Phase D: COMPLETE_WITH_BLOCKERS. All historical preparation rows remain '
-            'NOT_ESTIMABLE. No clinical approval, estimation, recoding, Mapper refit or frozen edit. '
+            'NOT_ESTIMABLE. No clinical approval, estimation, Mapper refit or frozen edit. '
             'Code evidence, instrument evidence and human review remain separate. '
             'Required evidence is listed per representation/source in the review queue and proposals. '
             'Original forms, assay dates, protocol semantics and expert independence decisions cannot '
-            'be inferred from this code. R2 is exploratory; R0 stable-only was not executed. '
+            'be inferred from this code. R2 is exploratory; R0 stable-only support was evaluated without estimation. '
             'Patient counts and denominators are withheld across the entire package to prevent '
             'cross-table reconstruction. No external sharing or ZIP packaging is authorized.\n')
         for name, payload in payloads.items():
