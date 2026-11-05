@@ -91,9 +91,11 @@ def _combine(rows):
     return frame
 
 
-def _reproduce_fit(reference, evaluation, spec, cfg, outcome_id):
+def _reproduce_fit(reference, evaluation, spec, cfg, outcome_id, costs=None):
     """Refit the original coherent family once, then check all published terms."""
-    fits, _, _ = fit_family(evaluation, spec, cfg)
+    fits, attempts, _ = fit_family(evaluation, spec, cfg)
+    if costs is not None:
+        costs['reference_reproduction_attempts'] += len(attempts)
     models = reference['tables']['01_model_comparison']
     coefficients = reference['tables']['01_model_coefficients']
     comparable = {}
@@ -226,6 +228,8 @@ def run(args):
             pd.testing.assert_frame_equal(groups, immutable)
     plan = v.frozen_plan(inventory, priority, args.seed)
     context = dict(version=v.VALIDATION_VERSION, cutoff=args.data_cutoff,
+        bootstrap_policy=v.BOOTSTRAP_POLICY, sensitivity_policy=v.SENSITIVITY_POLICY,
+        calibration_denominator=v.CALIBRATION_DENOMINATOR, original_support_policy=C_SUPPORT_POLICY,
         inputs={k: i['sha256'] for k, i in inputs.items()},
         references={k: i['sha256'] for k, i in reference_snapshot.items()},
         code={k: i['sha256'] for k, i in code_snapshot.items()},
@@ -240,6 +244,7 @@ def run(args):
         scope = v.digest(dict(thresholds=thresholds, bases=bases))[:16]
         cache = v.Checkpoints(cache_root/scope, context, plan, args.resume, patient_ids)
     lookup = {tuple(row[k] for k in ('outcome_id', 'threshold_abs', 'basis_specification', 'model')): row for row in inventory}
+    actual_costs = dict(reference_reproduction_attempts=0, loo_attempts=0, bootstrap_attempts=0)
     consumed, selected_outcomes, task_states, deep_results, reproduced = 0, set(), [], {}, {}
     for task in plan['tasks']:
         key = (task['outcome_id'], task['threshold_abs'], task['basis_specification'])
@@ -251,7 +256,7 @@ def run(args):
             evaluation, spec, meta = evaluations[key]
             # Budget includes original family reconstruction (up to two
             # families x three models), full LOO and requested bootstrap.
-            cost = evaluation['data'].patient_id.nunique()+args.bootstrap_replicates+(6 if key not in reproduced else 0)
+            cost = evaluation['data'].patient_id.nunique()+(args.bootstrap_replicates if spec.type != 'binary' else 0)+(6 if key not in reproduced else 0)
             within_outcomes = args.max_outcomes is None or task['outcome_id'] in selected_outcomes or len(selected_outcomes) < args.max_outcomes
             within_refits = args.max_patient_refits is None or consumed+cost <= args.max_patient_refits
             if within_outcomes and within_refits:
@@ -261,7 +266,7 @@ def run(args):
                     print(f'Step17 global validation deep task {task["queue_position"]}/{len(plan["tasks"])}: model {model}', flush=True)
                 task_start = time.monotonic()
                 if key not in reproduced:
-                    reproduced[key] = _reproduce_fit(references[(key[2], key[1])], evaluation, spec, cfg, key[0])
+                    reproduced[key] = _reproduce_fit(references[(key[2], key[1])], evaluation, spec, cfg, key[0], actual_costs)
                 fits, comparison = reproduced[key]
                 if not comparison[model] or model not in fits:
                     loo = dict(model=model, status='NOT_COMPARABLE_REFERENCE', reason='Reference family/coefficients/covariance not reproduced',
@@ -273,11 +278,17 @@ def run(args):
                 else:
                     loo, influence = v.loo_summary(evaluation, fits[model], spec, cfg, args.seed)
                     boot = bootstrap_patients(evaluation, fits, spec, deep_cfg, model=model, validation_seed=args.seed)
+                    actual_costs['loo_attempts'] += loo.get('n_attempted', loo['n_requested'])
+                    actual_costs['bootstrap_attempts'] += boot.get('n_attempted', boot['n_requested'])
                     scientific = v.scientific_status(row, overlaps[key], loo, boot)
                 if not influence:
                     influence = [dict(model=model, status='NOT_ESTIMABLE',
                         reason='No comparable aggregate LOO estimands', n_requested=loo['n_requested'],
                         n_successful=loo['n_successful'], n_failed=loo['n_failed'])]
+                safe_loo = v.suppress_table(pd.DataFrame([dict(meta, **loo)]), patient_ids, sensitive).iloc[0]
+                safe_boot = v.suppress_table(pd.DataFrame([dict(meta, **boot)]), patient_ids, sensitive).iloc[0]
+                if 'DISCLOSURE_SUPPRESSED' in (safe_loo.disclosure_status, safe_boot.disclosure_status):
+                    scientific = 'INCONCLUSIVE' if scientific not in ('NOT_COMPARABLE_REFERENCE', 'NOT_ESTIMABLE') else scientific
                 payload = dict(scientific_status=scientific, duration_seconds=time.monotonic()-task_start,
                     loo=v.suppress_table(pd.DataFrame([dict(meta, **loo)]), patient_ids, sensitive).to_dict('records'),
                     bootstrap=v.suppress_table(pd.DataFrame([dict(meta, **boot)]), patient_ids, sensitive).to_dict('records'),
@@ -288,7 +299,7 @@ def run(args):
             deep_results[(*key, model)] = payload
             target = bundles[(key[2], key[1])]
             for table_name, field in [('07_fit_stability', 'loo'), ('07_patient_bootstrap_qc', 'bootstrap'),
-                                      ('07_influence_summary', 'influence')]:
+                                      ('07_influence_summary', 'influence'), ('07_bootstrap_failure_diagnostics', 'bootstrap')]:
                 target[table_name].extend(dict(r, duration_seconds=payload['duration_seconds']) for r in payload[field])
         task_states.append(dict(task_id=task['task_id'], queue_position=task['queue_position'],
             status='DEEP_COMPLETE' if payload else 'DEEP_PENDING_RESOURCE_BUDGET', source=source))
@@ -302,6 +313,7 @@ def run(args):
         row['status'] = row['validation_coverage']
         row['loo_status'] = result['loo'][0]['status'] if result else 'NOT_RUN'
         row['bootstrap_status'] = result['bootstrap'][0]['status'] if result else 'NOT_RUN'
+        row.update(v.validation_dimensions(result, dict(row, status=status)))
         target = bundles[(key[2], key[1])]
         target['07_outcome_validation_inventory'].append(row)
         classification = dict(row, status=status, scientific_validation_status=status,
@@ -310,7 +322,7 @@ def run(args):
                                     'Exploratory descriptive stability; inspect continuous diagnostics'))
         target['07_scientific_validation_classification'].append(classification)
         if result is None:
-            for name in ('07_fit_stability', '07_patient_bootstrap_qc', '07_influence_summary'):
+            for name in ('07_fit_stability', '07_patient_bootstrap_qc', '07_influence_summary', '07_bootstrap_failure_diagnostics'):
                 target[name].append(dict(row, status=status, n_requested=0, n_successful=0, n_failed=0,
                     reason='No intensive result; see inventory eligibility and frozen queue'))
     verify_unchanged(inputs)
@@ -336,6 +348,9 @@ def run(args):
             bundle_tasks = [task for task in plan['tasks'] if task['basis_specification'] == basis and task['threshold_abs'] == threshold]
             task_ids = {t['task_id'] for t in bundle_tasks}
             complete = classes.loc[classes.validation_coverage.eq('DEEP_COMPLETE')]
+            # Do not reconstruct suppressed patient denominators through cost totals.
+            hidden_costs = any(record.get('disclosure_status') == 'DISCLOSURE_SUPPRESSED'
+                for result in deep_results.values() for field in ('loo', 'bootstrap') for record in result[field])
             summary = dict(validation_version=v.VALIDATION_VERSION,
                 n_outcomes_inventory=inv.outcome_id.nunique(), n_outcome_models=len(inv),
                 by_model={m: dict(n_inventory=int(inv.model.eq(m).sum()),
@@ -345,6 +360,9 @@ def run(args):
                     n_deep_complete=int(part.validation_coverage.eq('DEEP_COMPLETE').sum()))
                     for domain, part in inv.groupby('domain')},
                 scientific_status_counts=classes.status.value_counts().to_dict(),
+                loo_stability_status_counts=classes.loo_stability_status.value_counts().to_dict(),
+                bootstrap_calibration_status_counts=classes.bootstrap_calibration_status.value_counts().to_dict(),
+                bootstrap_failure_diagnostics=tables['07_bootstrap_failure_diagnostics'].to_dict('records'),
                 stability_denominator=len(complete),
                 n_supported_exploratory=int(complete.status.eq('SUPPORTED_EXPLORATORY').sum()),
                 stability_fraction=float(complete.status.eq('SUPPORTED_EXPLORATORY').mean()) if len(complete) else None,
@@ -358,7 +376,9 @@ def run(args):
                     suppression='Counts omitted when any contributing task tally is disclosure-suppressed')
                     for name in ('07_fit_stability', '07_patient_bootstrap_qc')},
                 selection=plan, resource_budget=dict(max_patient_refits=args.max_patient_refits,
-                    max_outcomes=args.max_outcomes, reserved_refits_this_invocation=consumed),
+                    max_outcomes=args.max_outcomes, reserved_refits_this_invocation=None if hidden_costs else consumed,
+                    actual_refits_this_invocation={k: None if hidden_costs else value for k, value in actual_costs.items()},
+                    disclosure_status='DISCLOSURE_SUPPRESSED' if hidden_costs else 'AGGREGATE'),
                 limitations=['Retrospective associations, not causal progression/prediction',
                     'Same-cohort bootstrap is not independent validation',
                     'Three-knot specification introduced post hoc; exploratory inference',
@@ -373,6 +393,9 @@ def run(args):
             write_manifest(paths['qc']/'validation_summary.json', v.json_safe(summary))
             manifest = dict(version=VERSION, validation_version=v.VALIDATION_VERSION,
                 basis_specification=basis, threshold_abs=threshold, time_axis='clinical_baseline', scenario='main',
+                bootstrap_policy=v.BOOTSTRAP_POLICY, sensitivity_policy=v.SENSITIVITY_POLICY,
+                original_support_policy=C_SUPPORT_POLICY, calibration_denominator=v.CALIBRATION_DENOMINATOR,
+                sample_fingerprints=inv[['outcome_id', 'sample_fingerprint']].drop_duplicates().to_dict('records'),
                 c_support_policy=C_SUPPORT_POLICY, input_origin=args.input_origin, data_cutoff=args.data_cutoff,
                 software_qc_status='FAIL' if classes.status.eq('NOT_COMPARABLE_REFERENCE').any() else 'PASS',
                 scientific_status='EXPLORATORY_NOT_CLINICALLY_REVIEWED', validation_depth=args.depth,

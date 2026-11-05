@@ -2,6 +2,7 @@
 from dataclasses import replace
 import importlib.util
 import json
+import shutil
 from pathlib import Path
 import sys
 
@@ -356,11 +357,19 @@ def test_scientific_classification_ignores_p_q_and_requires_both_deep_components
     assert v.scientific_status(dict(row, reference_comparable=False), 1., good, boot) == 'NOT_COMPARABLE_REFERENCE'
 
 
-@pytest.fixture
-def complete_reference(upstream, tmp_path):
-    root = tmp_path/'reference'
-    # No outcome subset: exercise the actual full synthetic source catalog.
+@pytest.fixture(scope='module')
+def validation_reference_template(upstream, tmp_path_factory):
+    root = tmp_path_factory.mktemp('validation-reference-template')
+    # Generate the complete synthetic V3 catalog once; each test gets its own
+    # byte-identical copy, including tests that deliberately corrupt artifacts.
     original_cli.run(args_for(upstream, root, '--sensitivity', 'none'))
+    return root
+
+
+@pytest.fixture
+def complete_reference(validation_reference_template, tmp_path):
+    root = tmp_path/'reference'
+    shutil.copytree(validation_reference_template, root)
     return root
 
 
@@ -369,6 +378,20 @@ def test_systematic_all_catalog_four_bundles_immutable_reference_privacy_and_q(c
     monkeypatch.setattr(v, 'VALIDATION_VERSION', validation_version)
     root = complete_reference
     source = root/'synthetic_validation/outputs'
+    historical = []
+    for basis in BASIS_SPECIFICATIONS:
+        for threshold in (3, 5):
+            for area in ('tables', 'qc'):
+                current = v.directories(root/'synthetic_validation', basis, threshold)[area]
+                legacy = Path(str(current).replace(v.VALIDATION_VERSION, 'validation_global_v1'))/'historical.txt'
+                legacy.parent.mkdir(parents=True, exist_ok=True)
+                legacy.write_text('frozen historical V1 snapshot\n')
+                historical.append(legacy)
+    legacy_work = root/'synthetic_validation/work/17_nonlinear_temporal_heterogeneity/temporal-spline-v3/validation_global_v1/frozen.json'
+    legacy_work.parent.mkdir(parents=True, exist_ok=True)
+    legacy_work.write_text('{"historical": true}\n')
+    historical.append(legacy_work)
+    historical_hashes = {p: sha256(p) for p in historical}
     before = {p: sha256(p) for p in source.rglob('*') if p.is_file()}
     before.update({p: sha256(p) for p in upstream['root'].rglob('*') if p.is_file()})
     monkeypatch.setattr(cli, 'fit_family', lambda *args: pytest.fail('systematic must not fit models'))
@@ -418,6 +441,7 @@ def test_systematic_all_catalog_four_bundles_immutable_reference_privacy_and_q(c
             coverage = pd.read_csv(paths['tables']/'07_patient_temporal_coverage.csv')
             assert len(coverage) == 4*len(original)
     assert all(sha256(p) == before[p] for p in before)
+    assert all(sha256(p) == value for p, value in historical_hashes.items())
 
 
 def test_invalid_reference_hash_scope_cutoff_and_outcome_sample(complete_reference, upstream):
@@ -451,7 +475,7 @@ def test_deep_zero_budget_checkpoint_resume_and_backup_without_rewriting_V3(comp
     assert resumed['n_deep_complete'] == 0
     assert checkpoints[0].read_bytes() == plan_before
     assert not list((root/'synthetic_validation/outputs').rglob('validation-autoreplace-*'))
-    backup = root/'synthetic_validation/outputs/backups/17_nonlinear_temporal_heterogeneity/validation_global_v1/test'
+    backup = root/'synthetic_validation/outputs/backups/17_nonlinear_temporal_heterogeneity/validation_global_v2/test'
     args = validation_args(upstream, root, '--depth', 'deep', '--max-patient-refits', '0', '--resume', '--backup-root', str(backup))
     second = cli.run(args)
     assert first['n_deep_complete'] == second['n_deep_complete'] == 0
@@ -498,7 +522,7 @@ def test_deep_budget_completed_task_resume_and_reconstruction_gate(upstream, tmp
     assert first['n_deep_candidates'] == 12
     assert first['n_deep_complete'] == 1 and first['n_deep_pending'] == 11
     assert len(calls) == 2
-    backup = root/'synthetic_validation/outputs/backups/17_nonlinear_temporal_heterogeneity/validation_global_v1/test'
+    backup = root/'synthetic_validation/outputs/backups/17_nonlinear_temporal_heterogeneity/validation_global_v2/test'
     resumed = cli.run(validation_args(upstream, root, '--depth', 'deep', '--bootstrap-replicates', '100',
         '--max-patient-refits', '0', '--resume', '--backup-root', str(backup)))
     assert resumed['n_deep_complete'] == 1 and len(calls) == 2
@@ -552,7 +576,7 @@ def test_validation_staging_rollback_preserves_source_and_snapshot(complete_refe
                 raise OSError('synthetic publication interruption')
         return rename(source, destination)
     monkeypatch.setattr(outputs.os, 'replace', fail_after_first)
-    backup = root/'synthetic_validation/outputs/backups/17_nonlinear_temporal_heterogeneity/validation_global_v1/rollback'
+    backup = root/'synthetic_validation/outputs/backups/17_nonlinear_temporal_heterogeneity/validation_global_v2/rollback'
     flags = ('--backup-root', str(backup)) if persistent_backup else ()
     with pytest.raises(OSError):
         cli.run(validation_args(upstream, root, *flags))

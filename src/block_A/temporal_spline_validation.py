@@ -26,12 +26,15 @@ from src.block_A.temporal_spline_contrasts import function_and_gradient
 from src.block_A.temporal_spline_models import fit_fixed_family
 from src.block_A.temporal_spline_inference import simultaneous_critical
 
-VALIDATION_VERSION = 'validation_global_v1'
+VALIDATION_VERSION = 'validation_global_v2'
+BOOTSTRAP_POLICY = 'strict_original_support'
+SENSITIVITY_POLICY = 'fixed_original_grid_conditional'
+CALIBRATION_DENOMINATOR = 'max(100, ceil(0.8*n_requested))'
 EARLY = (0., .5)
 LATE = (1.75, 2.5)
 TABLES = ('07_outcome_validation_inventory', '07_patient_temporal_coverage',
           '07_within_patient_change', '07_distribution_diagnostics', '07_influence_summary',
-          '07_fit_stability', '07_patient_bootstrap_qc', '07_scientific_validation_classification')
+          '07_fit_stability', '07_patient_bootstrap_qc', '07_bootstrap_failure_diagnostics', '07_scientific_validation_classification')
 # Frozen descriptive thresholds, applied to every numeric outcome/model. These
 # are not clinical MCIDs. All continuous diagnostics remain in the tables.
 MATERIAL = dict(loo_standardized_shift_p95=1., loo_material_direction_fraction=.2,
@@ -116,6 +119,13 @@ def suppress_table(table, patient_ids=(), sensitive_outcomes=()):
     for col in tallies:
         numeric = pd.to_numeric(d[col], errors='coerce')
         small |= numeric.between(1, 4)
+    for col in ('refit_failure_category', 'support_loss_histogram'):
+        if col in d:
+            def has_small_tally(value):
+                if not isinstance(value, str):
+                    return False
+                return any(0 < count < 5 for count in json.loads(value or '{}').values())
+            small |= d[col].map(has_small_tally)
     hide = sensitive | small
     # Metadata numbers (seed, threshold, model dimensions, time grid) do not
     # describe a patient's measurement. All other numeric metrics are linked.
@@ -130,6 +140,23 @@ def suppress_table(table, patient_ids=(), sensitive_outcomes=()):
     for col in ('failure_reasons', 'reference_tests'):
         if col in d and col == 'failure_reasons':
             d.loc[hide, col] = '{}'
+    for col in ('refit_failure_category', 'support_loss_histogram'):
+        if col in d:
+            d.loc[hide, col] = '{}'
+    for col in d:
+        if pd.api.types.is_bool_dtype(d[col]) and col not in ('eligible_for_deep', 'reference_comparable'):
+            d[col] = d[col].astype(object)
+            d.loc[hide, col] = None
+    for col in ('loo_stability_status', 'bootstrap_calibration_status', 'validation_reason_codes'):
+        if col in d:
+            d.loc[hide, col] = 'DISCLOSURE_SUPPRESSED'
+    for col in ('scientific_validation_status', 'scientific_status'):
+        if col in d:
+            d.loc[hide, col] = 'INCONCLUSIVE'
+    if 'calibration_valid' in d and 'status' in d:
+        d.loc[hide & d.status.isin(['CALIBRATED', 'INCONCLUSIVE']), 'status'] = 'DISCLOSURE_SUPPRESSED'
+    if 'scientific_validation_status' in d:
+        d.loc[hide, 'status'] = 'INCONCLUSIVE'
     d['disclosure_status'] = np.where(hide, 'DISCLOSURE_SUPPRESSED', 'AGGREGATE')
     safe_table(d, patient_ids)
     audit_payload(d.to_dict('records'), patient_ids)
@@ -600,12 +627,14 @@ def loo_summary(evaluation, fit, spec, cfg, seed):
 
 def bootstrap_summary(evaluation, fit, spec, cfg, seed=None):
     """Fixed-family stratified patient bootstrap, joint over model-specific family."""
-    from src.block_A.temporal_spline_sensitivity import resample_patients
     seed = cfg.seed if seed is None else seed
     requested = cfg.bootstrap_replicates
     base = dict(model=fit.model, n_requested=requested, n_attempted=0, n_successful=0, n_failed=0,
         seed=seed, estimand_family=family_name(fit.model), failure_reasons='{}',
-        required_successes=max(100, math.ceil(.8*requested)), calibration_valid=False)
+        bootstrap_policy=BOOTSTRAP_POLICY, sensitivity_policy=SENSITIVITY_POLICY,
+        calibration_denominator=CALIBRATION_DENOMINATOR,
+        required_successes=max(100, math.ceil(.8*requested)), calibration_valid=False,
+        calibration_valid_strict=False, calibration_valid_conditional=False)
     if spec.type == 'binary':
         return dict(base, status='NOT_ESTIMABLE_METHOD', reason='Binary response bootstrap calibration is not validated')
     rows, gradients, estimates = target_family(evaluation, fit)
@@ -613,37 +642,130 @@ def bootstrap_summary(evaluation, fit, spec, cfg, seed=None):
         return dict(base, status='NOT_ESTIMABLE', reason='No supported grid')
     se = np.sqrt(np.maximum(np.einsum('ij,jk,ik->i', gradients, fit.covariance, gradients), 0))
     valid = se > 1e-12
-    if not valid.any():
-        return dict(base, status='NOT_ESTIMABLE', reason='No nondegenerate estimands')
+    if not valid.any() or not np.isfinite(se).all() or not np.isfinite(estimates).all():
+        return dict(base, status='NOT_ESTIMABLE', reason='No finite nondegenerate estimands')
     analytic = simultaneous_critical(gradients, fit.covariance, cfg.simulations, cfg.seed)
-    rng, maxima, failures = np.random.default_rng(seed), [], Counter()
+    rng, maxima, conditional, failures = np.random.default_rng(seed), [], [], Counter()
+    categories, primary = Counter(), Counter()
+    losses, source_fractions, pseudo_fractions, distances = [], [], [], []
+    grid = original_times(evaluation)
     for _ in range(requested):
-        replicate = resample_patients(evaluation['data'], rng)
+        replicate, support = diagnostic_resample(evaluation['data'], rng, grid, cfg)
         refit, reason = fit_fixed_family(replicate, evaluation['basis'], fit.model, fit.family, spec, cfg)
         if refit is None:
             failures[reason] += 1
+            categories[refit_failure_category(reason)] += 1
+            primary['refit'] += 1
             continue
-        # Calibration requires the entire ORIGINAL family, never a smaller
-        # data-dependent set of supported contrasts in a successful replicate.
-        if supported_times(replicate, original_times(evaluation), cfg) != original_times(evaluation):
-            failures['ORIGINAL_SUPPORT_LOST'] += 1
+        if (refit.family != fit.family or refit.model != fit.model or
+                not np.isfinite(refit.covariance).all() or
+                np.linalg.eigvalsh(refit.covariance).min() < -1e-10):
+            failures['NONCOMPARABLE_FAMILY_OR_COVARIANCE'] += 1
+            categories['COVARIANCE_OR_FAMILY'] += 1
+            primary['refit'] += 1
             continue
+        common = supported_times(replicate, grid, cfg)
+        lost = len(grid)-len(common)
+        losses.append(lost)
+        source_fractions.append(support[0])
+        pseudo_fractions.append(support[1])
+        distances.append(support[2])
         values = target_values(rows, evaluation, refit)
-        maxima.append(float(np.max(np.abs(values[valid]-estimates[valid])/se[valid])))
-    enough = len(maxima) >= base['required_successes']
-    critical = float(np.quantile(maxima, .95)) if enough else np.nan
-    analytic_sign = np.where(estimates-analytic*se > 0, 1, np.where(estimates+analytic*se < 0, -1, 0))
-    bootstrap_sign = np.where(estimates-critical*se > 0, 1, np.where(estimates+critical*se < 0, -1, 0))
-    return dict(base, status='CALIBRATED' if enough else 'INCONCLUSIVE', reason='' if enough else 'Insufficient comparable replicates',
-        n_attempted=requested, n_successful=len(maxima), n_failed=requested-len(maxima),
-        failure_reasons=json.dumps(failures, sort_keys=True), success_fraction=len(maxima)/requested if requested else 0.,
-        calibration_valid=enough, bootstrap_sup_t_critical=critical, analytic_sup_t_critical=analytic,
-        analytic_seed=cfg.seed,
+        maximum = float(np.max(np.abs(values[valid]-estimates[valid])/se[valid]))
+        finite = np.isfinite(values).all() and np.isfinite(maximum)
+        # Primary decomposition follows V1: refit, then support, then target.
+        if lost:
+            failures['ORIGINAL_SUPPORT_LOST'] += 1
+            primary['support'] += 1
+        elif not finite:
+            failures['TARGET_NONFINITE_OR_DEGENERATE'] += 1
+            primary['estimand'] += 1
+        else:
+            maxima.append(maximum)
+        if finite:
+            conditional.append(maximum)
+    def calibration(samples):
+        enough = len(samples) >= base['required_successes']
+        critical = float(np.quantile(samples, .95)) if enough else np.nan
+        original_sign = np.where(estimates-analytic*se > 0, 1, np.where(estimates+analytic*se < 0, -1, 0))
+        calibrated_sign = np.where(estimates-critical*se > 0, 1, np.where(estimates+critical*se < 0, -1, 0))
+        agreement = float(np.mean(original_sign[valid] == calibrated_sign[valid])) if enough else np.nan
+        return enough, critical, agreement
+    enough, critical, agreement = calibration(maxima)
+    cond_valid, cond_critical, cond_agreement = calibration(conditional)
+    return dict(base, status='CALIBRATED' if enough else 'INCONCLUSIVE',
+        reason='' if enough else 'Insufficient comparable replicates',
+        n_attempted=requested, n_successful=len(maxima), n_accepted=len(maxima), n_failed=requested-len(maxima),
+        n_rejected_refit=primary['refit'], n_rejected_support=primary['support'],
+        n_rejected_estimand=primary['estimand'], n_other=0,
+        n_accepted_conditional=len(conditional), n_failed_conditional=requested-len(conditional),
+        n_rejected_refit_conditional=primary['refit'], n_rejected_support_conditional=0,
+        n_rejected_estimand_conditional=requested-primary['refit']-len(conditional),
+        success_fraction_conditional=len(conditional)/requested if requested else 0.,
+        bootstrap_accepted_strict=len(maxima), n_failed_strict=requested-len(maxima),
+        failure_reasons=json.dumps(failures, sort_keys=True),
+        refit_failure_category=json.dumps(categories, sort_keys=True),
+        support_loss_histogram=json.dumps(Counter('1' if n == 1 else '2_or_more' if n > 1 else '0' for n in losses), sort_keys=True),
+        support_loss_fraction=float(np.mean(np.array(losses)>0)) if losses else np.nan,
+        support_loss_conditional=bool(len(conditional)>len(maxima)),
+        support_loss_conditional_fraction=(len(conditional)-len(maxima))/len(conditional) if conditional else np.nan,
+        source_unique_local_fraction_mean=float(np.mean(source_fractions)) if source_fractions and np.isfinite(source_fractions).all() else None,
+        pseudo_local_fraction_mean=float(np.mean(pseudo_fractions)) if pseudo_fractions and np.isfinite(pseudo_fractions).all() else None,
+        grid_distance_years_max=max(distances) if distances and np.isfinite(distances).all() else None,
+        source_support_disclosure_status=('DISCLOSURE_SUPPRESSED' if source_fractions and not np.isfinite(source_fractions).all() else 'AGGREGATE'),
+        success_fraction=len(maxima)/requested if requested else 0.,
+        calibration_valid=enough, calibration_valid_strict=enough, calibration_valid_conditional=cond_valid,
+        bootstrap_sup_t_critical=critical, bootstrap_sup_t_critical_conditional=cond_critical,
+        analytic_sup_t_critical=analytic, analytic_seed=cfg.seed,
         critical_difference=critical-analytic, critical_ratio=critical/analytic,
         global_sup_t_p50=float(np.quantile(maxima, .5)) if enough else np.nan,
         global_sup_t_p90=float(np.quantile(maxima, .9)) if enough else np.nan,
-        band_agreement=float(np.mean(analytic_sign[valid] == bootstrap_sign[valid])) if enough else np.nan,
-        inference='Exploratory stability within the same cohort; not independent validation')
+        band_agreement=agreement, band_agreement_conditional=cond_agreement,
+        inference='Exploratory original-SE standardized maximum deviation; not bootstrap-t or independent validation')
+
+
+def refit_failure_category(reason):
+    reason = reason.upper()
+    for category in ('DESIGN', 'LONGITUDINAL_SUPPORT', 'NUMERICAL', 'CONVERGENCE',
+                     'COVARIANCE', 'RESIDUAL', 'BINARY'):
+        if category in reason:
+            return 'RESIDUAL_QC' if category == 'RESIDUAL' else category
+    return 'OTHER'
+
+
+def diagnostic_resample(data, rng, times, cfg):
+    """V1-identical draws; source identities exist only in this stack frame.
+
+    Return the draw and three aggregate diagnostics, never a source-ID map.
+    """
+    if data.groupby('patient_id').observed_pattern.nunique().gt(1).any():
+        raise ContractError('bootstrap requires fixed patient groups')
+    by_patient = {pid: d for pid, d in data.groupby('patient_id')}
+    parts, unique_fractions, pseudo_fractions, gaps = [], [], [], []
+    source_small = False
+    for group in PATTERNS:
+        pool = data.loc[data.observed_pattern.eq(group), 'patient_id'].unique()
+        if not len(pool):
+            raise ContractError('bootstrap group missing')
+        selected = rng.choice(pool, len(pool), replace=True)
+        source = data.loc[data.patient_id.isin(set(selected))]
+        for index, pid in enumerate(selected):
+            part = by_patient[pid].copy()
+            part['patient_id'] = group+'_bootstrap_'+str(index)
+            parts.append(part)
+        for t in times:
+            local = source.loc[source.time.sub(t).abs().le(cfg.prediction_window_years/2)]
+            unique_count = local.patient_id.nunique()
+            source_small |= 0 < unique_count < 5
+            unique_fractions.append(unique_count/len(pool))
+            local_ids = set(local.patient_id)
+            pseudo_fractions.append(sum(pid in local_ids for pid in selected)/len(pool))
+            gaps.append(max(0., source.time.min()-t, t-source.time.max()))
+    if source_small:
+        # Never release a rate from which a small source-patient cell can be recovered.
+        return pd.concat(parts, ignore_index=True), (np.nan, np.nan, np.nan)
+    return pd.concat(parts, ignore_index=True), (float(np.mean(unique_fractions)),
+        float(np.mean(pseudo_fractions)), max(gaps, default=0.))
 
 
 def scientific_status(inventory, overlap, loo=None, bootstrap=None):
@@ -658,7 +780,7 @@ def scientific_status(inventory, overlap, loo=None, bootstrap=None):
         return 'DEEP_PENDING_RESOURCE_BUDGET'
     if loo.get('status') == 'NOT_COMPARABLE_REFERENCE':
         return 'NOT_COMPARABLE_REFERENCE'
-    if not loo.get('n_successful') or not bootstrap.get('calibration_valid'):
+    if not loo.get('n_successful'):
         return 'INCONCLUSIVE'
     failed = loo['n_failed']/max(1, loo['n_requested'])
     if (failed > MATERIAL['maximum_refit_failure_fraction'] or
@@ -666,6 +788,8 @@ def scientific_status(inventory, overlap, loo=None, bootstrap=None):
             loo['standardized_shift_p95'] > MATERIAL['loo_standardized_shift_p95'] or
             loo['material_direction_fraction'] > MATERIAL['loo_material_direction_fraction']):
         return 'FRAGILE'
+    if not bootstrap.get('calibration_valid'):
+        return 'INCONCLUSIVE'
     if (overlap < MATERIAL['minimum_longitudinal_overlap'] or
             loo.get('support_fraction_p25', 1.) < MATERIAL['minimum_loo_support_fraction'] or
             loo['band_agreement'] < MATERIAL['minimum_band_agreement'] or
@@ -737,3 +861,35 @@ class Checkpoints:
         payload = json_safe(payload)
         self._atomic(self.path/(task_id+'.json'), dict(context_hash=self.context_hash, task_id=task_id,
             payload_hash=digest(payload), payload=payload))
+
+
+def validation_dimensions(result, inventory=None):
+    """Independent disclosure-controlled LOO and bootstrap dimensions."""
+    if result is None:
+        return dict(loo_stability_status=('NOT_APPLICABLE' if inventory and inventory['status'] == 'NOT_APPLICABLE_TYPE' else 'LOO_NOT_RUN'),
+            bootstrap_calibration_status=('NOT_COMPARABLE_REFERENCE' if inventory and not inventory['reference_comparable'] else 'NOT_RUN'),
+            loo_material_fragility_detected=None, bootstrap_strict_calibration_valid=None,
+            bootstrap_conditional_calibration_valid=None, validation_reason_codes='DEEP_NOT_RUN')
+    loo, boot = result['loo'][0], result['bootstrap'][0]
+    hidden = any(r.get('disclosure_status') == 'DISCLOSURE_SUPPRESSED' for r in (loo, boot))
+    if hidden:
+        return dict(loo_stability_status='DISCLOSURE_SUPPRESSED',
+            bootstrap_calibration_status='DISCLOSURE_SUPPRESSED', loo_material_fragility_detected=None,
+            bootstrap_strict_calibration_valid=None, bootstrap_conditional_calibration_valid=None,
+            validation_reason_codes='DISCLOSURE_SUPPRESSED')
+    material = bool(loo.get('n_successful')) and (
+        bool(loo.get('material_fragility_detected', False)) or
+        loo.get('standardized_shift_p95', 0) > MATERIAL['loo_standardized_shift_p95'] or
+        loo.get('material_direction_fraction', 0) > MATERIAL['loo_material_direction_fraction'] or
+        loo.get('n_failed', 0)/max(1, loo.get('n_requested', 0)) > MATERIAL['maximum_refit_failure_fraction'])
+    loo_status = ('MATERIAL_INFLUENCE' if material else 'LOO_INCONCLUSIVE' if not loo.get('n_successful') or
+        loo.get('support_fraction_p25', 1.) < MATERIAL['minimum_loo_support_fraction'] or
+        loo.get('band_agreement', 0) < MATERIAL['minimum_band_agreement'] else 'STABLE_WITHIN_DEFINED_LIMITS')
+    strict = bool(boot.get('calibration_valid', False))
+    conditional = bool(boot.get('calibration_valid_conditional', False))
+    boot_status = (boot['status'] if boot.get('status') in ('NOT_ESTIMABLE_METHOD', 'NOT_COMPARABLE_REFERENCE') else
+        'CALIBRATED_STRICT' if strict else 'CONDITIONAL_ONLY' if conditional else 'INCONCLUSIVE_STRICT')
+    return dict(loo_stability_status=loo_status, bootstrap_calibration_status=boot_status,
+        loo_material_fragility_detected=material, bootstrap_strict_calibration_valid=strict,
+        bootstrap_conditional_calibration_valid=conditional,
+        validation_reason_codes=loo_status+';'+boot_status)
