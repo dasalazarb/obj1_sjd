@@ -321,3 +321,14 @@ incluye soporte R0 estable sin estimar modelos; los endpoints pendientes siguen
 bloqueados. Consulte
 [`docs/graph03_phase_d_resolution.md`](../../../docs/graph03_phase_d_resolution.md)
 para colecciones, criterios de selección, evidencia, divulgación y pruebas.
+
+### Graph03 E: inferencia condicionada a decisiones humanas
+
+El nuevo contrato `graph03_controlled_n3_v1` añade inventario de esquemas,
+vista basal derivada, decisiones por representación/fuente verificadas por SHA,
+preflight con bloqueos simultáneos y ejecución individualmente condicionada.
+03c/03d conservan su carácter documental. La configuración de producción no
+prescribe ni aprueba outcomes. Consulte
+[`docs/graph03_controlled_inference.md`](../../../docs/graph03_controlled_inference.md)
+para preparación de planes, evidencia institucional, comandos y límites de
+privacidad. No se ha establecido viabilidad inferencial en datos clínicos reales.
