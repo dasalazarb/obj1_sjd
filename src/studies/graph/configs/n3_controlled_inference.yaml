@@ -1,0 +1,21 @@
+schema_version: graph03_controlled_n3_v1
+privacy_class: INTERNAL_RESTRICTED
+public_export: false
+require_human_signoff: true
+allow_discovery_refit: false
+# --prepare-plan creates exact input pins, but never a clinical approval.
+input_sha256: {}
+authorized_reviewers: []
+decisions: []
+# Empty production plan: human prespecification is mandatory. One approved pair
+# can advance independently. Do not include both RF text/value encodings.
+# outcomes:
+# - representation_id: R0
+#   source_column: ext__biopsy_focus_score
+#   requested_models: [A, B]
+#   n1_basis: []
+#   use_pop: false
+#   topology_scope: full  # or preregistered R0_stable_only sensitivity
+#   model_family: gaussian_ols
+#   hypothesis_family: primary_biopsy
+outcomes: []
