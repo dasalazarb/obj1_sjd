@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """New restricted, human-approved Graph03 N3 analysis; never refits Mapper."""
 import argparse
+from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import shutil
 import sys
+from types import SimpleNamespace
+from uuid import uuid4
 
 import yaml
 
@@ -16,12 +20,91 @@ from src.studies.graph.stage03.s03_n3_controlled import input_pins, run_controll
 from src.studies.graph.stage03.s03_n3_decisions import decision_templates
 from src.studies.graph.stage03.s03_n3_phasec_adjudication import CANDIDATES
 from src.studies.graph.stage03.s03_n3_resolution import _check_overlap
+from src.studies.graph.stage03.s03_run_resolution import (
+    graph_paths, resolve_graph03_dependencies,
+)
+from src.studies.graph._pipeline import config_path
+
+
+def _configured_inputs():
+    """Resolve inputs only from the existing versioned project configs."""
+    pipeline_file = ROOT / 'src/studies/graph/configs/pipeline.yaml'
+    controlled_file = ROOT / 'src/studies/graph/configs/n3_controlled_inference.yaml'
+    pipeline = yaml.safe_load(pipeline_file.read_text())
+    controlled = yaml.safe_load(controlled_file.read_text())
+    data_root = Path(os.environ.get('OBJ1_SJD_ROOT', ROOT)).resolve()
+
+    def data_location(path):
+        resolved = Path(path).resolve()
+        if data_root != ROOT and resolved.is_relative_to(ROOT):
+            return data_root / resolved.relative_to(ROOT)
+        return resolved
+
+    integrated = data_location(config_path(pipeline_file, pipeline['paths']['integrated']))
+    # Step10 publishes this alongside the integrated analytic parquet.
+    context = integrated.with_name('10_integrated_longitudinal_context.parquet')
+    measurement_setting = controlled.get('source_paths', {}).get('measurements')
+    if not isinstance(measurement_setting, str) or not measurement_setting.strip():
+        raise ValueError('N3_MEASUREMENT_SOURCE_MUST_BE_CONFIGURED')
+    measurements = data_location(config_path(controlled_file, measurement_setting))
+    return context, measurements
+
+
+def _fill_automatic_inputs(args, parser):
+    """One-command mode; keep explicit overrides for reproducibility/debugging."""
+    if args.graph03_run is None or args.graph02_release is None:
+        selection = SimpleNamespace(
+            graph03_run=args.graph03_run,
+            graph02_release=args.graph02_release,
+            config=ROOT / 'src/studies/graph/configs/n3_phasec_review.yaml',
+            strict=False,
+        )
+        graph03, release, _, _ = resolve_graph03_dependencies(selection, ROOT, phase='C')
+        args.graph03_run, args.graph02_release = graph03, release
+
+    if args.context is None or args.measurements is None:
+        context, measurements = _configured_inputs()
+        args.context = args.context or context
+        args.measurements = args.measurements or measurements
+
+    # Neither an arbitrary parquet nor an inferred episode date may replace
+    # the reviewed instrument-level measurement contract.
+    for name, path in [('Step10 context', args.context), ('N3 measurements', args.measurements)]:
+        if not Path(path).is_file():
+            parser.exit(2, f'[Graph03] Missing configured {name}: {path}\n'
+                        'No clinical data were invented or estimators started. '
+                        'Supply the verified source at this configured location.\n')
+
+    output_root = graph_paths(ROOT)['graph03'].parent / '03_graph_n3_controlled_inference'
+    unique_run = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ') + '_' + uuid4().hex[:8]
+    if args.output_dir is None:
+        args.output_dir = output_root / 'runs' / unique_run
+    if args.plan is None:
+        active = output_root / 'plans' / 'active.yaml'
+        if active.is_file():
+            args.plan = active
+            if not args.prepare_plan:
+                # A deliberately activated, content-pinned plan is execution
+                # intent. run_controlled still blocks every unapproved model.
+                args.execute = True
+        else:
+            if args.execute:
+                parser.exit(2, '[Graph03] No active approved N3 plan. '
+                            'Create and review a draft first.\n')
+            args.prepare_plan = True
+            args.plan = output_root / 'plans' / ('draft_' + unique_run + '.yaml')
+    if args.prepare_plan:
+        args.plan.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if args.decision_root is None:
+        args.decision_root = output_root / 'decisions'
+    return args
+
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ['graph03-run', 'graph02-release', 'context', 'measurements', 'plan', 'output-dir']:
-        parser.add_argument('--' + name, required=True, type=Path)
+        parser.add_argument('--' + name, type=Path)
     parser.add_argument('--decision-root', type=Path)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--prepare-plan', action='store_true',
@@ -29,6 +112,7 @@ def main(argv=None):
     mode.add_argument('--execute', action='store_true', help='Estimate only individually READY approved models')
     args = parser.parse_args(argv)
     try:
+        args = _fill_automatic_inputs(args, parser)
         if args.prepare_plan:
             release = args.graph02_release.resolve()
             frozen_roots = [args.graph03_run.resolve(), release if release.is_dir() else release.parent]
@@ -58,11 +142,9 @@ def main(argv=None):
                 raise
             result = dict(status='UNSIGNED_DRAFT_NO_APPROVAL', plan=str(args.plan), output_dir=str(args.output_dir))
         else:
-            if args.decision_root is None:
-                parser.error('--decision-root is required for preflight/execute')
             result = run_controlled(args.graph03_run, args.graph02_release, args.context,
                 args.measurements, args.output_dir, args.plan, args.decision_root, ROOT, execute=args.execute)
-    except (ValueError, OSError, KeyError, TypeError, yaml.YAMLError):
+    except (ValueError, OSError, KeyError, TypeError, RuntimeError, yaml.YAMLError):
         # Clinical paths, free values and exception messages stay off console.
         parser.exit(1, '[Graph03] Controlled N3 stopped: invalid input, integrity or review contract.\n')
     print(json.dumps(result, sort_keys=True))
