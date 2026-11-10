@@ -50,6 +50,56 @@ def _configured_inputs():
     return context, measurements
 
 
+def _source_readiness(output_dir, context, measurements):
+    """Report named upstream schemas only; never fabricate/export patient rows."""
+    import re
+    source_root = ROOT / 'data/intermediate'
+    paths = {
+        'step10_context': Path(context),
+        'step01_lab_analytes': source_root / 'block_A/01_serological_profile/01_labs_episode_analyte_level.parquet',
+        'step01_essdai_esspri': source_root / '01_pop_distribution/01_visit_level_classification.parquet',
+        'step01_extended_clinical': source_root / 'block_A/01_extended_clinical_phenotype/01_extended_clinical_phenotype_longitudinal.parquet',
+        'required_instrument_measurements': Path(measurements),
+    }
+    inventory = {}
+    for label, path in paths.items():
+        info = {'path': str(path), 'exists': path.is_file()}
+        if path.is_file():
+            try:
+                import pyarrow.parquet as pq
+                columns = set(pq.read_schema(path).names)
+                info['has_patient_episode_keys'] = {'patient_id', 'clinical_episode_id'} <= columns
+                info['date_columns'] = sorted(x for x in columns
+                    if re.search(r'(?:date|datetime|specimen)', x, flags=re.I))
+                info['instrument_fields'] = sorted(columns & {
+                    'source_column', 'value', 'measurement_date',
+                    'assay_id', 'unit', 'sample_id'})
+                info['selected_lab_fields'] = sorted(columns & {
+                    'lab_id', 'selected_lab_date', 'selected_value_numeric',
+                    'selected_value_text', 'selected_unit', 'selection_status',
+                    'unit_conflict', 'result_conflict'})
+            except (ImportError, OSError, ValueError):
+                info['schema_inspection'] = 'UNAVAILABLE'
+        inventory[label] = info
+    report = {
+        'status': 'SOURCE_CONTRACT_NOT_READY',
+        'estimators_run': 0,
+        'required_instrument_columns': [
+            'patient_id', 'clinical_episode_id', 'source_column', 'value',
+            'measurement_date', 'assay_id', 'unit', 'sample_id'],
+        'upstream_sources': inventory,
+        'action': ('Construct and independently review an instrument-level source. '
+                   'Never substitute clinical episode dates for instrument dates, '
+                   'invent sample IDs, conflate assays or auto-approve endpoints.'),
+    }
+    output_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
+    target = output_dir / 'source_readiness.json'
+    target.write_text(json.dumps(report, sort_keys=True, indent=2) + '\n')
+    target.chmod(0o600)
+    return {'status': report['status'], 'report': str(target),
+            'output_dir': str(output_dir), 'estimators_run': 0}
+
+
 def _fill_automatic_inputs(args, parser):
     """One-command mode; keep explicit overrides for reproducibility/debugging."""
     if args.graph03_run is None or args.graph02_release is None:
@@ -67,16 +117,12 @@ def _fill_automatic_inputs(args, parser):
         args.context = args.context or context
         args.measurements = args.measurements or measurements
 
-    # Neither an arbitrary parquet nor an inferred episode date may replace
-    # the reviewed instrument-level measurement contract.
-    for name, path in [('Step10 context', args.context), ('N3 measurements', args.measurements)]:
-        if not Path(path).is_file():
-            parser.exit(2, f'[Graph03] Missing configured {name}: {path}\n'
-                        'No clinical data were invented or estimators started. '
-                        'Supply the verified source at this configured location.\n')
-
     output_root = graph_paths(ROOT)['graph03'].parent / '03_graph_n3_controlled_inference'
     unique_run = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ') + '_' + uuid4().hex[:8]
+    if not Path(args.context).is_file() or not Path(args.measurements).is_file():
+        args.source_readiness = _source_readiness(
+            output_root / 'runs' / unique_run, args.context, args.measurements)
+        return args
     if args.output_dir is None:
         args.output_dir = output_root / 'runs' / unique_run
     if args.plan is None:
@@ -113,6 +159,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         args = _fill_automatic_inputs(args, parser)
+        if getattr(args, 'source_readiness', None):
+            print(json.dumps(args.source_readiness, sort_keys=True))
+            return
         if args.prepare_plan:
             release = args.graph02_release.resolve()
             frozen_roots = [args.graph03_run.resolve(), release if release.is_dir() else release.parent]
