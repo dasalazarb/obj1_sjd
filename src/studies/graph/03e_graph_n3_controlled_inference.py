@@ -81,9 +81,26 @@ def _source_readiness(output_dir, context, measurements):
             except (ImportError, OSError, ValueError):
                 info['schema_inspection'] = 'UNAVAILABLE'
         inventory[label] = info
+    candidate_status = 'NOT_ATTEMPTED'
+    candidate_artifact = ''
+    if Path(context).is_file() and not Path(measurements).is_file():
+        try:
+            from src.studies.graph.stage03.s03_n3_source_adapter import build_candidate
+            candidate_path = output_dir / 'unapproved_lab_measurement_candidates.parquet'
+            candidate = build_candidate(ROOT, Path(context), candidate_path)
+            candidate_status = candidate['status']
+            candidate_artifact = str(candidate_path)
+        except (ValueError, OSError, KeyError, TypeError) as exc:
+            # Emit only controlled reason tokens, never source values.
+            import re as _re
+            token = str(exc)
+            candidate_status = token if _re.fullmatch('[A-Z][A-Z0-9_]+', token) else 'ADAPTER_ERROR'
     report = {
         'status': 'SOURCE_CONTRACT_NOT_READY',
         'estimators_run': 0,
+        'candidate_status': candidate_status,
+        'candidate_artifact': candidate_artifact,
+        'candidate_is_approved': False,
         'required_instrument_columns': [
             'patient_id', 'clinical_episode_id', 'source_column', 'value',
             'measurement_date', 'assay_id', 'unit', 'sample_id'],
@@ -92,7 +109,7 @@ def _source_readiness(output_dir, context, measurements):
                    'Never substitute clinical episode dates for instrument dates, '
                    'invent sample IDs, conflate assays or auto-approve endpoints.'),
     }
-    output_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
+    output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     target = output_dir / 'source_readiness.json'
     target.write_text(json.dumps(report, sort_keys=True, indent=2) + '\n')
     target.chmod(0o600)
