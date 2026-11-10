@@ -3,6 +3,12 @@ privacy_class: INTERNAL_RESTRICTED
 public_export: false
 require_human_signoff: true
 allow_discovery_refit: false
+# Unambiguous Step10 context path is derived from pipeline.yaml.
+# Instrument-level measurements are a separate, reviewed input and cannot be
+# recreated from the analytic baseline or selected by filename heuristics.
+# Relative to this file, matching the existing data/analytic convention.
+source_paths:
+  measurements: ../../../../data/analytic/10_build_integrated_longitudinal_dataset/10_n3_instrument_measurements.parquet
 # --prepare-plan creates exact input pins, but never a clinical approval.
 input_sha256: {}
 authorized_reviewers: []
