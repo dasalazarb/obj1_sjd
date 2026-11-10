@@ -114,7 +114,10 @@ def _source_readiness(output_dir, context, measurements):
     target.write_text(json.dumps(report, sort_keys=True, indent=2) + '\n')
     target.chmod(0o600)
     return {'status': report['status'], 'report': str(target),
-            'output_dir': str(output_dir), 'estimators_run': 0}
+            'output_dir': str(output_dir), 'estimators_run': 0,
+            'candidate_status': candidate_status,
+            'candidate_artifact': candidate_artifact,
+            'candidate_is_approved': False}
 
 
 def _fill_automatic_inputs(args, parser):
