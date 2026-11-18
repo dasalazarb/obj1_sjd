@@ -612,7 +612,7 @@ def _staged_run(root, run_id):
 
 
 def run_source(mode, paths, output_root, config_path, repository_root, *, run_id=None,
-               review_path=None, signature_path=None, trust_key=None):
+               review_path=None, signature_path=None, trust_key=None, verify_calendar_formats=False):
     """Publish a private audit, candidate, or externally signed evidence release."""
     from .s03_n3_measurement_review import reviewed_measurements, validate_specimen_column
 
@@ -684,9 +684,16 @@ def run_source(mode, paths, output_root, config_path, repository_root, *, run_id
         if calendar is not None:
             if all(source_hashes[role] for role in cal.BTRIS_ROLES):
                 try:
-                    records = cal.btris_provenance(paths, calendar)
-                except (ValueError, OSError):
-                    blockers.append('BTRIS_COLLECTION_PROVENANCE_UNRESOLVED')
+                    records = cal.btris_provenance(paths, calendar, verify_formats=verify_calendar_formats)
+                except (ValueError, OSError) as exc:
+                    reason = str(exc)
+                    if verify_calendar_formats and re.fullmatch(
+                            r'BTRIS_COLLECTION_(COLUMNS_REQUIRED|DATE_FORMAT_UNVERIFIED|OBSERVATION_MAPPING_CONFLICT)'
+                            r'_BTRIS_(RAW|INTERMEDIATE)_(11D|15D)',
+                            reason):
+                        blockers.append(reason)
+                    else:
+                        blockers.append('BTRIS_COLLECTION_PROVENANCE_UNRESOLVED')
             else:
                 blockers.append('BTRIS_COLLECTION_FILES_NOT_AVAILABLE')
         if not blockers:
