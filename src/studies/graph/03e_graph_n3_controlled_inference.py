@@ -170,8 +170,8 @@ def _fill_automatic_inputs(args, parser):
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if not argv:
-        from src.studies.graph.stage03.s03_n3_auto import run_auto
-        print(json.dumps(run_auto(ROOT), sort_keys=True))
+        from src.studies.graph.stage03.s03_n3_exploratory import run_exploratory_auto
+        print(json.dumps(run_exploratory_auto(ROOT), sort_keys=True))
         return
 
     parser = argparse.ArgumentParser(description=__doc__)
