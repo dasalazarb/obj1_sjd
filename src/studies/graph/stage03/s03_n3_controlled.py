@@ -22,7 +22,8 @@ import yaml
 from .._pipeline import digest
 from ..stage02.s02_contracts import safe_artifact
 from .s03_construct_validation import _dependencies, _paths
-from .s03_n3_approved_view import protocol_view, measurement_values, validate_baseline
+from . import s03_n3_calendar_day as cal
+from .s03_n3_approved_view import protocol_view, measurement_values, measurement_values_calendar_day, validate_baseline
 from .s03_n3_decisions import (
     VERSION, details_for, decision_templates, plan_sha256, verify_decisions,
 )
@@ -132,11 +133,21 @@ def prepare_pair(baseline, context, measurements, membership, roles, inventory,
     baseline_ok = bool(review['baseline']) and all(review['baseline'].get(k) is True for k in (
         'official_baseline_verified', 'episode_anchor_verified', 'era_date_semantics_verified'))
     gates['baseline'] = _gate(baseline_ok, 'OFFICIAL_BASELINE_AND_ERA_REVIEW_REQUIRED')
-    measured, reason = _failure(lambda: measurement_values(baseline, measurements, source, review['measurement']))
+    measurement_review = review['measurement']
+    if measurement_review.get('measurement_contract') == cal.CONTRACT:
+        inspection = {key: value for key, value in measurement_review.items() if key != 'source_review_sha256'}
+        measured, reason = _failure(lambda: measurement_values_calendar_day(
+            baseline, measurements, source, inspection,
+            source_review_sha256=measurement_review.get('source_review_sha256')))
+        temporal_ok = measured is not None  # The v2 view validates origin and the strict day interval.
+    elif {'collection_calendar_day', 'date_resolution'} <= set(measurements):
+        measured, reason, temporal_ok = None, 'SIGNED_CALENDAR_DAY_SOURCE_AND_PAIR_REVIEW_REQUIRED', False
+    else:
+        measured, reason = _failure(lambda: measurement_values(baseline, measurements, source, measurement_review))
+        temporal_ok = (bool(measurement_review) and measurement_review.get('instrument_date_verified') is True
+                       and measurement_review.get('date_semantics') == 'instrument_measurement'
+                       and measured is not None)
     gates['measurement'] = _gate(measured is not None, reason)
-    temporal_ok = (bool(review['measurement']) and review['measurement'].get('instrument_date_verified') is True
-                   and review['measurement'].get('date_semantics') == 'instrument_measurement'
-                   and measured is not None)
     gates['temporal'] = _gate(temporal_ok, reason or 'INSTRUMENT_BASELINE_WINDOW_UNVERIFIED')
     y, kind = measured if measured is not None else (pd.Series(np.nan, index=baseline.index), 'unknown')
     viewed[source] = y
@@ -457,7 +468,7 @@ def _write_aggregate_figures(output, comparisons):
 
 
 def run_controlled(graph03_run, graph02_release, context_path, measurements_path, output_dir,
-                   plan_path, decision_root, repository_root, *, execute=False):
+                   plan_path, decision_root, repository_root, *, execute=False, measurement_trust_key=None):
     """Publish a new private release, or blocked preflight, with frozen SHA checks.
 
     All execution inputs are explicit and independently pinned. No compatible-run
@@ -480,6 +491,8 @@ def run_controlled(graph03_run, graph02_release, context_path, measurements_path
     validation = yaml.safe_load(validation_path.read_text())
     validate_plan(plan, validation)
     context_path, measurements_path = Path(context_path).resolve(), Path(measurements_path).resolve()
+    if measurement_trust_key is not None:
+        measurement_trust_key = Path(measurement_trust_key).resolve()
     if any(output == p or output in p.parents for p in [plan_path, validation_path, context_path, measurements_path]):
         raise ValueError('OUTPUT_OVERLAPS_SOURCE_INPUT')
     protected = {p: digest(p) for p in [plan_path, validation_path, context_path, measurements_path]}
@@ -512,7 +525,10 @@ def run_controlled(graph03_run, graph02_release, context_path, measurements_path
             raise ValueError('OUTCOME_REPRESENTATION_OUTSIDE_FROZEN_RELEASE')
         registry = pd.read_csv(safe_artifact(release.parent, manifest['relative_paths']['clinical_registry']))
         context, measurements = pd.read_parquet(context_path), pd.read_parquet(measurements_path)
-        decisions, states, documents = verify_decisions(plan, decision_root, input_hashes)
+        if {'collection_calendar_day', 'date_resolution'} <= set(measurements) and output.is_relative_to(root):
+            raise ValueError('CALENDAR_DAY_OUTPUT_MUST_BE_OUTSIDE_REPOSITORY')
+        decisions, states, documents = verify_decisions(
+            plan, decision_root, input_hashes, measurement_trust_key=measurement_trust_key)
         protected.update(documents)
         # Every implementation file used by this new release is content-pinned.
         code_hashes = _implementation_hashes(root)
@@ -534,13 +550,14 @@ def run_controlled(graph03_run, graph02_release, context_path, measurements_path
                           for r in preflight if r['model'] == 'A' and r['protocol_gate'] == PASS]
         if any(not approved_views[0].equals(v) for v in approved_views[1:]):
             raise ValueError('INCONSISTENT_APPROVED_PROTOCOL_VIEWS')
-        # Distinct ANA names cannot hide a shared original assay in the plan.
+        # The plan cannot reuse one reviewed ANA identity across hypotheses.
         ana_units = []
         for outcome in plan['outcomes']:
             if CANDIDATES[outcome['source_column']] == 'ana':
                 detail = details_for(decisions, 'measurement', outcome['representation_id'], outcome['source_column'])
-                if detail.get('assay_id'):
-                    ana_units.append((outcome['representation_id'], detail['assay_id']))
+                field = 'test_definition_id' if detail.get('measurement_contract') == cal.CONTRACT else 'assay_id'
+                if detail.get(field):
+                    ana_units.append((outcome['representation_id'], field, detail[field]))
         if len(ana_units) != len(set(ana_units)):
             raise ValueError('ANA_SAME_ASSAY_HYPOTHESES_REQUIRE_AMENDMENT')
         for outcome in plan['outcomes']:

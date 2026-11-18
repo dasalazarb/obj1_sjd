@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.studies.graph.stage03.s03_n3_measurement_source import run_source
+from src.studies.graph.stage03.s03_n3_calendar_day import BTRIS_ROLES
 
 PATHS = {
     'eda_long': 'Parquet longitudinal original EDA/BTRIS',
@@ -28,6 +29,7 @@ PATHS = {
     'esspri_original': 'Fuente original opcional de ESSPRI, inventario de esquema',
     'biopsy_original': 'Fuente original opcional de biopsia, inventario de esquema',
     'protocol_original': 'Fuente original opcional de asignaciones de protocolo, inventario de esquema',
+    **{role: f'Contrato v2: archivo CSV o carpeta con Lab*.csv de {role}' for role in BTRIS_ROLES},
 }
 
 
