@@ -102,11 +102,18 @@ def measurement_values(baseline, measurements, source, review):
     columns = KEYS + ['source_column', 'value', 'measurement_date', 'assay_id', 'unit', 'sample_id']
     if not set(columns) <= set(measurements):
         raise ValueError('MEASUREMENT_SCHEMA_UNAVAILABLE')
-    rows = measurements.loc[measurements.source_column.eq(source), columns].copy()
+    selected_source = measurements.loc[measurements.source_column.eq(source)]
+    if ('source_artifact_status' in selected_source and
+            selected_source.source_artifact_status.eq('SOURCE_CANDIDATE_UNAPPROVED').any()):
+        raise ValueError('UNAPPROVED_MEASUREMENT_CANDIDATE')
+    rows = selected_source[columns].copy()
     if rows[KEYS].isna().any().any():
         raise ValueError('MEASUREMENT_IDENTITY_MISSING')
+    if rows.sample_id.astype('string').fillna('').str.strip().eq('').any():
+        raise ValueError('MEASUREMENT_SAMPLE_IDENTITY_MISSING')
     # Never combine different ANA assays, units or RF encodings under one source.
-    if not rows.assay_id.eq(review['assay_id']).all() or not rows.unit.eq(review['unit']).all():
+    if (not rows.assay_id.eq(review['assay_id']).fillna(False).all()
+            or not rows.unit.eq(review['unit']).fillna(False).all()):
         raise ValueError('NON_EQUIVALENT_ASSAY_OR_UNIT')
     rows = rows.merge(baseline[KEYS + ['clinical_baseline_date']], on=KEYS,
                       how='inner', validate='many_to_one')

@@ -1,0 +1,21 @@
+schema_version: graph03_n3_measurement_source_v1
+privacy_class: INTERNAL_RESTRICTED
+public_export: false
+minimum_disclosure_cell: 5
+# Confirmar el campo original en el diccionario de EDA antes de configurarlo.
+# Su presencia es evidencia candidata. La revisión externa acredita su semántica.
+eda_specimen_id_column: null
+source_paths:
+  step01: ../../../../data/intermediate/block_A/01_serological_profile/01_labs_episode_analyte_level.parquet
+  step10: ../../../../data/analytic/10_build_integrated_longitudinal_dataset/10_integrated_longitudinal_clinical_episode.parquet
+  context: ../../../../data/analytic/10_build_integrated_longitudinal_dataset/10_integrated_longitudinal_context.parquet
+  spine: ../../../../data/intermediate/00_episode_spine_all.parquet
+  # Rutas a proporcionar para el entorno institucional, sin selección automática.
+  eda_long: null
+  graph02_release: null
+  graph03_run: null
+  baseline: null
+  essdai_original: null
+  esspri_original: null
+  biopsy_original: null
+  protocol_original: null
