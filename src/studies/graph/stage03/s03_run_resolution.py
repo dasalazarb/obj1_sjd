@@ -12,13 +12,13 @@ import re
 import yaml
 
 from .._pipeline import config_path, digest
-from ..stage02.s02_contracts import validate_release
+from ..stage02.s02_contracts import safe_artifact, validate_release
 from .s03_n3_phasec_adjudication import INPUT_FILES, load_phasec_inputs
 
 
-def graph_paths(repository_root):
+def graph_paths(repository_root, *, data_root=None):
     repo = Path(repository_root).resolve()
-    data_root = Path(os.environ.get('OBJ1_SJD_ROOT', repo)).resolve()
+    data_root = Path(data_root if data_root is not None else os.environ.get('OBJ1_SJD_ROOT', repo)).resolve()
     config = repo / 'src/studies/graph/configs/pipeline.yaml'
     paths = yaml.safe_load(config.read_text())['paths']
     result = {}
@@ -91,9 +91,10 @@ def resolve_latest_compatible(kind, roots, required_files, metadata_file, valida
                        f'Buscado en {searched}. Descartes: ' + '; '.join(failures[:5]))
 
 
-def resolve_graph03_dependencies(args, repository_root, *, phase):
+def resolve_graph03_dependencies(args, repository_root, *, phase, data_root=None, quiet=False,
+                                 verify_inventory=False):
     """Resolve Phase C's pair or Phase D's linked triple as a unit."""
-    paths = graph_paths(repository_root)
+    paths = graph_paths(repository_root, data_root=data_root)
     config = yaml.safe_load(args.config.read_text())
     from .s03_n3_resolution import load_inputs, validate_config
     from .s03_n3_phasec_adjudication import validate_phasec_config
@@ -122,6 +123,11 @@ def resolve_graph03_dependencies(args, repository_root, *, phase):
             cconfig = config if phase == 'C' else yaml.safe_load((Path(repository_root) /
                 'src/studies/graph/configs/n3_phasec_review.yaml').read_text())
             load_phasec_inputs(graph03, release, cconfig, strict=strict)
+            if verify_inventory:
+                summary = json.loads((graph03 / '03_graph_results_summary.json').read_text())
+                for name, sha in summary['sha256_by_artifact'].items():
+                    if digest(safe_artifact(graph03, name)) != sha:
+                        raise ValueError('GRAPH03_ARTIFACT_SHA_MISMATCH')
             return release, evidence02
 
         graph03, (release, evidence02), evidence03 = resolve_latest_compatible(
@@ -144,11 +150,12 @@ def resolve_graph03_dependencies(args, repository_root, *, phase):
     else:
         graph03, release, evidence = select_a()
         phasec = None
-    for record in evidence:
-        print(f'[Graph03] {record["dependency"]}: {record["path"]}; '
-              f'run_id={record["run_id"]}; {record["reason"]}')
-        for rejected in record['rejected_candidates']:
-            print(f'[Graph03] Descartado: {rejected}')
-    print(f'[Graph03] Configuración: {args.config.resolve()}')
-    print('[Graph03] Resolución de dependencias: OK')
+    if not quiet:
+        for record in evidence:
+            print(f'[Graph03] {record["dependency"]}: {record["path"]}; '
+                  f'run_id={record["run_id"]}; {record["reason"]}')
+            for rejected in record['rejected_candidates']:
+                print(f'[Graph03] Descartado: {rejected}')
+        print(f'[Graph03] Configuración: {args.config.resolve()}')
+        print('[Graph03] Resolución de dependencias: OK')
     return graph03, release, phasec, evidence

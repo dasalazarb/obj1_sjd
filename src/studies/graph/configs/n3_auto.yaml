@@ -1,0 +1,14 @@
+# Paths are absolute or relative to the obj1_sjd checkout. The default
+# deployment has obj1_sjd, eda_sjd and graph03_n3_private under the same parent.
+data_root: .
+eda_root: ../eda_sjd
+private_root: ../graph03_n3_private
+source_paths:
+  eda_long: data_analytic/BTRIS/20_btris_lab_records_long.parquet
+  step01: data/intermediate/block_A/01_serological_profile/01_labs_episode_analyte_level.parquet
+  step10: data/analytic/10_build_integrated_longitudinal_dataset/10_integrated_longitudinal_clinical_episode.parquet
+  context: data/analytic/10_build_integrated_longitudinal_dataset/10_integrated_longitudinal_context.parquet
+  btris_raw_11d: data_raw/BTRIS/11D
+  btris_raw_15d: data_raw/BTRIS/15D
+  btris_intermediate_11d: data_intermediate/BTRIS/11D
+  btris_intermediate_15d: data_intermediate/BTRIS/15D

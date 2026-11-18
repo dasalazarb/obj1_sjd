@@ -96,7 +96,13 @@ def verify_decisions(plan, root, input_hashes, *, measurement_trust_key=None):
                 if measurement_trust_key is None:
                     states[key] = 'CALENDAR_DAY_MEASUREMENT_SIGNATURE_REQUIRED'
                     continue
-                signature = evidence_path(root, pointer.get('signature_path'))
+                try:
+                    signature = evidence_path(root, pointer.get('signature_path'))
+                except ValueError as exc:
+                    states[key] = ('CALENDAR_DAY_MEASUREMENT_SIGNATURE_REQUIRED'
+                                   if not pointer.get('signature_path') or str(exc) == 'EVIDENCE_MISSING_OR_TOO_LARGE'
+                                   else 'CALENDAR_DAY_MEASUREMENT_SIGNATURE_INVALID')
+                    continue
                 protected[signature] = digest(signature)
                 protected[measurement_trust_key] = digest(measurement_trust_key)
                 if not verify_detached_signature(payload, signature, measurement_trust_key):

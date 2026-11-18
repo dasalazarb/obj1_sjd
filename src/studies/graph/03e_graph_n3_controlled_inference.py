@@ -121,7 +121,7 @@ def _source_readiness(output_dir, context, measurements):
 
 
 def _fill_automatic_inputs(args, parser):
-    """One-command mode; keep explicit overrides for reproducibility/debugging."""
+    """Fill missing inputs for explicit diagnostic invocations."""
     if args.graph03_run is None or args.graph02_release is None:
         selection = SimpleNamespace(
             graph03_run=args.graph03_run,
@@ -168,6 +168,12 @@ def _fill_automatic_inputs(args, parser):
 
 
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if not argv:
+        from src.studies.graph.stage03.s03_n3_auto import run_auto
+        print(json.dumps(run_auto(ROOT), sort_keys=True))
+        return
+
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ['graph03-run', 'graph02-release', 'context', 'measurements', 'plan', 'output-dir']:
         parser.add_argument('--' + name, type=Path)

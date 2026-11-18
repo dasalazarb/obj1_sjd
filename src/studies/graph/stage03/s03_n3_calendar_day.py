@@ -162,7 +162,7 @@ def btris_columns(settings, origin):
     return {value[origin]: field for field, value in settings['linkage_fields'].items()}
 
 
-def _btris_days(path, settings, origin):
+def _btris_days(path, settings, origin, *, checked_role=None):
     columns = btris_columns(settings, origin)
     fmt = settings.get('date_formats', {}).get(origin, 'ISO8601')
     # Deduplicate only identical original rows, even if other columns differ
@@ -172,7 +172,18 @@ def _btris_days(path, settings, origin):
     for file in btris_files(path):
         frame = pd.read_csv(file, dtype='string', keep_default_na=False)
         if not {*columns, 'Collected Date Time'} <= set(frame):
-            raise ValueError('BTRIS_COLLECTION_COLUMNS_REQUIRED')
+            raise ValueError('BTRIS_COLLECTION_COLUMNS_REQUIRED' +
+                             ('_' + checked_role.upper() if checked_role else ''))
+        if checked_role:
+            dates = frame['Collected Date Time']
+            if dates.str.strip().ne('').any() and not calendar_days(dates, fmt, allow_time=True).notna().any():
+                raise ValueError('BTRIS_COLLECTION_DATE_FORMAT_UNVERIFIED_' + checked_role.upper())
+            # Step20 prefers a cluster header to Observation Name when both are present.
+            if settings['linkage_fields']['original_observation_name']['eda'] == 'cluster_name_original':
+                observation = frame[settings['linkage_fields']['original_observation_name'][origin]]
+                aliases = ('Cluster Name', 'cluster_name')
+                if any(not frame[name].equals(observation) for name in aliases if name in frame):
+                    raise ValueError('BTRIS_COLLECTION_OBSERVATION_MAPPING_CONFLICT_' + checked_role.upper())
         tables.append(frame)
     frame = pd.concat(tables, ignore_index=True).drop_duplicates()
     frame = frame.rename(columns=columns)
@@ -184,12 +195,14 @@ def _btris_days(path, settings, origin):
     return frame.drop_duplicates(fields).drop(columns='Collected Date Time')
 
 
-def btris_provenance(paths, settings):
+def btris_provenance(paths, settings, *, verify_formats=False):
     fields = list(settings['linkage_fields'])
     tables = []
     for protocol in BTRIS_PROTOCOLS:
-        raw, intermediate = (_btris_days(paths[f'btris_{origin}_{protocol}'], settings, origin)
-                             for origin in BTRIS_ORIGINS)
+        roles = [f'btris_{origin}_{protocol}' for origin in BTRIS_ORIGINS]
+        raw, intermediate = (_btris_days(paths[role], settings, origin,
+                                         checked_role=role if verify_formats else None)
+                             for origin, role in zip(BTRIS_ORIGINS, roles))
         table = raw.merge(intermediate, on=fields, how='outer', suffixes=('_raw', '_intermediate'),
                           validate='one_to_one')
         table['btris_source'] = protocol.upper()
