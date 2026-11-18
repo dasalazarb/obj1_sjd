@@ -1,6 +1,10 @@
 """Restricted derived views; source values and frozen populations are preserved."""
+import re
+
 import numpy as np
 import pandas as pd
+
+from . import s03_n3_calendar_day as cal
 
 KEYS = ['patient_id', 'clinical_episode_id']
 
@@ -149,3 +153,96 @@ def measurement_values(baseline, measurements, source, review):
     output.loc[tokens.isin(groups['positive']).to_numpy()] = 1.
     output.loc[tokens.isin(groups['negative']).to_numpy()] = 0.
     return output, kind
+
+
+def validate_calendar_day_review(review):
+    required = {
+        'measurement_contract': cal.CONTRACT, 'time_resolution': 'calendar_day',
+        'identity_contract': cal.IDENTITY, 'date_origin': cal.DATE_ORIGIN,
+        'selection_rule': 'latest_prebaseline_calendar_day', 'duplicate_rule': 'identical_only',
+    }
+    approvals = (
+        'calendar_day_origin_verified', 'baseline_calendar_day_verified', 'baseline_window_verified',
+        'selection_and_duplicates_reviewed', 'test_definition_verified', 'source_unit_and_scale_verified',
+        'unidentified_assay_and_specimen_risk_reviewed', 'missingness_and_indication_reviewed',
+    )
+    if (not isinstance(review, dict) or any(review.get(key) != value for key, value in required.items())
+            or any(review.get(key) is not True for key in approvals)
+            or any(key in review for key in ('assay_id', 'sample_id', 'timezone_reviewed', 'dates_normalized_to_utc'))):
+        raise ValueError('CALENDAR_DAY_PROVENANCE_AND_SEMANTICS_REVIEW_REQUIRED')
+    cal.validate_window(review)
+    if (review.get('type') not in {'numeric', 'binary'}
+            or any(not isinstance(review.get(key), str) or not review[key].strip()
+                   for key in ('test_definition_id', 'unit'))):
+        raise ValueError('CALENDAR_DAY_TEST_DEFINITION_UNIT_OR_TYPE_REQUIRED')
+    if review['type'] == 'numeric':
+        return None
+    categories = review.get('category_convention')
+    names = ('positive', 'negative', 'unknown', 'not_tested')
+    if (not isinstance(categories, dict) or set(categories) != set(names)
+            or any(not isinstance(group, list) or any(not isinstance(token, str) or
+                not token.strip() for token in group) for group in categories.values())):
+        raise ValueError('BINARY_CONVENTIONS_UNREVIEWED_OR_OVERLAPPING')
+    groups = {name: set(categories[name]) for name in names}
+    if (not groups['positive'] or not groups['negative'] or
+            sum(map(len, groups.values())) != len(set().union(*groups.values()))):
+        raise ValueError('BINARY_CONVENTIONS_UNREVIEWED_OR_OVERLAPPING')
+    if any(re.fullmatch(cal.ADMINISTRATIVE_RESULT, token) for token in groups['positive'] | groups['negative']):
+        raise ValueError('REVIEWED_ADMINISTRATIVE_TOKEN_NOT_MISSING')
+    return groups
+
+
+def measurement_values_calendar_day(baseline, measurements, source, review, *, source_review_sha256):
+    """Apply a signed calendar-day contract to a pinned, reviewed artifact."""
+    groups = validate_calendar_day_review(review)
+    if source not in cal.LAB_SOURCES:
+        raise ValueError('CALENDAR_DAY_LAB_SOURCE_REQUIRED')
+    if not set(cal.CORE) <= set(measurements):
+        raise ValueError('CALENDAR_DAY_MEASUREMENT_SCHEMA_UNAVAILABLE')
+    rows = measurements.loc[measurements.source_column.eq(source), cal.CORE].copy()
+    if rows.empty:
+        raise ValueError('NO_PREBASELINE_INSTRUMENT_MEASUREMENTS')
+    if not rows.source_artifact_status.eq('SOURCE_REVIEWED').fillna(False).all():
+        raise ValueError('UNAPPROVED_MEASUREMENT_CANDIDATE')
+    if not cal.SHA256.fullmatch(str(source_review_sha256)):
+        raise ValueError('SIGNED_CALENDAR_DAY_SOURCE_REVIEW_REQUIRED')
+    requirements = {
+        'source_review_sha256': source_review_sha256, 'measurement_contract_sha256': cal.fingerprint(review),
+        'review_contract_version': cal.REVIEW_VERSION, 'date_origin': cal.DATE_ORIGIN, 'date_resolution': 'calendar_day',
+        'test_definition_id': review['test_definition_id'], 'unit': review['unit'],
+    }
+    if (any(not rows[key].eq(value).fillna(False).all() for key, value in requirements.items())
+            or rows[['assay_id', 'sample_id']].notna().any().any()
+            or not rows.observation_sha256.astype('string').str.fullmatch(cal.SHA256, na=False).all()
+            or any(rows[key].astype('string').fillna('').str.strip().eq('').any()
+                   for key in KEYS + ['source_episode_id', *cal.ORIGINAL_IDENTITY, 'value'])):
+        raise ValueError('CALENDAR_DAY_ARTIFACT_OUTSIDE_SIGNED_SCOPE')
+    validate_baseline(baseline)
+    cutoffs = baseline[KEYS].assign(_cutoff=cal.calendar_days(baseline.clinical_baseline_date, allow_time=True))
+    anchors = cal.calendar_days(baseline.clinical_anchor_date, allow_time=True)
+    if cutoffs._cutoff.isna().any() or not cutoffs._cutoff.eq(anchors).fillna(False).all():
+        raise ValueError('OFFICIAL_BASELINE_CALENDAR_DAY_MISMATCH')
+    rows = rows.merge(cutoffs, on=KEYS, how='left', validate='many_to_one')
+    rows['collection_calendar_day'] = cal.calendar_days(rows.collection_calendar_day)
+    if rows._cutoff.isna().any() or rows.collection_calendar_day.isna().any():
+        raise ValueError('CALENDAR_DAY_OR_BASELINE_IDENTITY_INVALID')
+    ages = cal.calendar_age(rows._cutoff, rows.collection_calendar_day)
+    identity = [field for field in cal.CORE if field not in KEYS]
+    latest, discordant = cal.latest_calendar_rows(
+        rows.loc[ages.between(review['minimum_days_before_baseline'], review['lookback_days'])], identity)
+    chosen = latest.loc[~discordant].drop_duplicates(KEYS + identity)
+    if chosen.empty:
+        raise ValueError('AMBIGUOUS_SAME_DAY' if discordant.any() else 'NO_PREBASELINE_INSTRUMENT_MEASUREMENTS')
+    values = baseline[KEYS].merge(chosen[KEYS + ['value']], on=KEYS, how='left', validate='one_to_one').value
+    if groups is None:
+        numeric = pd.to_numeric(values, errors='coerce').replace([np.inf, -np.inf], np.nan)
+        if (values.notna() & numeric.isna()).any():
+            raise ValueError('UNPARSED_NUMERIC_MEASUREMENT')
+        return pd.Series(numeric.to_numpy(dtype=float, na_value=np.nan), index=baseline.index), 'numeric'
+    tokens = values.astype('string')
+    if not set(tokens.dropna()) <= set().union(*groups.values()):
+        raise ValueError('UNREVIEWED_MEASUREMENT_CATEGORY')
+    output = pd.Series(np.nan, index=baseline.index)
+    output.loc[tokens.isin(groups['positive']).to_numpy()] = 1.
+    output.loc[tokens.isin(groups['negative']).to_numpy()] = 0.
+    return output, 'binary'

@@ -4,14 +4,14 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 import hashlib
 import re
-import subprocess
 
 import pandas as pd
 import yaml
 
 from .._pipeline import digest
-from .s03_n3_approved_view import measurement_values
-from .s03_n3_decisions import evidence_path
+from . import s03_n3_calendar_day as cal
+from .s03_n3_approved_view import measurement_values, measurement_values_calendar_day, validate_calendar_day_review
+from .s03_n3_decisions import evidence_path, verify_detached_signature
 from .s03_n3_measurement_source import CORE, EDA_FIELDS, KEYS, LAB_SOURCES, UNAVAILABLE_RESULT, _text, _utc
 
 REVIEW_VERSION = 'graph03_n3_measurement_review_v1'
@@ -41,7 +41,7 @@ def validate_specimen_column(field):
         raise ValueError('SPECIMEN_KEY_MUST_BE_A_SEPARATE_ORIGINAL_FIELD')
 
 
-def _verify_document(documents, binding):
+def _verify_document(documents, binding, version):
     review_file, signature, key = (documents[name] for name in ('review', 'signature', 'trust_key'))
     for path in documents.values():
         if not path.is_file() or not 0 < path.stat().st_size <= 2_000_000:
@@ -52,14 +52,10 @@ def _verify_document(documents, binding):
     payload = review_file.read_bytes()
     if hashlib.sha256(payload).hexdigest() != hashes['review']:
         raise ValueError('SOURCE_REVIEW_DOCUMENT_CHANGED')
-    result = subprocess.run(
-        ['openssl', 'dgst', '-sha256', '-verify', str(key), '-signature', str(signature)],
-        input=payload, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
-    )
-    if result.returncode != 0:
+    if not verify_detached_signature(payload, signature, key):
         raise ValueError('SOURCE_REVIEW_SIGNATURE_INVALID')
     document = yaml.safe_load(payload)
-    if (not isinstance(document, dict) or document.get('schema_version') != REVIEW_VERSION
+    if (not isinstance(document, dict) or document.get('schema_version') != version
             or document.get('decision') != 'APPROVED_SOURCE_PROVENANCE'
             or any(not isinstance(document.get(key), str) or not document[key].strip()
                    for key in ('reviewer', 'review_id'))
@@ -178,33 +174,133 @@ def _build_outcome(candidates, baseline, source, rule, specimen_id_column):
     return output[CORE], linkage, inspection, assay
 
 
-def reviewed_measurements(candidates, ledger, baseline, binding, specimen_id_column, documents):
+CALENDAR_AFFIRMATIONS = ('official_episode_linkage_verified', 'raw_result_field_verified',
+                         'btris_eda_linkage_and_step20_truncation_reviewed',
+                         'comparable_test_crosswalk_reviewed', 'unavailable_results_reviewed')
+TEST_FIELDS = ['original_order_name', 'original_observation_name', 'assay']
+
+
+def _calendar_rule(source, rule, window):
+    if (not isinstance(rule, dict) or not all(rule.get(flag) is True for flag in CALENDAR_AFFIRMATIONS)
+            or rule.get('unit_field') != 'unit' or rule.get('date_field') != 'lab_date'
+            or any(flag in rule for flag in (
+                'assay_identity_verified', 'sample_identity_verified', 'sample_field',
+                'assay_field', 'baseline_cutoff_utc_verified', 'instrument_time_semantics_verified'))):
+        raise ValueError('CALENDAR_DAY_SOURCE_REVIEW_FIELD_SEMANTICS_REQUIRED')
+    inspection = rule.get('measurement_review')
+    groups = validate_calendar_day_review(inspection)
+    if any(inspection.get(key) != window[key] for key in cal.SELECTOR_FIELDS):
+        raise ValueError('CALENDAR_DAY_WINDOW_OUTSIDE_PRESPECIFIED_SCOPE')
+    value_field = rule.get('value_field')
+    kind = 'numeric' if source.endswith('__value') else 'binary'
+    if (inspection['type'] != kind or value_field not in (
+            {'result_numeric_exact'} if kind == 'numeric' else {'result_text', 'result_raw'})):
+        raise ValueError('REVIEWED_SOURCE_VALUE_FIELD_OR_TYPE_INVALID')
+    definitions = rule.get('comparable_original_tests')
+    if (not isinstance(definitions, list) or not definitions or any(
+            not isinstance(test, dict) or set(test) != set(TEST_FIELDS)
+            or any(not isinstance(test[key], str) or not test[key].strip() for key in TEST_FIELDS[:2])
+            or (test['assay'] is not None and (not isinstance(test['assay'], str) or not test['assay'].strip()))
+            for test in definitions)):
+        raise ValueError('CALENDAR_DAY_REVIEWED_CROSSWALK_REQUIRED')
+    return inspection, groups, pd.DataFrame(definitions, columns=TEST_FIELDS).astype('string').drop_duplicates()
+
+
+def _build_calendar_outcome(candidates, baseline, source, rule, window, source_sha):
+    inspection, groups, definitions = _calendar_rule(source, rule, window)
+    rows = candidates.loc[candidates.source_column.eq(source)].copy()
+    if rows.empty:
+        raise ValueError('REVIEWED_ORIGINAL_OBSERVATIONS_UNAVAILABLE_OR_MAPPING_INVALID')
+    signatures = rows[TEST_FIELDS].astype('string')
+    comparable = pd.MultiIndex.from_frame(signatures).isin(pd.MultiIndex.from_frame(definitions))
+    comparable &= (rows.unit.eq(inspection['unit']).fillna(False) & rows.mapping_candidate).to_numpy(dtype=bool)
+    linkage = rows[['eda_row_offset', 'source_column', 'source_episode_id', 'btris_source',
+                    'calendar_date_status']].copy()
+    linkage['test_definition_verified'] = comparable & rows.collection_calendar_day.notna()
+    linkage['reviewed_disposition'] = rows.calendar_disposition
+    latest = rows.calendar_disposition.eq('LATEST_ELIGIBLE_DAY')
+    rows['value'] = _text(rows[rule['value_field']])
+    administrative = rows[['result_raw', 'result_text', 'result_status', 'reported_interpretation']].apply(
+        lambda column: _text(column).str.fullmatch(cal.ADMINISTRATIVE_RESULT, na=False)).any(axis=1)
+    if groups is None:
+        result_valid = rows.value.map(_finite) & rows.eda_result_valid & ~administrative
+    else:
+        nonresult = rows.value.isin(groups['unknown'] | groups['not_tested'])
+        result_valid = rows.value.isin(set().union(*groups.values())) & (rows.eda_result_valid | nonresult)
+        result_valid &= ~administrative | nonresult
+    clean = result_valid & ~rows.censored
+    linkage.loc[latest & ~comparable, 'reviewed_disposition'] = 'TEST_DEFINITION_OR_UNIT_OUTSIDE_REVIEWED_SCOPE'
+    linkage.loc[latest & comparable & ~clean, 'reviewed_disposition'] = 'UNUSABLE_OR_UNREVIEWED_RESULT'
+    retained = latest & comparable & clean
+    linkage.loc[retained, 'reviewed_disposition'] = 'RETAINED_FOR_03E_SELECTION'
+    selected = rows.loc[retained].drop_duplicates(KEYS + cal.OBSERVATION_FIELDS)
+    linkage.loc[retained & ~linkage.index.isin(selected.index), 'reviewed_disposition'] = 'IDENTICAL_DUPLICATE_COLLAPSED'
+    fingerprints = selected[cal.OBSERVATION_FIELDS].astype('string').to_dict('records')
+    output = selected.assign(
+        test_definition_id=inspection['test_definition_id'], review_contract_version=cal.REVIEW_VERSION,
+        source_review_sha256=source_sha, measurement_contract_sha256=cal.fingerprint(inspection),
+        observation_sha256=[cal.fingerprint({key: value if pd.notna(value) else None for key, value in record.items()})
+                            for record in fingerprints],
+        source_artifact_status='SOURCE_REVIEWED',
+    )[cal.CORE].astype({key: baseline[key].dtype for key in KEYS})
+    if not output.empty:
+        measurement_values_calendar_day(baseline, output, source, inspection, source_review_sha256=source_sha)
+    return output, linkage, inspection, set(definitions.fillna('').itertuples(index=False, name=None))
+
+
+def reviewed_measurements(candidates, ledger, baseline, binding, specimen_id_column, documents, *, calendar=None):
     """Consume a signature from an institutional trust anchor supplied out of band."""
-    document, hashes, evidence = _verify_document(documents, binding)
+    version = REVIEW_VERSION if calendar is None else cal.REVIEW_VERSION
+    document, hashes, evidence = _verify_document(documents, binding, version)
     rules = document.get('outcomes')
     if not isinstance(rules, dict) or not rules or not set(rules) <= set(LAB_SOURCES):
         raise ValueError('SOURCE_REVIEW_OUTCOME_SCOPE_INVALID')
     output, row_links, windows, ana_assays = [], [], {}, []
     offset = 0
     for source, rule in sorted(rules.items()):
-        if ledger.loc[ledger.canonical_analyte.eq(LAB_SOURCES[source]), 'baseline_linkage_conflict'].any():
-            raise ValueError('REVIEWED_EDA_EPISODE_LINKAGE_UNRESOLVED')
-        measurements, linkage, inspection, original_assay = _build_outcome(
-            candidates, baseline, source, rule, specimen_id_column)
+        if calendar is None:
+            if ledger.loc[ledger.canonical_analyte.eq(LAB_SOURCES[source]), 'baseline_linkage_conflict'].any():
+                raise ValueError('REVIEWED_EDA_EPISODE_LINKAGE_UNRESOLVED')
+            measurements, linkage, inspection, original_assay = _build_outcome(
+                candidates, baseline, source, rule, specimen_id_column)
+            ana_identity = (_identity(original_assay), _identity(inspection['assay_id']))
+        else:
+            if source not in calendar['windows']:
+                raise ValueError('SOURCE_REVIEW_OUTCOME_SCOPE_INVALID')
+            measurements, linkage, inspection, definitions = _build_calendar_outcome(
+                candidates, baseline, source, rule, calendar['windows'][source], hashes['review'])
+            ana_identity = (definitions, inspection['test_definition_id'])
         linkage['reviewed_row_offset'] = pd.Series(range(offset, offset + len(measurements)),
                                                   index=measurements.index, dtype='Int64')
+        if calendar is not None:
+            excluded = ledger.loc[ledger.canonical_analyte.eq(LAB_SOURCES[source]) &
+                                  ~ledger.eda_row_offset.isin(linkage.eda_row_offset), [
+                                      'eda_row_offset', 'source_episode_id', 'btris_source',
+                                      'calendar_date_status', 'identity_status']]
+            if not excluded.empty:
+                excluded = excluded.assign(source_column=source, test_definition_verified=False,
+                                           reviewed_disposition=excluded.identity_status)
+                linkage = pd.concat([linkage, excluded.drop(columns='identity_status')], ignore_index=True)
         offset += len(measurements)
         output.append(measurements)
         row_links.append(linkage)
         windows[source] = inspection['lookback_days']
         if LAB_SOURCES[source].startswith('ana'):
-            ana_assays.append((_identity(original_assay), _identity(inspection['assay_id'])))
-    if len(ana_assays) == 2 and any(left == right for left, right in zip(*ana_assays)):
-        raise ValueError('REVIEWED_ANA_OUTCOMES_SHARE_ORIGINAL_ASSAY')
+            ana_assays.append(ana_identity)
+    if len(ana_assays) == 2:
+        (original_a, reviewed_a), (original_b, reviewed_b) = ana_assays
+        if calendar is None and (original_a == original_b or reviewed_a == reviewed_b):
+            raise ValueError('REVIEWED_ANA_OUTCOMES_SHARE_ORIGINAL_ASSAY')
+        if calendar is not None and (document.get('ana_hypotheses_distinct_verified') is not True
+                                    or original_a & original_b or reviewed_a == reviewed_b):
+            raise ValueError('REVIEWED_ANA_DEFINITIONS_NOT_DISTINCT')
     combined = pd.concat(output, ignore_index=True)
     if combined.groupby('sample_id').patient_id.nunique().gt(1).any():
         raise ValueError('REVIEWED_SAMPLE_IDENTITY_UNVERIFIED')
-    # The route emits observations only. Representation-specific decisions,
-    # research protocol and support stay within 03e.
-    return combined, pd.concat(row_links, ignore_index=True), dict(
+    # 03e evaluates representation-specific decisions, research protocol and support.
+    manifest = dict(
         sources=sorted(windows), lookback_days_by_source=windows, document_sha256=hashes, evidence_sha256=evidence)
+    if calendar is not None:
+        manifest.update(review_contract_version=version, minimum_days_before_baseline_by_source={
+            source: calendar['windows'][source]['minimum_days_before_baseline'] for source in windows})
+    return combined, pd.concat(row_links, ignore_index=True), manifest

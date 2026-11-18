@@ -172,6 +172,8 @@ def main(argv=None):
     for name in ['graph03-run', 'graph02-release', 'context', 'measurements', 'plan', 'output-dir']:
         parser.add_argument('--' + name, type=Path)
     parser.add_argument('--decision-root', type=Path)
+    parser.add_argument('--measurement-trust-key', type=Path,
+                        help='Institutional public key for detached calendar-day measurement decision signatures')
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--prepare-plan', action='store_true',
                       help='Create an unsigned plan and review templates without reading clinical rows')
@@ -183,6 +185,10 @@ def main(argv=None):
             print(json.dumps(args.source_readiness, sort_keys=True))
             return
         if args.prepare_plan:
+            if any(path.resolve().is_relative_to(ROOT) for path in (args.output_dir, args.plan)):
+                import pyarrow.parquet as pq
+                if {'collection_calendar_day', 'date_resolution'} <= set(pq.read_schema(args.measurements).names):
+                    raise ValueError('CALENDAR_DAY_OUTPUT_MUST_BE_OUTSIDE_REPOSITORY')
             release = args.graph02_release.resolve()
             frozen_roots = [args.graph03_run.resolve(), release if release.is_dir() else release.parent]
             _check_overlap(args.output_dir.resolve(), frozen_roots)
@@ -212,7 +218,8 @@ def main(argv=None):
             result = dict(status='UNSIGNED_DRAFT_NO_APPROVAL', plan=str(args.plan), output_dir=str(args.output_dir))
         else:
             result = run_controlled(args.graph03_run, args.graph02_release, args.context,
-                args.measurements, args.output_dir, args.plan, args.decision_root, ROOT, execute=args.execute)
+                args.measurements, args.output_dir, args.plan, args.decision_root, ROOT,
+                execute=args.execute, measurement_trust_key=args.measurement_trust_key)
     except (ValueError, OSError, KeyError, TypeError, RuntimeError, yaml.YAMLError):
         # Clinical paths, free values and exception messages stay off console.
         parser.exit(1, '[Graph03] Controlled N3 stopped: invalid input, integrity or review contract.\n')

@@ -1,4 +1,7 @@
 schema_version: graph03_n3_measurement_source_v1
+# El modo calendario se activa en una copia privada con
+# schema_version: graph03_n3_measurement_source_v2 y una sección calendar_day
+# que fija el vínculo BTRIS/EDA y las ventanas. Ver docs/graph03_n3_calendar_day.md.
 privacy_class: INTERNAL_RESTRICTED
 public_export: false
 minimum_disclosure_cell: 5
