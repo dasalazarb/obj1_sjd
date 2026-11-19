@@ -19,38 +19,13 @@ CURRENT_ARTIFACTS = {'membership':'02_graph_patient_membership.csv','feature_rol
         'missingness_controls':'02_graph_missingness_control_comparisons.csv','coverage_reasons':'02_graph_coverage_reason_summary.csv',
         'refit_membership':'02_graph_refit_membership.csv','release_qc':'02_graph_release_qc.json','alignment':'02_graph_cross_representation_alignment.csv'}
 
-def source_provenance(integrated,candidates,cfg):
-    report=LAB.current_profile(integrated,candidates,cfg['analysis']['mode'])
-    summary=json.loads(Path(candidates).with_name('00_pharma_profile_summary.json').read_text())
-    required=cfg['sensitivity']['input_governance']['required_pharma_profile_contract']
-    if summary.get('profile_contract_version')!=required:
-        raise ValueError('INCOMPATIBLE_PHARMA_PROFILE_CONTRACT')
-    return report
-
-
 def resolve_sources(cfg):
-    paths=cfg['paths']; anchor=paths.get('source_manifest')
-    if anchor:
-        manifest=config_path(cfg['_path'],anchor)
-        source=json.loads(manifest.read_text())
-        if source.get('schema_version')!='graph_source_v1' or source.get('feature_policy')!=cfg['analysis']['feature_policy']:
-            raise ValueError('Incompatible pinned source manifest')
-        resolved={}
-        for role in ('integrated','pharma_candidates'):
-            entry=source[role]; path=config_path(manifest,entry['path'])
-            if digest(path)!=entry['sha256']: raise ValueError('Pinned source SHA mismatch')
-            resolved[role]=path
-        source_provenance(resolved['integrated'],resolved['pharma_candidates'],cfg)
-        return resolved
-    integrated=config_path(cfg['_path'],paths['integrated'])
+    paths = cfg['paths']
+    integrated = config_path(cfg['_path'], paths['integrated'])
     if not integrated.is_file():
         raise FileNotFoundError('Missing integrated baseline source; run the authorized upstream pipeline first')
-    candidate=config_path(cfg['_path'],paths['pharma_candidates'])
-    # Pharma00 still publishes bundles independently of Graph. Its legacy
-    # resolver accepts one unambiguous bundle when no canonical file exists.
-    candidate = LAB.resolve_candidates(candidate)
-    source_provenance(integrated, candidate, cfg)
-    return {'integrated': integrated, 'pharma_candidates': candidate}
+    candidates = LAB.current_profile_path(Path(cfg['_path']).parent / paths['pharma_candidates'])
+    return {'integrated': integrated, 'pharma_candidates': candidates}
 
 
 def safe_artifact(root,relative):

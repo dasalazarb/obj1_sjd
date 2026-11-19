@@ -329,25 +329,19 @@ def write_failure(dirs, prefix, report, exc, args=None):
 
 
 # Baseline exploratory contract: clinical gates above are retained verbatim.
-from ._feature_catalog import CONTRACT_VERSION, file_hash
+from ._feature_catalog import CONTRACT_VERSION, clean, file_hash, lab_stem
+from ._pipeline import output_lock
 
 
-def resolve_candidates(path: Path) -> Path:
+def current_profile_path(path: Path) -> Path:
     path = Path(path)
-    if path.is_file():
-        return path  # An explicit validated bundle is exact, never shadowed by another run.
-    runs = path.parent / "runs"
-    found = sorted(runs.glob("*/" + path.name)) if runs.exists() else []
-    distinct = {}
-    for candidate in found:
-        summary = candidate.with_name("00_pharma_profile_summary.json")
-        if not summary.is_file():
-            continue
-        key = (file_hash(candidate), file_hash(summary))
-        distinct.setdefault(key, candidate)
-    if len(distinct) > 1:
-        raise ValueError("AMBIGUOUS_PHARMA00_PROFILES: specify an exact compatible bundle or a pinned source manifest")
-    return next(iter(distinct.values())) if distinct else path
+    resolved = path.resolve()
+    if ("runs" in path.parts or "runs" in resolved.parts
+            or resolved != path.parent.resolve() / path.name):
+        raise ValueError("Use the current Pharma00 files in the configured directory")
+    if not path.is_file():
+        raise FileNotFoundError(f"Missing current Pharma00 file {path}. Run src/studies/pharma/00_profile_labs.py")
+    return resolved
 
 
 def validate_provenance(integrated: Path, candidates: Path, analysis_mode: str) -> dict:
@@ -369,22 +363,70 @@ def validate_provenance(integrated: Path, candidates: Path, analysis_mode: str) 
             "profile_summary_hash": file_hash(summary_path)}
 
 
-def current_profile(integrated: Path, candidates: Path, analysis_mode: str) -> dict:
-    if analysis_mode == "clinical_release":
-        return validate_provenance(integrated, candidates, analysis_mode)
-    summary_path = candidates.with_name("00_pharma_profile_summary.json")
-    summary = json.loads(summary_path.read_text())
-    if summary.get("feature_contract_version") != CONTRACT_VERSION:
-        raise ValueError("STALE_FEATURE_CONTRACT: rerun Pharma 00")
-    selection = candidates.with_name("00_pharma_graph_lab_selection_audit.csv")
-    if not candidates.is_file() or not selection.is_file():
-        raise FileNotFoundError("PHARMA00_PROFILE_ARTIFACT_MISSING")
+def load_current_profile(master: pd.DataFrame, integrated: Path, candidates: Path, analysis_mode: str):
+    """Read one publication and reconcile its laboratory selections with Step10."""
+    candidates = Path(candidates)
+    current_profile_path(candidates)
+    with output_lock(candidates.parent, shared=True):
+        current_profile_path(candidates)
+        selection_path = current_profile_path(candidates.with_name("00_pharma_graph_lab_selection_audit.csv"))
+        summary_path = current_profile_path(candidates.with_name("00_pharma_profile_summary.json"))
+        summary = json.loads(summary_path.read_text())
+        if not isinstance(summary, dict):
+            raise ValueError("Pharma00 summary must be a JSON object")
+        report = validate_provenance(integrated, candidates, analysis_mode) if analysis_mode == "clinical_release" else {}
+        selected = pd.read_csv(candidates)
+        audit = pd.read_csv(selection_path)
+
+    required = {"lab", "source_column", "included", "value_column", "text_column",
+                "reference_status_column", "graph_candidate_status", "graph_encoding_hint",
+                "primary_result_source", "baseline_n", "observed_n_baseline",
+                "n_units", "conflict_assessment_status", "ordinal_values_json"}
+    for table in (audit, selected):
+        missing = required - set(table)
+        if missing:
+            raise ValueError(f"Graph lab candidates missing required columns: {sorted(missing)}")
+        if table.source_column.isna().any() or table.source_column.duplicated().any():
+            raise ValueError("Missing or duplicate lab representation source keys")
+        if not table.included.isin([True, False]).all():
+            raise ValueError("Pharma00 selection requires boolean inclusion flags")
+
+    expected = {column for column in master if lab_stem(column)}
+    if set(audit.source_column) != expected:
+        raise ValueError("Pharma00 lab result columns differ from Step10")
+    for row in audit.itertuples(index=False):
+        stem = lab_stem(row.source_column)
+        source_field = "value_column" if row.source_column.endswith("__value") else "text_column"
+        columns = ((row.value_column, "__value"), (row.text_column, "__text"),
+                   (row.reference_status_column, "__reference_status"))
+        if (stem != row.lab or row.primary_result_source != source_field
+                or getattr(row, source_field) != row.source_column
+                or any(pd.notna(value) and value != stem + suffix for value, suffix in columns)):
+            raise ValueError("LAB_REPRESENTATION_KEY_MISMATCH: exact stem/source required")
+    units = pd.to_numeric(audit.n_units, errors="coerce")
+    if not (np.isfinite(units) & units.ge(0) & units.mod(1).eq(0)).all():
+        raise ValueError("Pharma00 unit counts must be nonnegative integers")
+    comparison = sorted(required | ({"clinical_approval_status", "longitudinal_graph_candidate_status"}
+                                    & set(audit) & set(selected)))
+    try:
+        pd.testing.assert_frame_equal(
+            audit.loc[audit.included.eq(True), comparison].sort_values("source_column").reset_index(drop=True),
+            selected[comparison].sort_values("source_column").reset_index(drop=True), check_dtype=False)
+    except AssertionError as exc:
+        raise ValueError("Pharma00 candidates disagree with the selection audit") from exc
+
+    baseline = master.loc[master.is_clinical_baseline.fillna(False).astype(bool)]
+    observed = {column: int(clean(baseline[column]).notna().sum()) for column in expected}
+    if not audit.baseline_n.eq(len(baseline)).all() or not audit.observed_n_baseline.eq(audit.source_column.map(observed)).all():
+        raise ValueError("Pharma00 baseline coverage differs from Step10")
+
     recorded = summary.get("input_hashes")
     entries = recorded if isinstance(recorded, list) else []
     input_hash = next((entry.get("sha256", "") for entry in entries
                        if isinstance(entry, dict) and entry.get("role") == "integrated"), "")
-    return {"analysis_mode": analysis_mode, "clinical_validation": "not_established",
-            "feature_contract_version": CONTRACT_VERSION, "input_hash": input_hash}
+    report.update(analysis_mode=analysis_mode, clinical_validation="not_established",
+                  feature_contract_version=CONTRACT_VERSION, input_hash=input_hash)
+    return audit, report
 
 
 def enforce_lab_mode(manifest: pd.DataFrame, *, analysis_mode: str, allow_without_lab: bool = False,
@@ -395,7 +437,7 @@ def enforce_lab_mode(manifest: pd.DataFrame, *, analysis_mode: str, allow_withou
         release = yaml.safe_load(release_path.read_text()) if release_path and release_path.is_file() else None
         if integrated_path is None or candidates_path is None:
             raise LabContractError("INCOMPLETE_RELEASE_REVIEW", "Clinical release requires the complete input bundle")
-        candidates_path = resolve_candidates(candidates_path)
+        candidates_path = current_profile_path(candidates_path)
         folder = candidates_path.parent
         summary = json.loads((folder / "00_pharma_profile_summary.json").read_text())
         profile = pd.read_csv(folder / summary.get("profile_output_name", "00_pharma_lab_profile.csv"))

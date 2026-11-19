@@ -94,6 +94,73 @@ def test_default_full_protocol_and_no_required_flags():
         assert 'required=True' not in source
 
 
+
+def test_pharma_graph_chain_without_flags_overwrites_canonical_artifacts(configuration, tmp_path, monkeypatch):
+    import common
+
+    tables = tmp_path / 'outputs/tables/studies'
+    profile_dir = tables / 'pharma/00_profile_labs'
+    graph01_dir = tables / 'graph/01_run_topological_phenotyping'
+    graph02_dir = tables / 'graph/02_graph_representation_sensitivity'
+    source = Path(configuration['paths']['integrated'])
+    original_source = source.read_bytes()
+    monkeypatch.setattr(common, 'INTEGRATED_LONGITUDINAL_PARQUET', source)
+    monkeypatch.setattr(common, 'INTEGRATED_BASELINE_CSV', tmp_path / 'absent_baseline.csv')
+    monkeypatch.setattr(common, 'STUDIES_TABLES_DIR', tables)
+    for key in ('figures', 'qc', 'logs'):
+        monkeypatch.setattr(common, f'STUDIES_{key.upper()}_DIR', tmp_path / f'outputs/{key}/studies')
+    monkeypatch.setattr(common, 'STUDIES_ANALYTIC_DIR', tmp_path / 'data/analytic/studies')
+
+    path = Path(configuration['_path'])
+    pipeline = yaml.safe_load(path.read_text())
+    candidate = profile_dir / '00_pharma_graph_lab_candidates.csv'
+    pipeline['paths'].update(pharma_candidates=str(candidate), output_02=str(graph02_dir))
+    path.write_text(yaml.safe_dump(pipeline))
+    monkeypatch.setattr(pipe, 'DEFAULT_CONFIG', path)
+
+    # The existing full-pipeline tests cover the extra sensitivities.
+    experiments = Path(pipeline['includes']['experiments'])
+    settings = yaml.safe_load(experiments.read_text())
+    for key in ('run_mapper_grid', 'run_domain_and_family_ablations', 'run_negative_controls',
+                'run_structural_comparators', 'run_lens_distance_sensitivity', 'run_observation_diagnostics'):
+        settings[key] = False
+    experiments.write_text(yaml.safe_dump(settings))
+    missingness = Path(pipeline['includes']['missingness_methods'])
+    settings = yaml.safe_load(missingness.read_text())
+    settings['enabled'] = False
+    missingness.write_text(yaml.safe_dump(settings))
+
+    scripts = (GRAPH.parent / 'pharma/00_profile_labs.py',
+               GRAPH / '01_run_topological_phenotyping.py',
+               GRAPH / '02_graph_representation_sensitivity.py')
+    directories = (profile_dir, graph01_dir, graph02_dir)
+    artifacts = (candidate, graph01_dir / '01_graph_community_membership.csv',
+                 graph02_dir / '02_graph_patient_membership.csv')
+
+    def run_chain(obsolete_metadata=False):
+        for script in scripts:
+            monkeypatch.setattr(sys, 'argv', [str(script)])
+            runpy.run_path(str(script), run_name='__main__')
+            if script == scripts[0] and obsolete_metadata:
+                summary_path = profile_dir / '00_pharma_profile_summary.json'
+                summary = json.loads(summary_path.read_text())
+                summary.update(feature_contract_version='obsolete', profile_contract_version='obsolete')
+                summary.pop('input_hashes')
+                summary_path.write_text(json.dumps(summary))
+
+    run_chain(obsolete_metadata=True)
+    expected_names = [{p.name for p in directory.iterdir()} for directory in directories]
+    expected_results = [artifact.read_bytes() for artifact in artifacts]
+    for artifact in artifacts:
+        artifact.write_text('stale result')
+    run_chain()
+    assert [artifact.read_bytes() for artifact in artifacts] == expected_results
+    assert [{p.name for p in directory.iterdir()} for directory in directories] == expected_names
+    assert not any(directory.is_dir() for stage in directories for directory in stage.iterdir())
+    assert source.read_bytes() == original_source
+
+
+
 def test_zero_argument_full_study_and_standalone_entries(configuration,monkeypatch):
     cfg=configuration
     monkeypatch.setattr(pipe,'DEFAULT_CONFIG',Path(cfg['_path']))
@@ -204,19 +271,26 @@ def test_failed_run_preserves_current_graph_results(configuration, monkeypatch):
     assert (root / '02_graph_failure.json').is_file()
 
 
-def test_configured_pharma_profile_wins_over_historical_bundles(configuration, tmp_path):
+def test_graph_reads_current_pharma_files_only(configuration, tmp_path):
     cfg = configuration
     sources = resolve_sources(cfg)
     candidate = sources['pharma_candidates']
-    other = candidate.parent / 'runs' / 'distinct'
-    other.mkdir(parents=True)
-    (other / candidate.name).write_text('invalid_historical_bundle')
+    historical = candidate.parent / 'runs' / 'previous'
+    historical.mkdir(parents=True)
+    from shutil import copyfile
+    for path in candidate.parent.iterdir():
+        if path.is_file():
+            copyfile(path, historical / path.name)
+    cfg['paths']['source_manifest'] = str(tmp_path / 'obsolete-pin.json')
     assert resolve_sources(cfg) == sources
-    pin = tmp_path / 'pin.json'
-    pipe.write_json(pin, {'schema_version': 'graph_source_v1', 'feature_policy': cfg['analysis']['feature_policy'],
-        **{role: {'path': str(path), 'sha256': pipe.digest(path)} for role, path in sources.items()}})
-    cfg['paths']['source_manifest'] = str(pin)
-    assert resolve_sources(cfg) == sources
+    candidate.unlink()
+    with pytest.raises(FileNotFoundError, match='Missing current Pharma00'):
+        resolve_sources(cfg)
+    with pytest.raises(FileNotFoundError, match='Missing current Pharma00'):
+        legacy.CANON.load_real_inputs(sources['integrated'], candidate)
+    cfg['paths']['pharma_candidates'] = str(historical / candidate.name)
+    with pytest.raises(ValueError, match='current Pharma00 files'):
+        resolve_sources(cfg)
 
 
 def test_gower_properties_and_missingness():

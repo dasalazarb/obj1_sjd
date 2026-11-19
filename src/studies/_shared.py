@@ -64,6 +64,10 @@ def validate_integrated_dataset(frame: pd.DataFrame, *, allow_legacy_aliases: bo
     """Validate and summarize the immutable integrated episode master."""
     structural = PUBLIC_REQUIRED - {"pop__status", "essdai__total", "esspri__total"}
     _require(frame, structural, "Integrated dataset")
+    if not frame.columns.is_unique:
+        raise ValueError("Integrated dataset contains duplicate columns")
+    if frame[["patient_id", "clinical_episode_id"]].isna().any().any():
+        raise ValueError("Integrated dataset contains null patient or episode keys")
     pop_col = resolve_concept(frame, "pop", allow_legacy_aliases=allow_legacy_aliases)
     essdai_col = resolve_concept(frame, "essdai_total", allow_legacy_aliases=allow_legacy_aliases)
     esspri_col = resolve_concept(frame, "esspri_total", allow_legacy_aliases=allow_legacy_aliases)

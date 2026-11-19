@@ -29,22 +29,19 @@ figuras o activar comparadores en un segundo comando.
 
 Un comando sin flags sigue necesitando fuentes reales válidas. No crea datos de
 ejemplo cuando falta Step10. El modo `clinical_release` requiere explícitamente las
-aprobaciones vigentes. Graph01 y Graph02 buscan el perfil Pharma00 configurado.
-Para instalaciones donde Pharma00 solo haya publicado paquetes versionados,
-también se admite un paquete upstream inequívoco. Un manifiesto de fuentes
-opcional permite indicar un perfil exacto (rutas relativas a ese JSON):
+aprobaciones vigentes. Ejecuta Pharma00 antes de Graph01 y Graph02.
 
-```json
-{
-  "schema_version": "graph_source_v1",
-  "feature_policy": "phenotype_independent",
-  "integrated": {"path": "master.parquet", "sha256": "<SHA256>"},
-  "pharma_candidates": {"path": "profile/00_pharma_graph_lab_candidates.csv", "sha256": "<SHA256>"}
-}
+```bash
+python src/studies/pharma/00_profile_labs.py
+python src/studies/graph/01_run_topological_phenotyping.py
+python src/studies/graph/02_graph_representation_sensitivity.py
 ```
 
-Se configura su ruta en `paths.source_manifest` del pipeline. La selección de
-fuentes no cambia los contratos Pharma00 ni las compuertas de serología as-of.
+Pharma00 reemplaza sus CSV y JSON en
+`outputs/tables/studies/pharma/00_profile_labs/`. Graph01 y Graph02 leen
+el perfil actual y reconcilian los analitos, la selección y la cobertura basal
+con Step10. En modo exploratorio las versiones y huellas del perfil son
+informativas.
 
 ## Graph03 N3 exploratorio en Biowulf
 

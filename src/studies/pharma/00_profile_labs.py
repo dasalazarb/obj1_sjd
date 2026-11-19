@@ -26,7 +26,8 @@ import yaml
 import common
 from src.studies._shared import load_parquet, validate_integrated_dataset
 from src.studies.graph._feature_catalog import (CONTRACT_VERSION as FEATURE_CONTRACT_VERSION,
-    build_catalog, namespace_audit, new_run_id)
+    build_catalog, namespace_audit)
+from src.studies.graph._pipeline import stage_outputs
 
 SCRIPT_NAME = Path(__file__).stem
 OUTPUT_DIR = common.STUDIES_TABLES_DIR / "pharma" / SCRIPT_NAME
@@ -40,6 +41,7 @@ IMPACT_NAME = "00_pharma_downstream_impact.csv"
 SUMMARY_NAME = "00_pharma_profile_summary.json"
 SELECTION_AUDIT_NAME = "00_pharma_graph_lab_selection_audit.csv"
 NAMESPACE_AUDIT_NAME = "00_pharma_feature_namespace_audit.csv"
+FAILURE_NAME = "00_pharma_failure.json"
 CONTRACT_VERSION = "pharma_lab_profile_v2"
 KEYS = ["patient_id", "clinical_episode_id"]
 LAB_RESULT_SUFFIXES = ("__value", "__text")
@@ -483,7 +485,7 @@ def exploratory_lab_catalog(frame, context, profile, registry, coverage=.70, sou
     audit["graph_use_mode"] = "exploratory"
     audit["feature_contract_version"] = FEATURE_CONTRACT_VERSION
     for field in ("n_units", "unit_assessment_status", "conflict_assessment_status"):
-        audit[field] = audit.lab.map(indexed[field])
+        audit[field] = audit.lab.map(indexed.get(field, pd.Series(dtype=object)))
     audit["ordinal_values_json"] = audit.lab.map(lambda lab: json.dumps({str(v).lower(): i for i, v in enumerate(registry["assays"].get(lab, {}).get("ordinal_categories", []))}))
     audit["primary_result_source"] = audit.source_column.map(lambda c: "value_column" if c.endswith("__value") else "text_column")
     for field, default in (("exploratory_graph_eligible", False), ("exploratory_graph_representation", ""),
@@ -625,8 +627,8 @@ def _sha256(path: Path) -> str:
 
 def run(args: argparse.Namespace) -> pd.DataFrame:
     integrated, output = Path(args.integrated), Path(args.output)
-    if output == DEFAULT_OUTPUT:
-        output = output.parent / "runs" / new_run_id() / output.name
+    if "runs" in output.parts or "runs" in output.resolve().parts:
+        raise ValueError("Use a current Pharma00 output directory outside runs")
 
     context_path = getattr(args, "context", None)
     if getattr(args, "no_context", False):
@@ -649,8 +651,6 @@ def run(args: argparse.Namespace) -> pd.DataFrame:
         raise ValueError("--output must be a distinct profile CSV path")
     if any(out.resolve() == inp.resolve() for out in destinations for inp in inputs):
         raise ValueError("Profiling outputs must not overwrite any input")
-    if any(path.exists() for path in destinations):
-        raise FileExistsError("Profiling outputs already exist; choose a new run directory")
     hashes = {path: _sha256(path) for path in inputs}
     registry = load_registry(registry_path)
     master = load_parquet(integrated)
@@ -691,17 +691,21 @@ def run(args: argparse.Namespace) -> pd.DataFrame:
                "clinical_release_blockers": ["review_per_lab_impact_before_clinical_release", "pending_assay_approvals_and_metadata",
                             "serology_temporal_construction_unverified"] + ([] if previous_path else ["previous_row_level_snapshot_missing"]),
                "privacy": "aggregate_only_free_text_redacted_no_patient_records", "inputs_unchanged": True}
-    for path, digest in hashes.items():
-        if _sha256(path) != digest:
-            raise RuntimeError("Input changed during profiling; refusing to publish outputs")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    for table, path in [(profile, output), (audit, output.parent / EXPECTED_AUDIT_NAME),
-                        (candidates, output.parent / GRAPH_CANDIDATES_NAME), (serology, output.parent / SEROLOGY_NAME),
-                        (text_code_audit(master), output.parent / TEXT_AUDIT_NAME), (impact, output.parent / IMPACT_NAME),
-                        (selection, output.parent / SELECTION_AUDIT_NAME), (namespace_audit(master), output.parent / NAMESPACE_AUDIT_NAME)]:
-        table.to_csv(path, index=False)
-    summary["output_hashes"] = {p.name: _sha256(p) for p in destinations if p.is_file() and p.name != SUMMARY_NAME}
-    (output.parent / SUMMARY_NAME).write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+    tables = [(profile, output.name), (audit, EXPECTED_AUDIT_NAME),
+              (candidates, GRAPH_CANDIDATES_NAME), (serology, SEROLOGY_NAME),
+              (text_code_audit(master), TEXT_AUDIT_NAME), (impact, IMPACT_NAME),
+              (selection, SELECTION_AUDIT_NAME), (namespace_audit(master), NAMESPACE_AUDIT_NAME)]
+    owned = {path.name for path in destinations}
+    with stage_outputs({"pharma": output.parent}, lambda _, name: name in owned,
+                       failure=("pharma", FAILURE_NAME), completion=output.parent / SUMMARY_NAME) as staging:
+        folder = staging["pharma"]
+        for table, name in tables:
+            table.to_csv(folder / name, index=False)
+        summary["output_hashes"] = {name: _sha256(folder / name) for _, name in tables}
+        (folder / SUMMARY_NAME).write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+        for path, digest in hashes.items():
+            if _sha256(path) != digest:
+                raise RuntimeError("Input changed during profiling; refusing to publish outputs")
     print(f"Laboratory metadata mode: {mode}")
     print(f"Lab stems: {len(profile)}; serology fields (separate): {len(serology)}")
     print(f"Recommended use: {summary['new_recommended_use_counts']}")

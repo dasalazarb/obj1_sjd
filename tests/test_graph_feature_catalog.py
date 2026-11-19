@@ -274,20 +274,73 @@ def test_cli_no_readable_labs_fails_with_complete_audit(tmp_path,script,prefix):
     assert json.loads((out/"tables"/f"{prefix}_preflight.json").read_text())["status"]=="BLOCKED"
 
 
-def test_pharma_new_fields_preserve_longitudinal_semantics_and_runs(tmp_path,monkeypatch):
-    master=frame();ip=tmp_path/"master.parquet";master.to_parquet(ip)
-    destination=tmp_path/"pharma"/"00_pharma_lab_profile.csv"
-    old=P.profile_labs(master)
-    profile=P.run(P.parse_args(["--integrated",str(ip),"--output",str(destination)]))
+def test_pharma_overwrites_and_exploratory_accepts_obsolete_metadata(tmp_path, monkeypatch):
+    master = frame()
+    integrated = tmp_path / "master.parquet"
+    master.to_parquet(integrated)
+    destination = tmp_path / "pharma" / "00_pharma_lab_profile.csv"
+    args = P.parse_args(["--integrated", str(integrated), "--output", str(destination)])
+    old = P.profile_labs(master)
+    profile = P.run(args)
     pd.testing.assert_series_equal(old.recommended_use, profile.recommended_use)
     assert not profile.longitudinal_eligibility.any()
     assert profile.baseline_graph_eligibility.any()
     assert profile.clinical_approval_status.eq("pending").all()
-    before={p.name:p.read_bytes() for p in destination.parent.iterdir()}
-    with pytest.raises(FileExistsError): P.run(P.parse_args(["--integrated",str(ip),"--output",str(destination)]))
-    assert before=={p.name:p.read_bytes() for p in destination.parent.iterdir()}
-    summary=destination.with_name(P.SUMMARY_NAME)
-    payload=json.loads(summary.read_text());payload["feature_contract_version"]="obsolete"
+    before = {p.name: p.read_bytes() for p in destination.parent.iterdir()}
+
+    write_csv = pd.DataFrame.to_csv
+
+    def fail_on_selection(frame, path, *args, **kwargs):
+        if Path(path).name == P.SELECTION_AUDIT_NAME:
+            raise OSError("Synthetic write failure")
+        return write_csv(frame, path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(pd.DataFrame, "to_csv", fail_on_selection)
+        with pytest.raises(OSError, match="Synthetic write failure"):
+            P.run(args)
+    assert before == {name: (destination.parent / name).read_bytes() for name in before}
+    assert (destination.parent / P.FAILURE_NAME).is_file()
+
+    destination.write_text("obsolete")
+    P.run(args)
+    assert before == {p.name: p.read_bytes() for p in destination.parent.iterdir()}
+    summary = destination.with_name(P.SUMMARY_NAME)
+    payload = json.loads(summary.read_text())
+    payload.update(feature_contract_version="obsolete", profile_contract_version="obsolete")
+    payload.pop("input_hashes")
     summary.write_text(json.dumps(payload))
-    with pytest.raises(ValueError,match="STALE_FEATURE_CONTRACT"):
-        G.load_real_inputs(ip,destination.with_name(P.GRAPH_CANDIDATES_NAME),"exploratory")
+    G.load_real_inputs(integrated, destination.with_name(P.GRAPH_CANDIDATES_NAME), "exploratory")
+
+
+@pytest.mark.parametrize("mutation, message", [
+    ("candidate", "disagree with the selection audit"),
+    ("coverage", "baseline coverage differs from Step10"),
+    ("identity", "null patient or episode keys"),
+    ("missing", "missing required columns"),
+    ("mapping", "LAB_REPRESENTATION_KEY_MISMATCH"),
+    ("units", "unit counts must be nonnegative integers"),
+])
+def test_current_pharma_profile_enforces_scientific_contract(tmp_path, mutation, message):
+    master, integrated, candidates, _ = bundle(tmp_path)
+    audit = candidates.with_name(P.SELECTION_AUDIT_NAME)
+    if mutation == "candidate":
+        frame = pd.read_csv(candidates)
+        frame.iloc[:-1].to_csv(candidates, index=False)
+    elif mutation == "coverage":
+        master.loc[0, "lab__complement_c3__value"] = np.nan
+        master.to_parquet(integrated)
+    elif mutation == "identity":
+        master.loc[0, "patient_id"] = None
+        master.to_parquet(integrated)
+    elif mutation == "missing":
+        pd.read_csv(audit).drop(columns="source_column").to_csv(audit, index=False)
+    else:
+        frame = pd.read_csv(audit)
+        if mutation == "units":
+            frame.loc[0, "n_units"] = -1
+        else:
+            frame.loc[0, "lab"] = "lab__wrong"
+        frame.to_csv(audit, index=False)
+    with pytest.raises(ValueError, match=message):
+        G.load_real_inputs(integrated, candidates)

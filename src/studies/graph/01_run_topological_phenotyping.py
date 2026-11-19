@@ -45,7 +45,7 @@ from src.studies._shared import (benjamini_hochberg, create_study_dirs,
 
 from src.studies.graph import _lab_contract as LAB
 from src.studies.graph import _feature_catalog as CATALOG
-from src.studies.graph._lab_contract import current_profile, resolve_candidates, enforce_lab_mode
+from src.studies.graph._lab_contract import load_current_profile, enforce_lab_mode
 from src.studies.graph._pipeline import stage_outputs
 
 POPS = ("Pop1", "Pop2", "Pop3")
@@ -83,40 +83,17 @@ def load_config(path: Path) -> dict:
     return config
 
 
-def load_real_inputs(integrated: Path, candidates_path: Path, analysis_mode: str | None = "exploratory", *, resolve_profile: bool = True) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+def load_real_inputs(integrated: Path, candidates_path: Path, analysis_mode: str | None = "exploratory") -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     if analysis_mode is None or isinstance(analysis_mode, dict):
         summary = analysis_mode if isinstance(analysis_mode, dict) else json.loads(candidates_path.with_name("00_pharma_profile_summary.json").read_text())
         master = load_parquet(integrated)
         candidates, report = LAB.validate_graph_lab_contract(master, pd.read_csv(candidates_path), summary,
             integrated_path=integrated, candidates_path=candidates_path)
         return master, candidates, report
-    if analysis_mode is not None and resolve_profile:
-        candidates_path = resolve_candidates(candidates_path)
-    if not candidates_path.exists():
-        raise FileNotFoundError(
-            f"Graph lab candidate file not found: {candidates_path}. "
-            "Run src/studies/pharma/00_profile_labs.py first"
-        )
     master = load_parquet(integrated)
     contract = validate_integrated_dataset(master)
-    if analysis_mode is not None:
-        contract.update(current_profile(integrated, candidates_path, analysis_mode))
-    candidates = pd.read_csv(candidates_path)
-    if analysis_mode is not None:
-        candidates = pd.read_csv(candidates_path.with_name("00_pharma_graph_lab_selection_audit.csv"))
-        if candidates.source_column.duplicated().any():
-            raise ValueError("Duplicate lab representation source keys")
-        if any(CATALOG.lab_stem(r.source_column) != r.lab for r in candidates.itertuples()):
-            raise ValueError("LAB_REPRESENTATION_KEY_MISMATCH: exact stem/source required")
-        bad = set(candidates.source_column) - set(master.columns)
-        if bad:
-            raise ValueError(f"Candidate sources absent from master: {sorted(bad)}")
-    required = {"lab", "graph_candidate_status", "graph_encoding_hint",
-                "primary_result_source", "value_column", "text_column",
-                "reference_status_column"}
-    missing = required - set(candidates)
-    if missing:
-        raise ValueError(f"Graph lab candidates missing required columns: {sorted(missing)}")
+    candidates, profile_report = load_current_profile(master, integrated, candidates_path, analysis_mode)
+    contract.update(profile_report)
     return master, candidates, contract
 
 
@@ -375,7 +352,7 @@ def write_selection_outputs(dirs, prefix, master, manifest, values, contract, ar
     CATALOG.domain_flow(manifest, set(values)).to_csv(dirs["tables"] / f"{prefix}_domain_flow.csv", index=False)
     flow = CATALOG.family_flow(manifest)
     flow.to_csv(dirs["tables"] / f"{prefix}_family_flow.csv", index=False)
-    candidate_path = resolve_candidates(args.graph_lab_candidates)
+    candidate_path = args.graph_lab_candidates
     input_paths = {"integrated": args.integrated, "config": args.config,
         "pharma_candidates": candidate_path,
         "pharma_summary": candidate_path.with_name("00_pharma_profile_summary.json")}
