@@ -1,4 +1,4 @@
-"""Exercise 03e with no arguments, using only synthetic inputs and ephemeral keys."""
+"""Exercise the signed Calendar Day v2 runner with synthetic inputs and keys."""
 import fcntl
 import json
 from pathlib import Path
@@ -81,8 +81,10 @@ def automatic(calendar_originals, tmp_path):
 
 def auto(automatic):
     repo, _, _, _ = automatic
-    script = repo / 'src/studies/graph/03e_graph_n3_controlled_inference.py'
-    proc = run_command(sys.executable, str(script), cwd=repo.parent)
+    code = ('import json; from pathlib import Path; '
+            'from src.studies.graph.stage03.s03_n3_auto import run_auto; '
+            'print(json.dumps(run_auto(Path.cwd())))')
+    proc = run_command(sys.executable, '-c', code, cwd=repo)
     assert not proc.stderr
     for secret in ('SYNTHETIC_0', 'SYNTHETIC_EP_', '2019-12-31', 'SYNTHETIC_LEGACY_SENTINEL'):
         assert secret not in proc.stdout

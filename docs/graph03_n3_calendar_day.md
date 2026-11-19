@@ -1,6 +1,18 @@
 # Graph03 N3 con recolección por día calendario
 
-`calendar_day_prebaseline` es el contrato de la ejecución automática de 03e para asociaciones exploratorias con membresías congeladas. Su alcance temporal es el día de recolección. La precedencia intradía, la identidad del espécimen y de la plataforma y la causalidad quedan fuera del alcance. Las invocaciones técnicas explícitas conservan el contrato v1 de timestamps con offset, ensayo y muestra verificados.
+## Ejecución exploratoria sin argumentos
+
+```bash
+/usr/local/Anaconda/envs/py3.10/bin/python /data/salazarda/data/obj1_sjd/src/studies/graph/03e_graph_n3_controlled_inference.py
+```
+
+03e resuelve los releases compatibles de Graph02 y Graph03, verifica sus hashes y analiza los cinco outcomes de laboratorio con membresías congeladas. Usa la última recolección cotejable de 1 a 365 días antes del baseline. Si queda incertidumbre sobre independencia o proxies, entrega descriptivos por comunidad. La ejecución exploratoria prescinde de expedientes firmados y requiere que el acceso institucional a los datos esté autorizado.
+
+Las rutas se leen de [n3_auto.yaml](../src/studies/graph/configs/n3_auto.yaml). El JSON de salida indica `status`, `n_outcomes_with_data`, `n_model_pairs_estimable` y las rutas de los resultados agregados. Cada run se guarda en `graph03_n3_private/exploratory/runs/` con permisos de propietario. `README.md` documenta las reglas de selección, supresión e inferencia exploratoria de ese run.
+
+## Circuito con revisión institucional
+
+`calendar_day_prebaseline` es el contrato Calendar Day v2 para el circuito de revisión institucional conservado en `s03_n3_auto.run_auto`. Su alcance temporal es el día de recolección. La precedencia intradía, la identidad del espécimen y de la plataforma y la causalidad quedan fuera del alcance. Las invocaciones técnicas explícitas de 03e conservan sus contratos de medición y sus verificaciones de aprobación.
 
 ## Selección y procedencia
 
@@ -10,13 +22,9 @@
 - Fijar la ventana por outcome antes de analizar asociaciones. La regla principal usa `1 <= baseline_day - collection_day <= lookback_days` y toma el último día elegible. El mismo día, días posteriores y días fuera de ventana se excluyen. Una sensibilidad con diferencia de al menos dos días requiere su propia configuración, expediente, artefacto y plan. En el último día se colapsan duplicados comprobablemente idénticos. Discordancia en resultado, unidad, definición o identidad lógica genera `AMBIGUOUS_SAME_DAY` y excluye al paciente para ese outcome sin recurrir a un día anterior.
 - El crosswalk firmado restringe el outcome a combinaciones comparables de nombre original de orden, nombre original de observación y etiqueta EDA `assay` (puede ser nula), con una unidad exacta. La definición describe la prueba clínica comparable dentro de ese alcance. `assay_id` y `sample_id` quedan nulos. Los tokens desconocidos o no realizados se tratan como faltantes. Los valores censurados, tokens ajenos a la convención y unidades fuera de alcance se excluyen. Incluir ANA general y HEp-2 juntos exige evidencia revisada de que son hipótesis distintas y definiciones de origen disjuntas. Las dos codificaciones de RF representan la misma hipótesis por representación.
 
-## Operación habitual
+## Operación del runner firmado
 
-```bash
-/usr/local/Anaconda/envs/py3.10/bin/python /data/salazarda/data/obj1_sjd/src/studies/graph/03e_graph_n3_controlled_inference.py
-```
-
-El comando localiza Graph03 Fase A y su release Graph02 mediante el selector de compatibilidad existente y verifica sus hashes. Después valida la prespecificación, ejecuta la auditoría y construye el candidato v2. Con el expediente de fuente firmado genera el Parquet revisado, prepara el borrador de 03e y busca el plan firmado. El preflight evalúa los gates por representación, outcome y modelo. La inferencia se ejecuta exclusivamente para los modelos `READY`.
+El runner firmado localiza Graph03 Fase A y su release Graph02 mediante el selector de compatibilidad existente y verifica sus hashes. Después valida la prespecificación, ejecuta la auditoría y construye el candidato v2. Con el expediente de fuente firmado genera el Parquet revisado, prepara el borrador de 03e y busca el plan firmado. El preflight evalúa los gates por representación, outcome y modelo. La inferencia se ejecuta exclusivamente para los modelos `READY`.
 
 Las rutas de instalación están en [n3_auto.yaml](../src/studies/graph/configs/n3_auto.yaml). Por defecto, los directorios `obj1_sjd` y `eda_sjd` comparten el padre `/data/salazarda/data`. El primero contiene Step01, Step10 y las colecciones Graph02/03. El segundo contiene Step20 y BTRIS raw e intermedio, cada uno con 11D y 15D. En otra instalación se puede editar una vez `n3_auto.yaml`. Las rutas de los releases se leen de `pipeline.yaml` y la selección usa la relación de procedencia entre los releases.
 
@@ -49,9 +57,9 @@ Para el expediente de fuente, `CALENDAR_AFFIRMATIONS` enumera las afirmaciones r
 
 La decisión `measurement` de 03e reproduce en `details` el `measurement_review` firmado y agrega `source_review_sha256`, el hash del expediente de 03f. El preflight conserva los gates de protocolo, baseline, medición, temporalidad, independencia de N1/N2, Pop cuando aplica, topología, diseño y soporte. `demo__protocol` requiere acreditación semántica y fecha efectiva. ESSDAI, ESSPRI y biopsia requieren sus propias fechas instrumentales y revisión de fuente. Las comparaciones A/B/C/D y el ajuste por multiplicidad conservan las reglas de 03e.
 
-## Lectura del resultado
+## Lectura del resultado del runner firmado
 
-El comando imprime una sola línea JSON. `n_ready` cuenta modelos que superaron los gates y `estimators_run` cuenta los intentos de ajuste de la ejecución, incluidos los recuperados de una corrida íntegra. `COMPLETE_WITH_LIMITATIONS` identifica, por ejemplo, un modelo autorizado junto con otro bloqueado o una comparación no estimable. El informe de `report_path` contiene el historial de estados, la procedencia y los bloqueos por modelo y gate. Los Parquet y ledgers quedan restringidos. Las tablas de 03f suprimen celdas pequeñas y 03e retiene los recuentos de pacientes y grados de libertad.
+El informe del runner firmado usa `n_ready` para contar los modelos que superaron los gates y `estimators_run` para contar los intentos de ajuste de la ejecución, incluidos los recuperados de una corrida íntegra. `COMPLETE_WITH_LIMITATIONS` identifica, por ejemplo, un modelo autorizado junto con otro bloqueado o una comparación no estimable. El informe de `report_path` contiene el historial de estados, la procedencia y los bloqueos por modelo y gate. Los Parquet y ledgers quedan restringidos. Las tablas de 03f suprimen celdas pequeñas y 03e retiene los recuentos de pacientes y grados de libertad.
 
 ### Ejemplo sintético de revisión pendiente (`PENDING_REVIEW`)
 
