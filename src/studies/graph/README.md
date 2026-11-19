@@ -1,7 +1,7 @@
 # Graph 01, 02 y 03
 
-Graph02 descubre y evalúa topología basal. Graph03 interpreta un release congelado y
-verificado; no vuelve a seleccionar variables, imputar, estimar PCA ni ejecutar Mapper.
+Graph02 descubre y evalúa topología basal. Graph03 caracteriza las comunidades
+publicadas por Graph02. Graph03e analiza las mediciones N3 por día calendario.
 Los resultados por defecto son **exploratorios**, sin validación clínica confirmatoria.
 
 ## Ejecución completa sin flags
@@ -15,8 +15,10 @@ python src/studies/graph/run_graph_study.py
 También funcionan individualmente sin argumentos:
 
 ```bash
+python src/studies/graph/01_run_topological_phenotyping.py
 python src/studies/graph/02_graph_representation_sensitivity.py
 python src/studies/graph/03_graph_community_characterization.py
+python src/studies/graph/03e_graph_n3_controlled_inference.py
 ```
 
 La configuración principal es [configs/pipeline.yaml](configs/pipeline.yaml).
@@ -27,10 +29,10 @@ figuras o activar comparadores en un segundo comando.
 
 Un comando sin flags sigue necesitando fuentes reales válidas. No crea datos de
 ejemplo cuando falta Step10. El modo `clinical_release` requiere explícitamente las
-aprobaciones vigentes; no se promueven ensayos pendientes. Las fuentes Pharma00 se
-verifican por versión, hashes del master y hashes de salidas. Si hay más de un
-bundle compatible distinto, se exige un manifiesto fuente anclado; no se elige por
-fecha. Un manifiesto anclado tiene este esquema (rutas relativas a ese JSON):
+aprobaciones vigentes. Graph01 y Graph02 buscan el perfil Pharma00 configurado.
+Para instalaciones donde Pharma00 solo haya publicado paquetes versionados,
+también se admite un paquete upstream inequívoco. Un manifiesto de fuentes
+opcional permite indicar un perfil exacto (rutas relativas a ese JSON):
 
 ```json
 {
@@ -50,10 +52,11 @@ fuentes no cambia los contratos Pharma00 ni las compuertas de serología as-of.
 /usr/local/Anaconda/envs/py3.10/bin/python /data/salazarda/data/obj1_sjd/src/studies/graph/03e_graph_n3_controlled_inference.py
 ```
 
-El release privado queda en `../graph03_n3_private/exploratory/runs/`.
-`../graph03_n3_private/exploratory/latest.json` identifica el release verificado.
-Empieza por `RESULTADOS_N3.md` para ver la cobertura, los perfiles basales y por
-ventana, las asociaciones exploratorias estimables y los motivos de exclusión.
+Los agregados de uso interno quedan en
+`outputs/tables/studies/graph/03_graph_n3_controlled_inference/`.
+El archivo `03e_RESULTADOS.md` reúne cobertura, perfiles, modelos estimables
+y motivos de exclusión. Las mediciones originales se leen en sus ubicaciones
+de origen. Las filas individuales permanecen en dichas fuentes.
 El protocolo está versionado en [n3_exploratory_defaults.yaml](configs/n3_exploratory_defaults.yaml).
 
 ## Qué ejecuta Graph02
@@ -122,36 +125,35 @@ El protocolo está versionado en [n3_exploratory_defaults.yaml](configs/n3_explo
 
 El comando sin flags genera todos los CSV, figuras PNG/PDF aplicables, resumen
 con cifras de ejecución, inventario de figuras no estimables, pesos y auditorías.
-El manifiesto conserva `graph02_release_v1` de forma aditiva y Graph03 valida
-los mismos hashes sin reestimar. Caché v3 incluye mapa/release, variables,
-configuración, semilla, versión de algoritmo y hash de entrada. Los archivos por
-paciente y el resto del release son internos/restringidos por defecto: el inventario
-no autoriza exportación pública sin revisión NIH. Una corrida real requiere las
-fuentes Step10/Pharma00 originales en el entorno NIH; los tests usan sintéticos.
+El descriptor `02_graph_release_manifest.json` registra la referencia, las
+representaciones elegibles y el estado científico. Los archivos por paciente son
+de uso interno restringido.
 
-Las pruebas no aplicables tienen filas `NOT_ESTIMABLE` con motivos. Los fallos de
-réplicas se registran y afectan QC; no se reintenta hasta obtener éxitos. Un grafo
-sin estructura estable puede producir un release `NO_STABLE_STRUCTURE`: es un
-resultado científico negativo, no un error computacional.
+## Archivos vigentes
 
-## Release inmutable 02 → 03
+Cada etapa reemplaza sus propios archivos en su carpeta de siempre. Las etapas
+calculan primero en un temporal y publican el resumen al completar sus archivos.
+En caso de error, queda el último resultado completo y se registra un
+`*_failure.json` con el estado del intento fallido.
 
-Cada ejecución crea un directorio nuevo `runs/<UTC_uuid>/`. Se rechazan IDs ya
-usados. El manifiesto `02_graph_release_manifest.json` contiene esquema, SHA por
-artefacto, fuentes exactas, configuración, versiones, referencia y representaciones
-elegibles, población y QC. El puntero `latest_completed_02.json` sólo se publica
-atómicamente tras finalizar y validar el release. Un run fallido no reemplaza al
-último completado. La caché verificable de réplicas permite reanudar trabajo con
-las mismas fuentes, configuración, experimento, semilla y muestra; cada publicación
-sigue teniendo un directorio propio.
+| Etapa | Carpeta bajo `outputs/tables/studies/graph/` |
+|---|---|
+| Graph01 | `01_run_topological_phenotyping/` |
+| Graph02 | `02_graph_representation_sensitivity/` |
+| Graph03 | `03_graph_community_characterization/` |
+| Graph03c | `03_graph_n3_clinical_adjudication/` |
+| Graph03d | `03_graph_n3_resolution_preflight/` |
+| Graph03e y auditoría 03f | `03_graph_n3_controlled_inference/` |
+| Ejecutor integral | `run_graph_study/` |
 
-Graph03 valida hashes, esquema, estado, política, IDs y fuentes clínicas. Su modo
-standalone usa el puntero; el runner conjunto pasa la ruta exacta recién generada.
-No busca directorios `runs/*` ni importa los ejecutables numerados de descubrimiento.
+Graph01 conserva la jerarquía habitual de figuras, QC y logs bajo `outputs/`
+y de intermedios analíticos bajo `data/analytic/studies/`. Graph02 y Graph03
+publican las figuras junto a las tablas. Los CSV que respaldan las figuras
+llevan el sufijo `_source.csv`.
 
-El contrato diferencia membresía solapada de comunidad, asignación dura, nodos y
-componentes conexas. Los scores Mapper son descriptivos, no probabilidades clínicas
-calibradas. El CSV basal congelado conserva valores observados, sin imputación.
+Graph03 comprueba la cohorte, las membresías y el QC de la salida actual de
+Graph02. El ejecutor integral corre Graph02, Graph03 y Graph03e en ese orden y
+publica `graph_study_results_summary.md` con enlaces a los resultados de cada etapa.
 
 ## Qué ejecuta Graph03
 
@@ -177,11 +179,6 @@ calibradas. El CSV basal congelado conserva valores observados, sin imputación.
 * MGUS/linfoma/HLA sólo con fuentes y codificaciones exactas aprobadas. Sin ese
   contrato, quedan explícitamente no estimables. No se entrena proyección externa.
 
-Las tablas de 03 incluyen `graph02_run_id` y `graph02_release_sha256`. El índice
-maestro del estudio enlaza rutas relativas y hashes de tablas, figuras y logs de
-ambas etapas. Los estados de ejecución son `COMPLETE`, `COMPLETE_WITH_LIMITATIONS`,
-`PARTIAL`, `FAILED`; nunca se presenta una prueba no estimable como un éxito.
-
 ## Diagnóstico y compatibilidad
 
 Estos parámetros son opcionales:
@@ -192,10 +189,10 @@ python src/studies/graph/run_graph_study.py --preflight-only
 python src/studies/graph/03_graph_community_characterization.py --graph02-release /ruta/runs/ID/02_graph_release_manifest.json
 ```
 
-`--output-dir` es la raíz de una colección de runs; `--run-id` fija un ID nuevo.
-`--dry-run` equivale a preflight y nunca publica un release incompleto.
-El preflight del runner comprueba las fuentes/contratos de 02; sin release nuevo
-no ejecuta 03. Para comprobar un release ya publicado, usar preflight de 03.
+`--output-dir` permite indicar el directorio de salida. El preflight del
+ejecutor integral comprueba las fuentes de Graph02. El preflight de Graph03
+comprueba las salidas actuales de Graph02. Los comandos de diagnóstico guardan
+su estado de preflight sin reemplazar el resumen del análisis completo.
 
 Graph01 conserva su interfaz. Las funciones históricas Graph02 viven ahora en
 `stage02/s02_legacy.py`, con exports de compatibilidad desde el script numerado.
@@ -273,12 +270,11 @@ Cada variante principal solicita 60 submuestras; `-I` añade 20 bootstrap clási
 Cada sensibilidad de peso/corte solicita 20 submuestras sin cruzar la grilla
 Mapper. Imputación, pesos, escalas, máscaras, reducción y Mapper se reajustan en
 cada réplica sobre el panel congelado; no se submuestrea una matriz completada
-previamente. Las claves de cache incluyen fuentes, panel, estados originales,
-semilla, configuración, versión y hashes del código. Son cálculos CPU; el coste
+previamente. Son cálculos CPU. El coste
 crece especialmente con la validación de rangos dentro de cada refit. No requieren
 GPU. El test sintético incluye un panel de 159 × 98 y control de memoria.
 
-En el nuevo `runs/<run_id>/`, los CSV `02_graph_missingness_*` contienen registro
+En la carpeta de Graph02, los CSV `02_graph_missingness_*` contienen registro
 de métodos, paneles, estados agregados, reconstrucción, soporte de distancias,
 comparaciones geométricas y comunitarias, cobertura, estabilidad y QC. Se separan
 `FAILED` y `NOT_ESTIMABLE`; una variante secundaria fallida limita el release y
@@ -288,11 +284,9 @@ PNG/PDF incluyen CSV fuente, denominadores y supresión de nodos/celdas menores
 a `minimum_publication_cell`. El resumen técnico no declara fenotipos validados,
 causalidad del proceso de observación ni progresión temporal.
 
-El manifiesto registra SHA256 de cada artefacto, versión del estimador,
-`analysis_role: sensitivity`, panel fijo y estados. El lector Graph03 comprueba
-estos hashes y continúa usando R0/R2 históricos; las variantes nunca se incluyen
-en `eligible_representation_ids`. `latest_completed_02.json` sólo se publica
-tras la validación integral del release. No se reescriben corridas previas.
+El descriptor registra la función de sensibilidad, la versión del estimador
+y los estados de las variantes. Graph03 usa sus agregados para el contexto y
+las representaciones elegibles de Graph02 para la caracterización clínica.
 
 Pruebas sintéticas y regresión:
 
@@ -325,14 +319,11 @@ python src/studies/graph/03c_graph_n3_clinical_adjudication.py
 python src/studies/graph/03d_graph_n3_resolution_preflight.py
 ```
 
-Ambas fases descubren los runs compatibles y crean un nuevo `runs/<id>`.
-Los overrides de rutas/configuración son opcionales; `OBJ1_SJD_ROOT` permite
-otra raíz de datos y `--strict` añade los pins históricos disponibles. Se
-conservan integridad de datos, revisión humana y gates científicos. Phase D
-incluye soporte R0 estable sin estimar modelos; los endpoints pendientes siguen
-bloqueados. Consulte
-[`docs/graph03_phase_d_resolution.md`](../../../docs/graph03_phase_d_resolution.md)
-para colecciones, criterios de selección, evidencia, divulgación y pruebas.
+Graph03c usa los resultados actuales de Graph02 y Graph03. Graph03d incorpora
+el diagnóstico actual de Graph03c. Ambas fases son opcionales para el análisis
+exploratorio. `OBJ1_SJD_ROOT` permite indicar otra raíz para los diagnósticos.
+Graph03d comprueba el soporte de la topología estable de R0 y documenta los
+endpoints pendientes.
 
 ### Graph03 E: inferencia condicionada a decisiones humanas
 

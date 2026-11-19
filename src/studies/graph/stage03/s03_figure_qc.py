@@ -157,10 +157,10 @@ def select_n2_sources(matrix, safe, roles, validation, minimum_cell, provenance=
                 display_status=display, reason=reason, **(provenance or {})))
     return pd.DataFrame(rows, columns=['representation_id', *required, 'relationship_type',
         'selection_status', 'has_observed_values', 'display_status', 'reason',
-        'graph02_run_id', 'graph02_release_sha256'])
+        *(provenance or {})])
 
 
-def figure_qc(folder, expected_sources, provenance=None, *, protected_matrix=None):
+def figure_qc(folder, expected_sources, provenance=None, *, protected_matrix=None, source_suffix=''):
     """Check registered artifacts against the exact protected rendering inputs.
 
     Hashes have one owner: 03_graph_artifact_inventory.csv. This QC references
@@ -180,7 +180,8 @@ def figure_qc(folder, expected_sources, provenance=None, *, protected_matrix=Non
         item = dict(figure=name)
         available = {}
         for ext in ['png', 'pdf', 'csv']:
-            artifact = folder / f'{name}.{ext}'
+            suffix = source_suffix if ext == 'csv' else ''
+            artifact = folder / f'{name}{suffix}.{ext}'
             available[ext] = artifact.is_file() and artifact.stat().st_size > 0
             if not available[ext]: errors.append(f'MISSING_ARTIFACT:{name}.{ext}')
             elif ext in {'png', 'pdf'}:
@@ -195,7 +196,7 @@ def figure_qc(folder, expected_sources, provenance=None, *, protected_matrix=Non
             canonical = source if len(source.columns) else pd.DataFrame(columns=['status', 'reason'])
             try:
                 expected = pd.read_csv(StringIO(canonical.to_csv(index=False)))
-                actual = pd.read_csv(folder / f'{name}.csv')
+                actual = pd.read_csv(folder / f'{name}{source_suffix}.csv')
                 pd.testing.assert_frame_equal(actual, expected)
                 verified = True
             except (AssertionError, ValueError, pd.errors.ParserError):
@@ -245,7 +246,7 @@ def figure_qc(folder, expected_sources, provenance=None, *, protected_matrix=Non
                 except (KeyError, TypeError, ValueError, AttributeError):
                     errors.append(f'INVALID_FIGURE_METADATA_COUNTS:{name}')
         item.update(files=available, protected_source_csv_verified=verified,
-            artifact_hash_inventory={ext: f'figures/{name}.{ext}' for ext in available})
+            artifacts={ext: f'{name}{source_suffix if ext == "csv" else ""}.{ext}' for ext in available})
         generated += int(all(available.values()))
         items.append(item)
     clinical = [item for item in items if item['figure'] in expected_tiers and item.get('tier') in TIERS]

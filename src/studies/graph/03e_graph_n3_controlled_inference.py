@@ -17,7 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.studies.graph.stage03.s03_run_resolution import (
-    graph_paths, resolve_graph03_dependencies,
+    graph_paths, resolve_historical_graph03_dependencies,
 )
 from src.studies.graph._pipeline import config_path
 
@@ -125,7 +125,7 @@ def _fill_automatic_inputs(args, parser):
             config=ROOT / 'src/studies/graph/configs/n3_phasec_review.yaml',
             strict=False,
         )
-        graph03, release, _, _ = resolve_graph03_dependencies(selection, ROOT, phase='C')
+        graph03, release, _, _ = resolve_historical_graph03_dependencies(selection, ROOT, phase='C')
         args.graph03_run, args.graph02_release = graph03, release
 
     if args.context is None or args.measurements is None:
@@ -167,8 +167,11 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if not argv:
         from src.studies.graph.stage03.s03_n3_exploratory import run_exploratory_auto
-        print(json.dumps(run_exploratory_auto(ROOT), sort_keys=True))
-        return
+        result = run_exploratory_auto(ROOT)
+        print(json.dumps(result, sort_keys=True))
+        if result['status'] == 'EXPLORATORY_RUN_FAILED':
+            raise SystemExit(1)
+        return result
 
     from src.studies.graph.stage03.s03_n3_controlled import input_pins, run_controlled
     from src.studies.graph.stage03.s03_n3_decisions import decision_templates

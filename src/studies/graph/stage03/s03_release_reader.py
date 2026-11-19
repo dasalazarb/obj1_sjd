@@ -3,14 +3,22 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from .._pipeline import digest, output_root
-from ..stage02.s02_contracts import validate_release, resolve_latest, safe_artifact
+from ..stage02.s02_contracts import CURRENT_SCHEMA, MANIFEST, artifact_paths, validate_release, safe_artifact
+
+
+RESULTS = '03_graph_results_summary.json'
+RESULTS_SCHEMA = 'graph03_current_v1'
 
 
 def read_release(cfg,path=None):
-    manifest,path=validate_release(path) if path else resolve_latest(output_root(cfg,'02'))
+    manifest,path=validate_release(path or output_root(cfg,'02') / MANIFEST)
+    historical = manifest.get('schema_version') != CURRENT_SCHEMA
+    if historical and path.parent == output_root(cfg, '02'):
+        raise ValueError('Graph03 requires a current Graph02 result in the configured directory')
+    artifacts = artifact_paths(manifest)
     if manifest['feature_policy']!=cfg['analysis']['feature_policy'] or manifest['study_mode']!=cfg['analysis']['mode']:
         raise ValueError('Graph02 release policy/mode differs from the requested pipeline')
-    if manifest['data_sha256']!=manifest['source_inputs']['integrated']['sha256']:
+    if historical and manifest['data_sha256']!=manifest['source_inputs']['integrated']['sha256']:
         raise ValueError('Frozen clinical source hash disagrees with release')
     sensitivity_paths={entry.get('artifact') for entry in manifest.get('sensitivity_artifacts',[])}
     main_roles={'baseline_raw','membership','nodes','edges','feature_sets','feature_roles',
@@ -18,10 +26,13 @@ def read_release(cfg,path=None):
                 'experiment_registry','community_dictionary','comparison_denominators',
                 'missingness_controls','coverage_reasons'}
     clinical_roles={'baseline_raw','membership','nodes','feature_sets','refit_membership'}
-    if any(relative in sensitivity_paths for role,relative in manifest['relative_paths'].items() if role in clinical_roles):
+    if any(relative in sensitivity_paths for role,relative in artifacts.items() if role in clinical_roles):
         raise ValueError('Sensitivity artifacts cannot enter primary clinical release inputs')
-    frames={role:pd.read_csv(safe_artifact(path.parent,relative),dtype={'patient_id':'string'})
-            for role,relative in manifest['relative_paths'].items() if role in main_roles and relative.endswith('.csv')}
+    identifiers = {'patient_id': 'string'}
+    if not historical:
+        identifiers.update(clinical_episode_id='string', clinical_baseline_episode_id='string')
+    frames = {role: pd.read_csv(safe_artifact(path.parent, relative), dtype=identifiers)
+              for role, relative in artifacts.items() if role in main_roles and relative.endswith('.csv')}
     frames['method_context_inputs'],frames['method_context_qc']=read_sensitivity_artifacts(manifest,path)
     baseline=frames['baseline_raw']; membership=frames['membership']
     if any('-' in identifier for identifier in manifest['eligible_representation_ids']):
@@ -52,9 +63,9 @@ def read_release(cfg,path=None):
     finite_scores=membership.membership_score.dropna()
     if not finite_scores.between(0,1).all():
         raise ValueError('Invalid descriptive membership score')
-    if digest(safe_artifact(path.parent,manifest['relative_paths']['feature_sets']))!=manifest['features_sha256']:
+    if historical and digest(safe_artifact(path.parent,artifacts['feature_sets']))!=manifest['features_sha256']:
         raise ValueError('Frozen feature SHA differs from manifest')
-    for role,entry in manifest['source_inputs'].items():
+    for role,entry in manifest['source_inputs'].items() if historical else ():
         if digest(Path(entry['path']))!=entry['sha256']:
             raise ValueError('Clinical source has changed since frozen Graph02 release: '+role)
     return manifest,path,frames
@@ -82,14 +93,17 @@ AGGREGATE_SENSITIVITY_TABLES = {
 
 
 def read_sensitivity_artifacts(manifest, path):
-    """Read only explicitly inventoried, hash-verified aggregate diagnostics."""
+    """Read only explicitly listed aggregate diagnostics."""
     path=Path(path)
     suite=manifest.get('missingness_sensitivity')
     qc={'status':'NOT_AVAILABLE_IN_RELEASE','sources':[],
-        'graph02_run_id':manifest['run_id'],'graph02_release_sha256':digest(path),
+        'graph02_directory':str(path.parent),
         'estimator_version':'UNKNOWN','analysis_policy':'aggregate_only_non_defining_no_refit',
         'study_mode':manifest['study_mode'],'feature_policy':manifest['feature_policy'],
         'eligible_representation_ids':manifest['eligible_representation_ids']}
+    historical = manifest.get('schema_version') != CURRENT_SCHEMA
+    if historical:
+        qc.update(graph02_run_id=manifest['run_id'], graph02_release_sha256=digest(path))
     if not suite or not suite.get('enabled',False): return {},qc
     if suite.get('graph03_defining') is not False:
         raise ValueError('Sensitivity lacks explicit non-defining guarantee')
@@ -104,8 +118,7 @@ def read_sensitivity_artifacts(manifest, path):
         if entry.get('graph03_defining') is not False or entry.get('analysis_role')!='sensitivity':
             raise ValueError('Sensitivity artifact lacks explicit non-defining guarantee')
         source=safe_artifact(path.parent,entry['artifact'])
-        actual=digest(source)
-        if actual!=entry.get('sha256') or actual!=manifest['sha256_by_artifact'].get(entry['artifact']):
+        if historical and (digest(source)!=entry.get('sha256') or entry.get('sha256')!=manifest['sha256_by_artifact'].get(entry['artifact'])):
             raise ValueError('Sensitivity aggregate SHA mismatch')
         try: frame=pd.read_csv(source)
         except pd.errors.EmptyDataError: frame=pd.DataFrame()
@@ -114,7 +127,8 @@ def read_sensitivity_artifacts(manifest, path):
         if any(token in str(column).lower() for column in frame for token in private_fields):
             raise ValueError('Patient-level data in sensitivity aggregate')
         tables[role]=frame
-        qc['sources'].append({'artifact':entry['artifact'],'sha256':actual,
+        qc['sources'].append({'artifact':entry['artifact'],
+            **({'sha256': entry['sha256']} if historical else {}),
             'estimator_version':entry.get('estimator_version',qc['estimator_version']),
             'graph03_defining':False})
     qc['status']='AVAILABLE' if tables else 'NOT_AVAILABLE_IN_RELEASE'

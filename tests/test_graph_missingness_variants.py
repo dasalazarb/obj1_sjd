@@ -232,12 +232,12 @@ def test_full_sensitivity_suite_refits_every_variant_and_emits_sources(synthetic
     assert attempts.panel_hash.str.len().eq(64).all()
     panels=pd.read_csv(tmp_path/'02_graph_missingness_panel_comparability.csv')
     assert panels.identical_panel.all() and panels.n_excluded_sources.eq(0).all()
-    for ext in ['png','pdf','csv']: assert len(list((tmp_path/'figures').glob('*.'+ext)))==10
+    for ext in ['png','pdf']: assert len(list(tmp_path.glob('02_graph_missingness_*.'+ext)))==10
     for r in results:
         np.testing.assert_array_equal(before[r][0],results[r]['space'].distance)
         np.testing.assert_array_equal(before[r][1],results[r]['mapped']['hard'])
     # No raw clinical values or patient identifiers in aggregate figure sources.
-    for path in (tmp_path/'figures').glob('*.csv'):
+    for path in tmp_path.glob('02_graph_missingness_*_source.csv'):
         frame=pd.read_csv(path)
         assert 'patient_id' not in frame and not set(raw)&set(frame)
         if 'n_support' in frame: assert frame.n_support.dropna().ge(5).all()

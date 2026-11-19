@@ -45,7 +45,8 @@ from src.studies._shared import (benjamini_hochberg, create_study_dirs,
 
 from src.studies.graph import _lab_contract as LAB
 from src.studies.graph import _feature_catalog as CATALOG
-from src.studies.graph._lab_contract import resolve_candidates, validate_provenance, enforce_lab_mode
+from src.studies.graph._lab_contract import current_profile, resolve_candidates, enforce_lab_mode
+from src.studies.graph._pipeline import stage_outputs
 
 POPS = ("Pop1", "Pop2", "Pop3")
 PRO_FEATURES = ("sf36_pcs", "sf36_mcs", "profad_total", "mdafs_global")
@@ -99,7 +100,7 @@ def load_real_inputs(integrated: Path, candidates_path: Path, analysis_mode: str
     master = load_parquet(integrated)
     contract = validate_integrated_dataset(master)
     if analysis_mode is not None:
-        contract.update(validate_provenance(integrated, candidates_path, analysis_mode))
+        contract.update(current_profile(integrated, candidates_path, analysis_mode))
     candidates = pd.read_csv(candidates_path)
     if analysis_mode is not None:
         candidates = pd.read_csv(candidates_path.with_name("00_pharma_graph_lab_selection_audit.csv"))
@@ -409,7 +410,6 @@ def write_selection_outputs(dirs, prefix, master, manifest, values, contract, ar
     write_json(dirs["tables"] / f"{prefix}_selection_summary.json", summary)
     write_json(dirs["tables"] / f"{prefix}_preflight.json", summary)
     write_json(dirs["tables"] / f"{prefix}_input_provenance.json", summary)
-    print(json.dumps(summary, default=str, indent=2))
     return summary
 
 
@@ -419,26 +419,14 @@ def add_catalog_arguments(parser):
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--allow-without-lab", action="store_true")
     parser.add_argument("--quick-exploratory", action="store_true", help="Label quick run; 2 bootstraps, 19 permutations, no persistent homology")
-    parser.add_argument("--run-id", default=None)
-    parser.add_argument("--output-dir", type=Path, help="New run root; existing directories are refused")
+    parser.add_argument("--output-dir", type=Path, help="Override the current study directory")
     parser.add_argument("--clinical-release", "--graph-release", dest="clinical_release", type=Path, default=Path(__file__).with_name("graph_lab_release.yaml"))
 
 
 def run_dirs(args, study):
     if args.output_dir:
-        args.output_dir.mkdir(parents=True, exist_ok=False)
-        dirs = {name: args.output_dir / name for name in ("analytic", "tables", "figures", "qc", "logs")}
-        for path in dirs.values():
-            path.mkdir()
-        return dirs
-    # IDs are directory components, never arbitrary output paths.
-    run_id = args.run_id or CATALOG.new_run_id()
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", run_id):
-        raise ValueError("Invalid run ID")
-    dirs = create_study_dirs(study + "/runs/" + run_id)
-    with (dirs["tables"] / ".graph_run").open("x") as stream:
-        stream.write(run_id + "\n")
-    return dirs
+        return {name: args.output_dir.resolve() / name for name in ("analytic", "tables", "figures", "qc", "logs")}
+    return create_study_dirs(study)
 
 
 def quick_config(config, args):
@@ -938,11 +926,8 @@ def _configure_logging(path: Path) -> None:
                         handlers=[logging.FileHandler(path, mode="w"), logging.StreamHandler()])
 
 
-def _run(args: argparse.Namespace) -> None:
+def _run(args: argparse.Namespace, dirs) -> None:
     config = quick_config(load_config(args.config), args)
-    dirs = run_dirs(args, "graph/01_run_topological_phenotyping")
-    args._active_dirs = dirs
-    _configure_logging(dirs["logs"] / "01_run_topological_phenotyping.log")
     logging.info("Integrated input: %s", args.integrated)
     master, candidates, contract = load_real_inputs(args.integrated, args.graph_lab_candidates, args.analysis_mode)
     baseline = select_baseline(master)
@@ -957,7 +942,7 @@ def _run(args: argparse.Namespace) -> None:
     manifest, numeric_values, lab_names, lab_audit = build_feature_manifest(
         baseline, candidates, float(config["feature_selection"]["minimum_baseline_coverage"]),
         analysis_mode=args.analysis_mode, feature_policy=args.feature_policy,
-        metadata=config.get("feature_metadata", {}), source_hash=contract["input_hash"])
+        metadata=config.get("feature_metadata", {}), source_hash=contract.get("input_hash", ""))
     manifest = manifest.loc[manifest.source_column.isin(master.columns)].copy()
     selection_summary = write_selection_outputs(dirs, "01_graph", master, manifest, numeric_values, contract, args)
     manifest_path = dirs["tables"] / "01_graph_feature_manifest.csv"; manifest.to_csv(manifest_path, index=False)
@@ -1211,12 +1196,36 @@ def _run(args: argparse.Namespace) -> None:
 
 
 def run(args):
-    args._active_dirs = None
-    try:
-        return _run(args)
-    except (ValueError, OSError) as exc:
-        write_run_failure(args, "01_graph", exc)
-        raise
+    destinations = run_dirs(args, "graph/01_run_topological_phenotyping")
+    def owned(key, name):
+        if key == "figures":
+            return name in {
+                "01_graph_embedding_mapper.png", "02_graph_community_stability.png",
+                "03_graph_soft_membership.png", "04_graph_communities_vs_pop.png",
+                "05_graph_community_trajectories.png", "06_graph_persistent_homology.png",
+            }
+        return name.startswith("01_graph_") or name == "01_run_topological_phenotyping.log"
+
+    completion = destinations["tables"] / "01_graph_results_summary.json"
+    with stage_outputs(destinations, owned, failure=("logs", "01_graph_failure.json"),
+                       completion=completion, diagnostic=args.preflight_only) as dirs:
+        logger = logging.getLogger()
+        level = logger.level
+        handler = logging.FileHandler(dirs["logs"] / "01_run_topological_phenotyping.log")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        try:
+            _run(args, dirs)
+        finally:
+            logger.removeHandler(handler)
+            handler.close()
+            logger.setLevel(level)
+        if args.preflight_only and completion.is_file():
+            # A diagnostic may report readiness without replacing completed tables.
+            for path in dirs["tables"].iterdir():
+                if path.name != "01_graph_preflight.json":
+                    path.unlink()
 
 
 def write_run_failure(args, prefix, exc):

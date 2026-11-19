@@ -263,10 +263,10 @@ def _figures(folder, frames):
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
 
-    folder.mkdir(mode=0o700)
     names = []
 
     def plot(filename, title, ylabel, samples):
+        filename = '03e_' + filename
         if not samples:
             return
         fig = Figure(figsize=(9, max(2.8, len(samples) * .32 + 1.5)), layout='constrained')
@@ -334,7 +334,7 @@ def _figures(folder, frames):
             ax.invert_yaxis()
             ax.set(xlabel='Diferencia de medias (IC95%)' if scale == 'mean_difference' else 'OR (IC95%)',
                    xscale='linear' if scale == 'mean_difference' else 'log')
-            filename = 'efectos_' + table + '_' + scale + '.png'
+            filename = '03e_efectos_' + table + '_' + scale + '.png'
             fig.savefig(folder / filename, dpi=130)
             names.append(filename)
     return names
@@ -345,8 +345,8 @@ def _markdown(summary, frames):
     n_label = str(n) if n is not None else 'suprimido o no disponible'
     lines = ['# Resultados exploratorios de Graph03 N3', '',
              f'**Estado:** `{summary["status"]}`. **Pacientes en el baseline congelado:** {n_label}.',
-             f'Graph02 `{summary["graph02_run"] or "no disponible"}` · '
-             f'Graph03 `{summary["graph03_run"] or "no disponible"}`.', '',
+             f'Graph02 `{summary["graph02_input"] or "no disponible"}` · '
+             f'Graph03 `{summary["graph03_input"] or "no disponible"}`.', '',
              '## Baseline y cobertura', '',
              'Los perfiles congelados describen las comunidades R0–R4 a partir de las variables observadas. '
              'Los perfiles de variables definidoras o relacionadas pueden ser circulares.', '',
@@ -416,48 +416,3 @@ def _markdown(summary, frames):
         lines += [f'- `{row.outcome}` / `{row.stratum}` / `{row.stage}`'
                   for row in removed[['outcome', 'stratum', 'stage']].drop_duplicates().itertuples(index=False)]
     return '\n'.join(lines) + '\n'
-
-
-def _readme():
-    return """# Graph03 N3 · EXPLORATORY_ONLY
-
-El baseline y las asignaciones hard proceden de releases congelados. R0 es la representación
-principal. R2 conserva la etiqueta exploratoria y R1, R3 y R4 son sensibilidades de representación.
-
-El día de colección se lee tal como está registrado. El enlace por episodio y el enlace
-unívoco por paciente conservan sus estados originales. El vínculo por paciente apunta al
-baseline oficial para calcular la ventana. El episodio de origen queda desconocido.
-La auditoría distingue la evidencia BTRIS original, la EDA sin cotejo y los conflictos.
-Las fechas de selección de Step01 y contexto sirven para auditoría porque pueden identificar
-exámenes distintos.
-
-La diferencia es día basal menos día de colección. Prebaseline abarca 1–365 días, día 0 es
-contemporáneo y el seguimiento abarca 1–365 y más de 365 días en estratos distintos.
-Los días anteriores a esa ventana solo aportan cobertura. Los ensayos se identifican mediante
-nombre originalmente registrado, discriminadores originales, ensayo y unidad. La definición
-primaria por ventana y procedencia maximiza pacientes comparables tras resolver la última
-fecha elegible, con desempate léxico. Las definiciones alternativas conservan perfiles
-propios. Las unidades admitidas de RF numérico se enumeran en la configuración versionada
-y se mantienen en su escala original. Un empate incompatible en el
-último día excluye esa selección. Se aceptan positive, detected, negative, not detected y
-variantes de espacios, guiones, subrayados y mayúsculas. La censura y los resultados
-indeterminados quedan en auditoría.
-
-Los modelos A y B usan los mismos casos completos. A ajusta por edad basal, sexo y era de
-cinco años si el campo válido varía. B agrega comunidad congelada. Los modelos son OLS HC3
-para RF numérico y logit con sandwich HC3 para resultados binarios. Los umbrales son
-30 casos completos, dos comunidades con ocho pacientes cada una, diez grados residuales,
-cinco eventos y cinco no eventos por comunidad y por parámetro en el modelo binario.
-El contraste es Wald global para las comunidades. BH engloba las pruebas globales
-estimadas en las modalidades indicadas. Cada representación y modalidad aporta como máximo
-una prueba de RF, primero numérica si es estimable. ANA y HEp-2 son resultados relacionados.
-Las tablas de sensibilidad identifican por separado fecha EDA sola y enlace por episodio.
-
-Los conteos de exclusión por primera causa son secuenciales a nivel de fila. Varios motivos
-pueden corresponder a un mismo paciente y los conteos de pacientes por motivo pueden
-solaparse. Los conteos de flujo indican la unidad. Un valor vacío indica supresión o
-indisponibilidad según el estado. Cero representa ausencia observada. Las celdas de 1–4 y
-los totales complementarios se suprimen antes de escribir las figuras. Los identificadores
-de definiciones son hashes de los campos originales. El manifest y el recibo registran hashes
-para verificar la integridad del release privado.
-"""

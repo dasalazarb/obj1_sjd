@@ -2,18 +2,14 @@
 from copy import deepcopy
 from functools import partial
 from pathlib import Path
-import hashlib
 import json
-import logging
 import numpy as np
 import pandas as pd
 from sklearn.decomposition import PCA
 from sklearn.metrics import adjusted_rand_score, pairwise_distances
-from .._pipeline import (load_pipeline, config_path, output_root, new_run, save_table, write_json,
-    digest, utc_now, git_commit, version_info, artifact_inventory, base_parser)
-from .. import _feature_catalog as catalog
+from .._pipeline import (load_pipeline, config_path, output_root, stage_outputs, save_table, write_json, utc_now, base_parser)
 from . import s02_legacy as legacy
-from .s02_contracts import SCHEMA, resolve_sources, publish_pointer
+from .s02_contracts import CURRENT_SCHEMA, MANIFEST, resolve_sources, validate_release
 from .s02_feature_registry import clinical_registry, domain_coverage, eligible_domain_map, verify_observed_baseline_dates, mapping_counts, RESERVED, CLINICAL
 from .s02_representations import build_space, Space, hierarchical_mfa
 from .s02_mapper_engine import analyze, frozen_membership
@@ -45,7 +41,7 @@ def prepare_inputs(cfg):
     legacy.validate_canonical_config(config,canonical,SimpleNamespace(canonical_config='pipeline canonical'))
     manifest,values,_,_=legacy.CANON.build_feature_manifest(baseline,candidates,
         float(config['feature_selection']['minimum_baseline_coverage']),analysis_mode=cfg['analysis']['mode'],
-        feature_policy=cfg['analysis']['feature_policy'],metadata=config.get('feature_metadata',{}),source_hash=contract['input_hash'])
+        feature_policy=cfg['analysis']['feature_policy'],metadata=config.get('feature_metadata',{}),source_hash=contract.get('input_hash', ''))
     verify_observed_baseline_dates(baseline,manifest,cfg['validation']['date_column'])
     governance=legacy.CANON.enforce_lab_mode(manifest,analysis_mode=cfg['analysis']['mode'],
         release_path=config_path(cfg['_path'],cfg['paths']['clinical_release']),
@@ -56,30 +52,30 @@ def prepare_inputs(cfg):
     return master,baseline,candidates,manifest,values,config,sources,governance
 
 
-def run(cfg, *, root=None, run_id=None, preflight_only=False):
-    root=Path(root) if root else output_root(cfg,'02')
-    run_dir=new_run(root,run_id)
-    started=utc_now()
-    try:
-        return _execute(cfg,root,run_dir,started,preflight_only)
-    except Exception as exc:
-        write_json(run_dir/'02_graph_release_qc.json',{'release_status':'QC_FAILED','execution_status':'FAILED',
-            'exception_type':type(exc).__name__,'reason':str(exc).split(':')[0], 'created_at_utc':utc_now()})
-        # Failed runs never replace the last completed pointer.
-        raise
+def run(cfg, *, root=None, preflight_only=False):
+    root = Path(root).resolve() if root else output_root(cfg, '02')
+    def owned(_, name):
+        return name.startswith('02_graph_') or name == 'latest_completed_02.json'
+
+    with stage_outputs({'stage': root}, owned, failure=('stage', '02_graph_failure.json'),
+                       completion=root / MANIFEST, diagnostic=preflight_only, obsolete_dirs=('figures', 'logs')) as staging:
+        status = _execute(cfg, staging['stage'], preflight_only)
+    manifest = None if preflight_only else root / MANIFEST
+    print(f'Graph02 {status}; results: {root}')
+    return {'run_dir': root, 'manifest': manifest, 'execution_status': status}
 
 
-def _execute(cfg,root,run_dir,started,preflight_only):
+def _execute(cfg, run_dir, preflight_only):
     master,baseline,candidates,manifest,values,config,sources,governance=prepare_inputs(cfg)
     settings=cfg['experiments']; seed=int(config['random_seed']); n=len(baseline)
     families={row.feature:legacy.family_name(row.family) for row in manifest.loc[manifest.included].itertuples()}
     primary,_,_=legacy.select_features(values,families,'S3',config,manifest)
     registry=clinical_registry(manifest,cfg['clinical_domains'],primary)
-    save_table(run_dir/'02_graph_clinical_domain_registry.csv',registry)
     write_json(run_dir/'02_graph_preflight.json',{'status':'PASS','n_patients':n,'n_features':len(values),
         'analysis_mode':cfg['analysis']['mode'],'feature_policy':cfg['analysis']['feature_policy'],**governance})
     if preflight_only:
-        return {'run_dir':run_dir,'execution_status':'PREFLIGHT_ONLY','manifest':None}
+        return 'PREFLIGHT_ONLY'
+    save_table(run_dir/'02_graph_clinical_domain_registry.csv',registry)
     mapping_error=None
     try:
         lab_frame=legacy.load_lab_group_map(config_path(cfg['_path'],cfg['paths']['lab_group_map']))
@@ -91,12 +87,6 @@ def _execute(cfg,root,run_dir,started,preflight_only):
     experiments=[]; results={}; selection=[]; feature_sets=[]; weights=[]; coverage=[]
     attempts=[]; stability=[]; matches=[]; refit_membership=[]; legacy_members=[]; member_rows=[]; negative=[]; comparator_rows=[]
     nodes=[]; edges=[]; dictionary=[]; pair_rows=[]; logs=[]; qc_by_id={}
-    cache_dir=root/'.cache'/settings['cache_version'] if cfg['execution']['resume'] else None
-    map_path=config_path(cfg['_path'],cfg['paths']['lab_group_map'])
-    cache_base=digest(sources['integrated'])+cfg['_config_sha256']+settings['cache_version']+catalog.frame_hash(pd.DataFrame(values))
-    cache_base+=digest(map_path) if map_path.is_file() else 'NO_S4_MAP'
-    cache_base+=json.dumps(cfg['clinical_domains'],sort_keys=True)+json.dumps(settings,sort_keys=True)
-    cache_base+=SCHEMA+catalog.CONTRACT_VERSION+'graph02_algorithm_v3/'+str(seed)
     stable_ids={}; memberships={}
 
     def record(identifier,kind,status='COMPLETE',reason='',**more):
@@ -135,8 +125,7 @@ def _execute(cfg,root,run_dir,started,preflight_only):
         effective_config=effective_config or config
         result=resample(mapped['community_sets'],n,fit or refit(identifier,effective_config=effective_config),
             partial(analyze,config=effective_config),settings,seed=seed,identifier=experiment_id or identifier,
-            method=method,replicates=budget,cache_dir=cache_dir,
-            cache_key=cache_base+json.dumps(effective_config,sort_keys=True)+'|'.join(sorted(space.features)),preliminary=preliminary)
+            method=method,replicates=budget,preliminary=preliminary)
         attempts.extend(result['attempts']); stability.extend(result['stability']); matches.extend(result['alignments'])
         for row in result['assignments']:
             patient=baseline.patient_id.iloc[row.pop('patient_index')]
@@ -381,7 +370,6 @@ def _execute(cfg,root,run_dir,started,preflight_only):
     save_table(run_dir/'02_graph_context_exclusion_comparison.csv',[r for r in experiments if r['experiment_id']=='A5/context_excluded'])
     registry['included_R2']=registry.feature.isin(results['R2']['space'].features if 'R2' in results else [])
     registry.loc[registry.exploratory_technical_eligible & ~registry.included_R2,'exclusion_reason']='NOT_SELECTED_IN_R2_REFIT_OR_REPRESENTATION_NOT_ESTIMABLE'
-    save_table(run_dir/'02_graph_clinical_domain_registry.csv',registry)
     save_table(run_dir/'02_graph_clinical_feature_mapping_audit.csv',registry)
     unmapped=registry.loc[registry.selected_in_primary & registry.clinical_domain.eq('UNMAPPED')].copy()
     save_table(run_dir/'02_graph_unmapped_selected_features.csv',unmapped)
@@ -405,7 +393,7 @@ def _execute(cfg,root,run_dir,started,preflight_only):
     # refits/artifacts. Historical memberships, summaries and budgets stay intact.
     from .s02_missingness_study import run_missingness_study
     missingness_study=run_missingness_study(results,registry,manifest,baseline,families,config,cfg,
-        run_dir,lab_groups,feature_to_lab,digest(sources['integrated']))
+        run_dir,lab_groups,feature_to_lab)
     for row in missingness_study['experiments']:
         record(row['experiment_id'],row['kind'],row['status'],row['reason'],analysis_role='sensitivity',reference_id=row['reference_id'],
             **{k:row[k] for k in ['graph03_defining','method','method_type','is_mapper','estimator','panel_hash'] if k in row})
@@ -506,42 +494,22 @@ def _execute(cfg,root,run_dir,started,preflight_only):
                     'patient_b':baseline.patient_id.iloc[b],'distance':float(space.distance[a,b]),'method':space.method})
     save_table(run_dir/'02_graph_patient_embedding.csv',embedding_rows)
     save_table(run_dir/'02_graph_patient_distances.csv',distance_rows)
-    figures({k:v for k,v in results.items() if k.startswith('R')},stable_frame,run_dir/'figures',registry,coverage,alignments)
-    with (run_dir/'logs/02_graph_events.jsonl').open('w') as stream:
+    figures({k:v for k,v in results.items() if k.startswith('R')},stable_frame,run_dir,registry,coverage,alignments)
+    with (run_dir/'02_graph_events.jsonl').open('w') as stream:
         for row in logs: stream.write(json.dumps(row,default=str)+'\n')
-    figure_inventory=diagnostic_figures(observation,comparisons,experiments,run_dir/'figures',registry,int(settings.get('minimum_publication_cell',5)))
+    figure_inventory=diagnostic_figures(observation,comparisons,experiments,run_dir,registry,int(settings.get('minimum_publication_cell',5)))
     inventoried={r['artifact'] for r in figure_inventory}
-    figure_inventory.extend(dict(artifact=p.relative_to(run_dir).as_posix(),status='COMPLETE',reason='') for p in sorted((run_dir/'figures').glob('*')) if p.relative_to(run_dir).as_posix() not in inventoried)
+    figure_inventory.extend(dict(artifact=p.relative_to(run_dir).as_posix(),status='COMPLETE',reason='') for p in sorted(run_dir.iterdir()) if p.suffix in {'.png', '.pdf'} and p.name not in inventoried)
     save_table(run_dir/'02_graph_figure_inventory.csv',figure_inventory)
     results_summary(run_dir/'02_graph_results_summary.md',results,perturbations,experiments,comparisons,registry,observation,stable_frame,qc)
     save_table(run_dir/'02_graph_privacy_inventory.csv',privacy_inventory(run_dir))
-    relative={'membership':'02_graph_patient_membership.csv','feature_roles':'02_graph_feature_role_manifest.csv',
-        'baseline_raw':'02_graph_baseline_raw.csv','feature_sets':'02_graph_feature_sets.csv','stability':'02_graph_community_stability.csv',
-        'experiment_registry':'02_graph_experiment_registry.csv','nodes':'02_graph_mapper_nodes.csv','edges':'02_graph_mapper_edges.csv',
-        'community_dictionary':'02_graph_community_dictionary.csv','clinical_registry':'02_graph_clinical_domain_registry.csv',
-        'mapping_audit':'02_graph_clinical_feature_mapping_audit.csv','comparison_denominators':'02_graph_comparison_denominators.csv',
-        'missingness_controls':'02_graph_missingness_control_comparisons.csv','coverage_reasons':'02_graph_coverage_reason_summary.csv',
-        'refit_membership':'02_graph_refit_membership.csv','release_qc':'02_graph_release_qc.json','alignment':'02_graph_cross_representation_alignment.csv'}
-    pharma=sources['pharma_candidates']; summary_path=pharma.with_name('00_pharma_profile_summary.json')
-    source_info={role:{'path':str(p),'sha256':digest(p)} for role,p in sources.items()}
-    source_info['pharma_summary']={'path':str(summary_path),'sha256':digest(summary_path)}
-    profile_path=pharma.with_name(json.loads(summary_path.read_text()).get('profile_output_name','00_pharma_lab_profile.csv'))
-    extra_sources={'pharma_profile':profile_path,'pharma_selection_audit':pharma.with_name('00_pharma_graph_lab_selection_audit.csv'),
-                   's4_lab_group_map':config_path(cfg['_path'],cfg['paths']['lab_group_map']),
-                   'baseline_metrics':config_path(cfg['_path'],cfg['paths']['baseline_metrics'])}
-    if cfg['analysis']['mode']=='clinical_release':
-        extra_sources['clinical_release']=config_path(cfg['_path'],cfg['paths']['clinical_release'])
-    for role,source in extra_sources.items():
-        if source.is_file(): source_info[role]={'path':str(source),'sha256':digest(source)}
-    manifest_release={'schema_version':SCHEMA,'finalized':True,'run_id':run_dir.name,'git_commit':git_commit(),
-        'study_mode':cfg['analysis']['mode'],'feature_policy':cfg['analysis']['feature_policy'],'data_sha256':digest(sources['integrated']),
-        'pharma_profile_sha256':digest(profile_path),'clinical_release_id':(legacy.CANON.load_config(config_path(cfg['_path'],cfg['paths']['clinical_release'])).get('release_id') if cfg['analysis']['mode']=='clinical_release' else None),
-        'config_sha256':cfg['_config_sha256'],'config_hashes':cfg['_hashes'],
-        'features_sha256':digest(run_dir/'02_graph_feature_sets.csv'),'baseline_definition_id':'Step10_is_clinical_baseline_clinical_episode_curated_v2',
+    manifest_release={'schema_version':CURRENT_SCHEMA,'finalized':True,
+        'study_mode':cfg['analysis']['mode'],'feature_policy':cfg['analysis']['feature_policy'],
+        'baseline_definition_id':'Step10_is_clinical_baseline_clinical_episode_curated_v2',
         'n_patients':n,'n_features':len(base_space.raw.columns),'n_covered':int(base_map['covered'].sum()),
         'method_list':sorted({item['space'].method for item in results.values()}),'primary_reference_id':'R0',
         'eligible_representation_ids':eligible,'release_status':release_status,'execution_status':execution_status,
-        'qc_reasons':reasons,'created_at_utc':utc_now(),'started_at_utc':started,'relative_paths':relative,
+        'qc_reasons':reasons,
         'clinical_mapping':{'mapping_release_id':cfg['clinical_domains'].get('mapping_release_id'),
             'review_status':cfg['clinical_domains']['mapping_review_status'],
             'technical_exploratory_status':'not_estimable' if 'R2' not in results else 'eligible' if not len(unmapped) and registry.loc[registry.selected_in_primary & registry.clinical_domain.isin(CLINICAL),'exploratory_technical_eligible'].all() else 'partial',
@@ -551,25 +519,20 @@ def _execute(cfg,root,run_dir,started,preflight_only):
             'standalone_controls':['N2a','N2b','N2c','N2d'],'diagnostic_complete':all(any(r['experiment_id'].startswith(i+'/') for r in experiments) for i in ['N2a','N2b','N2c','N2d','M1'])},
         'coverage':{'n_total':n,'n_covered_R0':int(base_map['covered'].sum()),'n_uncovered_R0':int((~base_map['covered']).sum()),'reason_audit_complete':bool(observation['reason_audit_complete'])},
         'missingness_sensitivity':{k:v for k,v in missingness_study.items() if k!='experiments'},
-        'sensitivity_artifacts':[dict(artifact=rel,sha256=digest(run_dir/rel),analysis_role='sensitivity',
+        'sensitivity_artifacts':[dict(artifact=rel,analysis_role='sensitivity',
             graph03_defining=False,estimator_version=missingness_study['estimator_version'],
             schema_version=missingness_study['schema_version'],references=['R0','R2'],panel_policy='frozen_reference_sources_and_patients',
             estimability=missingness_study['statuses']) for rel in missingness_study.get('artifacts',[])],
-        'artifact_inventory':privacy_inventory(run_dir),
-        'sha256_by_artifact':artifact_inventory(run_dir),'source_inputs':source_info,'versions':version_info(),
+        'source_inputs':{role: {'path': str(path)} for role, path in sources.items()},
         'protocol_id':settings['protocol_id'],'random_seed':seed,'clinical_validation':governance['clinical_validation']}
-    manifest_path=run_dir/'02_graph_release_manifest.json'
-    write_json(manifest_path,manifest_release)
-    publish_pointer(root,manifest_path)
-    print(f'Graph02 {release_status}; {execution_status}; release: {manifest_path}')
-    if missingness_study.get('enabled'):
-        print('Missingness R0/R2 primary variants: '+json.dumps(missingness_study['counts'],sort_keys=True)
-              +'; registry: '+str(run_dir/'02_graph_missingness_method_registry.csv'))
-    return {'run_dir':run_dir,'manifest':manifest_path,'execution_status':execution_status}
+    manifest_path = run_dir / MANIFEST
+    write_json(manifest_path, manifest_release)
+    validate_release(manifest_path)
+    return execution_status
 
 
 def main(argv=None):
     parser=base_parser(__doc__)
     args=parser.parse_args(argv)
-    return run(load_pipeline(args.pipeline_config),root=args.output_dir,run_id=args.run_id,
+    return run(load_pipeline(args.pipeline_config),root=args.output_dir,
                preflight_only=args.preflight_only or args.dry_run)

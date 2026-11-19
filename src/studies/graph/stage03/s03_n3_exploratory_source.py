@@ -52,7 +52,7 @@ def _clean(series):
     return text.mask(text.eq(''))
 
 
-def _inputs(paths, issues, source_hashes):
+def _inputs(paths, issues):
     fields = {
         'eda_long': (EDA_REQUIRED - {'matched_clinical_episode_id', 'episode_match_ambiguous'}, EDA_FIELDS | {
             *NAME_FIELDS, 'specimen_date_origin', 'specimen_type', 'source_protocol'}),
@@ -63,8 +63,6 @@ def _inputs(paths, issues, source_hashes):
     tables = {}
     for name, (required, projected) in fields.items():
         try:
-            if source_hashes[name] is None:
-                raise ValueError('SOURCE_HASH_UNAVAILABLE')
             columns = set(pq.read_schema(paths[name]).names)
             if not required <= columns:
                 raise ValueError('REQUIRED_COLUMNS_MISSING')

@@ -71,7 +71,6 @@ reporting:
   always_publish_time_stratum_tables: true
   always_publish_independence_audit: true
   always_publish_reasons_for_nonestimation: true
-  save_latest_pointer: true
 # Exact source encodings. Spaces, hyphens and underscores may separate words.
 qualitative_crosswalk:
   positive: [positive, detected]

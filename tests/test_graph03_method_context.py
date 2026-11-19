@@ -200,11 +200,9 @@ def test_pipeline_frozen_release_and_historical_compatibility(configuration,tmp_
     result=run02(cfg)
     manifest,path,frames=read_release(cfg,result['manifest'])
     frozen_hash=pipe.digest(path)
-    pointer=pipe.output_root(cfg,'02')/'latest_completed_02.json'
-    pointer_hash=pipe.digest(pointer)
     monkeypatch.setattr(s02_mapper_engine,'analyze',lambda *a,**k:pytest.fail('Graph03 cannot refit'))
     output=run03(cfg,graph02_release=path)['run_dir']
-    assert pipe.digest(path)==frozen_hash and pipe.digest(pointer)==pointer_hash
+    assert pipe.digest(path)==frozen_hash
     evidence=pd.read_csv(output/'03_graph_representation_evidence.csv')
     r2=evidence.loc[evidence.representation_id.eq('R2')].iloc[0]
     assert r2.evidence_level=='EXPLORATORY_PROVISIONAL' and r2.clinical_mapping_status=='pending_clinical_review'
@@ -222,8 +220,8 @@ def test_pipeline_frozen_release_and_historical_compatibility(configuration,tmp_
     assert summary['pop_denominator_qc']['status']=='PASS' and summary['pop_denominator_qc']['crosswalk_reconciled']
     assert summary['characterization_qc_status']=='PASS'
     role_inventory=pd.read_csv(output/'03_graph_characterization_role_inventory.csv')
-    assert not role_inventory.duplicated(['graph02_run_id','representation_id','source_column']).any()
-    assert role_inventory.graph02_release_sha256.eq(frozen_hash).all()
+    assert not role_inventory.duplicated(['graph02_directory','representation_id','source_column']).any()
+    assert role_inventory.graph02_directory.eq(str(path.parent)).all()
     assert not role_inventory.loc[role_inventory.tier.ne('N3_REVIEWED'),'inferential_eligible'].any()
     matrix=pd.read_csv(output/'03_graph_characterization_clinical_matrix.csv')
     assert (matrix.n_observed+matrix.n_missing).eq(matrix.n_group).all()
@@ -237,11 +235,12 @@ def test_pipeline_frozen_release_and_historical_compatibility(configuration,tmp_
         assert 'patient_id' not in table
     for name in ['N1_R0','N1_R2','N2_R0','N2_R2','N3_R0','N3_R2','role_crosswalk','availability']:
         for ext in ['csv','png','pdf']:
-            assert (output/f'figures/03_graph_characterization_{name}.{ext}').is_file()
+            suffix = '_source.csv' if ext == 'csv' else '.' + ext
+            assert (output / f'03_graph_characterization_{name}{suffix}').is_file()
     pending=pd.read_csv(output/'03_graph_independent_anchor_validation.csv')
     if not pending.empty:
         assert pending.status.eq('NOT_ESTIMABLE').all() and pending.p_value.isna().all()
-    assert pipe.digest(path)==frozen_hash and pipe.digest(pointer)==pointer_hash
+    assert pipe.digest(path)==frozen_hash
 
     for name in ['temporal_source_audit','episode_collision_summary','episode_resolution_audit',
                  'longitudinal_denominator_audit','longitudinal_unresolved_reasons',
@@ -251,11 +250,11 @@ def test_pipeline_frozen_release_and_historical_compatibility(configuration,tmp_
         assert not any(patient in table.to_csv(index=False) for patient in frames['baseline_raw'].patient_id)
     pop_audit=pd.read_csv(output/'03_graph_pop_denominator_audit.csv')
     assert pop_audit[['n_pop1','n_pop2','n_pop3','n_unclassified_pop','n_missing_pop','n_invalid_pop']].sum(axis=1).eq(pop_audit.n_denominator).all()
-    assert (output/'figures/03_graph_figure_status.csv').is_file()
+    assert (output/'03_graph_figure_status.csv').is_file()
 
     inventory=pd.read_csv(output/'03_graph_artifact_inventory.csv')
     assert not inventory.shareable_export_allowed.any() and inventory.privacy_class.eq('INTERNAL_RESTRICTED').all()
-    for figure in (output/'figures').glob('*.csv'):
+    for figure in output.glob('03_graph_*_source.csv'):
         text=figure.read_text()
         assert 'patient_id' not in text
         assert not any(patient in text for patient in frames['baseline_raw'].patient_id)

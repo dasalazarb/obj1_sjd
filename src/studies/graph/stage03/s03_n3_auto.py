@@ -24,7 +24,7 @@ from .s03_n3_decisions import decision_templates, evidence_path, verify_detached
 from .s03_n3_measurement_source import AUDITED_FILES, LAB_INPUTS, ORIGINALS, run_source
 from .s03_n3_phasec_adjudication import CANDIDATES
 from .s03_n3_resolution import _snapshot
-from .s03_run_resolution import graph_paths, resolve_graph03_dependencies
+from .s03_run_resolution import graph_paths, resolve_historical_graph03_dependencies
 
 CONFIGS = Path('src/studies/graph/configs')
 PRESPEC_APPROVAL = 'APPROVED_CALENDAR_DAY_PRESPECIFICATION'
@@ -145,17 +145,23 @@ def _relative(root, setting):
     return (root / setting).resolve()
 
 
-def _settings(root):
+def _source_settings(root):
     cfg = yaml.safe_load((root / CONFIGS / 'n3_auto.yaml').read_text())
     data = _relative(root, cfg['data_root'])
     eda = _relative(root, cfg['eda_root'])
-    private = _relative(root, cfg['private_root'])
     definitions = cfg['source_paths']
     required = {*LAB_INPUTS, *cal.BTRIS_ROLES}
     if not isinstance(definitions, dict) or not required <= set(definitions) <= required | set(ORIGINALS):
         raise ValueError('AUTO_SOURCE_PATHS_INVALID')
     paths = {role: _relative(eda if role.startswith(('eda_', 'btris_')) else data, value)
              for role, value in definitions.items()}
+    return data, paths
+
+
+def _settings(root):
+    data, paths = _source_settings(root)
+    cfg = yaml.safe_load((root / CONFIGS / 'n3_auto.yaml').read_text())
+    private = _relative(root, cfg['private_root'])
     protected = [root, *paths.values(), *graph_paths(root, data_root=data).values()]
     if any(private.is_relative_to(path) or path.is_relative_to(private) for path in protected):
         raise ValueError('AUTO_WORK_DIRECTORY_OVERLAPS_INPUT')
@@ -539,7 +545,7 @@ def _run(root, report):
         try:
             args = SimpleNamespace(graph03_run=None, graph02_release=None, strict=False,
                                    config=root / CONFIGS / PHASEC)
-            graph03, release, _, selection = resolve_graph03_dependencies(
+            graph03, release, _, selection = resolve_historical_graph03_dependencies(
                 args, root, phase='C', data_root=data, quiet=True, verify_inventory=True)
             frozen = [release.parent, graph03]
             if any(private.is_relative_to(path) or path.is_relative_to(private) for path in frozen):

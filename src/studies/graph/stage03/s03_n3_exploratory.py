@@ -1,41 +1,36 @@
-"""Zero-argument 03e analysis of private, frozen Graph02/03 results."""
+"""Calendar-day exploratory analysis of current Graph02/03 results."""
 
-from importlib.metadata import version
+from contextlib import ExitStack
 import json
-import os
 from pathlib import Path
-import platform
 import re
-from tempfile import NamedTemporaryFile
-from types import SimpleNamespace
 
 import pandas as pd
 import yaml
 
-from .._pipeline import digest
-from ..stage02.s02_contracts import SCHEMA as RELEASE_SCHEMA, STATUSES, safe_artifact, validate_release
+from .._pipeline import config_path, output_lock, output_root, stage_outputs, write_json
+from ..stage02.s02_contracts import CURRENT_SCHEMA, MANIFEST, artifact_paths, safe_artifact, validate_release
 from . import s03_n3_calendar_day as cal
-from .s03_construct_validation import _dependencies
+from .s03_construct_validation import _dependencies, feature_roles
 from .s03_n3_approved_view import validate_baseline
-from .s03_n3_auto import CONFIGS, PHASEC, VALIDATION, _artifact_inventory, _cached, _locked, _settings
+from .s03_n3_auto import CONFIGS, VALIDATION, _source_settings
 from .s03_n3_exploratory_models import (
     ESTIMATED, INDEPENDENT, UNRESOLVED as LINEAGE_UNRESOLVED, _estimate, _family, _fdr, _independence,
     _model_support,
 )
 from .s03_n3_exploratory_reporting import (
     SCOPE, TABLE_COLUMNS, _baseline_profiles, _chain, _coverage, _exclusions, _figures, _markdown, _profiles,
-    _readme, _small, _source_audit,
+    _small, _source_audit,
 )
 from .s03_n3_exploratory_source import (
     DATE_FAILURES, EARLY, EDA_ONLY, EXACT, LATE, LINKED, OLDER, ORIGINAL, PATIENT_ONLY, PRE, READ_ERRORS,
     RF_TEXT, RF_VALUE, STRATA, UNRESOLVED, _btris_records, _candidates, _inputs, _outcome, _test_disposition,
 )
-from .s03_n3_measurement_source import LAB_INPUTS, LAB_SOURCES, _private_directory, _read_frozen
-from .s03_n3_resolution import _snapshot
-from .s03_release_reader import hard_members
-from .s03_run_resolution import graph_paths, resolve_graph03_dependencies, resolve_latest_compatible
+from .s03_n3_measurement_source import LAB_SOURCES
+from .s03_release_reader import RESULTS, RESULTS_SCHEMA, hard_members
+from .s03_run_resolution import graph_paths
 
-MODE = 'EXPLORATORY_ONLY'
+MODE = 'calendar_day_exploratory'
 DEFAULTS = 'n3_exploratory_defaults.yaml'
 LIMITATIONS = [
     'Las asociaciones son exploratorias y están condicionadas a las comunidades congeladas. '
@@ -208,7 +203,7 @@ def _model(label, frame, independence, prior_rf, table, policy, cell):
     return model, support, model_n
 
 
-def _analyze(tables, loaded, records, validation, policy):
+def _analyze(tables, loaded, records, validation, policy, *, audit_only=False):
     outputs = {name: [] for name in TABLE_COLUMNS}
     frozen = loaded['frozen']
     baseline, members, features = (frozen[key] for key in ('baseline_raw', 'membership', 'feature_sets'))
@@ -249,6 +244,8 @@ def _analyze(tables, loaded, records, validation, policy):
                                                count_unit='source_row', status='DATA_UNAVAILABLE'))
             outputs['cohort_flow'].extend(_chain(dict(outcome=source, stratum='ALL'),
                                                   dict(n_frozen_cohort=len(baseline)), cell))
+        if audit_only:
+            continue
         for rep in reps:
             if rep not in membership:
                 audit = dict(representation_id=rep, outcome=source, classification=LINEAGE_UNRESOLVED,
@@ -361,11 +358,11 @@ def _empty_outputs(policy):
 
 
 def _write_run(staging, target, base, outputs, n, policy):
-    files = {name: target / (name + '.csv') for name in TABLE_COLUMNS}
+    files = {name: target / ('03e_' + name + '.csv') for name in TABLE_COLUMNS}
     frames = {name: pd.DataFrame(outputs[name], columns=columns.split()) for name, columns in TABLE_COLUMNS.items()}
     for name, frame in frames.items():
         frame.to_csv(staging / files[name].name, index=False)
-    figures = _figures(staging / 'figures', frames)
+    figures = _figures(staging, frames)
     models = {table: int(frames[table].status.eq(ESTIMATED).sum()) for table in SCOPES}
     if n is None:
         status = 'INPUTS_UNUSABLE'
@@ -380,56 +377,27 @@ def _write_run(staging, target, base, outputs, n, policy):
                       coverage.definition_role.eq('PRIMARY')]
     visible = r0.loc[r0.n_measured.notna() & r0.stratum.ne(OLDER)]
     n_outcomes = visible.loc[visible.n_measured.astype(float).gt(0), 'outcome'].nunique()
-    by_slice = r0[['outcome', 'stratum', 'provenance', 'status', 'n_measured']]
-    summary = dict(**base, status=status, output_dir=str(target), run_id=target.name,
+    summary = dict(**base, status=status, output_dir=str(target),
                    privacy_class=policy['privacy_class'], public_export=policy['public_export'],
                    n_frozen_cohort=n if n is None or
                    not _small(n, policy['minimum_disclosure_cell']) else None,
                    n_outcomes_with_data=int(n_outcomes), outcomes_count_scope='R0_DISCLOSABLE_MEASUREMENTS',
                    n_model_pairs_estimable=models['models'],
-                   models_by_scope=models, r0_outcomes_by_stratum=json.loads(by_slice.to_json(orient='records')),
-                   summary=str(target / 'summary.json'), readme=str(target / 'README.md'),
-                   report=str(target / 'RESULTADOS_N3.md'), manifest=str(target / 'results_manifest.json'),
-                   figures=[str(target / 'figures' / name) for name in figures],
+                   models_by_scope=models,
+                   summary=str(target / '03e_summary.json'),
+                   report=str(target / '03e_RESULTADOS.md'),
+                   figures=[str(target / name) for name in figures],
                    **{name: str(path) for name, path in files.items()})
-    (staging / 'summary.json').write_text(json.dumps(summary, sort_keys=True, indent=2) + '\n')
-    (staging / 'RESULTADOS_N3.md').write_text(_markdown(summary, frames))
-    (staging / 'README.md').write_text(_readme())
-    manifest = {'schema_version': policy['schema_version'], 'status': status, 'run_id': target.name,
-                'graph02_run': base['graph02_run'], 'graph03_run': base['graph03_run'],
-                'provenance': base['provenance'], 'sha256_by_artifact': _artifact_inventory(staging)}
-    (staging / 'results_manifest.json').write_text(json.dumps(manifest, sort_keys=True, indent=2) + '\n')
+    write_json(staging / '03e_summary.json', summary)
+    (staging / '03e_RESULTADOS.md').write_text(_markdown(summary, frames))
+    return summary
 
-
-def _readable_digest(path):
-    try:
-        return digest(path) if path.is_file() else None
-    except OSError:
-        return None
-
-
-def _source_hashes(paths):
-    return {role: _readable_digest(paths[role]) for role in LAB_INPUTS}
-
-
-def _btris_hashes(paths):
-    return {role: {str(file): _readable_digest(file) for file in cal.btris_files(paths[role])}
-            for role in cal.BTRIS_ROLES}
-
-
-def _implementation(root):
-    graph = root / 'src/studies/graph'
-    paths = [*graph.rglob('*.py'), root / 'src/block_A/01_serological_profile.py',
-             root / 'common.py', root / 'config.py']
-    return cal.fingerprint({path.relative_to(root).as_posix(): digest(path) for path in paths})
 
 
 def _baseline_artifact(release, manifest):
-    filename = manifest['relative_paths']['baseline_raw']
-    path = safe_artifact(release.parent, filename)
-    if digest(path) != manifest['sha256_by_artifact'][filename]:
-        raise ValueError('EXPLORATORY_FROZEN_BASELINE_HASH_MISMATCH')
-    baseline = pd.read_csv(path, dtype={'patient_id': 'string', 'clinical_episode_id': 'string'})
+    path = safe_artifact(release.parent, artifact_paths(manifest)['baseline_raw'])
+    baseline = pd.read_csv(path, dtype={'patient_id': 'string', 'clinical_episode_id': 'string',
+                                        'clinical_baseline_episode_id': 'string'})
     validate_baseline(baseline)
     if baseline.empty or len(baseline) != manifest['n_patients']:
         raise ValueError('EXPLORATORY_FROZEN_BASELINE_INCOMPLETE')
@@ -437,21 +405,12 @@ def _baseline_artifact(release, manifest):
 
 
 def _load_baseline_only(directory):
-    release = directory / '02_graph_release_manifest.json'
-    manifest = json.loads(release.read_text())
-    if (manifest['schema_version'] != RELEASE_SCHEMA or manifest['finalized'] is not True
-            or manifest['run_id'] != directory.name or manifest['release_status'] not in STATUSES - {'QC_FAILED'}):
-        raise ValueError('EXPLORATORY_FROZEN_BASELINE_MANIFEST_INVALID')
-    qc_file = manifest['relative_paths']['release_qc']
-    qc_path = safe_artifact(directory, qc_file)
-    if digest(qc_path) != manifest['sha256_by_artifact'][qc_file]:
-        raise ValueError('EXPLORATORY_FROZEN_BASELINE_QC_HASH_MISMATCH')
-    qc = json.loads(qc_path.read_text())
-    if qc.get('primary_qc') != 'PASS' or qc.get('release_status') != manifest['release_status']:
-        raise ValueError('EXPLORATORY_FROZEN_BASELINE_QC_FAILED')
+    manifest, release = validate_release(directory / MANIFEST, baseline_only=True)
+    if manifest['schema_version'] != CURRENT_SCHEMA:
+        raise ValueError('CURRENT_GRAPH02_BASELINE_REQUIRED')
     baseline = _baseline_artifact(release, manifest)
     return dict(frozen=dict(baseline_raw=baseline, membership=pd.DataFrame(),
-                            feature_sets=pd.DataFrame(columns=['representation_id', 'source_column', 'included'])),
+                            feature_sets=pd.DataFrame(columns=['representation_id', 'source_column', 'feature', 'included'])),
                 registry=pd.DataFrame(), roles=pd.DataFrame(), release=release,
                 manifest=dict(manifest, eligible_representation_ids=[]),
                 data_issues=[dict(status='DATA_UNAVAILABLE', artifact='frozen_graph02_inventory',
@@ -459,21 +418,25 @@ def _load_baseline_only(directory):
 
 
 def _load_graph02(directory):
-    manifest, release = validate_release(directory)
+    manifest, release = validate_release(directory / MANIFEST)
+    if manifest['schema_version'] != CURRENT_SCHEMA:
+        raise ValueError('CURRENT_GRAPH02_REQUIRED')
+    artifacts = artifact_paths(manifest)
     baseline = _baseline_artifact(release, manifest)
-    frozen = {role: pd.read_csv(safe_artifact(release.parent, manifest['relative_paths'][role]),
+    frozen = {role: pd.read_csv(safe_artifact(release.parent, artifacts[role]),
                                 dtype={'patient_id': 'string', 'clinical_episode_id': 'string'})
               for role in ('membership', 'feature_sets')}
     frozen['baseline_raw'] = baseline
     members = frozen['membership']
     features = frozen['feature_sets']
-    registry = pd.read_csv(safe_artifact(release.parent, manifest['relative_paths']['clinical_registry']))
+    registry = pd.read_csv(safe_artifact(release.parent, artifacts['clinical_registry']))
     # The baseline can still be reported if a frozen membership is unusable.
     flags = ['hard_assignment', 'mapper_covered', 'membership_tie', 'supported']
     required = {*flags, 'patient_id', 'representation_id', 'community_id', 'structural_stability_status'}
     accepted = []
     issues = []
-    if required <= set(members) and {'included', 'representation_id', 'source_column'} <= set(features):
+    if (required <= set(members) and {'included', 'representation_id', 'source_column', 'feature'} <= set(features)
+            and features.included.isin([True, False]).all()):
         for rep in manifest['eligible_representation_ids']:
             part = members.loc[members.representation_id.eq(rep)]
             if (set(part.patient_id) == set(baseline.patient_id) and
@@ -486,143 +449,119 @@ def _load_graph02(directory):
                 issues.append(dict(status='DATA_UNAVAILABLE', artifact='frozen_membership', reason=rep))
     else:
         issues.append(dict(status='DATA_UNAVAILABLE', artifact='frozen_membership_or_features'))
-        features = pd.DataFrame(columns=['representation_id', 'source_column', 'included'])
+        features = pd.DataFrame(columns=['representation_id', 'source_column', 'feature', 'included'])
     return dict(frozen=dict(frozen, feature_sets=features), registry=registry, roles=pd.DataFrame(),
                 release=release, manifest=dict(manifest, eligible_representation_ids=accepted), data_issues=issues)
 
 
-def _discover(root, data, phasec, issues):
-    args = SimpleNamespace(graph03_run=None, graph02_release=None, strict=False, config=phasec)
-    try:
-        graph03, release, _, selection = resolve_graph03_dependencies(
-            args, root, phase='C', data_root=data, quiet=True, verify_inventory=True)
-    except RuntimeError:
-        issues.append(dict(status='DATA_UNAVAILABLE', artifact='compatible_graph02_graph03_releases'))
-        for reader in (_load_graph02, _load_baseline_only):
-            try:
-                _, bundle, evidence = resolve_latest_compatible(
-                    'Graph02', [graph_paths(root, data_root=data)['graph02']], ['02_graph_release_manifest.json'],
-                    '02_graph_release_manifest.json', reader)
-                return bundle['release'], None, evidence['run_id'], None
-            except RuntimeError:
-                continue
-        issues.append(dict(status='DATA_UNAVAILABLE', artifact='frozen_graph02_baseline',
-                           reason='NO_VERIFIED_GRAPH02_BASELINE'))
-        return None, None, None, None
-    return release, graph03, selection[0]['run_id'], selection[1]['run_id']
+
+def _graph03_qc(directory, loaded, roles):
+    """Check current characterization against discovery before using its context."""
+    summary = json.loads(safe_artifact(directory, RESULTS).read_text())
+    if (not isinstance(summary, dict) or summary.get('schema_version') != RESULTS_SCHEMA
+            or summary.get('execution_status') not in {'COMPLETE', 'COMPLETE_WITH_LIMITATIONS'}
+            or summary.get('n_patients') != len(loaded['frozen']['baseline_raw'])):
+        raise ValueError('GRAPH03_COHORT_OR_COMPLETION_MISMATCH')
+    qc = json.loads(safe_artifact(directory, '03_graph_release_input_qc.json').read_text())
+    if (not isinstance(qc, dict) or qc.get('status') != 'PASS'
+            or qc.get('eligible_representation_ids') != loaded['manifest']['eligible_representation_ids']):
+        raise ValueError('GRAPH03_REPRESENTATION_MISMATCH')
+    keys = ['representation_id', 'source_column', 'direct_in_discovery', 'conflicting_defining_sources']
+    previous = pd.read_csv(safe_artifact(directory, '03_graph_clinical_feature_roles.csv'), keep_default_na=False)
+    if sorted(previous[keys].itertuples(index=False, name=None)) != sorted(roles[keys].itertuples(index=False, name=None)):
+        raise ValueError('GRAPH03_FEATURE_LINEAGE_MISMATCH')
+    inventory = pd.read_csv(safe_artifact(directory, '03_graph_n3_source_inventory.csv'))
+    for rep in loaded['manifest']['eligible_representation_ids']:
+        members = hard_members(loaded['frozen']['membership'], rep)
+        rows = inventory.loc[inventory.representation_id.eq(rep)]
+        stable = members.structural_stability_status.eq('stable').sum()
+        if rows.empty or not rows.n_hard_supported.eq(len(members)).all() or not rows.n_stable_hard.eq(stable).all():
+            raise ValueError('GRAPH03_TOPOLOGY_DENOMINATOR_MISMATCH')
+    return qc
 
 
-def _load(release, graph03, phasec, issues):
-    if release is None:
-        return None
-    if graph03 is not None:
-        try:
-            loaded = _read_frozen(dict(graph03_run=graph03, graph02_release=release, baseline=None),
-                                  yaml.safe_load(phasec.read_text()))
-            if not loaded['frozen']['baseline_raw'].empty:
-                return loaded
-        except READ_ERRORS:
-            issues.append(dict(status='DATA_UNAVAILABLE', artifact='frozen_graph03_inventory'))
-    for reader in (_load_graph02, _load_baseline_only):
-        try:
-            loaded = reader(release.parent)
-            issues.extend(loaded.pop('data_issues'))
-            return loaded
-        except READ_ERRORS:
-            continue
-    issues.append(dict(status='DATA_UNAVAILABLE', artifact='frozen_graph02_baseline',
-                       reason='NO_VERIFIED_GRAPH02_BASELINE'))
-    return None
-
-
-def _latest(folder, output):
-    payload = {'run_id': output.name, 'relative_path': 'runs/' + output.name,
-               'results_manifest_sha256': digest(output / 'results_manifest.json')}
-    with NamedTemporaryFile(mode='w', prefix='.latest-', dir=folder, delete=False) as handle:
-        temp = Path(handle.name)
-        try:
-            json.dump(payload, handle, sort_keys=True)
-            handle.write('\n')
-            handle.flush()
-            os.fsync(handle.fileno())
-            temp.replace(folder / 'latest.json')
-        finally:
-            temp.unlink(missing_ok=True)
-
-
-def run_exploratory_auto(root):
-    """Publish one verified, private aggregate release using automatic discovery."""
+def run_exploratory_auto(root, cfg=None, *, audit_only=False):
+    """Publish current aggregates from the configured inputs without refitting Mapper."""
     root = Path(root).resolve()
     issues = []
-    base = dict(mode=MODE, graph02_run=None, graph03_run=None, data_issues=issues, limitations=LIMITATIONS)
+    base = dict(mode=MODE, graph02_input=None, graph03_input=None, data_issues=issues,
+                limitations=LIMITATIONS)
     try:
-        data, private, paths = _settings(root)
-        _private_directory(private)
-        folder = private / 'exploratory'
-        with _locked(folder):
-            phasec, validation = (root / CONFIGS / name for name in (PHASEC, VALIDATION))
-            config_paths = [phasec, validation, *(root / CONFIGS / name for name in
-                                                 (DEFAULTS, 'n3_auto.yaml', 'pipeline.yaml'))]
-            config_sha = {file.name: digest(file) for file in config_paths}
+        data, paths = _source_settings(root)
+        if cfg is not None:
+            paths['step10'] = config_path(cfg['_path'], cfg['paths']['integrated'])
+        defaults = graph_paths(root, data_root=data)
+        graph02 = output_root(cfg, '02') if cfg else defaults['graph02']
+        graph03 = output_root(cfg, '03') if cfg else defaults['graph03']
+        target = graph03.parent / defaults['phasee'].name
+        if any(target.is_relative_to(path) or path.is_relative_to(target)
+               for path in (graph02, graph03, *paths.values())):
+            raise ValueError('EXPLORATORY_OUTPUT_OVERLAPS_INPUT')
+        prefix = '03f_' if audit_only else '03e_'
+        completion = target / (prefix + 'summary.json')
+        with ExitStack() as stack:
+            for directory in dict.fromkeys((graph02, graph03)):
+                if directory.is_dir():
+                    stack.enter_context(output_lock(directory, shared=True))
+            staging = stack.enter_context(stage_outputs(
+                {'stage': target}, lambda _, name: name.startswith(prefix),
+                failure=('stage', prefix + 'failure.json'), completion=completion))['stage']
+            for artifact, directory, marker in (
+                    ('graph02', graph02, '02_graph_failure.json'),
+                    ('graph03', graph03, '03_graph_failure.json')):
+                if (directory / marker).is_file():
+                    issues.append(dict(status='PARTIAL', artifact=artifact,
+                                       reason='LAST_ATTEMPT_FAILED_USING_LAST_COMPLETE_RESULT'))
             policy = _policy(root)
-            release, graph03, base['graph02_run'], base['graph03_run'] = _discover(root, data, phasec, issues)
-            frozen_roots = [path for path in (release.parent if release else None, graph03) if path]
-            if any(private.is_relative_to(path) or path.is_relative_to(private) for path in frozen_roots):
-                raise ValueError('EXPLORATORY_OUTPUT_OVERLAPS_FROZEN_INPUT')
-            frozen_sha = _snapshot(frozen_roots)
-            sources_sha, btris_sha = _source_hashes(paths), _btris_hashes(paths)
-            code_sha = _implementation(root)
-            versions = {name: version(name) for name in ('pandas', 'numpy', 'scipy', 'statsmodels', 'pyarrow', 'matplotlib', 'PyYAML')}
-            versions['python'] = platform.python_version()
-            provenance = dict(frozen_manifest_sha256={path.name: sha for path, sha in frozen_sha.items()
-                              if path.name in {'02_graph_release_manifest.json', '03_graph_results_summary.json'}},
-                              frozen_inventory_sha256=cal.fingerprint([
-                                  {path.relative_to(directory).as_posix(): sha for path, sha in frozen_sha.items()
-                                   if path.is_relative_to(directory)} for directory in frozen_roots]),
-                              source_sha256=sources_sha, btris_sha256={
-                                  role: sorted(sha for sha in files.values() if sha is not None)
-                                  for role, files in btris_sha.items()},
-                              config_sha256=config_sha, implementation_sha256=code_sha, versions=versions)
-            base['provenance'] = provenance
-
-            def verify():
-                if (frozen_sha != _snapshot(frozen_roots) or sources_sha != _source_hashes(paths)
-                        or btris_sha != _btris_hashes(paths) or code_sha != _implementation(root)
-                        or any(config_sha[file.name] != digest(file) for file in config_paths)):
-                    raise ValueError('EXPLORATORY_INPUT_CHANGED_DURING_RUN')
-
-            def build(staging, target):
-                tables = _inputs(paths, issues, sources_sha)
-                loaded = _load(release, graph03, phasec, issues)
-                if loaded is None:
-                    _write_run(staging, target, base, _empty_outputs(policy), None, policy)
-                    return
-                integrated = loaded['manifest']['source_inputs'].get('integrated')
-                if integrated and integrated['sha256'] != sources_sha['step10']:
-                    issues.append(dict(status='DATA_UNAVAILABLE', artifact='step10',
-                                       reason='FROZEN_GRAPH02_INPUT_SHA_MISMATCH'))
-                    tables.pop('step10', None)
-                btris_files = {role: [Path(file) for file, sha in files.items() if sha is not None]
-                               for role, files in btris_sha.items()}
-                for role, files in btris_sha.items():
-                    if files and btris_files[role] and None in files.values():
-                        issues.append(dict(status='DATA_UNAVAILABLE', artifact=role, reason='SOURCE_HASH_UNAVAILABLE'))
-                btris = _btris_records(btris_files, issues, tables.get('eda_long', pd.DataFrame()))
-                outputs = _analyze(tables, loaded, btris, yaml.safe_load(validation.read_text()), policy)
-                _write_run(staging, target, base, outputs, len(loaded['frozen']['baseline_raw']), policy)
-
-            cache_key = dict(provenance=provenance, graph02_run=base['graph02_run'], graph03_run=base['graph03_run'],
-                             btris_inventory=cal.fingerprint(btris_sha))
-            output = _cached(folder / 'runs', cache_key, build, verify, verify_reuse=True)
-            summary = json.loads((output / 'summary.json').read_text())
-            if summary['status'] != 'INPUTS_UNUSABLE':
-                _latest(folder, output)
-            keys = ('status', 'mode', 'graph02_run', 'graph03_run', 'n_outcomes_with_data', 'n_model_pairs_estimable',
-                    'models_by_scope', 'output_dir', 'summary', 'models', 'report', 'manifest', 'figures',
-                    'limitations', 'data_issues')
-            return {key: summary[key] for key in keys}
-    except (OSError, ValueError, KeyError, TypeError, yaml.YAMLError) as exc:
+            validation = cfg['validation'] if cfg else yaml.safe_load((root / CONFIGS / VALIDATION).read_text())
+            loaded = None
+            for reader in (_load_graph02, _load_baseline_only):
+                try:
+                    loaded = reader(graph02)
+                    issues.extend(loaded.pop('data_issues'))
+                    break
+                except READ_ERRORS:
+                    continue
+            if loaded is None:
+                issues.append(dict(status='DATA_UNAVAILABLE', artifact='graph02_baseline',
+                                   reason='NO_VALID_CURRENT_BASELINE'))
+                if completion.exists() and json.loads(completion.read_text()).get('status') != 'INPUTS_UNUSABLE':
+                    raise ValueError('EXPLORATORY_CURRENT_BASELINE_UNAVAILABLE')
+                outputs, n = _empty_outputs(policy), None
+            else:
+                base['graph02_input'] = graph02.name
+                baseline = loaded['frozen']['baseline_raw']
+                features = loaded['frozen']['feature_sets']
+                reps = loaded['manifest']['eligible_representation_ids']
+                if reps:
+                    try:
+                        loaded['roles'] = feature_roles(features, baseline, validation, reps, loaded['registry'])
+                    except ValueError:
+                        issues.append(dict(status='DATA_UNAVAILABLE', artifact='graph02_feature_lineage',
+                                           reason='CURRENT_DEFINING_FEATURE_LINEAGE_INVALID'))
+                    try:
+                        loaded['qc'] = _graph03_qc(graph03, loaded, loaded['roles'])
+                        base['graph03_input'] = graph03.name
+                    except READ_ERRORS:
+                        issues.append(dict(status='DATA_UNAVAILABLE', artifact='graph03_characterization',
+                                           reason='CURRENT_GRAPH03_MISSING_OR_INCONSISTENT'))
+                tables = _inputs(paths, issues)
+                btris_files = {role: cal.btris_files(paths[role]) for role in cal.BTRIS_ROLES}
+                records = _btris_records(btris_files, issues, tables.get('eda_long', pd.DataFrame()))
+                outputs = _analyze(tables, loaded, records, validation, policy, audit_only=audit_only)
+                n = len(baseline)
+            if audit_only:
+                schema = TABLE_COLUMNS['source_linkage_audit'].split()
+                audit = pd.DataFrame(outputs['source_linkage_audit'], columns=schema)
+                audit.to_csv(staging / '03f_source_linkage_audit.csv', index=False)
+                result = dict(status='AUDITED' if n is not None else 'INPUTS_UNUSABLE',
+                              output_dir=str(target), data_issues=issues,
+                              source_linkage_audit=str(target / '03f_source_linkage_audit.csv'))
+                write_json(staging / '03f_summary.json', result)
+            else:
+                result = _write_run(staging, target, base, outputs, n, policy)
+        return result
+    except READ_ERRORS + (RuntimeError, yaml.YAMLError) as exc:
         token = str(exc)
-        reason = token if re.fullmatch(r'(?:EXPLORATORY_[A-Z_]+|UNSAFE_AUTO_[A-Z_]+|AUTO_RUN_IN_PROGRESS)', token) else (
-            'EXPLORATORY_RUN_UNAVAILABLE')
+        reason = token if re.fullmatch(r'EXPLORATORY_[A-Z_]+', token) else 'EXPLORATORY_RUN_UNAVAILABLE'
         return dict(**base, status='EXPLORATORY_RUN_FAILED', output_dir=None, reason=reason)

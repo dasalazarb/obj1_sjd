@@ -34,6 +34,16 @@ PATHS = {
 
 
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if not argv or argv == ['--audit-only']:
+        from src.studies.graph.stage03.s03_n3_exploratory import run_exploratory_auto
+
+        result = run_exploratory_auto(ROOT, audit_only=True)
+        print(json.dumps(result, sort_keys=True))
+        if result['status'] == 'EXPLORATORY_RUN_FAILED':
+            raise SystemExit(1)
+        return result
+
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--audit-only', dest='mode', action='store_const', const='audit-only',

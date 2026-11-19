@@ -46,7 +46,7 @@ def cache_signature(raw,registry,baseline,identifier,policy,config,config_hash,s
     return hashlib.sha256(json.dumps(data,sort_keys=True,default=str).encode()).hexdigest()
 
 
-def run_missingness_study(results,registry,manifest,baseline,families,config,cfg,run_dir,lab_groups,feature_to_lab,source_hash):
+def run_missingness_study(results,registry,manifest,baseline,families,config,cfg,run_dir,lab_groups,feature_to_lab,source_hash=""):
     policy=cfg.get('missingness_methods',{})
     if not policy.get('enabled',False): return {'enabled':False,'experiments':[],'artifacts':[]}
     if policy.get('schema_version')!='graph_missingness_methods_v1': raise ValueError('UNKNOWN_MISSINGNESS_PROTOCOL')
@@ -206,11 +206,9 @@ def run_missingness_study(results,registry,manifest,baseline,families,config,cfg
                     budgets=[('repeated_subsampling',int(policy['resampling']['main_subsampling_replicates_per_variant'] if parameter is None else policy['resampling']['parameter_sensitivity_subsampling_replicates']))]
                     if method=='I': budgets.append(('classic_bootstrap',int(policy['resampling']['iterative_bootstrap_replicates'])))
                     qc=True; main_stability=[]; successful_refits=0
-                    key=cache_signature(raw,registry,baseline,experiment,policy,config,cfg['_config_sha256'],source_hash)
-                    cache_dir=run_dir.parent.parent/'.cache'/policy['estimator_version'] if cfg['execution']['resume'] else None
                     for resampling_method,budget in budgets:
                         sampled=resample(mapped['community_sets'],n,lambda draw:fit(draw)[0],lambda s:analyze(s,config),settings,
-                            seed=seed,identifier=experiment,method=resampling_method,replicates=budget,cache_dir=cache_dir,cache_key=key)
+                            seed=seed,identifier=experiment,method=resampling_method,replicates=budget)
                         qc &= sampled['qc_pass']
                         successful_refits+=sampled['n_success']
                         tables['method_stability'].extend(dict(reference_id=reference,stability_threshold=settings['stable_threshold'],**r) for r in sampled['stability'])
@@ -354,7 +352,7 @@ def run_missingness_study(results,registry,manifest,baseline,families,config,cfg
         focal.append('| '+' | '.join(str(r.get(c,'NA')) for c in ['experiment_id','status','reason','n_patients','n_covered','n_communities',
             'n_valid_pair_distances','n_connected','n_successful_refits','estimator','panel_hash'])+' |')
     (run_dir/'02_graph_missingness_focal_fix_summary.md').write_text('\n\n'.join(focal)+'\n')
-    artifacts=[p.relative_to(run_dir).as_posix() for p in sorted(run_dir.glob('02_graph_missingness_*')) if p.is_file()]+figures
+    artifacts=sorted({p.name for p in run_dir.glob('02_graph_missingness_*') if p.is_file()} | set(figures))
     return dict(enabled=True,schema_version=policy['schema_version'],estimator_version=policy['estimator_version'],
         analysis_role='sensitivity',references=policy['references'],panel_policy='frozen_reference_sources_and_patients',
         graph03_defining=False,experiments=experiments,artifacts=artifacts,

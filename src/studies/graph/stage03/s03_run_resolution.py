@@ -12,7 +12,7 @@ import re
 import yaml
 
 from .._pipeline import config_path, digest
-from ..stage02.s02_contracts import safe_artifact, validate_release
+from ..stage02.s02_contracts import MANIFEST, safe_artifact, validate_release
 from .s03_n3_phasec_adjudication import INPUT_FILES, load_phasec_inputs
 
 
@@ -27,6 +27,7 @@ def graph_paths(repository_root, *, data_root=None):
         result[key] = data_root / configured.relative_to(repo) if configured.is_relative_to(repo) else configured
     result['phasec'] = result['graph03'].parent / '03_graph_n3_clinical_adjudication'
     result['phased'] = result['graph03'].parent / '03_graph_n3_resolution_preflight'
+    result['phasee'] = result['graph03'].parent / '03_graph_n3_controlled_inference'
     return result
 
 
@@ -91,7 +92,7 @@ def resolve_latest_compatible(kind, roots, required_files, metadata_file, valida
                        f'Buscado en {searched}. Descartes: ' + '; '.join(failures[:5]))
 
 
-def resolve_graph03_dependencies(args, repository_root, *, phase, data_root=None, quiet=False,
+def resolve_historical_graph03_dependencies(args, repository_root, *, phase, data_root=None, quiet=False,
                                  verify_inventory=False):
     """Resolve Phase C's pair or Phase D's linked triple as a unit."""
     paths = graph_paths(repository_root, data_root=data_root)
@@ -159,3 +160,14 @@ def resolve_graph03_dependencies(args, repository_root, *, phase, data_root=None
         print(f'[Graph03] Configuración: {args.config.resolve()}')
         print('[Graph03] Resolución de dependencias: OK')
     return graph03, release, phasec, evidence
+
+
+def current_dependencies(args, repository_root, *, phase):
+    """Return the configured current pair or triple, with explicit overrides."""
+    paths = graph_paths(repository_root)
+    graph03 = Path(args.graph03_run or paths['graph03']).resolve()
+    release = Path(args.graph02_release or paths['graph02']).resolve()
+    if not args.graph02_release or release.is_dir():
+        release = release / MANIFEST
+    phasec = Path(args.phasec_run or paths['phasec']).resolve() if phase == 'D' else None
+    return graph03, release, phasec

@@ -15,9 +15,10 @@ from src.studies.graph._pipeline import digest
 from src.studies.graph.stage03.s03_n3_phasec_adjudication import load_phasec_inputs, run_phasec
 from src.studies.graph.stage03 import s03_n3_resolution as D
 from src.studies.graph.stage03.s03_run_resolution import (
-    graph_paths, resolve_graph03_dependencies, resolve_latest_compatible,
+    graph_paths, resolve_historical_graph03_dependencies as resolve_graph03_dependencies, resolve_latest_compatible,
 )
 from test_graph03_n3_phasec_adjudication import synthetic_bundle
+from tests.graph_contract_fixtures import install_current_graph02
 
 ROOT = Path(__file__).resolve().parents[1]
 C_CONFIG = ROOT / 'src/studies/graph/configs/n3_phasec_review.yaml'
@@ -70,33 +71,46 @@ def command(script, data_root, cwd, *flags):
 
 def test_both_commands_zero_flags_outside_checkout_and_repeatable(tmp_path, monkeypatch):
     monkeypatch.setenv('OBJ1_SJD_ROOT', str(tmp_path))
-    graph03, release = install_bundle(tmp_path / 'seed', tmp_path)
-    before = {p: digest(p) for directory in [graph03, release.parent] for p in directory.iterdir()}
-    c = command('03c_graph_n3_clinical_adjudication.py', tmp_path, tmp_path)
-    assert c.returncode == 0, c.stderr
+    historical03, historical02 = install_bundle(tmp_path / 'seed', tmp_path)
     paths = graph_paths(ROOT)
-    first_c = next((paths['phasec'] / 'runs').iterdir())
+    release = install_current_graph02(historical02, paths['graph02'])
+    graph03 = paths['graph03']
+    for path in historical03.iterdir():
+        shutil.copy(path, graph03 / path.name)
+    roles = graph03 / '03_graph_clinical_feature_roles.csv'
+    pd.read_csv(roles).assign(direct_in_discovery=False).to_csv(roles, index=False)
+    summary = graph03 / '03_graph_results_summary.json'
+    summary.write_text(json.dumps(dict(schema_version='graph03_current_v1', execution_status='COMPLETE',
+                                       n_patients=100)))
+    (graph03 / '03_graph_release_input_qc.json').write_text(json.dumps(
+        dict(status='PASS', eligible_representation_ids=['R0', 'R2'])))
+    before = {p: digest(p) for directory in [graph03, release.parent] for p in directory.iterdir() if p.is_file()}
+    first_c, first_d = paths['phasec'], paths['phased']
+    for _ in range(2):
+        c = command('03c_graph_n3_clinical_adjudication.py', tmp_path, tmp_path)
+        assert c.returncode == 0, c.stderr
+        d = command('03d_graph_n3_resolution_preflight.py', tmp_path, tmp_path)
+        assert d.returncode == 0, d.stderr
+        assert 'COMPLETE_WITH_BLOCKERS' in d.stdout
+        names = [{p.name for p in directory.iterdir()} for directory in (first_c, first_d)]
+        if _ == 0:
+            first_names = names
+            first_models = pd.read_csv(first_d / (D.PREFIX + 'model_preflight.csv'))
+        else:
+            assert names == first_names
     qc_c = json.loads((first_c / '03_graph_n3_phasec_qc.json').read_text())
-    assert qc_c['run_id'] == first_c.name
-    assert len(qc_c['dependency_resolution']) == 2
-    d = command('03d_graph_n3_resolution_preflight.py', tmp_path, tmp_path)
-    assert d.returncode == 0, d.stderr
-    assert 'COMPLETE_WITH_BLOCKERS' in d.stdout
-    first_d = next((paths['phased'] / 'runs').iterdir())
+    assert 'run_id' not in qc_c and 'input_sha256_by_artifact' not in qc_c
     qc = json.loads((first_d / (D.PREFIX + 'qc.json')).read_text())
-    assert qc['run_id'] == first_d.name and qc['models_estimated'] == 0
-    assert len(qc['dependency_resolution']) == 3
+    assert 'run_id' not in qc and qc['models_estimated'] == 0
     assert qc['blocker_status']['models_abcd'] == 'NOT_ESTIMABLE'
     assert qc['blocker_status']['protocol'] == 'PENDING_HUMAN_REVIEW'
-    second = command('03d_graph_n3_resolution_preflight.py', tmp_path, ROOT)
-    assert second.returncode == 0, second.stderr
-    second_d = next(p for p in (paths['phased'] / 'runs').iterdir() if p != first_d)
+    assert not any(p.is_dir() for directory in (first_c, first_d) for p in directory.iterdir())
     # Compare scientific decisions, excluding per-execution provenance columns.
     columns = ['representation_id', 'source_column', 'model', 'primary_reason',
                'possible_remedy', 'status', 'blocking_reasons', 'r0_stable_only_support_gate']
     pd.testing.assert_frame_equal(
-        pd.read_csv(first_d / (D.PREFIX + 'model_preflight.csv'))[columns],
-        pd.read_csv(second_d / (D.PREFIX + 'model_preflight.csv'))[columns])
+        first_models[columns],
+        pd.read_csv(first_d / (D.PREFIX + 'model_preflight.csv'))[columns])
     assert before == {p: digest(p) for p in before}
     for directory in [first_c, first_d]:
         for p in directory.iterdir():
@@ -120,7 +134,7 @@ def test_newest_complete_skips_incomplete_and_failed_run(tmp_path, monkeypatch):
 def test_phase_d_uses_phasec_ancestry_even_with_newer_a_and_02(tmp_path, monkeypatch):
     monkeypatch.setenv('OBJ1_SJD_ROOT', str(tmp_path))
     old, release = install_bundle(tmp_path / 'seed1', tmp_path, '01')
-    result = run_phasec(old, release, None, C_CONFIG, ROOT)
+    result = run_phasec(old, release, graph_paths(ROOT)['phasec'] / 'runs/first', C_CONFIG, ROOT)
     latest, newer_release = install_bundle(tmp_path / 'seed2', tmp_path, '02')
     selected = resolve_graph03_dependencies(args('D'), ROOT, phase='D')
     assert selected[:3] == (old, release, Path(result['output_dir']))
@@ -135,8 +149,8 @@ def test_phase_d_uses_phasec_ancestry_even_with_newer_a_and_02(tmp_path, monkeyp
 def test_incompatible_new_phasec_falls_back_as_a_unit(tmp_path, monkeypatch):
     monkeypatch.setenv('OBJ1_SJD_ROOT', str(tmp_path))
     graph03, release = install_bundle(tmp_path / 'seed', tmp_path)
-    old = run_phasec(graph03, release, None, C_CONFIG, ROOT)
-    newer = run_phasec(graph03, release, None, C_CONFIG, ROOT)
+    old = run_phasec(graph03, release, graph_paths(ROOT)['phasec'] / 'runs/first', C_CONFIG, ROOT)
+    newer = run_phasec(graph03, release, graph_paths(ROOT)['phasec'] / 'runs/second', C_CONFIG, ROOT)
     qc = Path(newer['output_dir']) / '03_graph_n3_phasec_qc.json'
     value = json.loads(qc.read_text())
     value['input_graph03_run_id'] = 'OTHER_BRANCH'
@@ -218,7 +232,7 @@ def test_pop_equivalence_requires_signoff_and_reconciles_derived_copy():
 def test_r0_sensitivity_selection_is_fixed_before_endpoint_missingness(tmp_path, monkeypatch):
     monkeypatch.setenv('OBJ1_SJD_ROOT', str(tmp_path))
     graph03, release = install_bundle(tmp_path / 'seed', tmp_path)
-    c = run_phasec(graph03, release, None, C_CONFIG, ROOT)
+    c = run_phasec(graph03, release, graph_paths(ROOT)['phasec'] / 'runs/first', C_CONFIG, ROOT)
     config = yaml.safe_load(D_CONFIG.read_text())
     inputs = D.load_inputs(graph03, release, Path(c['output_dir']), config)
     validation = yaml.safe_load((ROOT / 'src/studies/graph/configs/validation_03.yaml').read_text())
@@ -239,7 +253,7 @@ def test_r0_sensitivity_selection_is_fixed_before_endpoint_missingness(tmp_path,
 def test_normal_d_reports_downstream_code_drift_without_adding_a_blocker(tmp_path, monkeypatch):
     monkeypatch.setenv('OBJ1_SJD_ROOT', str(tmp_path))
     graph03, release = install_bundle(tmp_path / 'seed', tmp_path)
-    c = run_phasec(graph03, release, None, C_CONFIG, ROOT)
+    c = run_phasec(graph03, release, graph_paths(ROOT)['phasec'] / 'runs/first', C_CONFIG, ROOT)
     phasec = Path(c['output_dir'])
     # Simulate a historical documentary code digest. Artifact integrity remains
     # valid; current code is not required to match the historical producer.

@@ -162,14 +162,58 @@ def test_real_three_script_boundary_preflight_and_privacy(tmp_path,script,prefix
     assert sum(r['selected'] for r in summary['family_counts'] if r['family']=='EXT')==6
     for p in (output/'tables').glob('*'):
         assert 'SYNTHETIC_PATIENT_' not in p.read_text()
-    with pytest.raises(FileExistsError): script.run(script.parse_args(argv))
+    if script is G:
+        script.run(script.parse_args(argv))
+    else:
+        with pytest.raises(FileExistsError):
+            script.run(script.parse_args(argv))
+
+
+
+def test_graph01_zero_flags_overwrites_canonical_outputs(tmp_path, monkeypatch):
+    _, integrated, candidates, _ = bundle(tmp_path)
+    monkeypatch.setattr(G.common, 'INTEGRATED_LONGITUDINAL_PARQUET', integrated)
+    monkeypatch.setattr(G.common, 'INTEGRATED_BASELINE_CSV', tmp_path / 'no_age_input.csv')
+    tables = tmp_path / 'tables' / 'studies'
+    monkeypatch.setattr(G.common, 'STUDIES_TABLES_DIR', tables)
+    # Keep default study destinations while providing the synthetic Pharma00 profile
+    # at the path the zero-argument CLI expects.
+    pharma = tables / 'pharma' / '00_profile_labs'
+    pharma.mkdir(parents=True)
+    from shutil import copyfile
+    for path in candidates.parent.iterdir():
+        copyfile(path, pharma / path.name)
+    for key in ('analytic', 'figures', 'qc', 'logs'):
+        monkeypatch.setattr(G.common, f'STUDIES_{key.upper()}_DIR', tmp_path / key / 'studies')
+    load_config = G.load_config
+
+    def small_config(path):
+        config = load_config(path)
+        config['bootstrap']['replicates'] = 2
+        config['persistent_homology']['enabled'] = False
+        return config
+
+    monkeypatch.setattr(G, 'load_config', small_config)
+    destinations = G.run_dirs(G.parse_args([]), 'graph/01_run_topological_phenotyping')
+    G.run(G.parse_args([]))
+    filenames = {key: {path.name for path in directory.iterdir()} for key, directory in destinations.items()}
+    summary = destinations['tables'] / '01_graph_results_summary.json'
+    expected = json.loads(summary.read_text())
+    summary.write_text('{}')
+    G.run(G.parse_args([]))
+    assert json.loads(summary.read_text()) == expected
+    assert filenames == {key: {path.name for path in directory.iterdir()} for key, directory in destinations.items()}
+    assert not any(path.is_dir() for directory in destinations.values() for path in directory.iterdir())
+
 
 
 def test_provenance_stale_outputs_source_and_no_lab_guard(tmp_path):
     master,ip,cp,_=bundle(tmp_path)
     G.load_real_inputs(ip,cp,'exploratory')
     old=cp.read_bytes(); cp.write_bytes(old+b'\n')
-    with pytest.raises(ValueError,match='OUTPUT_HASH'): G.load_real_inputs(ip,cp,'exploratory')
+    G.load_real_inputs(ip, cp, 'exploratory')
+    with pytest.raises(ValueError, match='OUTPUT_HASH'):
+        L.validate_provenance(ip, cp, 'exploratory')
     cp.write_bytes(old); ip.write_bytes(ip.read_bytes()+b'x')
     with pytest.raises(ValueError,match='SOURCE_HASH'): L.validate_provenance(ip,cp,'exploratory')
     m,_,_,_=C.build_catalog(frame().drop(columns=[c for c in frame() if c.startswith('lab__')]),pd.DataFrame())
@@ -219,6 +263,11 @@ def test_cli_no_readable_labs_fails_with_complete_audit(tmp_path,script,prefix):
           "--preflight-only","--output-dir",str(out)]
     with pytest.raises(ValueError,match="NO_TECHNICALLY_ELIGIBLE_LABS"):
         script.run(script.parse_args(argv))
+    if script is G:
+        failure = json.loads((out / 'logs' / '01_graph_failure.json').read_text())
+        assert failure['execution_status'] == 'FAILED'
+        assert not (out / 'tables' / '01_graph_results_summary.json').exists()
+        return
     audit=pd.read_csv(out/"tables"/f"{prefix}_all_source_columns_audit.csv")
     assert set(audit.source_column)==set(master)
     assert not audit.loc[audit.family.eq("lab"),"included_pca"].any()

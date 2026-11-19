@@ -12,7 +12,6 @@ execution:
   run_02: true
   run_03: true
   auto_preflight: true
-  resume: true
   always_generate_tables_figures: true
   fail_on_primary_qc_error: true
   save_negative_and_not_estimable_results: true
@@ -36,4 +35,3 @@ reporting:
   figures_pdf: true
   summary_md: true
   experiment_registry: true
-  manifest_with_hashes: true

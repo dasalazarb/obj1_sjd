@@ -11,7 +11,7 @@ import pytest
 import yaml
 from src.studies.graph import _pipeline as pipe
 from src.studies.graph.stage02 import s02_legacy as legacy
-from src.studies.graph.stage02.s02_contracts import resolve_sources,validate_release,resolve_latest,SCHEMA
+from src.studies.graph.stage02.s02_contracts import resolve_sources,validate_release,MANIFEST,CURRENT_SCHEMA
 from src.studies.graph.stage02.s02_pipeline import run as run02
 from src.studies.graph.stage02.s02_feature_registry import clinical_registry,eligible_domain_map
 from src.studies.graph.stage02.s02_representations import gower_distance,hierarchical_mfa,famd_matrix
@@ -34,6 +34,7 @@ def configuration(tmp_path):
     rng=np.random.default_rng(919); n=36
     master=pd.DataFrame({'patient_id':[f'synthetic_{i}' for i in range(n)],
         'clinical_episode_id':[f'baseline_{i}' for i in range(n)],'clinical_anchor_date':pd.Timestamp('2020-01-01'),
+        'clinical_baseline_date':pd.Timestamp('2020-01-01'),
         'clinical_visit_number':1,'clinical_visit':True,'is_clinical_baseline':True,
         'pop__status':['Pop1','Pop2','Pop3']*(n//3),'essdai__total':rng.uniform(0,10,n),'esspri__total':rng.uniform(0,10,n),
         'pro__sf36_pcs':rng.normal(size=n),'pro__sf36_mcs':rng.normal(size=n),
@@ -96,10 +97,18 @@ def test_default_full_protocol_and_no_required_flags():
 def test_zero_argument_full_study_and_standalone_entries(configuration,monkeypatch):
     cfg=configuration
     monkeypatch.setattr(pipe,'DEFAULT_CONFIG',Path(cfg['_path']))
-    for executable in ['run_graph_study.py','02_graph_representation_sensitivity.py','03_graph_community_characterization.py']:
+    roots = [pipe.output_root(cfg, key) for key in ('02', '03', 'study')]
+    executables = ['run_graph_study.py', '02_graph_representation_sensitivity.py', '03_graph_community_characterization.py']
+    for executable in executables:
         monkeypatch.setattr(sys,'argv',[str(GRAPH/executable)])
         runpy.run_path(str(GRAPH/executable),run_name='__main__')
-    manifest,path=resolve_latest(pipe.output_root(cfg,'02'))
+    original_names = [{p.name for p in root.iterdir()} for root in roots]
+    monkeypatch.setattr(sys, 'argv', [str(GRAPH / executables[0])])
+    runpy.run_path(str(GRAPH / executables[0]), run_name='__main__')
+    assert original_names == [{p.name for p in root.iterdir()} for root in roots]
+    assert all(not any(p.is_dir() for p in root.iterdir()) for root in roots)
+    manifest,path=validate_release(roots[0] / MANIFEST)
+    assert manifest['schema_version'] == CURRENT_SCHEMA and 'sha256_by_artifact' not in manifest
     assert manifest['finalized'] and manifest['primary_reference_id']=='R0'
     assert manifest['study_mode']=='exploratory'
     assert manifest['release_status'] in {'NO_STABLE_STRUCTURE','PARTIAL_OR_EXPLORATORY'}
@@ -124,12 +133,12 @@ def test_zero_argument_full_study_and_standalone_entries(configuration,monkeypat
     methods=pd.read_csv(path.parent/'02_graph_resampling_replications.csv')
     assert set(methods.method)=={'repeated_subsampling','classic_bootstrap'}
     assert methods.loc[methods.method.eq('repeated_subsampling')].n_draws.eq(methods.loc[methods.method.eq('repeated_subsampling')].n_unique_patients).all()
-    assert len(list((path.parent/'figures').glob('*.png')))>=4
-    assert len(list((path.parent/'figures').glob('*.png')))==len(list((path.parent/'figures').glob('*.pdf')))
+    assert len(list(path.parent.glob('*.png')))>=4
+    assert len(list(path.parent.glob('*.png')))==len(list(path.parent.glob('*.pdf')))
     figure_inventory=pd.read_csv(path.parent/'02_graph_figure_inventory.csv')
     assert set(figure_inventory.status)<= {'COMPLETE','NOT_ESTIMABLE'}
     assert all((path.parent/r.artifact).is_file() for r in figure_inventory.query("status=='COMPLETE'").itertuples())
-    assert all(not r['shareable_export_allowed'] for r in manifest['artifact_inventory'])
+    assert not pd.read_csv(path.parent / '02_graph_privacy_inventory.csv').shareable_export_allowed.any()
     sensitivity=manifest['missingness_sensitivity']
     assert sensitivity['graph03_defining'] is False
     assert {'R0-DG','R2-DG'}<=set(sensitivity['statuses'])
@@ -140,24 +149,23 @@ def test_zero_argument_full_study_and_standalone_entries(configuration,monkeypat
                  'sparse_graph_support_summary','sparse_graph_stability','sparse_graph_comparisons','focal_fix_qc']:
         artifact='02_graph_missingness_'+name+'.csv'
         assert artifact in sensitivity['artifacts']
-        assert pipe.digest(path.parent/artifact)==manifest['sha256_by_artifact'][artifact]
+        assert (path.parent / artifact).is_file()
     for item in manifest['sensitivity_artifacts']:
         assert item['graph03_defining'] is False
     for name in ['imputation_diagnostics','sparse_graph_connectivity','focal_comparison']:
         for extension in ['png','pdf','csv']:
-            assert (path.parent/'figures'/('02_graph_missingness_'+name+'.'+extension)).is_file()
-    study=list(pipe.output_root(cfg,'study').glob('runs/*'))[0]
-    report=json.loads((study/'graph_study_execution_manifest.json').read_text())
-    assert report['execution_status'] in {'COMPLETE_WITH_LIMITATIONS','PARTIAL'}
-    linked=(study/report['stages']['02']['manifest_path']).resolve()
-    assert pipe.digest(linked)==report['stages']['02']['manifest_sha256']
-    assert len(pd.read_csv(study/'graph_study_output_index.csv'))>30
-    for run in pipe.output_root(cfg,'03').glob('runs/*'):
+            suffix = '_source.csv' if extension == 'csv' else '.' + extension
+            assert (path.parent / ('02_graph_missingness_' + name + suffix)).is_file()
+    study = roots[2]
+    assert {p.name for p in study.iterdir()} == {'graph_study_results_summary.md'}
+    report = (study / 'graph_study_results_summary.md').read_text()
+    assert all(name in report for name in (MANIFEST, '03_graph_results_summary.json', '03e_RESULTADOS.md'))
+    for run in [roots[1]]:
         roles=pd.read_csv(run/'03_graph_clinical_feature_roles.csv')
         anchors=pd.read_csv(run/'03_graph_independent_anchor_validation.csv')
         assert anchors.validation_role.eq('independent_baseline_anchor').all()
         summary=json.loads((run/'03_graph_results_summary.json').read_text())
-        assert summary['graph02_run_id']
+        assert Path(summary['graph02_directory']) == roots[0]
         n3=summary['n3_validation']
         assert n3['n_reviewed_independent_sources']==0 and n3['n_models_complete']==0
         inventory=pd.read_csv(run/'03_graph_n3_source_inventory.csv')
@@ -168,39 +176,47 @@ def test_zero_argument_full_study_and_standalone_entries(configuration,monkeypat
                      'descriptive_profiles','incremental_eligibility','incremental_models','model_comparison']:
             filename=f'03_graph_n3_{name}.csv'
             assert len(pd.read_csv(run/filename).columns)>1
-            assert pipe.digest(run/filename)==summary['sha256_by_artifact'][filename]
+            assert (run / filename).is_file()
         qc=json.loads((run/'03_graph_n3_validation_qc.json').read_text())
         assert qc['graph02_unchanged'] and qc['no_refit'] and qc['no_unapproved_estimates']
         assert pd.read_csv(run/'03_graph_n3_model_comparison.csv').empty
-        assert list((run/'figures').glob('*.pdf'))
+        assert list(run.glob('*.pdf'))
 
 
-def test_release_tamper_failure_does_not_refit_or_replace_pointer(configuration,monkeypatch):
-    result=run02(configuration)
-    root=pipe.output_root(configuration,'02'); pointer=(root/'latest_completed_02.json').read_bytes()
+def test_failed_run_preserves_current_graph_results(configuration, monkeypatch):
+    result = run02(configuration)
+    root = result['run_dir']
+    original = result['manifest'].read_bytes()
     monkeypatch.setattr(legacy,'fit_embedding',lambda *a,**k:(_ for _ in ()).throw(AssertionError('Graph03 must not refit')))
-    run03(configuration,graph02_release=result['manifest'])
-    artifact=result['run_dir']/'02_graph_patient_membership.csv'; artifact.write_text(artifact.read_text()+'\n')
-    with pytest.raises(ValueError,match='SHA mismatch'): run03(configuration,graph02_release=result['manifest'])
-    assert (root/'latest_completed_02.json').read_bytes()==pointer
-    with pytest.raises(AssertionError): run02(configuration)
-    assert (root/'latest_completed_02.json').read_bytes()==pointer
+    graph03 = run03(configuration)
+    summary = graph03['manifest'].read_bytes()
+    artifact = root / '02_graph_patient_membership.csv'
+    members = pd.read_csv(artifact)
+    members.loc[0, 'patient_id'] = 'outside_baseline'
+    members.to_csv(artifact, index=False)
+    with pytest.raises(ValueError, match='patient IDs differ'):
+        run03(configuration)
+    assert graph03['manifest'].read_bytes() == summary
+    assert (graph03['run_dir'] / '03_graph_failure.json').is_file()
+    with pytest.raises(AssertionError):
+        run02(configuration)
+    assert result['manifest'].read_bytes() == original
+    assert (root / '02_graph_failure.json').is_file()
 
 
-def test_source_ambiguity_requires_pin(configuration,tmp_path):
-    cfg=configuration
-    sources=resolve_sources(cfg); candidate=sources['pharma_candidates']
-    other=candidate.parent/'runs'/'distinct'; other.mkdir(parents=True)
-    import shutil
-    for path in candidate.parent.iterdir():
-        if path.is_file(): shutil.copyfile(path,other/path.name)
-    summary_path=other/'00_pharma_profile_summary.json'; summary=json.loads(summary_path.read_text())
-    summary['run_note']='distinct compatible clinical source snapshot'; summary_path.write_text(json.dumps(summary))
-    with pytest.raises(ValueError,match='AMBIGUOUS'): resolve_sources(cfg)
-    pin=tmp_path/'pin.json'; pipe.write_json(pin,{'schema_version':'graph_source_v1','feature_policy':cfg['analysis']['feature_policy'],
-        **{role:{'path':str(path),'sha256':pipe.digest(path)} for role,path in sources.items()}})
-    cfg['paths']['source_manifest']=str(pin)
-    assert resolve_sources(cfg)==sources
+def test_configured_pharma_profile_wins_over_historical_bundles(configuration, tmp_path):
+    cfg = configuration
+    sources = resolve_sources(cfg)
+    candidate = sources['pharma_candidates']
+    other = candidate.parent / 'runs' / 'distinct'
+    other.mkdir(parents=True)
+    (other / candidate.name).write_text('invalid_historical_bundle')
+    assert resolve_sources(cfg) == sources
+    pin = tmp_path / 'pin.json'
+    pipe.write_json(pin, {'schema_version': 'graph_source_v1', 'feature_policy': cfg['analysis']['feature_policy'],
+        **{role: {'path': str(path), 'sha256': pipe.digest(path)} for role, path in sources.items()}})
+    cfg['paths']['source_manifest'] = str(pin)
+    assert resolve_sources(cfg) == sources
 
 
 def test_gower_properties_and_missingness():
@@ -383,13 +399,14 @@ def test_empty_mapper_is_a_negative_scientific_result(configuration,monkeypatch)
     run03(cfg,graph02_release=result['manifest'])
 
 
-def test_pointer_schema_paths_and_missing_release(tmp_path):
+def test_artifact_paths_and_missing_current_release(tmp_path):
     from src.studies.graph.stage02.s02_contracts import safe_artifact
-    with pytest.raises(ValueError,match='MISSING_COMPLETED'): resolve_latest(tmp_path)
-    pipe.write_json(tmp_path/'latest_completed_02.json',{'schema_version':'unsupported'})
-    with pytest.raises(ValueError,match='pointer schema'): resolve_latest(tmp_path)
-    for path in ['../escape.csv','/tmp/escape.csv']:
-        with pytest.raises(ValueError,match='remain inside'): safe_artifact(tmp_path,path)
+    pipe.write_json(tmp_path / 'latest_completed_02.json', {'schema_version': 'unsupported'})
+    with pytest.raises(FileNotFoundError, match=MANIFEST):
+        validate_release(tmp_path / MANIFEST)
+    for path in ['../escape.csv', '/tmp/escape.csv']:
+        with pytest.raises(ValueError, match='remain inside'):
+            safe_artifact(tmp_path, path)
 
 
 def test_fixed_contract_error_is_not_resampling_instability():
@@ -441,30 +458,30 @@ def test_all_observation_controls_execute_on_missing_synthetic_panel(configurati
     assert manifest['clinical_mapping']['selected_unmapped_count']==0
     assert manifest['coverage']['reason_audit_complete']
     for name in ['missingness_domain_heatmap','missingness_coverage','missingness_topologies']:
-        assert (path.parent/f'figures/02_graph_{name}.png').is_file()
+        assert (path.parent/f'02_graph_{name}.png').is_file()
     masks=pd.read_csv(path.parent/'02_graph_patient_observation_masks.csv')
     assert masks.patient_id.tolist()==master.loc[master.is_clinical_baseline,'patient_id'].tolist()
     sources=pd.read_csv(path.parent/'02_graph_missingness_source_manifest.csv')
     assert sources.loc[sources.included_in_mask,'clinical_domain'].ne('D09').all()
-    # New mapping/diagnostic artifacts are hash-protected even though Graph03 does not reestimate them.
-    artifact=path.parent/'02_graph_missingness_summary.csv'
-    artifact.write_text(artifact.read_text()+'\n')
-    with pytest.raises(ValueError,match='SHA mismatch'): validate_release(path)
+    artifact = path.parent / '02_graph_missingness_summary.csv'
+    artifact.write_text(artifact.read_text() + '\n')
+    validate_release(path)
 
 
-def test_transversal_variants_preserve_historical_artifact_hashes_and_graph03(configuration):
+def test_transversal_variants_preserve_scientific_artifacts_and_graph03(configuration):
     cfg=configuration
     for key in ['run_mapper_grid','run_domain_and_family_ablations','run_negative_controls','run_structural_comparators','run_lens_distance_sensitivity']:
         cfg['experiments'][key]=False
     cfg['experiments']['run_observation_diagnostics']=False
     cfg['missingness_methods']['enabled']=False
-    old=run02(cfg)
-    cfg['missingness_methods']['enabled']=True
-    extended=run02(cfg)
-    for name in ['patient_membership','community_stability','feature_sets','scenario_patient_membership',
-                 'representation_sensitivity_summary','patient_embedding','patient_distances','feature_role_manifest']:
-        artifact='02_graph_'+name+'.csv'
-        assert pipe.digest(old['run_dir']/artifact)==pipe.digest(extended['run_dir']/artifact)
+    old = run02(cfg)
+    names = ['patient_membership', 'community_stability', 'feature_sets', 'scenario_patient_membership',
+             'representation_sensitivity_summary', 'patient_embedding', 'patient_distances', 'feature_role_manifest']
+    expected = {name: (old['run_dir'] / f'02_graph_{name}.csv').read_bytes() for name in names}
+    cfg['missingness_methods']['enabled'] = True
+    extended = run02(cfg)
+    assert old['run_dir'] == extended['run_dir']
+    assert expected == {name: (extended['run_dir'] / f'02_graph_{name}.csv').read_bytes() for name in names}
     manifest,path,frames=read_release(cfg,extended['manifest'])
     suite=manifest['missingness_sensitivity']
     assert suite['graph03_defining'] is False and manifest['primary_reference_id']=='R0'
@@ -472,6 +489,50 @@ def test_transversal_variants_preserve_historical_artifact_hashes_and_graph03(co
     assert len(suite['artifacts'])>=28
     assert all(r['analysis_role']=='sensitivity' for r in manifest['sensitivity_artifacts'])
     assert set(frames['membership'].representation_id)<=set(['R0','R1','R2','R3','R4','S0','S1','S2','S3','S4'])
-    # Tampering with a new sensitivity artifact is detected before Graph03 can use the release.
-    artifact=path.parent/suite['artifacts'][0]; artifact.write_text(artifact.read_text()+'\n')
-    with pytest.raises(ValueError,match='SHA mismatch'): read_release(cfg,path)
+    artifact = path.parent / '02_graph_missingness_method_registry.csv'
+    artifact.unlink()
+    with pytest.raises(ValueError, match='Missing or escaping'):
+        read_release(cfg, path)
+
+
+def test_publication_rolls_back_replacements_and_prunes_only_owned_files(tmp_path, monkeypatch):
+    stage = tmp_path / 'stage'
+    for folder in (stage / 'runs' / 'old', stage / 'figures'):
+        folder.mkdir(parents=True)
+    historical = stage / 'runs' / 'old' / '02_graph_a.csv'
+    historical.write_text('historical')
+    obsolete = stage / 'figures' / '02_graph_old.png'
+    obsolete.write_text('old figure')
+    unrelated = stage / 'other.csv'
+    unrelated.write_text('unrelated')
+    first = stage / '02_graph_a.csv'
+    first.write_text('old')
+    completion = stage / '02_graph_summary.json'
+    completion.write_text('old status')
+    failure = ('stage', '02_graph_failure.json')
+
+    def publish():
+        with pipe.stage_outputs({'stage': stage}, lambda _, name: name.startswith('02_graph_'),
+                                failure=failure, completion=completion, obsolete_dirs=('figures',)) as staging:
+            (staging['stage'] / first.name).write_text('new')
+            (staging['stage'] / completion.name).write_text('complete')
+
+    replace = pipe.os.replace
+
+    def fail_completion(source, target):
+        if target == completion:
+            raise OSError('synthetic publication failure')
+        return replace(source, target)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(pipe.os, 'replace', fail_completion)
+        with pytest.raises(OSError, match='synthetic publication failure'):
+            publish()
+    assert first.read_text() == 'old' and completion.read_text() == 'old status'
+    assert obsolete.read_text() == 'old figure'
+    assert (stage / failure[1]).is_file()
+    publish()
+    assert first.read_text() == 'new' and completion.read_text() == 'complete'
+    assert not obsolete.exists() and not (stage / failure[1]).exists()
+    assert unrelated.read_text() == 'unrelated' and historical.read_text() == 'historical'
+    assert list(tmp_path.iterdir()) == [stage]

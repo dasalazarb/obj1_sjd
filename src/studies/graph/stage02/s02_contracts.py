@@ -1,8 +1,7 @@
-"""Frozen release schema, strict source selection, hashes, and atomic publication."""
+"""Current Graph02 artifact contract and explicit historical release validation."""
 from pathlib import Path
 import json
-import os
-from .._pipeline import digest, write_json, utc_now, config_path
+from .._pipeline import digest, config_path
 from .. import _lab_contract as LAB
 
 SCHEMA='graph02_release_v1'
@@ -10,9 +9,18 @@ STATUSES={'VALIDATED_TOPOLOGICAL_STRUCTURE','PARTIAL_OR_EXPLORATORY','NO_STABLE_
 CRITICAL={'membership','feature_roles','baseline_raw','feature_sets','stability','experiment_registry',
           'nodes','edges','community_dictionary','clinical_registry','release_qc'}
 
+CURRENT_SCHEMA = 'graph02_current_v1'
+MANIFEST = '02_graph_release_manifest.json'
+CURRENT_ARTIFACTS = {'membership':'02_graph_patient_membership.csv','feature_roles':'02_graph_feature_role_manifest.csv',
+        'baseline_raw':'02_graph_baseline_raw.csv','feature_sets':'02_graph_feature_sets.csv','stability':'02_graph_community_stability.csv',
+        'experiment_registry':'02_graph_experiment_registry.csv','nodes':'02_graph_mapper_nodes.csv','edges':'02_graph_mapper_edges.csv',
+        'community_dictionary':'02_graph_community_dictionary.csv','clinical_registry':'02_graph_clinical_domain_registry.csv',
+        'mapping_audit':'02_graph_clinical_feature_mapping_audit.csv','comparison_denominators':'02_graph_comparison_denominators.csv',
+        'missingness_controls':'02_graph_missingness_control_comparisons.csv','coverage_reasons':'02_graph_coverage_reason_summary.csv',
+        'refit_membership':'02_graph_refit_membership.csv','release_qc':'02_graph_release_qc.json','alignment':'02_graph_cross_representation_alignment.csv'}
 
 def source_provenance(integrated,candidates,cfg):
-    report=LAB.validate_provenance(integrated,candidates,cfg['analysis']['mode'])
+    report=LAB.current_profile(integrated,candidates,cfg['analysis']['mode'])
     summary=json.loads(Path(candidates).with_name('00_pharma_profile_summary.json').read_text())
     required=cfg['sensitivity']['input_governance']['required_pharma_profile_contract']
     if summary.get('profile_contract_version')!=required:
@@ -38,23 +46,11 @@ def resolve_sources(cfg):
     if not integrated.is_file():
         raise FileNotFoundError('Missing integrated baseline source; run the authorized upstream pipeline first')
     candidate=config_path(cfg['_path'],paths['pharma_candidates'])
-    # A configured versioned directory is exact. Otherwise inventory all versions,
-    # retaining only validated, source-compatible bundles. Never select by mtime.
-    choices=[candidate] if candidate.parent.parent.name=='runs' else [candidate,*sorted((candidate.parent/'runs').glob('*/'+candidate.name))]
-    valid={}; failures=[]
-    for path in choices:
-        if not path.is_file(): continue
-        try:
-            source_provenance(integrated,path,cfg)
-            signature=tuple(digest(path.with_name(name)) for name in (path.name,'00_pharma_profile_summary.json','00_pharma_graph_lab_selection_audit.csv'))
-            valid.setdefault(signature,path)
-        except (ValueError,OSError,KeyError) as exc:
-            failures.append(type(exc).__name__)
-    if not valid:
-        raise ValueError('NO_COMPATIBLE_PHARMA00_PROFILE: regenerate a source-compatible Pharma00 bundle; no valid candidate')
-    if len(valid)>1:
-        raise ValueError('AMBIGUOUS_PHARMA00_PROFILES: pin an approved source_manifest; distinct compatible runs exist')
-    return {'integrated':integrated,'pharma_candidates':next(iter(valid.values()))}
+    # Pharma00 still publishes bundles independently of Graph. Its legacy
+    # resolver accepts one unambiguous bundle when no canonical file exists.
+    candidate = LAB.resolve_candidates(candidate)
+    source_provenance(integrated, candidate, cfg)
+    return {'integrated': integrated, 'pharma_candidates': candidate}
 
 
 def safe_artifact(root,relative):
@@ -67,17 +63,42 @@ def safe_artifact(root,relative):
     return target
 
 
-def validate_release(path, *, expected_sha=None):
+def artifact_paths(manifest):
+    return CURRENT_ARTIFACTS if manifest['schema_version'] == CURRENT_SCHEMA else manifest['relative_paths']
+
+
+def validate_release(path, *, expected_sha=None, baseline_only=False):
     path=Path(path).resolve()
-    if path.is_dir(): path=path/'02_graph_release_manifest.json'
+    if path.is_dir(): path=path/MANIFEST
     if expected_sha and digest(path)!=expected_sha:
         raise ValueError('Release manifest SHA mismatch')
     manifest=json.loads(path.read_text())
+    if not isinstance(manifest, dict):
+        raise ValueError('Graph02 descriptor must be a JSON object')
+    if manifest.get('schema_version') == CURRENT_SCHEMA:
+        if expected_sha:
+            raise ValueError('A current Graph02 result cannot serve as a historical pin')
+        if manifest.get('finalized') is not True or manifest.get('release_status') not in STATUSES - {'QC_FAILED'}:
+            raise ValueError('Graph02 is incomplete or QC_FAILED')
+        qc = json.loads(safe_artifact(path.parent, CURRENT_ARTIFACTS['release_qc']).read_text())
+        if qc.get('primary_qc') != 'PASS' or qc.get('release_status') != manifest['release_status']:
+            raise ValueError('Current Graph02 QC mismatch')
+        safe_artifact(path.parent, CURRENT_ARTIFACTS['baseline_raw'])
+        if not baseline_only:
+            for role in CRITICAL:
+                safe_artifact(path.parent, CURRENT_ARTIFACTS[role])
+            if manifest['primary_reference_id'] not in manifest['eligible_representation_ids']:
+                raise ValueError('Current Graph02 primary representation missing')
+            coverage = manifest['coverage']
+            if (coverage['n_total'] != manifest['n_patients'] or coverage['n_covered_R0'] != manifest['n_covered']
+                    or coverage['n_covered_R0'] + coverage['n_uncovered_R0'] != coverage['n_total']):
+                raise ValueError('Current Graph02 coverage denominator mismatch')
+        return manifest, path
     required={'schema_version','finalized','run_id','git_commit','study_mode','feature_policy','data_sha256',
               'pharma_profile_sha256','config_sha256','features_sha256','baseline_definition_id','n_patients',
               'n_features','n_covered','method_list','primary_reference_id','eligible_representation_ids',
               'release_status','created_at_utc','relative_paths','sha256_by_artifact','source_inputs','random_seed'}
-    if not isinstance(manifest,dict) or required-set(manifest):
+    if required-set(manifest):
         raise ValueError('Graph02 release manifest is incomplete')
     if manifest.get('schema_version')!=SCHEMA:
         raise ValueError('Unsupported Graph02 release schema')
@@ -131,24 +152,3 @@ def validate_release(path, *, expected_sha=None):
             if item.get('shareable_export_allowed') is not False:
                 raise ValueError('Graph02 artifact export requires publication review')
     return manifest,path
-
-
-def resolve_latest(root):
-    pointer_path=Path(root)/'latest_completed_02.json'
-    if not pointer_path.is_file():
-        raise ValueError('MISSING_COMPLETED_GRAPH02_RELEASE: execute Graph02 before Graph03')
-    pointer=json.loads(pointer_path.read_text())
-    if pointer.get('schema_version')!='graph02_pointer_v1':
-        raise ValueError('Unsupported Graph02 latest pointer schema')
-    path=safe_artifact(root,pointer['manifest_path'])
-    manifest,path=validate_release(path,expected_sha=pointer['manifest_sha256'])
-    if manifest['run_id']!=pointer['run_id'] or pointer['release_status']!=manifest['release_status']:
-        raise ValueError('Latest release pointer metadata mismatch')
-    return manifest,path
-
-
-def publish_pointer(root,manifest_path):
-    manifest,path=validate_release(manifest_path)
-    write_json(Path(root)/'latest_completed_02.json',{'schema_version':'graph02_pointer_v1',
-        'run_id':manifest['run_id'],'manifest_path':path.relative_to(root).as_posix(),
-        'manifest_sha256':digest(path),'release_status':manifest['release_status'],'created_at_utc':utc_now()},atomic=True)

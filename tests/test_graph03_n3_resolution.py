@@ -418,13 +418,14 @@ def test_code_drift_reports_and_blocks_or_rejects(tmp_path):
         run(paths, tmp_path / 'rejected')
 
 
-def test_no_fit_refit_projection_or_pipeline_imports_and_cli_explains_missing_dependency():
+def test_no_fit_refit_projection_or_pipeline_imports_and_cli_explains_missing_dependency(tmp_path, monkeypatch):
     script = ROOT / 'src/studies/graph/03d_graph_n3_resolution_preflight.py'
     result = subprocess.run([PYTHON, str(script), '--help'], capture_output=True, text=True)
     assert result.returncode == 0 and '--phasec-run' in result.stdout and '--preflight-only' in result.stdout
+    monkeypatch.setenv('OBJ1_SJD_ROOT', str(tmp_path))
     result = subprocess.run([PYTHON, str(script)], capture_output=True, text=True)
     assert result.returncode != 0
-    assert 'No se encontró un run compatible' in result.stderr
+    assert 'MISSING_FROZEN_INPUT_DIRECTORY' in result.stderr
     assert 'Traceback' not in result.stderr
     for path in [script, Path(D.__file__), ROOT / 'src/studies/graph/stage03/s03_n3_resolution_support.py']:
         code = path.read_text()
