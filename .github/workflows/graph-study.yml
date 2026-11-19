@@ -27,7 +27,7 @@ jobs:
           tests/test_graph03_n3_phasec_adjudication.py tests/test_graph03_n3_resolution.py
           tests/test_graph03_run_resolution.py tests/test_graph03_n3_candidate_audit.py
           tests/test_graph03_n3_incremental.py
-          tests/test_graph03_n3_controlled.py
+          tests/test_graph03_n3_controlled.py tests/test_graph03_n3_exploratory.py
           tests/test_graph03_n3_measurement_source.py tests/test_graph03_n3_calendar_day.py
           tests/test_graph_representation_sensitivity.py tests/test_graph_bootstrap_qc.py
           tests/test_graph_feature_catalog.py tests/test_graph_lab_contract_v2.py

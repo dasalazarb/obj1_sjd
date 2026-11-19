@@ -44,6 +44,18 @@ fecha. Un manifiesto anclado tiene este esquema (rutas relativas a ese JSON):
 Se configura su ruta en `paths.source_manifest` del pipeline. La selección de
 fuentes no cambia los contratos Pharma00 ni las compuertas de serología as-of.
 
+## Graph03 N3 exploratorio en Biowulf
+
+```bash
+/usr/local/Anaconda/envs/py3.10/bin/python /data/salazarda/data/obj1_sjd/src/studies/graph/03e_graph_n3_controlled_inference.py
+```
+
+El release privado queda en `../graph03_n3_private/exploratory/runs/`.
+`../graph03_n3_private/exploratory/latest.json` identifica el release verificado.
+Empieza por `RESULTADOS_N3.md` para ver la cobertura, los perfiles basales y por
+ventana, las asociaciones exploratorias estimables y los motivos de exclusión.
+El protocolo está versionado en [n3_exploratory_defaults.yaml](configs/n3_exploratory_defaults.yaml).
+
 ## Qué ejecuta Graph02
 
 * S0–S4 conservan las funciones históricas de selección, escalado y PCA. S3 y S4
