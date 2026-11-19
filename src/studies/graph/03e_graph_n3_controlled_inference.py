@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""New restricted, human-approved Graph03 N3 analysis; never refits Mapper."""
+"""Private Graph03 N3 exploration by default, with explicit flags for controlled inference."""
 import argparse
 from datetime import datetime, timezone
 import json
@@ -16,10 +16,6 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.studies.graph.stage03.s03_n3_controlled import input_pins, run_controlled
-from src.studies.graph.stage03.s03_n3_decisions import decision_templates
-from src.studies.graph.stage03.s03_n3_phasec_adjudication import CANDIDATES
-from src.studies.graph.stage03.s03_n3_resolution import _check_overlap
 from src.studies.graph.stage03.s03_run_resolution import (
     graph_paths, resolve_graph03_dependencies,
 )
@@ -173,6 +169,11 @@ def main(argv=None):
         from src.studies.graph.stage03.s03_n3_exploratory import run_exploratory_auto
         print(json.dumps(run_exploratory_auto(ROOT), sort_keys=True))
         return
+
+    from src.studies.graph.stage03.s03_n3_controlled import input_pins, run_controlled
+    from src.studies.graph.stage03.s03_n3_decisions import decision_templates
+    from src.studies.graph.stage03.s03_n3_phasec_adjudication import CANDIDATES
+    from src.studies.graph.stage03.s03_n3_resolution import _check_overlap
 
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ['graph03-run', 'graph02-release', 'context', 'measurements', 'plan', 'output-dir']:

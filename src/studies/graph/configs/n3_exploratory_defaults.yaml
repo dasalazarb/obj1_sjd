@@ -1,0 +1,87 @@
+schema_version: graph03_n3_exploratory_v1
+mode: exploratory_only
+one_command: true
+require_signatures: false
+require_approval_documents: false
+refit_mapper: false
+privacy_class: INTERNAL_RESTRICTED
+public_export: false
+minimum_disclosure_cell: 5
+representations: [R0, R1, R2, R3, R4]
+primary_representation: R0
+interpretation:
+  R2: exploratory_topology
+  R1_R3_R4: representation_sensitivity
+  R0: primary_descriptive_and_eligible_inference
+sources:
+  discover_via_existing_n3_auto: true
+  protect_frozen_inputs: true
+time:
+  anchor: frozen_graph02_clinical_baseline_date
+  unit: calendar_day
+  prebaseline_primary: {min_day_difference: 1, max_day_difference: 365}
+  same_day: {day_difference: 0, purpose: contemporaneous_descriptive_only}
+  followup_early: {min_day_after_baseline: 1, max_day_after_baseline: 365, purpose: descriptive_followup}
+  followup_late: {min_day_after_baseline: 366, purpose: descriptive_followup}
+  earlier_than_prebaseline: {min_day_difference: 366, purpose: window_excluded_coverage_only}
+  unresolvable_date: {purpose: unattributed_source_inventory_only}
+  intraday_ordering: never_inferred
+identity:
+  analytic_unit: patient
+  allow_unique_patient_link_without_episode: true
+  unresolved_patient: exclude_from_patient_level_statistics
+  preserve_original_episode_and_linkage_status: true
+  fabricate_episode_id: false
+measurements:
+  outcomes:
+    - lab__ana_status__text
+    - lab__ana_hep2_status__text
+    - lab__rheumatoid_factor__value
+    - lab__rheumatoid_factor__text
+    - lab__urine_protein_qualitative__text
+  main_window: prebaseline_primary
+  original_provenance_primary: true
+  eda_day_only_sensitivity: true
+  selection: latest_unambiguous_day_per_patient_outcome_and_stratum
+  require_comparable_original_test_definition: true
+  allow_numeric_unit_pooling_without_explicit_conversion: false
+  assume_unknown_qualitative_codes_are_negative: false
+models:
+  main: [A, B]
+  A: [age_at_baseline, sex, baseline_era_5y]
+  B: [age_at_baseline, sex, baseline_era_5y, frozen_community]
+  protocol_covariate: not_used_without_verified_semantics
+  numeric_family: gaussian_ols_hc3
+  binary_family: binomial_logit_hc3
+  minimum_complete_cases: 30
+  minimum_patients_per_group: 8
+  minimum_groups: 2
+  minimum_binary_events_per_group: 5
+  minimum_binary_nonevents_per_group: 5
+  minimum_events_per_parameter: 5
+  minimum_residual_degrees_of_freedom: 10
+  inference_only_if_independent_and_supported: true
+  fdr: BH_0.05_across_all_exploratory_estimable_tests
+  rf_duplicate_encodings: one_primary_test_per_representation
+  rf_primary_encoding: numeric_if_estimable_else_qualitative
+  selection_or_assay_posthoc: report_as_exploratory
+reporting:
+  always_publish_nonempty_frozen_descriptive_summary: true
+  always_publish_cohort_flow: true
+  always_publish_time_stratum_tables: true
+  always_publish_independence_audit: true
+  always_publish_reasons_for_nonestimation: true
+  save_latest_pointer: true
+# Exact source encodings. Spaces, hyphens and underscores may separate words.
+qualitative_crosswalk:
+  positive: [positive, detected]
+  negative: [negative, not detected]
+# A specimen field requires an explicitly carried original collection semantic.
+specimen_collection_origins: [Collected Date Time, BTRIS_COLLECTED_DATE_TIME]
+# Source-level relationships supplement the frozen registry and Phase A edges.
+clinical_proxy_prefixes:
+  lab__ana_status__text: [lab__ana_, lab__ana__]
+  lab__ana_hep2_status__text: [lab__ana_, lab__ana__]
+  lab__urine_protein_qualitative__text: [lab__urine_protein__, lab__urine_protein_, essdai__renal]
+# Admitted quantitative RF units. Values from different original units stay separate.
+rf_numeric_units: [IU/mL, U/mL, IU/L, U/L, kIU/L, mg/L, mg/dL, g/L, AU/mL, RU/mL, units/mL, '[IU]/mL']
