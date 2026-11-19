@@ -37,10 +37,10 @@ def synthetic():
     return raw,registry,baseline,config,policy,families
 
 
-def test_zero_argument_defaults_include_all_six_variants_and_hashes():
+def test_zero_argument_defaults_keep_variants_and_resampling_budgets():
     cfg=load_pipeline(); policy=cfg['missingness_methods']
     assert policy['enabled'] and policy['references']==['R0','R2']
-    assert 'missingness_methods' in cfg['_hashes']
+    assert 'manifest_with_hashes' not in cfg['reporting']
     assert policy['resampling']['main_subsampling_replicates_per_variant']==60
     assert policy['resampling']['iterative_bootstrap_replicates']==20
     assert cfg['experiments']['final_subsampling_replicates']==200
