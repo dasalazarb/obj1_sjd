@@ -1,8 +1,6 @@
 study_name: graph_representation_sensitivity
 contract_version: clinical_episode_curated_v2
 input_governance:
-  required_pharma_profile_contract: pharma_lab_profile_v2
-  required_feature_contract: graph_features_v1
   exploratory_clinical_release_required: false
   clinical_release_review_required: true
   nonempty_lab_required_unless_explicit_sensitivity: true

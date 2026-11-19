@@ -25,7 +25,7 @@ from .s02_reporting import diagnostic_figures, results_summary, privacy_inventor
 def prepare_inputs(cfg):
     sources=resolve_sources(cfg)
     master,candidates,contract=legacy.CANON.load_real_inputs(sources['integrated'],sources['pharma_candidates'],
-        cfg['analysis']['mode'],resolve_profile=False)
+        cfg['analysis']['mode'])
     baseline=legacy.CANON.select_baseline(master)
     if baseline.patient_id.isna().any(): raise ValueError('Missing baseline patient IDs')
     baseline['patient_id']=baseline.patient_id.astype(str)

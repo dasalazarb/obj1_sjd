@@ -8,8 +8,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from datetime import datetime, timezone
-from uuid import uuid4
 
 import numpy as np
 import pandas as pd
@@ -29,10 +27,6 @@ OUTCOMES = {"pop__status", "essdai__total", "esspri__total"}
 RESERVED_COMPONENTS = {"esspri__dryness", "esspri__fatigue", "esspri__pain"}
 CONTEXT_SUFFIXES = ("__unit", "__reference_status", "__measurement_date", "__days_from_anchor",
                     "__n_measurements", "__conflict", "__selection_status", "__episode_status")
-
-
-def new_run_id() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + "_" + uuid4().hex[:8]
 
 
 def file_hash(path) -> str:
