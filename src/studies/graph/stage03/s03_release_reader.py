@@ -48,6 +48,8 @@ def read_release(cfg,path=None):
     if membership.duplicated(['patient_id','representation_id','community_id']).any():
         raise ValueError('Duplicate frozen patient-community rows')
     ids=set(baseline.patient_id)
+    if membership.patient_id.isna().any() or not set(membership.patient_id) <= ids:
+        raise ValueError('Frozen membership patient IDs differ from baseline')
     for identifier in manifest['eligible_representation_ids']:
         part=membership.loc[membership.representation_id.eq(identifier)]
         if set(part.patient_id)!=ids: raise ValueError('Frozen membership patient IDs differ from baseline')

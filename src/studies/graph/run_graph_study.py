@@ -18,6 +18,12 @@ def run(cfg, *, root=None, preflight_only=False):
     from src.studies.graph.stage03.s03_pipeline import run as run03
 
     root = Path(root).resolve() if root else output_root(cfg, 'study')
+    graph02_root, graph03_root = (output_root(cfg, key) for key in ('02', '03'))
+    n3_root = graph03_root.parent / '03_graph_n3_controlled_inference'
+    if any(root.is_relative_to(stage) or stage.is_relative_to(root)
+           for stage in (graph02_root, graph03_root, n3_root)):
+        raise ValueError('Study summary directory overlaps a Graph stage')
+
     def owned(_, name):
         return name.startswith('graph_study_')
 
