@@ -65,7 +65,7 @@ def _independence(rep, source, roles, features, registry, dependencies, validati
     if missing:
         return audit(UNRESOLVED, 'DEFINING_SOURCE_REGISTRY_LINEAGE_MISSING', missing)
     if not role:
-        return audit(UNRESOLVED, 'FROZEN_PHASE_A_OUTCOME_ROLE_UNAVAILABLE')
+        return audit(UNRESOLVED, 'OUTCOME_ROLE_UNAVAILABLE')
     return audit(INDEPENDENT, 'FROZEN_FEATURE_REGISTRY_ROLE_AND_PROXY_CHECKS')
 
 
@@ -81,7 +81,6 @@ def _adjustment(frame):
 def _model_support(frame, numeric, policy, cell):
     observed = frame.value.notna()
     covariates = _adjustment(frame)
-    covariates = covariates.loc[:, covariates.loc[observed].nunique().gt(1)]
     complete = observed & covariates.notna().all(axis=1)
     counts = frame.loc[complete, 'community_id'].value_counts()
     keep = counts.index[counts.ge(policy['minimum_patients_per_group'])]

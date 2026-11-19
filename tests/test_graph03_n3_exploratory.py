@@ -1,6 +1,8 @@
 """Exercise the zero-argument exploratory route on synthetic frozen releases."""
 
 import json
+from shutil import copyfile
+import yaml
 from pathlib import Path
 import subprocess
 import sys
@@ -10,19 +12,57 @@ import pandas as pd
 import pytest
 
 from src.studies.graph._pipeline import digest
+from src.studies.graph.stage02.s02_contracts import CURRENT_ARTIFACTS
+from src.studies.graph.stage03.s03_construct_validation import feature_roles
+from src.studies.graph.stage03.s03_run_resolution import graph_paths
+from tests.graph_contract_fixtures import install_current_graph02
 from src.studies.graph.stage03 import s03_n3_exploratory as E
 from src.studies.graph.stage03 import s03_n3_exploratory_models as M
 from src.studies.graph.stage03 import s03_n3_exploratory_reporting as R
 from src.studies.graph.stage03 import s03_n3_exploratory_source as S
 from tests.test_graph03_n3_auto import automatic
 from tests.test_graph03_n3_calendar_day import calendar_originals, write_btris
-from tests.test_graph03_n3_measurement_source import ANA, HEP2, RF, RF_TEXT, ROOT, originals, paths_before
+from tests.test_graph03_n3_measurement_source import ANA, HEP2, RF, RF_TEXT, ROOT, originals
 
 POLICY = E._policy(ROOT)
 CELL = POLICY['minimum_disclosure_cell']
 NO_MODELS = 'COMPLETE_DESCRIPTIVE_NO_ESTIMABLE_MODELS'
 URINE = 'lab__urine_protein_qualitative__text'
 
+
+
+@pytest.fixture
+def current(automatic):
+    repo, sources, private, _ = automatic
+    paths = dict(sources)
+    config = yaml.safe_load((repo / E.CONFIGS / 'n3_auto.yaml').read_text())
+    folders = graph_paths(repo, data_root=config['data_root'])
+    paths['graph02_release'] = install_current_graph02(sources['graph02_release'], folders['graph02'])
+    paths['baseline'] = folders['graph02'] / CURRENT_ARTIFACTS['baseline_raw']
+    paths['graph03_run'] = folders['graph03']
+    for source in sources['graph03_run'].iterdir():
+        copyfile(source, folders['graph03'] / source.name)
+    update_graph03(repo, paths)
+    return repo, paths, private, folders['phasee']
+
+
+def update_graph03(repo, paths):
+    directory = paths['graph03_run']
+    loaded = E._load_graph02(paths['graph02_release'].parent)
+    validation = yaml.safe_load((repo / E.CONFIGS / E.VALIDATION).read_text())
+    frozen = loaded['frozen']
+    reps = loaded['manifest']['eligible_representation_ids']
+    roles = feature_roles(frozen['feature_sets'], frozen['baseline_raw'], validation, reps, loaded['registry'])
+    roles.to_csv(directory / '03_graph_clinical_feature_roles.csv', index=False)
+    (directory / '03_graph_results_summary.json').write_text(json.dumps(dict(
+        schema_version='graph03_current_v1', execution_status='COMPLETE', n_patients=len(frozen['baseline_raw']))))
+    (directory / '03_graph_release_input_qc.json').write_text(json.dumps(dict(
+        status='PASS', eligible_representation_ids=reps)))
+
+
+def paths_before(paths):
+    return {path: digest(path) for directory in (paths['graph02_release'].parent, paths['graph03_run'])
+            for path in directory.iterdir() if path.is_file()}
 
 def command(repo):
     script = repo / 'src/studies/graph/03e_graph_n3_controlled_inference.py'
@@ -32,24 +72,13 @@ def command(repo):
     return json.loads(run.stdout)
 
 
-def inspect_release(result, private):
+def inspect_release(result, expected):
     output = Path(result['output_dir'])
-    assert output.parent == private / 'exploratory' / 'runs'
+    assert output == expected
     assert output.stat().st_mode & 0o777 == 0o700
-    assert (output / 'figures').stat().st_mode & 0o777 == 0o700
-    assert all(f.stat().st_mode & 0o777 == 0o600 for f in output.rglob('*') if f.is_file())
-    manifest = json.loads((output / 'results_manifest.json').read_text())
-    for name, sha in manifest['sha256_by_artifact'].items():
-        assert digest(output / name) == sha
-    assert set(manifest['sha256_by_artifact']) == {
-        path.relative_to(output).as_posix() for path in output.rglob('*') if path.is_file()
-    } - {'receipt.json', 'results_manifest.json'}
-    latest = private / 'exploratory' / 'latest.json'
-    if result['status'] != 'INPUTS_UNUSABLE':
-        assert latest.stat().st_mode & 0o777 == 0o600
-        assert json.loads(latest.read_text()) == {
-            'run_id': output.name, 'relative_path': 'runs/' + output.name,
-            'results_manifest_sha256': digest(output / 'results_manifest.json')}
+    assert all(f.stat().st_mode & 0o777 == 0o600 for f in output.iterdir())
+    assert all(f.is_file() and f.name.startswith(('03e_', '03f_')) for f in output.iterdir())
+    assert 'run_id' not in json.loads((output / '03e_summary.json').read_text())
     for path in output.glob('*.csv'):
         contents = path.read_text()
         assert not any(secret in contents for secret in (
@@ -61,8 +90,8 @@ def rep_outcome(frame, rep, outcome):
     return frame.loc[frame.representation_id.eq(rep) & frame.outcome.eq(outcome)]
 
 
-def test_zero_arguments_builds_private_aggregates_and_never_uses_the_guard(automatic):
-    repo, paths, private, _ = automatic
+def test_zero_arguments_builds_private_aggregates_and_never_uses_the_guard(current):
+    repo, paths, private, expected = current
     eda = pd.read_parquet(paths['eda_long']).assign(unit='IU/mL')
     eda.to_parquet(paths['eda_long'], index=False)
     auto_module = repo / 'src/studies/graph/stage03/s03_n3_auto.py'
@@ -79,15 +108,15 @@ def test_zero_arguments_builds_private_aggregates_and_never_uses_the_guard(autom
     assert not result['data_issues']
     assert command(repo) == result
     assert (paths_before(paths), digest(paths['step10'])) == before
-    output = inspect_release(result, private)
-    profiles = pd.read_csv(output / 'community_profiles.csv')
+    output = inspect_release(result, expected)
+    profiles = pd.read_csv(output / '03e_community_profiles.csv')
     rf = profiles.loc[(profiles.outcome == RF) & profiles.n_measured.gt(0)]
     assert len(rf) == 4 and rf['median'].notna().all()
     assert rf.loc[rf.representation_id.eq('R2'), 'topology_status'].eq('R2_EXPLORATORY_UNSTABLE').all()
     assert rf.provenance.eq(S.ORIGINAL).all()
-    evidence = pd.read_csv(output / 'source_linkage_audit.csv')
+    evidence = pd.read_csv(output / '03e_source_linkage_audit.csv')
     assert evidence.loc[evidence.dimension.eq('date_evidence') & evidence.outcome.eq(RF), 'category'].dropna().eq('RAW_AND_EDA_AGREE').all()
-    models = pd.read_csv(output / 'models.csv')
+    models = pd.read_csv(output / '03e_models.csv')
     assert rep_outcome(models, 'R0', RF).status.item() == M.UNRESOLVED
     assert models.p_incremental.isna().all()
     assert 'Resultados exploratorios de Graph03 N3' in Path(result['report']).read_text()
@@ -95,36 +124,37 @@ def test_zero_arguments_builds_private_aggregates_and_never_uses_the_guard(autom
     with auto_module.open('a') as handle:
         handle.write('\n# Synthetic implementation change.\n')
     updated = command(repo)
-    assert updated['output_dir'] != result['output_dir']
-    assert inspect_release(updated, private).is_dir()
+    assert updated == result
+    assert inspect_release(updated, expected).is_dir()
     eda.to_parquet(paths['eda_long'], index=False, compression='gzip')
-    assert command(repo)['output_dir'] != updated['output_dir']
+    assert command(repo) == updated
 
 
 @pytest.mark.parametrize('tamper', ['graph03', 'baseline', 'membership'])
-def test_missing_or_tampered_inputs_preserve_only_verifiable_results(automatic, tamper):
-    repo, paths, private, _ = automatic
+def test_missing_or_tampered_inputs_preserve_only_verifiable_results(current, tamper):
+    repo, paths, private, expected = current
     paths['eda_long'].unlink()
-    (paths['graph03_run'] / '03_graph_n3_results_summary.md').write_text('tampered')
+    (paths['graph03_run'] / '03_graph_results_summary.json').unlink()
     if tamper == 'baseline':
         paths['baseline'].write_text('tampered')
     if tamper == 'membership':
-        release = json.loads(paths['graph02_release'].read_text())
-        (paths['graph02_release'].parent / release['relative_paths']['membership']).write_text('tampered')
+        (paths['graph02_release'].parent / CURRENT_ARTIFACTS['membership']).write_text('tampered')
     result = command(repo)
     assert result['status'] == ('INPUTS_UNUSABLE' if tamper == 'baseline' else 'PARTIAL_WITH_DATA_ISSUES'), result
     assert result['n_outcomes_with_data'] == 0
-    assert {'eda_long', 'compatible_graph02_graph03_releases'} <= {item['artifact'] for item in result['data_issues']}
+    issues = {item['artifact'] for item in result['data_issues']}
+    expected_issue = {'graph03': 'graph03_characterization', 'baseline': 'graph02_baseline',
+                      'membership': 'frozen_membership_or_features'}[tamper]
+    assert expected_issue in issues
     assert pd.read_csv(result['models']).p_incremental.isna().all()
-    output = inspect_release(result, private)
-    baseline = pd.read_csv(output / 'frozen_baseline_profiles.csv')
+    output = inspect_release(result, expected)
+    baseline = pd.read_csv(output / '03e_frozen_baseline_profiles.csv')
     assert baseline.empty == (tamper == 'baseline')
     if tamper == 'membership':
-        assert 'ONLY_BASELINE_AND_RELEASE_QC_VERIFIED' in {issue.get('reason') for issue in result['data_issues']}
         assert not baseline.n_hard.notna().any()
     if tamper != 'baseline':
         assert baseline.n_total.max() == 100
-        assert 'baseline_congelado.png' in {Path(path).name for path in result['figures']}
+        assert '03e_baseline_congelado.png' in {Path(path).name for path in result['figures']}
 
 
 def test_date_window_source_identity_duplicates_and_definitions(calendar_originals):
@@ -248,9 +278,8 @@ def test_continuous_binary_support_rank_and_separation():
     assert prepared is None and 'RANK_DEFICIENT_DESIGN' in info['reason']
 
 
-def bind_lineage(paths):
-    release = json.loads(paths['graph02_release'].read_text())
-    registry, features = [release['relative_paths'][key] for key in ('clinical_registry', 'feature_sets')]
+def bind_lineage(repo, paths):
+    registry, features = (CURRENT_ARTIFACTS[key] for key in ('clinical_registry', 'feature_sets'))
     directory = paths['graph02_release'].parent
     columns = [RF, RF_TEXT, ANA, HEP2, 'pro__sf36_pcs']
     pd.DataFrame({'source_column': columns, 'semantic_feature_id': [
@@ -260,24 +289,11 @@ def bind_lineage(paths):
     sets.loc[sets.representation_id.eq('R2'), 'source_column'] = RF_TEXT
     sets['feature'] = sets.source_column + '__encoded'
     sets.to_csv(directory / features, index=False)
-    for filename in (registry, features):
-        release['sha256_by_artifact'][filename] = digest(directory / filename)
-    release['features_sha256'] = digest(directory / features)
-    release['source_inputs']['integrated'] = {'sha256': digest(paths['step10'])}
-    paths['graph02_release'].write_text(json.dumps(release))
-    graph03 = paths['graph03_run']
-    for path in graph03.glob('*.json'):
-        document = json.loads(path.read_text())
-        document['graph02_release_sha256'] = digest(paths['graph02_release'])
-        path.write_text(json.dumps(document))
-    summary = graph03 / '03_graph_results_summary.json'
-    content = json.loads(summary.read_text())
-    content['sha256_by_artifact'] = {path.name: digest(path) for path in graph03.iterdir() if path != summary}
-    summary.write_text(json.dumps(content))
+    update_graph03(repo, paths)
 
 
-def test_end_to_end_ols_logit_rf_lineage_and_distinct_temporal_sensitivity(automatic):
-    repo, paths, private, _ = automatic
+def test_end_to_end_ols_logit_rf_lineage_and_distinct_temporal_sensitivity(current):
+    repo, paths, private, expected = current
     eda = pd.read_parquet(paths['eda_long']).assign(unit='IU/mL')
     eda['result_text'] = np.where((eda.index % 3) == 0, 'positive', 'negative')
     ana = eda.assign(canonical_analyte=E.LAB_SOURCES[ANA], unit=None,
@@ -289,12 +305,12 @@ def test_end_to_end_ols_logit_rf_lineage_and_distinct_temporal_sensitivity(autom
     lower_rf = eda.assign(lab_date='2019-12-30', order_identifier=eda.order_identifier + '_EDA',
                           result_numeric_exact=2., result_raw='2')
     pd.concat([original, lower_date_provenance, lower_rf], ignore_index=True).to_parquet(paths['eda_long'], index=False)
-    bind_lineage(paths)
+    bind_lineage(repo, paths)
     before = paths_before(paths), digest(paths['step10'])
     result = command(repo)
     assert result['status'] == 'COMPLETE_WITH_EXPLORATORY_MODELS', result
     assert result['n_model_pairs_estimable'] >= 2
-    output = inspect_release(result, private)
+    output = inspect_release(result, expected)
     rows = pd.read_csv(result['models'])
     assert rep_outcome(rows, 'R0', RF).family.item() == 'gaussian_ols_hc3'
     assert rep_outcome(rows, 'R0', RF).status.item() == M.ESTIMATED
@@ -304,24 +320,24 @@ def test_end_to_end_ols_logit_rf_lineage_and_distinct_temporal_sensitivity(autom
     assert rep_outcome(rows, 'R0', ANA).family.item() == 'binomial_logit_hc3'
     assert rep_outcome(rows, 'R0', ANA).status.item() == M.ESTIMATED
     assert rep_outcome(rows, 'R0', URINE).status.item() == M.UNRESOLVED
-    dates = pd.read_csv(output / 'sensitivity_models.csv')
+    dates = pd.read_csv(output / '03e_sensitivity_models.csv')
     assert rep_outcome(dates, 'R0', ANA).status.item() == M.ESTIMATED
     assert dates.provenance.eq(S.EDA_ONLY).all()
     assert rep_outcome(dates, 'R0', RF).not_estimable_reason.str.contains('DEGENERATE_OUTCOME').item()
     assert rep_outcome(dates, 'R0', RF_TEXT).status.item() == M.ESTIMATED
-    links = pd.read_csv(output / 'linkage_sensitivity_models.csv')
+    links = pd.read_csv(output / '03e_linkage_sensitivity_models.csv')
     assert rep_outcome(links, 'R0', RF).status.item() == M.ESTIMATED
     tested = pd.concat([rows, dates, links]).loc[lambda frame: frame.status.eq(M.ESTIMATED)]
     assert tested.fdr_test_count.eq(len(tested)).all()
     assert tested.q_bh.between(0, 1).all()
     assert (paths_before(paths), digest(paths['step10'])) == before
-    profiles = pd.read_csv(output / 'community_profiles.csv')
+    profiles = pd.read_csv(output / '03e_community_profiles.csv')
     assert rep_outcome(profiles, 'R0', RF_TEXT).n_measured.gt(0).any()
 
 
 @pytest.mark.parametrize('empty', [False, True])
-def test_no_prebaseline_publishes_real_frozen_descriptives_and_followup(automatic, empty):
-    repo, paths, private, _ = automatic
+def test_no_prebaseline_publishes_real_frozen_descriptives_and_followup(current, empty):
+    repo, paths, private, expected = current
     eda = pd.read_parquet(paths['eda_long']).assign(unit='IU/mL')
     if empty:
         eda = eda.iloc[:0]
@@ -332,12 +348,30 @@ def test_no_prebaseline_publishes_real_frozen_descriptives_and_followup(automati
     eda.to_parquet(paths['eda_long'], index=False)
     result = command(repo)
     assert result['status'] == NO_MODELS, result
-    output = inspect_release(result, private)
-    frozen = pd.read_csv(output / 'frozen_baseline_profiles.csv')
+    output = inspect_release(result, expected)
+    frozen = pd.read_csv(output / '03e_frozen_baseline_profiles.csv')
     assert frozen.n_total.max() == 100 and frozen['median'].notna().any()
-    assert (output / 'figures' / 'baseline_congelado.png').stat().st_size > 1000
-    assert not pd.read_csv(output / 'cohort_flow.csv').empty
-    coverage = rep_outcome(pd.read_csv(output / 'coverage.csv'), 'R0', RF)
+    assert (output / '03e_baseline_congelado.png').stat().st_size > 1000
+    assert not pd.read_csv(output / '03e_cohort_flow.csv').empty
+    coverage = rep_outcome(pd.read_csv(output / '03e_coverage.csv'), 'R0', RF)
     assert coverage.loc[coverage.stratum.eq(S.PRE), 'n_measured'].eq(0).all()
-    followup = pd.read_csv(output / 'followup_profiles.csv')
+    followup = pd.read_csv(output / '03e_followup_profiles.csv')
     assert followup.n_measured.gt(0).any() != empty
+
+
+def test_03f_current_audit_is_repeatable_and_preserves_03e(current):
+    repo, _, _, expected = current
+    exploration = command(repo)
+    summary = Path(exploration['summary'])
+    previous = summary.read_bytes()
+    script = repo / 'src/studies/graph/03f_build_n3_measurement_source.py'
+    for _ in range(2):
+        proc = subprocess.run([sys.executable, str(script)], cwd=repo.parent, check=True,
+                              capture_output=True, text=True)
+        result = json.loads(proc.stdout)
+        assert Path(result['output_dir']) == expected
+        assert result['status'] == 'AUDITED'
+        assert summary.read_bytes() == previous
+        inspect_release(exploration, expected)
+    assert {path.name for path in expected.glob('03f_*')} == {
+        '03f_source_linkage_audit.csv', '03f_summary.json'}

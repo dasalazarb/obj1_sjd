@@ -991,7 +991,11 @@ def _run(args: argparse.Namespace) -> None:
     config = CANON.quick_config(CANON.load_config(args.config), args)
     # Validate optional claim criteria before observing results or starting work.
     interpretation_check(pd.DataFrame(columns=["scenario", "n_stable_communities"]), config=config)
+    if args.output_dir:
+        args.output_dir.mkdir(parents=True, exist_ok=False)
     dirs = CANON.run_dirs(args, "graph/02_graph_representation_sensitivity")
+    for path in dirs.values():
+        path.mkdir(parents=True, exist_ok=True)
     args._active_dirs = dirs
     mapping_error = None
     try:

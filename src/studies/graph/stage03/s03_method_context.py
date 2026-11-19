@@ -10,7 +10,7 @@ SCOPE='EXPLORATORY / conditional on frozen labels; no clinical validation'
 def method_context(inputs,qc,manifest):
     rows=[]
     registry=inputs.get('method_registry',pd.DataFrame())
-    sources={r['artifact']:r['sha256'] for r in qc['sources']}
+    sources={r['artifact']:r.get('sha256') for r in qc['sources']}
     for table,frame in inputs.items():
         if table=='audit_all_representations': continue
         for original in frame.to_dict('records'):
@@ -30,9 +30,11 @@ def method_context(inputs,qc,manifest):
                 method_reason=reason,source_table=table,graph03_defining=False,
                 mapper_or_sparse_graph='sparse_graph' if kind=='DG' else 'mapper',
                 estimator_version=qc['estimator_version'],analysis_policy=qc['analysis_policy'],
-                source_sha256=sources.get(f'02_graph_missingness_{table}.csv','UNKNOWN'),
+                source_artifact=f'02_graph_missingness_{table}.csv',
                 concordance_denominator='n_common',coverage_denominator='n_patients',stability_denominator='n_evaluable_frozen_refits',
                 interpretation='cross_algorithm_ARI_does_not_establish_method_equivalence' if kind=='DG' else 'robustness_diagnostic_not_clinical_validation')
+            if checksum := sources.get(row['source_artifact']):
+                row['source_sha256'] = checksum
             rows.append(row)
     # Missing sources remain visible per reference/method, including historical
     # releases and partially available aggregate inventories.
@@ -93,5 +95,5 @@ def representation_evidence(manifest,membership,flow,release_sha):
             n_patients=int(counts.n_baseline),n_covered=int(counts.n_mapper_covered),
             n_supported_hard=int(counts.n_supported_hard),n_stable_hard=int(counts.n_stable_hard),
             n_provisional_hard=int(counts.n_provisional_hard),limitation_reason='|'.join(reasons),
-            graph02_release_sha256=release_sha,inferential_scope=SCOPE))
+            inferential_scope=SCOPE, **({'graph02_release_sha256': release_sha} if release_sha else {})))
     return pd.DataFrame(rows)

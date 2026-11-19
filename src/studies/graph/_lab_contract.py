@@ -369,6 +369,24 @@ def validate_provenance(integrated: Path, candidates: Path, analysis_mode: str) 
             "profile_summary_hash": file_hash(summary_path)}
 
 
+def current_profile(integrated: Path, candidates: Path, analysis_mode: str) -> dict:
+    if analysis_mode == "clinical_release":
+        return validate_provenance(integrated, candidates, analysis_mode)
+    summary_path = candidates.with_name("00_pharma_profile_summary.json")
+    summary = json.loads(summary_path.read_text())
+    if summary.get("feature_contract_version") != CONTRACT_VERSION:
+        raise ValueError("STALE_FEATURE_CONTRACT: rerun Pharma 00")
+    selection = candidates.with_name("00_pharma_graph_lab_selection_audit.csv")
+    if not candidates.is_file() or not selection.is_file():
+        raise FileNotFoundError("PHARMA00_PROFILE_ARTIFACT_MISSING")
+    recorded = summary.get("input_hashes")
+    entries = recorded if isinstance(recorded, list) else []
+    input_hash = next((entry.get("sha256", "") for entry in entries
+                       if isinstance(entry, dict) and entry.get("role") == "integrated"), "")
+    return {"analysis_mode": analysis_mode, "clinical_validation": "not_established",
+            "feature_contract_version": CONTRACT_VERSION, "input_hash": input_hash}
+
+
 def enforce_lab_mode(manifest: pd.DataFrame, *, analysis_mode: str, allow_without_lab: bool = False,
                      release_path: Path | None = None, integrated_path: Path | None = None,
                      candidates_path: Path | None = None) -> dict:

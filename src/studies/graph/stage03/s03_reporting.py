@@ -3,6 +3,7 @@
 All products remain internal/restricted pending publication review. Figure CSVs
 contain exactly the aggregate data used by the panel, never individual records.
 """
+from functools import partial
 import re
 import numpy as np
 import pandas as pd
@@ -15,12 +16,12 @@ from .s03_figure_qc import (DISCLOSURE_POLICY_VERSION, WITHHELD_MESSAGE, TIERS,
 CAPTION='EXPLORATORY / conditional on frozen labels; no clinical validation'
 
 
-def save_figure(fig,folder,name,source=None):
+def save_figure(fig,folder,name,source=None, *, source_suffix=''):
     folder.mkdir(parents=True,exist_ok=True)
     fig.text(.5,-.02,CAPTION,ha='center',fontsize=8)
     if source is not None:
         if len(source.columns)==0: source=pd.DataFrame(columns=['status','reason'])
-        source.to_csv(folder/f'{name}.csv',index=False)
+        source.to_csv(folder/f'{name}{source_suffix}.csv',index=False)
     for extension in ('png','pdf'):
         fig.savefig(folder/f'{name}.{extension}',bbox_inches='tight',dpi=180)
     plt.close(fig)
@@ -44,7 +45,7 @@ def _empty(ax,message='NOT_ESTIMABLE / unavailable or small cells suppressed'):
 
 
 def figures(anchors,trajectories,pop,folder, *, flow=None,domains=None,context=None,
-            missingness=None,minimum_cell=5,primary_reference_id='R0',baseline_table=None,marker_config=None,raw_matrix=None,roles=None):
+            missingness=None,minimum_cell=5,primary_reference_id='R0',baseline_table=None,marker_config=None,raw_matrix=None,roles=None,source_suffix=''):
     flow=flow if flow is not None else pd.DataFrame()
     domains=domains if domains is not None else pd.DataFrame()
     context=context if context is not None else pd.DataFrame()
@@ -54,10 +55,10 @@ def figures(anchors,trajectories,pop,folder, *, flow=None,domains=None,context=N
     inventory=[]
     sources={}
     def emit(fig,folder,name,source):
-        save_figure(fig,folder,name,source)
+        save_figure(fig,folder,name,source,source_suffix=source_suffix)
         sources[name]=source.copy()
     def emit_copy(fig,folder,name,source):
-        save_figure_copy(fig,folder,name,source)
+        save_figure_copy(fig,folder,name,source,source_suffix=source_suffix)
         sources[name]=source.copy()
     if raw_matrix is not None:
         # One whole-source privacy view feeds every historical clinical panel.
@@ -296,10 +297,10 @@ def figures(anchors,trajectories,pop,folder, *, flow=None,domains=None,context=N
     return sources
 
 
-def save_figure_copy(fig,folder,name,source):
+def save_figure_copy(fig,folder,name,source, *, source_suffix=''):
     """Historical figure name is an alias of the first endpoint panel."""
     folder.mkdir(parents=True,exist_ok=True)
-    source.to_csv(folder/f'{name}.csv',index=False)
+    source.to_csv(folder/f'{name}{source_suffix}.csv',index=False)
     for extension in ('png','pdf'): fig.savefig(folder/f'{name}.{extension}',bbox_inches='tight',dpi=180)
 
 
@@ -321,8 +322,9 @@ def safe_characterization_panels(matrix, minimum):
     return matrix.loc[[tuple(k) not in excluded for k in matrix[['representation_id','source_column']].to_numpy()]].copy()
 
 
-def characterization_figures(matrix, roles, folder, validation, minimum_cell=5, *, provenance=None):
+def characterization_figures(matrix, roles, folder, validation, minimum_cell=5, *, provenance=None, source_suffix=''):
     """Render only the conservative view; preserve metadata for withheld panels."""
+    render = partial(save_figure, source_suffix=source_suffix) if source_suffix else save_figure
     validate_figure_policy(validation)
     panel=validation.get('clinical_marker_panels',[])
     policy=validation.get('characterization',{})
@@ -392,7 +394,7 @@ def characterization_figures(matrix, roles, folder, validation, minimum_cell=5, 
             fig.suptitle(f'{rep}'+(' — exploratory provisional' if rep=='R2' else ' — primary reference')+'\n'+titles[level],fontsize=11)
             name=f'03_graph_characterization_{level}_{rep}'
             data=pd.concat(plotted,ignore_index=True) if plotted else matrix.iloc[:0].copy()
-            save_figure(fig,folder,name,data); figure_sources[name]=data
+            render(fig,folder,name,data); figure_sources[name]=data
             inventory.append(dict(figure=name,**diagnostic))
     crosswalk=roles.loc[roles.representation_id.isin(['R0','R2']) & roles.source_column.isin(all_sources),
         ['source_column','representation_id','tier','independence_status','relationship_type','blocking_reasons']].copy()
@@ -410,7 +412,7 @@ def characterization_figures(matrix, roles, folder, validation, minimum_cell=5, 
     else: _empty(ax,'SOURCE_UNAVAILABLE / no source-role metadata')
     ax.set_title('Prespecified source roles by frozen representation\nNo patient measurements; absence is not independence')
     name='03_graph_characterization_role_crosswalk'
-    save_figure(fig,folder,name,crosswalk); figure_sources[name]=crosswalk
+    render(fig,folder,name,crosswalk); figure_sources[name]=crosswalk
     metadata=evaluate_characterization_panel(matrix,safe,roles,representation_id='R0|R2',tier='transversal',
         selected_sources=all_sources,minimum_cell=minimum_cell)
     metadata.update(status='DISPLAYED_DESCRIPTIVE' if len(crosswalk) else 'SOURCE_UNAVAILABLE',
@@ -444,7 +446,7 @@ def characterization_figures(matrix, roles, folder, validation, minimum_cell=5, 
     limitation='NO_R0_R2_DISPLAYABLE_PANELS' if not r0_r2_visible else 'Excluded from this view: '+(', '.join(sorted({'R0','R2'}-set(visible_reps))) or 'none')
     ax.set_title('Source availability — visible representations: '+(', '.join(visible_reps) or 'none')+'\n'+limitation)
     name='03_graph_characterization_availability'
-    save_figure(fig,folder,name,availability); figure_sources[name]=availability
+    render(fig,folder,name,availability); figure_sources[name]=availability
     reps='|'.join(sorted(set(matrix.representation_id) | {'R0','R2'}))
     metadata=evaluate_characterization_panel(matrix,safe,roles,representation_id=reps,tier='transversal',selected_sources=all_sources,minimum_cell=minimum_cell)
     if not availability.empty:

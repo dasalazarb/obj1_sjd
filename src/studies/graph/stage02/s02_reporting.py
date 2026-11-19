@@ -83,9 +83,9 @@ def diagnostic_figures(observation, comparisons, experiments, folder, registry, 
     inventory=[]
     def finish(fig,name):
         save_figure(fig,folder,'02_graph_'+name)
-        for ext in ('png','pdf'): inventory.append(dict(artifact='figures/02_graph_'+name+'.'+ext,status='COMPLETE',reason=''))
+        for ext in ('png','pdf'): inventory.append(dict(artifact='02_graph_'+name+'.'+ext,status='COMPLETE',reason=''))
     def unavailable(name,reason):
-        for ext in ('png','pdf'): inventory.append(dict(artifact='figures/02_graph_'+name+'.'+ext,status='NOT_ESTIMABLE',reason=reason))
+        for ext in ('png','pdf'): inventory.append(dict(artifact='02_graph_'+name+'.'+ext,status='NOT_ESTIMABLE',reason=reason))
     features=observation['features']; labels=observation['community_labels']
     domain=[c for c in features if c.startswith('clinical_domain__')]
     groups=[c for c,n in labels.value_counts().items() if n>=minimum]
@@ -173,7 +173,7 @@ def results_summary(path,results,perturbations,experiments,comparisons,registry,
         'La completitud y el soporte geométrico se describen por separado; no se reasignan pacientes ni se optimiza Mapper para aumentar cobertura. Las máscaras R0 deduplican codificaciones, por lo que sus porcentajes no equivalen al porcentaje de celdas codificadas ausentes del release histórico.',
         '## Inventario de experimentos',table(pd.DataFrame(experiments),['experiment_id','status','reason','n_patients','n_common']),
         '## Límites y Graph03',
-        'Graph03 puede consumir el contrato congelado tras validar hashes y QC; no recompone Mapper/PCA. Una comunidad estable no implica fenotipo validado, progresión temporal ni subtipo etiológico. Siguen pendientes la revisión clínica humana del mapa, temporalidad, unidades y anticircularidad. Las fuentes usadas para definir el grafo no son validadores independientes.',
+        'Graph03 puede consumir el contrato congelado tras validar los archivos y el QC; no recompone Mapper/PCA. Una comunidad estable no implica fenotipo validado, progresión temporal ni subtipo etiológico. Siguen pendientes la revisión clínica humana del mapa, temporalidad, unidades y anticircularidad. Las fuentes usadas para definir el grafo no son validadores independientes.',
         'Limitaciones: '+ '; '.join(qc['limitations']),
         'artifact_risk=false es una regla automática limitada a los controles efectivamente estimados. No establece ausencia de sesgo administrativo. Los archivos por paciente son internos/restringidos; el inventario de privacidad excluye todos los artefactos de exportación automática hasta revisión NIH.']
     path.write_text('\n\n'.join(text)+'\n')
@@ -181,8 +181,7 @@ def results_summary(path,results,perturbations,experiments,comparisons,registry,
 
 def privacy_inventory(root):
     """Deny by default: an inventory is not authorization for public export."""
-    from .._pipeline import digest
-    return [dict(artifact=p.relative_to(root).as_posix(),sha256=digest(p),classification='INTERNAL_RESTRICTED',
+    return [dict(artifact=p.relative_to(root).as_posix(),classification='INTERNAL_RESTRICTED',
         shareable_export_allowed=False,reason='NIH_publication_review_required;patient_artifacts_never_auto_exported')
         for p in sorted(root.rglob('*')) if p.is_file()]
 
@@ -190,15 +189,15 @@ def privacy_inventory(root):
 def missingness_method_figures(root,spaces,tables,minimum_cell,reference_results=None):
     """Aggregate-only figure sources; every PNG/PDF has a colocated source CSV."""
     from .._pipeline import save_table
-    folder=root/'figures'; folder.mkdir(exist_ok=True)
+    folder=root
     artifacts=[]
     registry=pd.DataFrame(tables['method_registry'])
     def finish(fig,name,source,denominator):
         stem='02_graph_missingness_'+name
         fig.text(.5,-.05,denominator+'; NOT_ESTIMABLE = insufficient support. R2 is exploratory.',ha='center',fontsize=8)
-        save_table(folder/(stem+'.csv'),source)
+        save_table(folder/(stem+'_source.csv'),source)
         save_figure(fig,folder,stem)
-        artifacts.extend('figures/'+stem+'.'+ext for ext in ['csv','png','pdf'])
+        artifacts.extend([stem+'_source.csv', stem+'.png', stem+'.pdf'])
     for reference in ['R0','R2']:
         entries=registry.loc[registry.reference_id.eq(reference)&~registry.experiment_id.str.contains('/')]
         fig,axes=plt.subplots(1,4,figsize=(16,4)); source=[]
@@ -284,7 +283,7 @@ def missingness_method_figures(root,spaces,tables,minimum_cell,reference_results
 def focal_fix_figures(root,tables,minimum_cell):
     """Only pooled supported estimates enter figure CSVs; no patient/edge output."""
     from .._pipeline import save_table
-    artifacts=[]; folder=root/'figures'; folder.mkdir(exist_ok=True)
+    artifacts=[]; folder=root
     specifications=[('imputation_diagnostics','imputation_by_type'),
         ('sparse_graph_connectivity','sparse_graph_support_summary'),('focal_comparison','method_registry')]
     for name,table in specifications:
@@ -330,7 +329,7 @@ def focal_fix_figures(root,tables,minimum_cell):
         ax.set_ylabel('Per-type error / accuracy' if name=='imputation_diagnostics' else 'Fraction of reference patients')
         fig.text(.5,.015,f'Support ≥ {minimum_cell}; disjoint train/test for imputation. DG is not Mapper. No clinical validation.',ha='center',fontsize=8)
         stem='02_graph_missingness_'+name
-        save_table(folder/(stem+'.csv'),source or [dict(status='NOT_ESTIMABLE',reason='NO_PUBLISHABLE_ESTIMATE')])
+        save_table(folder/(stem+'_source.csv'),source or [dict(status='NOT_ESTIMABLE',reason='NO_PUBLISHABLE_ESTIMATE')])
         save_figure(fig,folder,stem)
-        artifacts.extend('figures/'+stem+'.'+ext for ext in ['csv','png','pdf'])
+        artifacts.extend([stem+'_source.csv', stem+'.png', stem+'.pdf'])
     return artifacts

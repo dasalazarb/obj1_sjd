@@ -1,12 +1,14 @@
-"""Configuration, immutable run directories, and artifact utilities (no modeling)."""
+"""Configuration, current study outputs, and artifact utilities (no modeling)."""
 from __future__ import annotations
 import argparse
+from contextlib import contextmanager, ExitStack
+import fcntl
+from tempfile import TemporaryDirectory
 from datetime import datetime, timezone
 import hashlib
 import json
 import os
 from pathlib import Path
-import platform
 import re
 import subprocess
 from uuid import uuid4
@@ -50,7 +52,6 @@ def load_pipeline(path=DEFAULT_CONFIG):
         p = config_path(path, value)
         cfg[name] = read_yaml(p)
         hashes[name] = digest(p)
-    cfg['_hashes'] = hashes
     cfg['_config_sha256'] = hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdigest()
     if cfg['analysis']['mode'] not in {'exploratory', 'clinical_release'}:
         raise ValueError('Unknown analysis mode')
@@ -98,28 +99,9 @@ def utc_now():
     return datetime.now(timezone.utc).isoformat()
 
 
-def new_run(output_root, run_id=None):
-    run_id = run_id or datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ') + '_' + uuid4().hex[:8]
-    if not re.fullmatch(r'[A-Za-z0-9_-]+', run_id):
-        raise ValueError('Invalid run ID')
-    path = Path(output_root) / 'runs' / run_id
-    path.mkdir(parents=True, exist_ok=False)
-    (path / 'figures').mkdir()
-    (path / 'logs').mkdir()
-    return path
-
-
 def output_root(cfg, stage):
     key = f'output_{stage}'
     return config_path(cfg['_path'], cfg['paths'][key])
-
-
-def version_info():
-    import importlib.metadata
-    result = {'python': platform.python_version()}
-    for package in ('numpy','pandas','scipy','scikit-learn','networkx','kmapper','statsmodels','matplotlib','PyYAML'):
-        result[package] = importlib.metadata.version(package)
-    return result
 
 
 def git_commit():
@@ -136,16 +118,99 @@ def save_table(path, rows, columns=None):
     return frame
 
 
-def artifact_inventory(root):
-    return {p.relative_to(root).as_posix(): digest(p) for p in sorted(Path(root).rglob('*'))
-            if p.is_file() and p.name not in {'02_graph_release_manifest.json', '03_graph_results_summary.json'}}
-
-
 def base_parser(description):
     p = argparse.ArgumentParser(description=description)
     p.add_argument('--pipeline-config', type=Path, default=DEFAULT_CONFIG)
-    p.add_argument('--run-id')
-    p.add_argument('--output-dir', type=Path, help='Run collection root; outputs use runs/<run-id>')
+    p.add_argument('--output-dir', type=Path, help='Override the current stage directory')
     p.add_argument('--preflight-only', action='store_true')
     p.add_argument('--dry-run', action='store_true', help='Preflight only; never publish an incomplete release')
     return p
+
+
+@contextmanager
+def output_lock(directory, *, shared=False):
+    """Coordinate readers and writers of the canonical directory."""
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def stage_outputs(destinations, owned, *, failure, completion=None, diagnostic=False, obsolete_dirs=()):
+    """Stage files on the destination filesystem and roll back failed publication.
+
+    Each destination maps to a staging directory. Only direct, stage-owned files
+    participate in replacement or cleanup. Diagnostics leave other files alone.
+    """
+    with ExitStack() as stack:
+        staging = {}
+        for key, destination in sorted(destinations.items(), key=lambda item: str(item[1])):
+            destination.mkdir(parents=True, exist_ok=True, mode=0o700)
+            stack.enter_context(output_lock(destination))
+            temp = Path(stack.enter_context(TemporaryDirectory(prefix='.graph-', dir=destination.parent)))
+            staging[key] = temp / 'files'
+            staging[key].mkdir(mode=0o700)
+        failed = destinations[failure[0]] / failure[1]
+        try:
+            yield staging
+            _publish_outputs(destinations, staging, owned, failed, completion, diagnostic, obsolete_dirs)
+        except Exception as exc:
+            status = {'execution_status': 'FAILED', 'exception_type': type(exc).__name__,
+                      'failed_at_utc': utc_now(), 'preflight_only': diagnostic}
+            code = getattr(exc, 'code', str(exc))
+            if isinstance(code, str) and re.fullmatch(r'[A-Z][A-Z0-9_]{2,100}', code):
+                status['reason'] = code
+            write_json(failed, status, atomic=True)
+            raise
+
+
+def _publish_outputs(destinations, staging, owned, failed, completion, diagnostic, obsolete_dirs):
+    changes = {}
+    backup_roots = {}
+    for key, destination in destinations.items():
+        staged = {path.name: path for path in staging[key].iterdir() if path.is_file()}
+        if any(not owned(key, name) for name in staged):
+            raise ValueError('Staged file does not belong to this Graph stage')
+        names = set(staged)
+        if not diagnostic:
+            names.update(path.name for path in destination.iterdir() if path.is_file() and owned(key, path.name))
+            for name in obsolete_dirs:
+                directory = destination / name
+                if directory.is_dir() and not directory.is_symlink():
+                    changes.update((path, None) for path in directory.iterdir()
+                                   if path.is_file() and owned(key, path.name))
+                    backup_roots[directory] = staging[key].parent
+        for name in sorted(names):
+            changes[destination / name] = staged.get(name)
+        backup_roots[destination] = staging[key].parent
+    if not diagnostic and completion and changes.get(completion) is None:
+        raise ValueError('Graph stage did not produce its completion artifact')
+    if not diagnostic and failed.exists():
+        changes[failed] = None
+    if completion in changes:
+        changes[completion] = changes.pop(completion)
+    backups = {}
+    for index, target in enumerate(changes):
+        if target.is_file() or target.is_symlink():
+            backup = backup_roots[target.parent] / f'backup-{index}'
+            os.link(target, backup, follow_symlinks=False)
+            backups[target] = backup
+    applied = []
+    try:
+        for target, source in changes.items():
+            if source is None:
+                target.unlink(missing_ok=True)
+            else:
+                source.chmod(0o600)
+                os.replace(source, target)
+            applied.append(target)
+    except BaseException:
+        for target in reversed(applied):
+            if target in backups:
+                os.replace(backups[target], target)
+            else:
+                target.unlink(missing_ok=True)
+        raise

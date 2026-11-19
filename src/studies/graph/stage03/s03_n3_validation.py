@@ -130,8 +130,10 @@ def run_n3_validation(run_dir, frames, roles, manifest, config, provenance, conf
     """Persist complete audit even if a later model implementation fails."""
     run_dir = Path(run_dir)
     catalog = evidence_catalog(config, Path(__file__).resolve().parents[4])
-    metadata = {**provenance, 'graph03_run_id':run_dir.name,
-                'implementation_commit_sha':git_commit(), 'config_sha256':config_sha256}
+    metadata = dict(provenance)
+    if config_sha256 is not None:
+        metadata.update(graph03_run_id=run_dir.name, implementation_commit_sha=git_commit(),
+                        config_sha256=config_sha256)
     baseline, membership = frames['baseline_raw'], frames['membership']
     audit = n3_audit_tables(baseline, membership, roles, frames['feature_sets'],
                           frames.get('clinical_registry', pd.DataFrame()), manifest, config, catalog)
@@ -154,8 +156,7 @@ def run_n3_validation(run_dir, frames, roles, manifest, config, provenance, conf
     (run_dir / '03_graph_n3_results_summary.md').write_text(
         '# N3 clinical audit and conditional exploratory comparisons\n\n'
         f'Execution: COMPLETE_WITH_LIMITATIONS. Phase A: COMPLETE. Phase B: {qc["phase_b_status"]}.\n\n'
-        f'Frozen Graph02: {metadata["graph02_run_id"]}; release SHA-256: {metadata["graph02_release_sha256"]}. '
-        f'Graph03 run: {run_dir.name}. Contract: {VERSION}.\n\n'
+        f'Contract: {VERSION}.\n\n'
         f'Inventory rows: {len(audit["source_inventory"])}. Candidates requiring review: {qc["n_candidates_for_review"]}. '
         f'Reviewed independent sources: {qc["n_reviewed_independent_sources"]}. '
         f'Completed models: {qc["n_models_complete"]}; comparisons: {qc["n_comparisons_complete"]}.\n\n'

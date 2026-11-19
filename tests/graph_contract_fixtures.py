@@ -57,3 +57,28 @@ def write_bundle(integrated, candidates_path, *, approved=True, profile=None, dr
     release_path = folder / "synthetic_graph_release.yaml"
     release_path.write_text(yaml.safe_dump(release))
     return release_path, paths, summary, release
+
+
+def install_current_graph02(release, destination):
+    """Adapt the legacy fixture to the current artifact contract."""
+    from shutil import copyfile
+    from src.studies.graph.stage02.s02_contracts import CURRENT_ARTIFACTS, CURRENT_SCHEMA
+
+    manifest = json.loads(release.read_text())
+    destination.mkdir(parents=True, exist_ok=True)
+    for role, filename in manifest['relative_paths'].items():
+        if role in CURRENT_ARTIFACTS:
+            copyfile(release.parent / filename, destination / CURRENT_ARTIFACTS[role])
+    features = destination / CURRENT_ARTIFACTS['feature_sets']
+    frame = pd.read_csv(features)
+    if 'feature' not in frame:
+        frame['feature'] = frame.source_column + '__encoded'
+        frame.to_csv(features, index=False)
+    result = destination / release.name
+    current = {key: manifest[key] for key in ('finalized', 'release_status',
+        'eligible_representation_ids', 'primary_reference_id', 'n_patients', 'n_covered')}
+    current.update(schema_version=CURRENT_SCHEMA, coverage=dict(
+        n_total=current['n_patients'], n_covered_R0=current['n_covered'],
+        n_uncovered_R0=current['n_patients'] - current['n_covered']))
+    result.write_text(json.dumps(current))
+    return result

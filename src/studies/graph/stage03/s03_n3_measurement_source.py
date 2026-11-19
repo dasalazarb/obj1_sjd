@@ -538,6 +538,8 @@ def _read_inputs(paths, available, specimen_id_column, calendar):
 
 def _read_frozen(paths, phasec_config):
     inputs = load_phasec_inputs(paths['graph03_run'], paths['graph02_release'], phasec_config)
+    if inputs['current']:
+        raise ValueError('SIGNED_SOURCE_REQUIRES_EXPLICIT_HISTORICAL_RELEASES')
     release = inputs['release']
     manifest = inputs['manifest']
     actual_baseline = safe_artifact(release.parent, manifest['relative_paths']['baseline_raw'])

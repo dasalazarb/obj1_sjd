@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Phase D: resolve compatible frozen inputs and scientific readiness; no estimators."""
+"""Phase D: check current results and scientific readiness; no estimators."""
 import argparse
 from pathlib import Path
 import sys
@@ -9,7 +9,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.studies.graph.stage03.s03_n3_resolution import run_resolution
-from src.studies.graph.stage03.s03_run_resolution import resolve_graph03_dependencies
+from src.studies.graph.stage03.s03_run_resolution import current_dependencies
 
 
 def main(argv=None):
@@ -18,7 +18,7 @@ def main(argv=None):
     parser.add_argument('--graph02-release', type=Path)
     parser.add_argument('--phasec-run', type=Path,
                         help='Optional existing Phase C directory; contracts are always checked')
-    parser.add_argument('--output-dir', type=Path, help='Optional exact new run directory')
+    parser.add_argument('--output-dir', type=Path, help='Override the current diagnostic directory')
     parser.add_argument('--config', type=Path, default=Path(__file__).parent / 'configs/n3_phase_d_resolution.yaml')
     parser.add_argument('--preflight-only', action='store_true',
                         help='Document intent; estimation is prohibited with or without this flag')
@@ -26,9 +26,9 @@ def main(argv=None):
     parser.add_argument('--verbose', action='store_true', help='Show traceback on failure')
     args = parser.parse_args(argv)
     try:
-        graph03, release, phasec, evidence = resolve_graph03_dependencies(args, ROOT, phase='D')
+        graph03, release, phasec = current_dependencies(args, ROOT, phase='D')
         result = run_resolution(graph03, release, phasec, args.output_dir, args.config, ROOT,
-            strict=args.strict, dependency_resolution=evidence)
+            strict=args.strict)
     except (RuntimeError, ValueError, OSError, KeyError) as exc:
         if args.verbose:
             raise

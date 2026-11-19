@@ -280,8 +280,14 @@ def test_t06_t20_preflight_writes_aggregate_audit_without_fitting(bundle, tmp_pa
     assert not report["blockers"]
     assert not list(folder.glob("*patient*"))
     assert "SYNTHETIC_PATIENT_" not in (folder / f"{prefix}_preflight.json").read_text()
-    with pytest.raises(FileExistsError):
+    if module is G1:
+        files = {path.name for path in folder.iterdir()}
         module.run(module.parse_args(argv))
+        assert files == {path.name for path in folder.iterdir()}
+        assert json.loads((folder / f"{prefix}_preflight.json").read_text()) == report
+    else:
+        with pytest.raises(FileExistsError):
+            module.run(module.parse_args(argv))
 
 
 def test_duplicate_stems_and_strict_false():
@@ -301,9 +307,15 @@ def test_standard_run_blocks_pending_release_and_empty_labs(bundle, tmp_path, mo
         args.lab_group_map = mapping
     with pytest.raises(LAB.LabContractError, match="NO_APPROVED_LABS|INCOMPLETE_RELEASE_REVIEW"):
         module.run(args)
-    report = json.loads((args.output_dir / "tables" / f"{prefix}_preflight.json").read_text())
-    assert report["status"] == "BLOCKED"
-    assert report["analysis_mode"] == "clinical_release"
+    if module is G1:
+        report = json.loads((args.output_dir / "logs" / f"{prefix}_failure.json").read_text())
+        assert report["execution_status"] == "FAILED"
+        assert report["reason"] in {"NO_APPROVED_LABS", "INCOMPLETE_RELEASE_REVIEW"}
+        assert not (args.output_dir / "tables" / f"{prefix}_results_summary.json").exists()
+    else:
+        report = json.loads((args.output_dir / "tables" / f"{prefix}_preflight.json").read_text())
+        assert report["status"] == "BLOCKED"
+        assert report["analysis_mode"] == "clinical_release"
 
 
 def test_canonical_config_mismatch_is_contract_error():

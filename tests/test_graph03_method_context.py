@@ -188,7 +188,7 @@ def test_every_endpoint_gets_a_source_backed_figure_and_small_cells_are_suppress
         assert 'patient_id' not in path.read_text() and '99999' not in path.read_text()
 
 
-def test_pipeline_frozen_release_and_historical_compatibility(configuration,tmp_path,monkeypatch):
+def test_pipeline_current_release_and_optional_context_compatibility(configuration,tmp_path,monkeypatch):
     from src.studies.graph.stage02.s02_pipeline import run as run02
     from src.studies.graph.stage03.s03_pipeline import run as run03
     from src.studies.graph.stage03.s03_release_reader import read_release
@@ -200,11 +200,9 @@ def test_pipeline_frozen_release_and_historical_compatibility(configuration,tmp_
     result=run02(cfg)
     manifest,path,frames=read_release(cfg,result['manifest'])
     frozen_hash=pipe.digest(path)
-    pointer=pipe.output_root(cfg,'02')/'latest_completed_02.json'
-    pointer_hash=pipe.digest(pointer)
     monkeypatch.setattr(s02_mapper_engine,'analyze',lambda *a,**k:pytest.fail('Graph03 cannot refit'))
     output=run03(cfg,graph02_release=path)['run_dir']
-    assert pipe.digest(path)==frozen_hash and pipe.digest(pointer)==pointer_hash
+    assert pipe.digest(path)==frozen_hash
     evidence=pd.read_csv(output/'03_graph_representation_evidence.csv')
     r2=evidence.loc[evidence.representation_id.eq('R2')].iloc[0]
     assert r2.evidence_level=='EXPLORATORY_PROVISIONAL' and r2.clinical_mapping_status=='pending_clinical_review'
@@ -222,8 +220,8 @@ def test_pipeline_frozen_release_and_historical_compatibility(configuration,tmp_
     assert summary['pop_denominator_qc']['status']=='PASS' and summary['pop_denominator_qc']['crosswalk_reconciled']
     assert summary['characterization_qc_status']=='PASS'
     role_inventory=pd.read_csv(output/'03_graph_characterization_role_inventory.csv')
-    assert not role_inventory.duplicated(['graph02_run_id','representation_id','source_column']).any()
-    assert role_inventory.graph02_release_sha256.eq(frozen_hash).all()
+    assert not role_inventory.duplicated(['graph02_directory','representation_id','source_column']).any()
+    assert role_inventory.graph02_directory.eq(str(path.parent)).all()
     assert not role_inventory.loc[role_inventory.tier.ne('N3_REVIEWED'),'inferential_eligible'].any()
     matrix=pd.read_csv(output/'03_graph_characterization_clinical_matrix.csv')
     assert (matrix.n_observed+matrix.n_missing).eq(matrix.n_group).all()
@@ -237,11 +235,12 @@ def test_pipeline_frozen_release_and_historical_compatibility(configuration,tmp_
         assert 'patient_id' not in table
     for name in ['N1_R0','N1_R2','N2_R0','N2_R2','N3_R0','N3_R2','role_crosswalk','availability']:
         for ext in ['csv','png','pdf']:
-            assert (output/f'figures/03_graph_characterization_{name}.{ext}').is_file()
+            suffix = '_source.csv' if ext == 'csv' else '.' + ext
+            assert (output / f'03_graph_characterization_{name}{suffix}').is_file()
     pending=pd.read_csv(output/'03_graph_independent_anchor_validation.csv')
     if not pending.empty:
         assert pending.status.eq('NOT_ESTIMABLE').all() and pending.p_value.isna().all()
-    assert pipe.digest(path)==frozen_hash and pipe.digest(pointer)==pointer_hash
+    assert pipe.digest(path)==frozen_hash
 
     for name in ['temporal_source_audit','episode_collision_summary','episode_resolution_audit',
                  'longitudinal_denominator_audit','longitudinal_unresolved_reasons',
@@ -251,15 +250,15 @@ def test_pipeline_frozen_release_and_historical_compatibility(configuration,tmp_
         assert not any(patient in table.to_csv(index=False) for patient in frames['baseline_raw'].patient_id)
     pop_audit=pd.read_csv(output/'03_graph_pop_denominator_audit.csv')
     assert pop_audit[['n_pop1','n_pop2','n_pop3','n_unclassified_pop','n_missing_pop','n_invalid_pop']].sum(axis=1).eq(pop_audit.n_denominator).all()
-    assert (output/'figures/03_graph_figure_status.csv').is_file()
+    assert (output/'03_graph_figure_status.csv').is_file()
 
     inventory=pd.read_csv(output/'03_graph_artifact_inventory.csv')
     assert not inventory.shareable_export_allowed.any() and inventory.privacy_class.eq('INTERNAL_RESTRICTED').all()
-    for figure in (output/'figures').glob('*.csv'):
+    for figure in output.glob('03_graph_*_source.csv'):
         text=figure.read_text()
         assert 'patient_id' not in text
         assert not any(patient in text for patient in frames['baseline_raw'].patient_id)
-    # A copy of the synthetic historical release lacks the new optional keys.
+    # Verify that an explicit result without optional sensitivity products remains usable.
     historical=tmp_path/'historical'/path.parent.name
     shutil.copytree(path.parent,historical)
     old=deepcopy(manifest)
@@ -269,17 +268,17 @@ def test_pipeline_frozen_release_and_historical_compatibility(configuration,tmp_
     old_qc=json.loads((old_output/'03_graph_release_input_qc.json').read_text())
     assert old_qc['missingness_sensitivity']['status']=='NOT_AVAILABLE_IN_RELEASE'
     assert set(pd.read_csv(old_output/'03_graph_method_sensitivity_context.csv').status)=={'UNAVAILABLE_IN_RELEASE'}
-    # Private sensitivity memberships cannot be relabelled as the primary input.
-    bad=deepcopy(manifest)
-    bad['relative_paths']['membership']=next(e['artifact'] for e in manifest['sensitivity_artifacts'] if e['artifact'].endswith('_patient_membership.csv'))
-    pipe.write_json(old_path,bad)
-    with pytest.raises(ValueError,match='Sensitivity artifacts cannot enter primary'):
-        read_release(cfg,old_path)
-    # Each requested optional source is checked, even after release validation.
-    entry=manifest['sensitivity_artifacts'][0]
-    tampered=path.parent/entry['artifact']; tampered.write_text(tampered.read_text()+'\n')
-    with pytest.raises(ValueError,match='SHA mismatch'): read_release(cfg,path)
-    assert pipe.digest(pointer)==pointer_hash
+    # A defining file cannot serve as a private sensitivity input.
+    bad = deepcopy(manifest)
+    bad['sensitivity_artifacts'].append({'artifact': '02_graph_patient_membership.csv'})
+    pipe.write_json(old_path, bad)
+    with pytest.raises(ValueError, match='Sensitivity artifacts cannot enter primary'):
+        read_release(cfg, old_path)
+    # Each requested aggregate must exist at its canonical path.
+    (path.parent / '02_graph_missingness_method_registry.csv').unlink()
+    with pytest.raises(ValueError, match='Missing or escaping'):
+        read_release(cfg, path)
+    assert not (path.parent / 'latest_completed_02.json').exists()
 
 
 def test_common_longitudinal_comparison_uses_intersection_only():
