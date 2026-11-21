@@ -12,6 +12,7 @@ import pytest
 import yaml
 
 from src.studies.graph._pipeline import digest
+from src.studies.graph.stage03.s03_baseline_window import policy
 from src.studies.graph.stage03.s03_n3_phasec_adjudication import load_phasec_inputs, run_phasec
 from src.studies.graph.stage03 import s03_n3_resolution as D
 from src.studies.graph.stage03.s03_run_resolution import (
@@ -81,7 +82,8 @@ def test_both_commands_zero_flags_outside_checkout_and_repeatable(tmp_path, monk
     pd.read_csv(roles).assign(direct_in_discovery=False).to_csv(roles, index=False)
     summary = graph03 / '03_graph_results_summary.json'
     summary.write_text(json.dumps(dict(schema_version='graph03_current_v1', execution_status='COMPLETE',
-                                       n_patients=100)))
+                                       n_patients=100, graph02_release_sha256=digest(release),
+                                       **policy().metadata())))
     (graph03 / '03_graph_release_input_qc.json').write_text(json.dumps(
         dict(status='PASS', eligible_representation_ids=['R0', 'R2'])))
     before = {p: digest(p) for directory in [graph03, release.parent] for p in directory.iterdir() if p.is_file()}

@@ -19,6 +19,7 @@ import yaml
 
 from .._pipeline import digest
 from . import s03_n3_calendar_day as cal
+from .s03_baseline_window import MISMATCH, VERSION as WINDOW_VERSION, policy as baseline_policy, require_policy
 from .s03_n3_controlled import GATES, input_pins, run_controlled, validate_plan, _implementation_hashes
 from .s03_n3_decisions import decision_templates, evidence_path, verify_detached_signature
 from .s03_n3_measurement_source import AUDITED_FILES, LAB_INPUTS, ORIGINALS, run_source
@@ -147,6 +148,7 @@ def _relative(root, setting):
 
 def _source_settings(root):
     cfg = yaml.safe_load((root / CONFIGS / 'n3_auto.yaml').read_text())
+    require_policy(cfg)
     data = _relative(root, cfg['data_root'])
     eda = _relative(root, cfg['eda_root'])
     definitions = cfg['source_paths']
@@ -196,7 +198,10 @@ def _signed_yaml(path, signature, key, code):
 
 def _prespecification(files):
     _, cfg = _signed_yaml(files['document'], files['signature'], files['trust_key'], 'PRESPECIFICATION')
-    if (not isinstance(cfg, dict) or cfg.get('schema_version') != cal.SOURCE_VERSION
+    require_policy(cfg)
+    if isinstance(cfg, dict) and cfg.get('schema_version') == cal.SOURCE_VERSION:
+        raise ValueError(MISMATCH)
+    if (not isinstance(cfg, dict) or cfg.get('schema_version') != cal.BASELINE_SOURCE_VERSION
             or cfg.get('source_paths') or cfg.get('privacy_class') != 'INTERNAL_RESTRICTED'
             or cfg.get('public_export') is not False
             or type(cfg.get('minimum_disclosure_cell')) is not int or cfg['minimum_disclosure_cell'] < 5
@@ -208,8 +213,8 @@ def _prespecification(files):
     if not isinstance(settings, dict) or not settings.get('windows'):
         raise ValueError('PRESPECIFICATION_WINDOWS_REQUIRED')
     cal.validate_settings(settings)
-    if any(w['minimum_days_before_baseline'] != 1 for w in settings['windows'].values()):
-        raise ValueError('PRESPECIFICATION_PRIMARY_WINDOW_REQUIRES_ONE_DAY_MINIMUM')
+    if settings['contract'] != cal.CONTRACT:
+        raise ValueError(MISMATCH)
     if set(settings.get('date_formats', {})) != set(cal.BTRIS_ORIGINS):
         raise ValueError('PRESPECIFICATION_BTRIS_DATE_FORMATS_REQUIRED')
     if any(settings['linkage_fields']['original_observation_name'][origin] != 'Observation Name'
@@ -227,7 +232,8 @@ def _prespecification(files):
 
 
 def _prespecification_template():
-    return dict(schema_version=cal.SOURCE_VERSION, decision='PENDING_REVIEW', reviewer=None, review_id=None,
+    return dict(schema_version=cal.BASELINE_SOURCE_VERSION, window_policy_version=WINDOW_VERSION,
+                decision='PENDING_REVIEW', reviewer=None, review_id=None,
                 privacy_class='INTERNAL_RESTRICTED', public_export=False, minimum_disclosure_cell=5,
                 evidence=[], calendar_day=dict(contract=cal.CONTRACT, windows={}, date_formats=dict(
                     raw=None, intermediate=None), linkage_fields={
@@ -237,7 +243,7 @@ def _prespecification_template():
 
 
 def _report():
-    return dict(mode='calendar_day_v2', status=None, graph02_run=None, graph03_run=None,
+    return dict(mode='baseline_calendar_window', **baseline_policy().metadata(), status=None, graph02_run=None, graph03_run=None,
                 source_status='NOT_STARTED', source_run=None, source_review_status='NOT_STARTED',
                 plan_status='NOT_STARTED', preflight_status='NOT_STARTED', n_ready=0, estimators_run=0,
                 blockers=[], next_required_action=None, report_path=None, history=[], artifacts={})
@@ -486,11 +492,12 @@ def _engine(root, paths, frozen):
     code = _implementation_hashes(root)
     code.update(_hashes({name: root / name for name in AUDITED_FILES}))
     configs = _hashes({name: root / CONFIGS / name for name in
-                       ('n3_auto.yaml', 'pipeline.yaml', PHASEC, CONTROLLED, VALIDATION)})
+                       ('n3_auto.yaml', 'pipeline.yaml', PHASEC, CONTROLLED, VALIDATION,
+                        'baseline_window_03.yaml', 'n3_exploratory_defaults.yaml')})
     sources = {role: str(path) for role, path in paths.items()}
     shared_code = ('common.py', 'config.py', 'src/studies/_shared.py')
     code.update(_hashes({name: root / name for name in shared_code}))
-    return dict(code_sha256=code, config_sha256=configs, paths=sources,
+    return dict(**baseline_policy().metadata(), code_sha256=code, config_sha256=configs, paths=sources,
                 inputs_sha256=_hashes({role: path for role, path in paths.items() if role not in cal.BTRIS_ROLES}),
                 btris_sha256={role: cal.file_hashes(paths[role]) for role in cal.BTRIS_ROLES},
                 frozen_sha256={str(path): sha for path, sha in _snapshot(frozen).items()},
@@ -516,7 +523,7 @@ def _approval_hashes(private):
 
 
 def _unsigned_source_review(binding):
-    return dict(schema_version=cal.REVIEW_VERSION, decision='PENDING_REVIEW', reviewer=None,
+    return dict(schema_version=cal.BASELINE_REVIEW_VERSION, window_policy_version=WINDOW_VERSION, decision='PENDING_REVIEW', reviewer=None,
                 review_id=None, input_sha256=binding, evidence=[], outcomes={})
 
 

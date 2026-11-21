@@ -4,7 +4,7 @@ from pathlib import Path
 from os.path import relpath
 import json
 import pandas as pd
-from .._pipeline import (load_pipeline,output_root,output_lock,stage_destinations,stage_outputs,
+from .._pipeline import (digest,load_pipeline,output_root,output_lock,stage_destinations,stage_outputs,
                          staged_artifact_paths,save_table,write_json,base_parser)
 from ..stage02.s02_contracts import CURRENT_SCHEMA as GRAPH02_SCHEMA, MANIFEST
 from .s03_release_reader import RESULTS, RESULTS_SCHEMA, read_release
@@ -12,7 +12,11 @@ from .s03_n3_validation import run_n3_validation,n3_validation_qc,enforce_n3_rev
 from .s03_construct_validation import feature_roles,assert_independent,anchor_lineage_audit
 from .s03_profiles import profile_tables,clinical_domains,uncovered_profiles,pop_denominator_audit,clinical_marker_summaries
 from .s03_incremental_value import pop_crosswalk,incremental_models
-from .s03_longitudinal import longitudinal,pop_transitions,comparable_longitudinal_summary
+from .s03_longitudinal import longitudinal,pop_transitions,comparable_longitudinal_summary,temporal_overlap_audit
+from .s03_baseline_window import FROZEN_SNAPSHOT, WARNING, calendar_day, policy as baseline_policy, require_policy
+from .s03_n3_exploratory import (
+    _analyze, _empty_outputs, _policy, current_source_inputs, frozen_fingerprints, write_baseline_artifacts,
+)
 from .s03_episode_audit import resolve_all_endpoints, VERSION
 from .s03_n3_approved_view import validate_baseline
 from .s03_rare_events import rare_event_table
@@ -47,9 +51,13 @@ def run(cfg, *, graph02_release=None, root=None, preflight_only=False):
 
 
 def _execute(cfg, release, run_dir, preflight_only, explicit_release, figure_dir, figure_prefix):
+    require_policy(cfg)
+    require_policy(cfg['validation'])
     validate_figure_policy(cfg['validation'])
     manifest,path,frames=read_release(cfg,release if explicit_release else None)
-    provenance={'graph02_directory':str(path.parent),
+    frozen_before = frozen_fingerprints(path, manifest)
+    provenance={**baseline_policy().metadata(), 'graph02_release_sha256':frozen_before['release_manifest'],
+                'graph02_directory':str(path.parent),
                 'baseline_definition_id':manifest['baseline_definition_id'],'analysis_mode':manifest['study_mode'],
                 'feature_policy':manifest['feature_policy']}
     input_qc = {**provenance, 'status': 'PASS', 'read_mode': 'published_artifacts_no_refit',
@@ -58,14 +66,23 @@ def _execute(cfg, release, run_dir, preflight_only, explicit_release, figure_dir
     if (path.parent / '02_graph_failure.json').is_file():
         input_qc['graph02_last_attempt_status'] = 'FAILED_USING_LAST_COMPLETE_RESULT'
     if preflight_only:
+        frozen_after = frozen_fingerprints(path, manifest)
+        if frozen_before != frozen_after:
+            raise ValueError('GRAPH02_CHANGED_DURING_PREFLIGHT')
+        input_qc.update(graph02_sha256_before=frozen_before, graph02_sha256_after=frozen_after)
         write_json(run_dir / '03_graph_preflight.json', input_qc)
         return 'PREFLIGHT_ONLY'
     write_json(run_dir / '03_graph_release_input_qc.json', input_qc)
     baseline=frames['baseline_raw']; membership=frames['membership']; validation=cfg['validation']
     roles=feature_roles(frames['feature_sets'],baseline,validation,manifest['eligible_representation_ids'],frames.get('clinical_registry',pd.DataFrame()))
     roles=statistical_role_gates(roles,baseline,membership,manifest,validation)
-    n3_tables,n3_qc=run_n3_validation(run_dir,frames,roles,manifest,validation,provenance, None)
+    window_roles = roles.copy()
+    n3_tables,n3_qc=run_n3_validation(run_dir,frames,roles,manifest,validation,
+                                     dict(provenance, snapshot_basis=FROZEN_SNAPSHOT, source_provenance_tier='FROZEN_RELEASE_VALUES'), None, snapshot_only=True)
     roles=enforce_n3_review_gates(roles,n3_tables['source_inventory'])
+    snapshot_n3 = roles.tier.eq('N3_REVIEWED')
+    roles.loc[snapshot_n3, 'inferential_eligible'] = False
+    roles.loc[snapshot_n3, 'blocking_reasons'] = 'USE_VERIFIED_BASELINE_WINDOW_FOR_N3'
     lineage=anchor_lineage_audit(roles,validation)
     tables=profile_tables(baseline,membership,roles,manifest,validation,int(manifest['random_seed']))
     characterization=characterization_tables(baseline,membership,roles,manifest,validation,tables['anchors'])
@@ -86,11 +103,28 @@ def _execute(cfg, release, run_dir, preflight_only, explicit_release, figure_dir
         source_baseline[keys] = source_baseline[keys].astype('string')
         for frame in (baseline, source_baseline):
             validate_baseline(frame)
-        published = pd.to_datetime(baseline.set_index(keys).clinical_baseline_date, utc=True).sort_index()
-        observed = pd.to_datetime(source_baseline.set_index(keys).clinical_baseline_date, utc=True).sort_index()
+        published = baseline.set_index(keys).clinical_baseline_date.map(calendar_day).sort_index()
+        observed = source_baseline.set_index(keys).clinical_baseline_date.map(calendar_day).sort_index()
         if not published.index.equals(observed.index) or not published.eq(observed).all():
             raise ValueError('GRAPH02_STEP10_BASELINE_MISMATCH')
     resolutions=resolve_all_endpoints(master,baseline,validation)
+    selected = {}
+    repository_root = Path(__file__).resolve().parents[4]
+    window_config = _policy(repository_root)
+    if manifest['schema_version'] == GRAPH02_SCHEMA:
+        source_tables, records, issues = current_source_inputs(
+            repository_root, step10=manifest['source_inputs']['integrated']['path'])
+        study = dict(frozen=frames, registry=frames.get('clinical_registry', pd.DataFrame()),
+                     manifest=manifest, roles=window_roles)
+        window_outputs = _analyze(source_tables, study, records, validation, window_config,
+                                  selected_measurements=selected)
+    else:
+        window_outputs = _empty_outputs(window_config)
+        issues = [dict(artifact='graph02_release', reason='CURRENT_RELEASE_REQUIRED_FOR_BASELINE_WINDOW')]
+    overlap = temporal_overlap_audit(resolutions, baseline, membership, manifest, selected, minimum_cell)
+    window_qc = write_baseline_artifacts(run_dir, window_outputs, issues, frozen_before,
+                                         frozen_fingerprints(path, manifest), temporal_overlap=overlap,
+                                         roles=window_roles)
     temporal_tables={key:pd.concat([r.audits[key] for r in resolutions.values()],ignore_index=True)
         for key in ['temporal_source','collision_summary','resolution','unresolved_reasons']}
     pop_denominators=pop_denominator_audit(baseline,membership,manifest,validation)
@@ -99,6 +133,8 @@ def _execute(cfg, release, run_dir, preflight_only, explicit_release, figure_dir
         actual=pop.loc[pop.representation_id.eq(row.representation_id),'n_patients'].sum() if 'n_patients' in pop else 0
         if actual!=row.n_pop1+row.n_pop2+row.n_pop3: raise ValueError('POP_CROSSWALK_DENOMINATOR_MISMATCH')
     eligibility,models,trajectories=longitudinal(master,baseline,membership,manifest,validation,resolutions=resolutions)
+    window_longitudinal = longitudinal(master, baseline, membership, manifest, validation,
+                                       resolutions=resolutions, post_characterization=True)
     comparison=comparable_longitudinal_summary(master,baseline,membership,manifest,validation,resolutions=resolutions)
     transitions,transition_eligibility=pop_transitions(master,baseline,membership,manifest,validation,resolutions=resolutions,return_eligibility=True)
     rare=rare_event_table(baseline,validation)
@@ -157,6 +193,11 @@ def _execute(cfg, release, run_dir, preflight_only, explicit_release, figure_dir
         '03_graph_community_trajectory_summary.csv':trajectories,'03_graph_missingness_by_community.csv':tables['missingness'],
         '03_graph_rare_events.csv':rare,'03_graph_anchor_discovery_sensitivity.csv':uncertainty,'03_graph_validation_status.csv':pd.DataFrame(statuses),
         '03_graph_cross_representation_alignment.csv':frames.get('alignment',pd.DataFrame())}
+    table_map.update({f'03_graph_longitudinal_post_characterization_{name}.csv':frame
+                      for name, frame in zip(('eligibility', 'models', 'trajectories'), window_longitudinal)})
+    frozen_tables = {'clinical_marker_summary', 'clinical_domains_by_community', 'community_baseline_table',
+                     'clinical_feature_roles', 'clinical_signatures', 'independent_anchor_validation',
+                     'missingness_by_community', 'uncovered_baseline_audit', 'anchor_lineage_audit'}
     table_map.update({f'03_graph_characterization_{name}.csv':frame for name,frame in characterization.items()})
     tier_qc=characterization_qc(characterization,baseline,membership,provenance,True)
     write_json(run_dir/'03_graph_characterization_qc.json',tier_qc)
@@ -166,6 +207,11 @@ def _execute(cfg, release, run_dir, preflight_only, explicit_release, figure_dir
     for name,frame in table_map.items():
         frame=frame.copy()
         for key,value in provenance.items(): frame[key]=value
+        if name.removeprefix('03_graph_').removesuffix('.csv') in frozen_tables or name.startswith('03_graph_characterization_'):
+            frame['snapshot_basis'] = FROZEN_SNAPSHOT
+            frame['source_provenance_tier'] = 'FROZEN_RELEASE_VALUES'
+        elif 'longitudinal' in name or 'trajectory' in name or 'temporal_source' in name:
+            frame['source_provenance_tier'] = 'VERIFIED_ENDPOINT_SPECIFIC'
         save_table(run_dir/name,frame)
     safe_matrix=safe_characterization_panels(characterization['clinical_matrix'],minimum_cell)
     safe_keys=safe_matrix[['representation_id','source_column']].drop_duplicates()
@@ -185,7 +231,7 @@ def _execute(cfg, release, run_dir, preflight_only, explicit_release, figure_dir
     write_json(run_dir/'03_graph_figure_qc.json',presentation_qc)
     if presentation_qc['status']=='FAILED': raise ValueError('GRAPH03_FIGURE_QC_FAILED')
     (figure_dir/'03_graph_figures_README.md').write_text('Aggregate internal figures and source CSVs. Publication review is required; no automatic public export. Small cells are suppressed using the configured publication minimum.\n')
-    limited=any(row['status'] not in {'COMPLETE','DESCRIPTIVE'} for row in statuses) or presentation_qc['status']!='PASS' or 'graph02_last_attempt_status' in input_qc
+    limited=any(row['status'] not in {'COMPLETE','DESCRIPTIVE'} for row in statuses) or presentation_qc['status']!='PASS' or 'graph02_last_attempt_status' in input_qc or window_qc['status'] != 'PASS'
     status='COMPLETE_WITH_LIMITATIONS' if limited else 'COMPLETE'
     (run_dir/'03_graph_results_summary.md').write_text(f'# Graph03 exploratory interpretation\n\nEXPLORATORY: no confirmatory clinical or predictive claims.\n\nGraph02 input: {path.parent.name}.\n\nPatients: {len(baseline)}; execution: {status}. Raw observed baseline values only; no imputation or discovery refit.\n\nCommunity and time effects are conditional on estimated frozen labels; intervals do not incorporate discovery uncertainty. See validation status for every unavailable or circular hypothesis.\n\nR0 is the frozen primary reference; R2 clinical comparison retains the release mapping and evidence status; other eligible representations are technical comparators.\n\n'
         + evidence[['representation_id','analysis_role','clinical_mapping_status','evidence_level','limitation_reason']].to_csv(index=False)
@@ -207,6 +253,9 @@ def _execute(cfg, release, run_dir, preflight_only, explicit_release, figure_dir
         stream.write(presentation['selection'].to_csv(index=False))
         stream.write('\nSource characterization levels: N1 explains internal structure; N2 is related descriptive evidence; N3 candidates are not validated. Only documented reviewed N3 sources may enter exploratory conditional inference after statistical gates. Pending review is NOT_ESTIMABLE / INDEPENDENCE_REVIEW_PENDING.\n\n')
         stream.write(characterization['tier_counts'].to_csv(index=False))
+        stream.write('\n' + WARNING + ' See 03_graph_baseline_window_qc.json for the verified-source analysis. '
+                     'The longitudinal sensitivity begins strictly after the calendar window. '
+                     'Overlapping measurements do not supply independent evidence.\n')
         stream.write('\nSee characterization_independence_audit.csv and characterization_qc.json for exact sources requiring clinical/lineage/baseline review. Longitudinal endpoint approvals are separate and unchanged.\n')
         stream.write(f'\nTemporal resolution: {VERSION}. Endpoint analyses: {len(eligibility)}; descriptive: {n_descriptive}; estimable models: {n_models}; unresolved endpoint/source groups: {n_unresolved}.\n\n')
         stream.write('Measurement dates require endpoint-specific reviewed evidence; a clinical spine anchor alone is insufficient. Unresolved units are excluded without inventing dates or outcomes. Descriptions use verified visits; models additionally require repeated observations, stability, support and all prespecified covariates. Frozen stability labels are not clinical bootstrap validation.\n\n')
@@ -224,6 +273,7 @@ def _execute(cfg, release, run_dir, preflight_only, explicit_release, figure_dir
         'n3_validation':{key:n3_qc[key] for key in ['schema_version','status','phase_a_status','phase_b_status',
             'n_inventory_rows','source_counts_by_representation','n_candidates_for_review','n_reviewed_independent_sources',
             'n_models_complete','n_outcomes_modeled','n_not_estimable_models','n_comparisons_complete']},
+        'baseline_window_qc_status':window_qc['status'],
         'characterization_policy_version':tier_qc['classification_policy_version'],
         'characterization_tier_counts':tier_qc['tier_counts'],
         'characterization_qc_status':tier_qc['status'],
@@ -246,6 +296,7 @@ def _execute(cfg, release, run_dir, preflight_only, explicit_release, figure_dir
         'confirmatory_validation':False,'external_prediction_validated':False,'causal_or_latent_progression_claims':False,
         'privacy_class':'INTERNAL_RESTRICTED','shareable_export_allowed':False,
         'inferential_scope':'exploratory_conditional_on_frozen_labels'}
+    summary['sha256_by_artifact'] = {file.name: digest(file) for file in sorted(run_dir.glob('03_graph_*')) if file.is_file()}
     write_json(run_dir / RESULTS, summary)
     return status
 

@@ -5,6 +5,9 @@ import numpy as np
 import pandas as pd
 
 from . import s03_n3_calendar_day as cal
+from .s03_baseline_window import (
+    calendar_day, calendar_windows, policy, require_policy, select_calendar_rows,
+)
 
 KEYS = ['patient_id', 'clinical_episode_id']
 
@@ -18,8 +21,8 @@ def validate_baseline(baseline):
     if 'clinical_baseline_episode_id' in baseline and not baseline.clinical_episode_id.eq(
             baseline.clinical_baseline_episode_id).all():
         raise ValueError('OFFICIAL_BASELINE_EPISODE_MISMATCH')
-    dates = pd.to_datetime(baseline.clinical_baseline_date, errors='coerce', utc=True)
-    anchors = pd.to_datetime(baseline.clinical_anchor_date, errors='coerce', utc=True)
+    dates = baseline.clinical_baseline_date.map(calendar_day)
+    anchors = baseline.clinical_anchor_date.map(calendar_day)
     if dates.isna().any() or not dates.eq(anchors).all():
         raise ValueError('OFFICIAL_BASELINE_DATE_MISMATCH')
 
@@ -82,15 +85,18 @@ def protocol_view(baseline, context, review):
     return result
 
 
-def measurement_values(baseline, measurements, source, review):
+def measurement_values(baseline, measurements, source, review, *, current=False):
     """Use actual, reviewed pre-baseline instrument times and exact assay/unit.
 
     Measurements use the official baseline episode key. Select latest eligible
     pre-baseline time within the approved lookback; discordant ties fail closed.
     No administrative/anchor date is substituted for an instrument date.
     """
+    if current and review:
+        require_policy(review)
+    selector = policy().selection_primary if current else 'latest_prebaseline'
     required = {'instrument_date_verified': True, 'date_semantics': 'instrument_measurement',
-                'selection_rule': 'latest_prebaseline', 'duplicate_rule': 'identical_only',
+                'selection_rule': selector, 'duplicate_rule': 'identical_only',
                 'baseline_window_verified': True, 'source_semantics_verified': True,
                 'missingness_and_indication_reviewed': True,
                 'timezone_reviewed': True, 'dates_normalized_to_utc': True}
@@ -99,7 +105,7 @@ def measurement_values(baseline, measurements, source, review):
         raise ValueError('MEASUREMENT_SOURCE_DATE_OR_SEMANTICS_REVIEW_REQUIRED')
     lookback = review.get('lookback_days')
     kind = review.get('type')
-    if (type(lookback) is not int or lookback < 0 or kind not in {'numeric', 'binary'} or
+    if ((not current and (type(lookback) is not int or lookback < 0)) or kind not in {'numeric', 'binary'} or
             not isinstance(review.get('assay_id'), str) or not review['assay_id'] or
             not isinstance(review.get('unit'), str) or not review['unit']):
         raise ValueError('MEASUREMENT_TYPE_ASSAY_UNIT_OR_WINDOW_REQUIRED')
@@ -125,15 +131,33 @@ def measurement_values(baseline, measurements, source, review):
     cutoff = pd.to_datetime(rows.clinical_baseline_date, errors='coerce', utc=True)
     if (rows.value.notna() & rows['_time'].isna()).any():
         raise ValueError('INSTRUMENT_DATE_MISSING_OR_INVALID')
-    # Post-baseline measurements stay ineligible, even when closer to an anchor.
-    age = (cutoff - rows['_time']).dt.total_seconds() / 86400
-    rows = rows.loc[age.between(0, lookback)].drop_duplicates(columns)
-    if rows.empty:
-        raise ValueError('NO_PREBASELINE_INSTRUMENT_MEASUREMENTS')
-    latest = rows.groupby(KEYS)['_time'].transform('max')
-    rows = rows.loc[rows['_time'].eq(latest)]
-    if rows.duplicated(KEYS).any():
-        raise ValueError('REPEATED_MEASUREMENT_TIE_REQUIRES_ADJUDICATION')
+    if current:
+        rows['collection_calendar_day'] = rows.measurement_date.map(calendar_day)
+        windows = calendar_windows(rows.clinical_baseline_date, rows.collection_calendar_day)
+        if (rows.value.notna() & windows.baseline_offset_days.isna()).any():
+            raise ValueError('INSTRUMENT_DATE_MISSING_OR_INVALID')
+        comparable = rows.value.notna()
+        if kind == 'numeric':
+            comparable &= pd.to_numeric(rows.value, errors='coerce').replace([np.inf, -np.inf], np.nan).notna()
+        else:
+            categories = review.get('category_convention', {})
+            comparable &= rows.value.astype('string').isin(set(categories.get('positive', [])) |
+                                                           set(categories.get('negative', [])))
+        inside = windows.window_bin.isin(('DAY0', 'DAY1_30', 'DAY31_90', 'DAY91_TO_6M'))
+        chosen, conflict = select_calendar_rows(rows.loc[inside & comparable], KEYS)
+        rows = chosen.loc[~conflict].drop_duplicates(KEYS)
+        if rows.empty:
+            raise ValueError('AMBIGUOUS_EARLIEST_DAY' if conflict.any() else 'NO_BASELINE_WINDOW_INSTRUMENT_MEASUREMENTS')
+    else:
+        # Historical explicit timestamp contract kept for source audits.
+        age = (cutoff - rows['_time']).dt.total_seconds() / 86400
+        rows = rows.loc[age.between(0, lookback)].drop_duplicates(columns)
+        if rows.empty:
+            raise ValueError('NO_PREBASELINE_INSTRUMENT_MEASUREMENTS')
+        latest = rows.groupby(KEYS)['_time'].transform('max')
+        rows = rows.loc[rows['_time'].eq(latest)]
+        if rows.duplicated(KEYS).any():
+            raise ValueError('REPEATED_MEASUREMENT_TIE_REQUIRES_ADJUDICATION')
     selected = baseline[KEYS].merge(rows[KEYS + ['value']], on=KEYS, how='left', validate='one_to_one')
     values = selected.value
     if kind == 'numeric':
@@ -156,10 +180,14 @@ def measurement_values(baseline, measurements, source, review):
 
 
 def validate_calendar_day_review(review):
+    current = isinstance(review, dict) and review.get('measurement_contract') == cal.CONTRACT
+    if current:
+        require_policy(review)
     required = {
-        'measurement_contract': cal.CONTRACT, 'time_resolution': 'calendar_day',
+        'measurement_contract': cal.CONTRACT if current else cal.LEGACY_CONTRACT, 'time_resolution': 'calendar_day',
         'identity_contract': cal.IDENTITY, 'date_origin': cal.DATE_ORIGIN,
-        'selection_rule': 'latest_prebaseline_calendar_day', 'duplicate_rule': 'identical_only',
+        'selection_rule': policy().selection_primary if current else 'latest_prebaseline_calendar_day',
+        'duplicate_rule': 'identical_only',
     }
     approvals = (
         'calendar_day_origin_verified', 'baseline_calendar_day_verified', 'baseline_window_verified',
@@ -170,7 +198,8 @@ def validate_calendar_day_review(review):
             or any(review.get(key) is not True for key in approvals)
             or any(key in review for key in ('assay_id', 'sample_id', 'timezone_reviewed', 'dates_normalized_to_utc'))):
         raise ValueError('CALENDAR_DAY_PROVENANCE_AND_SEMANTICS_REVIEW_REQUIRED')
-    cal.validate_window(review)
+    if not current:
+        cal.validate_window(review)
     if (review.get('type') not in {'numeric', 'binary'}
             or any(not isinstance(review.get(key), str) or not review[key].strip()
                    for key in ('test_definition_id', 'unit'))):
@@ -192,47 +221,85 @@ def validate_calendar_day_review(review):
     return groups
 
 
-def measurement_values_calendar_day(baseline, measurements, source, review, *, source_review_sha256):
+def measurement_values_calendar_day(baseline, measurements, source, review, *, source_review_sha256, canonical=None):
     """Apply a signed calendar-day contract to a pinned, reviewed artifact."""
     groups = validate_calendar_day_review(review)
+    current = review['measurement_contract'] == cal.CONTRACT
+    if current and canonical is None:
+        raise ValueError('CANONICAL_BASELINE_WINDOW_MEASUREMENTS_UNAVAILABLE')
     if source not in cal.LAB_SOURCES:
         raise ValueError('CALENDAR_DAY_LAB_SOURCE_REQUIRED')
     if not set(cal.CORE) <= set(measurements):
         raise ValueError('CALENDAR_DAY_MEASUREMENT_SCHEMA_UNAVAILABLE')
     rows = measurements.loc[measurements.source_column.eq(source), cal.CORE].copy()
     if rows.empty:
-        raise ValueError('NO_PREBASELINE_INSTRUMENT_MEASUREMENTS')
+        raise ValueError('NO_BASELINE_WINDOW_INSTRUMENT_MEASUREMENTS' if current else
+                         'NO_PREBASELINE_INSTRUMENT_MEASUREMENTS')
     if not rows.source_artifact_status.eq('SOURCE_REVIEWED').fillna(False).all():
         raise ValueError('UNAPPROVED_MEASUREMENT_CANDIDATE')
     if not cal.SHA256.fullmatch(str(source_review_sha256)):
         raise ValueError('SIGNED_CALENDAR_DAY_SOURCE_REVIEW_REQUIRED')
     requirements = {
         'source_review_sha256': source_review_sha256, 'measurement_contract_sha256': cal.fingerprint(review),
-        'review_contract_version': cal.REVIEW_VERSION, 'date_origin': cal.DATE_ORIGIN, 'date_resolution': 'calendar_day',
+        'review_contract_version': cal.BASELINE_REVIEW_VERSION if current else cal.REVIEW_VERSION,
+        'date_origin': cal.DATE_ORIGIN, 'date_resolution': 'calendar_day',
         'test_definition_id': review['test_definition_id'], 'unit': review['unit'],
     }
     if (any(not rows[key].eq(value).fillna(False).all() for key, value in requirements.items())
             or rows[['assay_id', 'sample_id']].notna().any().any()
             or not rows.observation_sha256.astype('string').str.fullmatch(cal.SHA256, na=False).all()
             or any(rows[key].astype('string').fillna('').str.strip().eq('').any()
-                   for key in KEYS + ['source_episode_id', *cal.ORIGINAL_IDENTITY, 'value'])):
+                   for key in KEYS + ((['source_episode_id', *cal.ORIGINAL_IDENTITY] if not current else []) + ['value']))):
         raise ValueError('CALENDAR_DAY_ARTIFACT_OUTSIDE_SIGNED_SCOPE')
     validate_baseline(baseline)
-    cutoffs = baseline[KEYS].assign(_cutoff=cal.calendar_days(baseline.clinical_baseline_date, allow_time=True))
-    anchors = cal.calendar_days(baseline.clinical_anchor_date, allow_time=True)
+    def written_day(series):
+        if current:
+            return pd.Series(pd.array(series.map(calendar_day), dtype=cal.DATE_DTYPE), index=series.index)
+        return cal.calendar_days(series, allow_time=True)
+
+    cutoffs = baseline[KEYS].assign(_cutoff=written_day(baseline.clinical_baseline_date))
+    anchors = written_day(baseline.clinical_anchor_date)
     if cutoffs._cutoff.isna().any() or not cutoffs._cutoff.eq(anchors).fillna(False).all():
         raise ValueError('OFFICIAL_BASELINE_CALENDAR_DAY_MISMATCH')
     rows = rows.merge(cutoffs, on=KEYS, how='left', validate='many_to_one')
-    rows['collection_calendar_day'] = cal.calendar_days(rows.collection_calendar_day)
+    rows['collection_calendar_day'] = written_day(rows.collection_calendar_day)
     if rows._cutoff.isna().any() or rows.collection_calendar_day.isna().any():
         raise ValueError('CALENDAR_DAY_OR_BASELINE_IDENTITY_INVALID')
-    ages = cal.calendar_age(rows._cutoff, rows.collection_calendar_day)
-    identity = [field for field in cal.CORE if field not in KEYS]
-    latest, discordant = cal.latest_calendar_rows(
-        rows.loc[ages.between(review['minimum_days_before_baseline'], review['lookback_days'])], identity)
-    chosen = latest.loc[~discordant].drop_duplicates(KEYS + identity)
-    if chosen.empty:
-        raise ValueError('AMBIGUOUS_SAME_DAY' if discordant.any() else 'NO_PREBASELINE_INSTRUMENT_MEASUREMENTS')
+    if current:
+        windows = calendar_windows(rows._cutoff, rows.collection_calendar_day)
+        if (not windows.window_bin.isin(('DAY0', 'DAY1_30', 'DAY31_90', 'DAY91_TO_6M')).all()
+                or rows.duplicated(KEYS).any()):
+            raise ValueError('MEASUREMENTS_OUTSIDE_CANONICAL_BASELINE_SELECTION')
+        # Bind the signed observations to the exact cohort-wide definition,
+        # IDs, collection days, and values selected by Graph03/03e.
+        expected_unit = canonical.unit.fillna('qualitative')
+        if not expected_unit.eq(review['unit']).all():
+            raise ValueError('SIGNED_REVIEW_DOES_NOT_MATCH_CANONICAL_UNIT_OR_TYPE')
+        expected = canonical.rename(columns={'definition_id': 'test_definition_id',
+                                             'order_identifier': 'original_order_id',
+                                             'order_name_original': 'original_order_name',
+                                             'observation_name_original': 'original_observation_name'})
+        scope = [*KEYS, 'collection_calendar_day', 'test_definition_id', 'source_episode_id', *cal.ORIGINAL_IDENTITY]
+        matched = rows.merge(expected[scope + ['value']], on=scope, how='outer',
+                             suffixes=('', '_canonical'), indicator=True, validate='one_to_one')
+        if groups is None:
+            encoding = pd.to_numeric(matched.value, errors='coerce')
+            equal_values = np.isclose(encoding, matched.value_canonical, atol=0, rtol=8 * np.finfo(float).eps)
+        else:
+            encoding = matched.value.map({**dict.fromkeys(groups['positive'], 1.),
+                                          **dict.fromkeys(groups['negative'], 0.)})
+            equal_values = encoding.eq(matched.value_canonical).fillna(False)
+        if not matched['_merge'].eq('both').all() or not equal_values.all():
+            raise ValueError('MEASUREMENTS_OUTSIDE_CANONICAL_BASELINE_SELECTION')
+        chosen = rows
+    else:
+        ages = cal.calendar_age(rows._cutoff, rows.collection_calendar_day)
+        identity = [field for field in cal.CORE if field not in KEYS]
+        latest, discordant = cal.latest_calendar_rows(
+            rows.loc[ages.between(review['minimum_days_before_baseline'], review['lookback_days'])], identity)
+        chosen = latest.loc[~discordant].drop_duplicates(KEYS + identity)
+        if chosen.empty:
+            raise ValueError('AMBIGUOUS_SAME_DAY' if discordant.any() else 'NO_PREBASELINE_INSTRUMENT_MEASUREMENTS')
     values = baseline[KEYS].merge(chosen[KEYS + ['value']], on=KEYS, how='left', validate='one_to_one').value
     if groups is None:
         numeric = pd.to_numeric(values, errors='coerce').replace([np.inf, -np.inf], np.nan)

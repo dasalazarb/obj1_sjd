@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from .s03_baseline_window import calendar_day, calendar_windows, policy
+
 from .._pipeline import digest
 
 KEYS = ["patient_id", "clinical_episode_id"]
@@ -38,7 +40,7 @@ def _unique(frame, keys, name):
 
 
 def _dates(values):
-    return pd.to_datetime(values, errors="coerce", utc=True)
+    return values.map(calendar_day)
 
 
 def build_candidate(root, context_path, output_path):
@@ -73,8 +75,9 @@ def build_candidate(root, context_path, output_path):
     baseline[KEYS] = baseline[KEYS].astype(str)
     context[KEYS] = context[KEYS].astype(str)
     selected[KEYS] = selected[KEYS].astype(str)
-    base = baseline[KEYS + [s for s in LAB_SOURCES if s in baseline]].merge(
-        context, on=KEYS, how="left", validate="one_to_one", indicator="_context_join")
+    frozen = baseline.reindex(columns=KEYS + ["clinical_baseline_date"] + [s for s in LAB_SOURCES if s in baseline])
+    base = frozen.merge(context.drop(columns="clinical_baseline_date", errors="ignore"), on=KEYS,
+                        how="left", validate="one_to_one", indicator="_context_join")
     if not base._context_join.eq("both").all():
         raise ValueError("N3_CONTEXT_EPISODE_MISMATCH")
 
@@ -95,12 +98,13 @@ def build_candidate(root, context_path, output_path):
                                             "unit_conflict": "_unit_conflict",
                                             "result_conflict": "_result_conflict",
                                             "selection_status": "_selection_status"})
-        m = base[KEYS + [source, date_field]].merge(
+        m = base[KEYS + ["clinical_baseline_date", source, date_field]].merge(
             matching, on=KEYS, how="left", validate="one_to_one")
         left, right = _dates(m[date_field]), _dates(m._selected_date)
         dates_agree = left.notna() & right.notna() & left.eq(right)
         conflicts = m._unit_conflict.eq(True).fillna(False) | m._result_conflict.eq(True).fillna(False)
         selected_ok = m._selection_status.isin(["selected_single", "selected_qualitative"])
+        temporal = calendar_windows(m.clinical_baseline_date, right)
         eligible_provenance = dates_agree & ~conflicts & selected_ok
         # Keep raw clinical values in the authorized environment only. Values
         # without verified dates are missing, never substituted by episode dates.
@@ -110,7 +114,9 @@ def build_candidate(root, context_path, output_path):
         frame = m[KEYS].copy()
         frame["source_column"] = source
         frame["value"] = values
-        frame["measurement_date"] = right.where(eligible_provenance & observed)
+        frame["measurement_date"] = pd.to_datetime(right.where(eligible_provenance & observed))
+        frame["window_bin"] = temporal.window_bin.where(dates_agree, 'UNKNOWN')
+        frame["baseline_offset_days"] = temporal.baseline_offset_days.where(dates_agree)
         # lab_id is a canonical analyte identifier, NOT proof of an assay platform.
         frame["assay_id"] = pd.Series(pd.NA, index=frame.index, dtype="string")
         frame["unit"] = m._unit.astype("string").where(eligible_provenance & observed)
@@ -126,7 +132,7 @@ def build_candidate(root, context_path, output_path):
         frame["assay_identity_status"] = "NOT_VERIFIED"
         frame["sample_identity_status"] = "NOT_AVAILABLE"
         frame["clinical_approval_status"] = "PENDING_HUMAN_REVIEW"
-        tables.append(frame[OUTPUT_COLUMNS])
+        tables.append(frame[OUTPUT_COLUMNS + ["window_bin", "baseline_offset_days"]])
         report[source] = "DATED_LAB_CANDIDATES_UNAPPROVED"
     if not tables:
         raise ValueError("N3_NO_SOURCE_MAPPED_LAB_CANDIDATES")
@@ -142,7 +148,9 @@ def build_candidate(root, context_path, output_path):
         os.chmod(temp, 0o600)
         temp.rename(output_path)
         manifest = {
+            **policy().metadata(),
             "status": "SOURCE_CANDIDATE_UNAPPROVED",
+            "source_provenance_tier": "STEP01_CONTEXT_SELECTED_DATE_ONLY",
             "privacy_class": "INTERNAL_RESTRICTED",
             "public_export": False,
             "eligible_for_inference": False,

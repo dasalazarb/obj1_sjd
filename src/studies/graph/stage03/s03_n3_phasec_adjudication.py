@@ -18,6 +18,7 @@ import yaml
 from .._pipeline import digest, git_commit, output_lock, stage_outputs, write_json
 from ..stage02.s02_contracts import CURRENT_SCHEMA, artifact_paths, safe_artifact, validate_release
 from .s03_n3_candidate_audit import _proxy_alerts
+from .s03_baseline_window import MISMATCH, policy as baseline_policy, require_policy
 from .s03_release_reader import RESULTS_SCHEMA, hard_members
 
 VERSION = 'graph03_n3_phasec_v1'
@@ -429,8 +430,10 @@ def load_phasec_inputs(graph03_run, graph02_release, config, *, strict=False):
     """Verify all contracts and hashes before generating conclusions or outputs."""
     validate_phasec_config(config)
     contract = config['input_contract']
-    manifest, release = validate_release(graph02_release,
-        expected_sha=contract.get('graph02_release_sha256') if strict else None)
+    manifest, release = validate_release(graph02_release)
+    expected_sha = contract.get('graph02_release_sha256') if strict else None
+    if expected_sha is not None and digest(release) != expected_sha:
+        raise ValueError('Release manifest SHA mismatch')
     current = manifest['schema_version'] == CURRENT_SCHEMA
     release_sha = None if current else digest(release)
     root = Path(graph03_run).resolve()
@@ -451,6 +454,10 @@ def load_phasec_inputs(graph03_run, graph02_release, config, *, strict=False):
         raise ValueError('GRAPH03_FAILED_OR_INCOMPLETE_RUN')
     input_hashes = {} if current else {name: digest(path) for name, path in paths.items()}
     if current:
+        require_policy(summary)
+        if (summary.get('window_policy_sha256') != baseline_policy().sha256
+                or summary.get('graph02_release_sha256') != digest(release)):
+            raise ValueError(MISMATCH)
         if (summary.get('n_patients') != manifest['n_patients']
                 or input_qc.get('eligible_representation_ids') != manifest['eligible_representation_ids']):
             raise ValueError('GRAPH03_CURRENT_COHORT_OR_REPRESENTATION_MISMATCH')
@@ -594,6 +601,7 @@ def run_phasec(graph03_run, graph02_release, output_dir, config_path, repository
 
     repo, cfg_path = Path(repository_root).resolve(), Path(config_path).resolve()
     config = yaml.safe_load(cfg_path.read_text())
+    require_policy(config)
     graph03 = Path(graph03_run).resolve()
     release = Path(graph02_release).resolve()
     roots = [graph03, release if release.is_dir() else release.parent]
@@ -670,6 +678,9 @@ def _write_phasec(inputs, config, cfg_path, graph03_run, output, repo, strict, d
             if column not in table: table[column] = ''
         for column,value in metadata.items(): table[column] = value
         tables[name] = _suppress(table,int(config['minimum_disclosure_cell']))
+    for table in tables.values():
+        for key, value in baseline_policy().metadata().items():
+            table[key] = value
     _privacy_check(tables,baseline)
     candidates = tables['candidate_adjudication']
     unique = not candidates.duplicated(['representation_id','candidate_family','source_column']).any()
@@ -680,7 +691,8 @@ def _write_phasec(inputs, config, cfg_path, graph03_run, output, repo, strict, d
     code_hashes = {} if current else {p: digest(repo/p) for p in DOCUMENTARY_FILES if (repo/p).is_file()}
     if any(digest(path) != sha for path,sha in inputs['protected'].items()):
         raise ValueError('FROZEN_INPUT_CHANGED_DURING_PHASEC')
-    qc = dict(**metadata, status='PASS', phasec_status='COMPLETE_WITH_DOCUMENTARY_BLOCKERS',
+    qc = dict(**metadata, **baseline_policy().metadata(), status='PASS', phasec_status='COMPLETE_WITH_DOCUMENTARY_BLOCKERS',
+        graph02_baseline_window_input_sha256=digest(inputs['release']),
         dependency_resolution=dependency_resolution or [], validation_mode='strict' if strict else 'normal',
         source_keys_unique=unique, graph02_unchanged=True, graph03_unchanged=True,
         n_candidate_rows=len(candidates), n_candidate_families=candidates.candidate_family.nunique(),

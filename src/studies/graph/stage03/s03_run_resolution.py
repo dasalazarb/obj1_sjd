@@ -15,6 +15,8 @@ from .._pipeline import config_path, digest
 from ..stage02.s02_contracts import MANIFEST, safe_artifact, validate_release
 from .s03_n3_phasec_adjudication import INPUT_FILES, load_phasec_inputs
 
+BASELINE_OUTPUT_DIR = '03_graph_n3_baseline_0_to_6m'
+
 
 def graph_paths(repository_root, *, data_root=None):
     repo = Path(repository_root).resolve()
@@ -27,7 +29,7 @@ def graph_paths(repository_root, *, data_root=None):
         result[key] = data_root / configured.relative_to(repo) if configured.is_relative_to(repo) else configured
     result['phasec'] = result['graph03'].parent / '03_graph_n3_clinical_adjudication'
     result['phased'] = result['graph03'].parent / '03_graph_n3_resolution_preflight'
-    result['phasee'] = result['graph03'].parent / '03_graph_n3_controlled_inference'
+    result['phasee'] = result['graph03'].parent / BASELINE_OUTPUT_DIR
     return result
 
 

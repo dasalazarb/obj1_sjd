@@ -10,6 +10,7 @@ import yaml
 
 from .._pipeline import digest
 from . import s03_n3_calendar_day as cal
+from .s03_baseline_window import policy, require_policy
 from .s03_n3_approved_view import measurement_values, measurement_values_calendar_day, validate_calendar_day_review
 from .s03_n3_decisions import evidence_path, verify_detached_signature
 from .s03_n3_measurement_source import CORE, EDA_FIELDS, KEYS, LAB_SOURCES, UNAVAILABLE_RESULT, _text, _utc
@@ -246,6 +247,65 @@ def _build_calendar_outcome(candidates, baseline, source, rule, window, source_s
     if not output.empty:
         measurement_values_calendar_day(baseline, output, source, inspection, source_review_sha256=source_sha)
     return output, linkage, inspection, set(definitions.fillna('').itertuples(index=False, name=None))
+
+
+def reviewed_baseline_measurements(candidates, baseline, binding, documents, settings, calendar):
+    """Apply signed review to the exact canonical measurement set without reselection."""
+    from .s03_n3_exploratory_source import DEFINITION, _outcome, primary_measurements
+
+    document, hashes, evidence = _verify_document(documents, binding, cal.BASELINE_REVIEW_VERSION)
+    require_policy(document)
+    rules = document.get('outcomes')
+    if not isinstance(rules, dict) or not rules or not set(rules) <= set(calendar['windows']):
+        raise ValueError('SOURCE_REVIEW_OUTCOME_SCOPE_INVALID')
+    outputs, ledgers, ana_definitions = [], [], []
+    for source, rule in sorted(rules.items()):
+        if not isinstance(rule, dict) or not all(rule.get(flag) is True for flag in CALENDAR_AFFIRMATIONS):
+            raise ValueError('CALENDAR_DAY_SOURCE_REVIEW_FIELD_SEMANTICS_REQUIRED')
+        inspection = rule.get('measurement_review')
+        validate_calendar_day_review(inspection)
+        if inspection.get('measurement_contract') != cal.CONTRACT:
+            raise ValueError('BASELINE_WINDOW_POLICY_VERSION_MISMATCH')
+        outcome = _outcome(candidates, source, settings)
+        selected = primary_measurements(outcome)
+        if selected.empty:
+            raise ValueError('NO_BASELINE_WINDOW_INSTRUMENT_MEASUREMENTS')
+        expected = {key: str(selected[key].iloc[0]) if pd.notna(selected[key].iloc[0]) else None
+                    for key in DEFINITION}
+        if (rule.get('exact_original_test') != expected or not selected.definition_id.eq(
+                inspection['test_definition_id']).all()):
+            raise ValueError('SIGNED_REVIEW_DOES_NOT_MATCH_CANONICAL_TEST_DEFINITION')
+        unit = expected['unit'] or 'qualitative'
+        numeric = source.endswith('__value')
+        expected_kind = 'numeric' if numeric else 'binary'
+        if inspection['type'] != expected_kind or inspection['unit'] != unit:
+            raise ValueError('SIGNED_REVIEW_DOES_NOT_MATCH_CANONICAL_UNIT_OR_TYPE')
+        values = selected.result_numeric_exact if numeric else selected.result_text.fillna(selected.result_raw)
+        output = selected.assign(
+            source_column=source, value=_text(values), unit=unit, assay_id=pd.NA, sample_id=pd.NA,
+            original_order_id=selected.order_identifier, original_order_name=selected.order_name_original,
+            original_observation_name=selected.observation_name_original,
+            test_definition_id=inspection['test_definition_id'], date_origin=cal.DATE_ORIGIN,
+            date_resolution='calendar_day', review_contract_version=cal.BASELINE_REVIEW_VERSION,
+            source_review_sha256=hashes['review'], measurement_contract_sha256=cal.fingerprint(inspection),
+            source_artifact_status='SOURCE_REVIEWED',
+            observation_sha256=[cal.fingerprint([str(value) for value in item]) for item in selected[
+                ['patient_id', 'clinical_episode_id', 'source_episode_id', 'collection_calendar_day', 'value',
+                 'definition_id']].itertuples(index=False, name=None)])
+        output = output[cal.CORE].astype({key: baseline[key].dtype for key in KEYS})
+        measurement_values_calendar_day(baseline, output, source, inspection, source_review_sha256=hashes['review'],
+                                        canonical=selected)
+        outputs.append(output)
+        ledger = outcome.inventory[['patient_id', 'source_episode_id', 'collection_calendar_day', 'first_reason']].copy()
+        ledgers.append(ledger.assign(source_column=source, selected=ledger.index.isin(selected.index)))
+        if LAB_SOURCES[source].startswith('ana'):
+            ana_definitions.append(inspection['test_definition_id'])
+    if len(ana_definitions) == 2 and (len(set(ana_definitions)) != 2 or
+                                     document.get('ana_hypotheses_distinct_verified') is not True):
+        raise ValueError('REVIEWED_ANA_DEFINITIONS_NOT_DISTINCT')
+    manifest = dict(sources=sorted(rules), document_sha256=hashes, evidence_sha256=evidence,
+                    review_contract_version=cal.BASELINE_REVIEW_VERSION, **policy().metadata())
+    return pd.concat(outputs, ignore_index=True), pd.concat(ledgers, ignore_index=True), manifest
 
 
 def reviewed_measurements(candidates, ledger, baseline, binding, specimen_id_column, documents, *, calendar=None):

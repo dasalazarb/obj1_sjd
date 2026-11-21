@@ -10,8 +10,12 @@ import pyarrow as pa
 
 from .._pipeline import digest
 from .s03_n3_source_adapter import KEYS, LAB_SOURCES
+from .s03_baseline_window import MISMATCH, require_policy
 
-CONTRACT = 'calendar_day_prebaseline'
+LEGACY_CONTRACT = 'calendar_day_prebaseline'
+CONTRACT = 'calendar_day_baseline_0_to_6m'
+BASELINE_SOURCE_VERSION = 'graph03_n3_measurement_source_v3'
+BASELINE_REVIEW_VERSION = 'graph03_n3_measurement_review_v3'
 SOURCE_VERSION = 'graph03_n3_measurement_source_v2'
 REVIEW_VERSION = 'graph03_n3_measurement_review_v2'
 IDENTITY = 'reviewed_test_definition_without_specimen_id'
@@ -67,14 +71,19 @@ def calendar_days(series, date_format='ISO8601', *, allow_time=False):
 
 
 def validate_settings(settings):
-    if (not isinstance(settings, dict) or settings.get('contract') != CONTRACT
+    if (not isinstance(settings, dict) or settings.get('contract') not in {CONTRACT, LEGACY_CONTRACT}
             or not isinstance(settings.get('windows'), dict) or not settings['windows']
             or not set(settings['windows']) <= set(LAB_SOURCES)):
         raise ValueError('CALENDAR_DAY_CONFIG_INVALID')
     for window in settings['windows'].values():
-        if not isinstance(window, dict) or set(window) != set(SELECTOR_FIELDS):
-            raise ValueError('CALENDAR_DAY_WINDOW_REQUIRED')
-        validate_window(window)
+        if settings['contract'] == CONTRACT:
+            require_policy(window)
+            if set(window) != {'window_policy_version'}:
+                raise ValueError(MISMATCH)
+        else:
+            if not isinstance(window, dict) or set(window) != set(SELECTOR_FIELDS):
+                raise ValueError('CALENDAR_DAY_WINDOW_REQUIRED')
+            validate_window(window)
     fields = settings.get('linkage_fields')
     if not isinstance(fields, dict) or set(fields) not in (set(KEY_FIELDS), set(KEY_FIELDS) | {'record_id'}):
         raise ValueError('BTRIS_LINKAGE_FIELDS_REQUIRED')

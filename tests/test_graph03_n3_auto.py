@@ -1,4 +1,4 @@
-"""Exercise the signed Calendar Day v2 runner with synthetic inputs and keys."""
+"""Exercise the signed baseline window runner with synthetic inputs and keys."""
 import fcntl
 import json
 from pathlib import Path
@@ -12,6 +12,9 @@ import yaml
 
 from src.studies.graph._pipeline import digest
 from src.studies.graph.stage03 import s03_n3_calendar_day as cal
+from src.studies.graph.stage03.s03_baseline_window import VERSION as WINDOW_VERSION, policy
+from src.studies.graph.stage03.s03_n3_exploratory_source import DEFINITION
+from src.studies.graph.stage03.s03_n3_measurement_review import CALENDAR_AFFIRMATIONS
 from src.studies.graph.stage03.s03_run_resolution import graph_paths
 from tests.test_graph03_n3_calendar_day import calendar_originals, inspection, source_rule, write_btris
 from tests.test_graph03_n3_controlled import attestations
@@ -72,7 +75,8 @@ def automatic(calendar_originals, tmp_path):
     legacy.mkdir(parents=True)
     (legacy / '10_n3_instrument_measurements.parquet').write_bytes(b'SYNTHETIC_LEGACY_SENTINEL')
 
-    eda = pd.read_parquet(paths['eda_long'])
+    eda = pd.read_parquet(paths['eda_long']).assign(lab_date='2020-01-01', unit='IU/mL')
+    write_btris(paths, eda, repo.parent)
     eda['result_numeric_exact'] = 2 + (eda.index % 13) / 3
     eda['result_raw'] = eda['result_numeric_exact'].astype(str)
     eda.to_parquet(paths['eda_long'], index=False)
@@ -89,7 +93,7 @@ def auto(automatic):
     for secret in ('SYNTHETIC_0', 'SYNTHETIC_EP_', '2019-12-31', 'SYNTHETIC_LEGACY_SENTINEL'):
         assert secret not in proc.stdout
     result = json.loads(proc.stdout)
-    assert result['mode'] == 'calendar_day_v2'
+    assert result['mode'] == 'baseline_calendar_window'
     if result['report_path']:
         report = Path(result['report_path'])
         assert report.stat().st_mode & 0o777 == 0o600
@@ -116,6 +120,8 @@ def provision_prespecification(automatic, *, complete=True, **updates):
     run_command('openssl', 'genpkey', '-algorithm', 'RSA', '-pkeyopt', 'rsa_keygen_bits:2048', '-out', str(key))
     run_command('openssl', 'pkey', '-in', str(key), '-pubout', '-out', str(trust / 'prespecification_public.pem'))
     doc = yaml.safe_load(config.read_text())
+    doc.update(schema_version=cal.BASELINE_SOURCE_VERSION, window_policy_version=WINDOW_VERSION)
+    doc['calendar_day'].update(contract=cal.CONTRACT, windows={RF: dict(window_policy_version=WINDOW_VERSION)})
     doc['source_paths'] = {}
     doc['calendar_day']['date_formats']['intermediate'] = 'ISO8601'
     if not complete:
@@ -129,13 +135,29 @@ def provision_prespecification(automatic, *, complete=True, **updates):
     return key
 
 
+def baseline_inspection(paths, **details):
+    sample = pd.read_parquet(paths['eda_long']).iloc[0]
+    definition = {key: sample.get(key) if pd.notna(sample.get(key)) else None for key in DEFINITION}
+    definition_id = cal.fingerprint(json.dumps(list(definition.values()), ensure_ascii=False))
+    old = inspection(**details)
+    old.pop('lookback_days')
+    old.pop('minimum_days_before_baseline')
+    old.update(measurement_contract=cal.CONTRACT, window_policy_version=WINDOW_VERSION,
+               selection_rule=policy().selection_primary, test_definition_id=definition_id, unit=sample.unit)
+    return old, definition
+
+
 def provision_source(automatic, pending):
-    _, _, private, _ = automatic
+    _, paths, private, _ = automatic
     audit = Path(report(pending)['artifacts']['source_audit'])
     binding = json.loads(audit.read_text())['review_binding']
     signing = private.parent / 'synthetic_source_signing'
     signing.mkdir()
-    files = signed_review(signing, binding, {RF: source_rule()}, version=cal.REVIEW_VERSION)
+    inspection, definition = baseline_inspection(paths)
+    rule = dict.fromkeys(CALENDAR_AFFIRMATIONS, True)
+    rule.update(exact_original_test=definition, measurement_review=inspection)
+    files = signed_review(signing, binding, {RF: rule}, version=cal.BASELINE_REVIEW_VERSION,
+                          window_policy_version=WINDOW_VERSION)
     folder = private / 'institution' / 'source'
     folder.mkdir(mode=0o700)
     shutil.copy(files['review_path'], folder / 'review.yaml')
@@ -161,7 +183,7 @@ def provision_plan(automatic, pending, key, sections, requested=None, *, sign_pl
         if pointer['section'] == 'measurement':
             path = decisions / pointer['path']
             doc = yaml.safe_load(path.read_text())
-            doc['details'] = inspection(source_review_sha256=digest(src))
+            doc['details'], _ = baseline_inspection(automatic[1], source_review_sha256=digest(src))
             write_yaml(path, doc)
             pointer.update(sha256=digest(path), signature_path='measurement.sig')
             sign(path, decisions / 'measurement.sig', key)
@@ -211,7 +233,7 @@ def test_audit_candidate_reuse_corruption_and_lock(automatic):
     assert details['history'] == ['SOURCE_AUDIT_COMPLETE', 'SOURCE_CANDIDATE_UNAPPROVED', 'SOURCE_REVIEW_PENDING']
     candidate = Path(artifacts['source_candidate'])
     assert candidate.is_file()
-    assert json.loads(candidate.read_text())['schema_version'] == cal.SOURCE_VERSION
+    assert json.loads(candidate.read_text())['schema_version'] == cal.BASELINE_SOURCE_VERSION
     assert (candidate.parent / 'unapproved_observations.parquet').stat().st_mode & 0o777 == 0o600
     assert auto(automatic) == first
     ledger = candidate.parent / 'private_ledger.parquet'

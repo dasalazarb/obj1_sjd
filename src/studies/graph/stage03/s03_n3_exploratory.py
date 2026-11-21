@@ -1,6 +1,7 @@
 """Calendar-day exploratory analysis of current Graph02/03 results."""
 
 from contextlib import ExitStack
+from dataclasses import asdict
 import json
 from pathlib import Path
 import re
@@ -8,31 +9,45 @@ import re
 import pandas as pd
 import yaml
 
-from .._pipeline import config_path, output_lock, output_root, stage_destinations, stage_outputs, write_json
+from .._pipeline import config_path, digest, output_lock, output_root, stage_destinations, stage_outputs, write_json
 from ..stage02.s02_contracts import CURRENT_SCHEMA, MANIFEST, artifact_paths, safe_artifact, validate_release
 from . import s03_n3_calendar_day as cal
-from .s03_construct_validation import _dependencies, feature_roles
+from .s03_baseline_window import (
+    AFTER_BASELINE_WINDOW, DAY_BINS, FROZEN_SNAPSHOT, MISMATCH, PRIMARY, WARNING, WINDOW_SNAPSHOT,
+    policy as baseline_policy, require_policy,
+)
+from .s03_construct_validation import _dependencies, _review, feature_roles, independence_review_approved
 from .s03_n3_approved_view import validate_baseline
 from .s03_n3_auto import CONFIGS, VALIDATION, _source_settings
 from .s03_n3_exploratory_models import (
     ESTIMATED, INDEPENDENT, UNRESOLVED as LINEAGE_UNRESOLVED, _estimate, _family, _fdr, _independence,
-    _model_support,
+    _adjustment, _model_support,
 )
 from .s03_n3_exploratory_reporting import (
-    SCOPE, TABLE_COLUMNS, _baseline_profiles, _chain, _coverage, _exclusions, _figures, _markdown, _profiles,
+    SCOPE, TABLE_COLUMNS, _baseline_profiles, _chain, _coverage, _exclusions, _figures, _markdown, _partition, _profiles,
     _small, _source_audit,
 )
 from .s03_n3_exploratory_source import (
-    DATE_FAILURES, EARLY, EDA_ONLY, EXACT, LATE, LINKED, OLDER, ORIGINAL, PATIENT_ONLY, PRE, READ_ERRORS,
-    RF_TEXT, RF_VALUE, STRATA, UNRESOLVED, _btris_records, _candidates, _inputs, _outcome, _test_disposition,
+    DATE_FAILURES, EDA_ONLY, EXACT, EXACT_WINDOW, LINKED, ORIGINAL, PATIENT_ONLY, READ_ERRORS,
+    RF_TEXT, RF_VALUE, SENSITIVITIES, STRATA, UNRESOLVED, _btris_records, _candidates, _inputs,
+    _outcome, _test_disposition, primary_measurements,
 )
 from .s03_n3_measurement_source import LAB_SOURCES
 from .s03_release_reader import RESULTS, RESULTS_SCHEMA, hard_members
 from .s03_run_resolution import graph_paths
 
 MODE = 'calendar_day_exploratory'
+BASELINE_ARTIFACTS = {
+    'baseline_eligibility': 'baseline_eligibility',
+    'measurement_delay': 'baseline_measurement_delay',
+    'baseline_inference': 'n3_baseline_inference',
+    'independence_audit': 'n3_role_lineage_audit',
+    'baseline_profiles': 'n3_baseline_community_profiles',
+    'temporal_overlap': 'temporal_overlap_audit',
+}
 DEFAULTS = 'n3_exploratory_defaults.yaml'
 LIMITATIONS = [
+    WARNING,
     'Las asociaciones son exploratorias y están condicionadas a las comunidades congeladas. '
     'Los resultados no constituyen evidencia confirmatoria, causal ni clínicamente validada.',
     'Los intervalos omiten la incertidumbre de Mapper y la selección de comunidades. '
@@ -51,7 +66,10 @@ SCOPES = {
 
 def _policy(root):
     policy = yaml.safe_load((root / CONFIGS / DEFAULTS).read_text())
-    if (policy['schema_version'] != 'graph03_n3_exploratory_v1'
+    require_policy(policy)
+    if policy.get('time') or 'main_window' in policy.get('measurements', {}):
+        raise ValueError(MISMATCH)
+    if (policy['schema_version'] != 'graph03_n3_exploratory_v2'
             or set(policy['measurements']['outcomes']) != set(LAB_SOURCES)
             or policy['representations'] != ['R0', 'R1', 'R2', 'R3', 'R4']
             or policy['primary_representation'] != 'R0'
@@ -75,23 +93,21 @@ def _unavailable(outputs, rep, source, reason):
         for provenance in (ORIGINAL, EDA_ONLY):
             outputs['coverage'].append(dict(representation_id=rep, outcome=source, stratum=stratum,
                                             provenance=provenance, status=reason, definition_role='PRIMARY'))
+    label = dict(representation_id=rep, outcome=source, stratum=PRIMARY, provenance=ORIGINAL,
+                 status=reason, definition_role='PRIMARY')
+    for name in ('community_profiles', 'baseline_eligibility', 'measurement_delay'):
+        outputs[name].append(label.copy())
     for table, (provenance, interpretation) in SCOPES.items():
-        outputs[table].append(dict(representation_id=rep, outcome=source, stratum=PRE, provenance=provenance,
+        outputs[table].append(dict(representation_id=rep, outcome=source, stratum=PRIMARY, provenance=provenance,
                                     interpretation=interpretation, status=reason, not_estimable_reason=reason,
                                     hypothesis_family=_family(source), model_a='A', model_b='B'))
 
 
 def _patient_flow(outputs, result, source, baseline, cell):
     label = dict(outcome=source, stratum='ALL')
-    inventory, selected = result.inventory, result.selected
+    inventory = result.inventory
     linked = inventory.loc[inventory.identity_status.isin(LINKED)]
-    dated = linked.loc[~linked.date_evidence.isin(DATE_FAILURES) & linked.stratum.ne(UNRESOLVED)]
-    in_window = dated.loc[dated.stratum.ne(OLDER)]
-    value_reasons = {'ANALYTE_MAPPING_UNVERIFIED', 'CENSORED_RESULT', 'ADMINISTRATIVE_RESULT',
-                     'NOT_EXACT_NUMERIC_RESULT', 'UNKNOWN_RESULT_TOKEN', 'INVALID_RESULT'}
-    definition_reasons = {'ORIGINAL_TEST_DEFINITION_UNAVAILABLE', 'NUMERIC_UNIT_UNAVAILABLE'}
-    valid = in_window.loc[~in_window.first_reason.isin(value_reasons)]
-    comparable = valid.loc[~valid.first_reason.isin(definition_reasons)]
+    counts = _eligibility_counts(inventory, result)
     n_unique = inventory._patient_match.nunique()
     rows = _chain(label, dict(n_source_rows=len(inventory)), cell, unit='source_row')
     if len(inventory) and (n_unique < cell or inventory._patient_match.isna().any()):
@@ -100,27 +116,12 @@ def _patient_flow(outputs, result, source, baseline, cell):
     outputs['cohort_flow'].extend(_chain(label, dict(n_frozen_cohort=len(baseline)), cell))
     outputs['cohort_flow'].extend(_chain(label, dict(
         n_distinct_source_patients=inventory.source_patient_id.nunique(),
-        n_normalized_source_patients=n_unique, n_identity_linked=linked.patient_id.nunique(),
-        n_collection_day_attributable=dated.patient_id.nunique(), n_inside_report_window=in_window.patient_id.nunique(),
-        n_value_valid=valid.patient_id.nunique(), n_test_comparable=comparable.patient_id.nunique(),
-        n_latest_unambiguous=selected.patient_id.nunique()), cell))
-    keys = {
-        'identity': {
-            'n_exact_episode_links': linked.loc[linked.identity_status.eq(EXACT), 'patient_id'].nunique(),
-            'n_unique_patient_only_links': linked.loc[linked.identity_status.eq(PATIENT_ONLY), 'patient_id'].nunique(),
-        },
-        'provenance': {
-            'n_date_original_verified': dated.loc[dated.provenance.eq(ORIGINAL), 'patient_id'].nunique(),
-            'n_eda_date_only': dated.loc[dated.provenance.eq(EDA_ONLY), 'patient_id'].nunique(),
-        },
-        'windows': {name: dated.loc[dated.stratum.eq(stratum), 'patient_id'].nunique() for stratum, name in
-                    zip(STRATA, ('n_prebaseline_1_365', 'n_day0', 'n_followup_1_365', 'n_followup_gt365',
-                                 'n_older_than_365'))},
-    }
-    for key, counts in keys.items():
-        total = linked.patient_id.nunique() if key == 'identity' else dated.patient_id.nunique()
-        for stage, count in counts.items():
-            outputs['cohort_flow'].extend(_chain(label, {'denominator': total, stage: count}, cell)[1:])
+        n_normalized_source_patients=n_unique, **counts), cell))
+    for stratum, name in zip(DAY_BINS, ('pre', 'day0', 'day1_30', 'day31_90', 'day91_to_6m', 'after_6m', 'unknown')):
+        count = linked.loc[linked.window_bin.eq(stratum), 'patient_id'].nunique()
+        outputs['cohort_flow'].extend(_chain(label, {'denominator': linked.patient_id.nunique(),
+                                                    'n_' + name: count}, cell)[1:])
+
     ambiguous = inventory.loc[inventory.identity_status.isin(
         {'PATIENT_ID_AMBIGUOUS', 'CROSS_PATIENT_CONFLICT', 'AMBIGUOUS_IDENTITY'})]
     audit = _chain(label, {'denominator': n_unique, 'n_ambiguous': ambiguous._patient_match.nunique()}, cell)[1]
@@ -128,19 +129,58 @@ def _patient_flow(outputs, result, source, baseline, cell):
         audit.update(status='SUPPRESSED', n_previous=None, n_remaining=None, n_excluded=None)
     outputs['cohort_flow'].append(audit)
 
-    for (stratum, provenance), group in dated.groupby(['stratum', 'provenance']):
-        if stratum == OLDER:
-            outputs['cohort_flow'].extend(_chain(dict(outcome=source, stratum=stratum, provenance=provenance),
-                                                  dict(n_outside_window=group.patient_id.nunique()), cell))
-            continue
-        good = group.loc[~group.first_reason.isin(value_reasons)]
-        comparable = good.loc[~good.first_reason.isin(definition_reasons)]
-        candidates = selected.loc[selected.stratum.eq(stratum) & selected.provenance.eq(provenance)]
-        primary = candidates.loc[candidates.definition_id.eq(result.primary.get((stratum, provenance)))]
-        counts = dict(n_collection_day_attributable=group.patient_id.nunique(), n_value_valid=good.patient_id.nunique(),
-                      n_test_comparable=comparable.patient_id.nunique(), n_latest_unambiguous=candidates.patient_id.nunique(),
-                      n_primary_definition=primary.patient_id.nunique())
-        outputs['cohort_flow'].extend(_chain(dict(outcome=source, stratum=stratum, provenance=provenance), counts, cell))
+
+def _eligibility_counts(inventory, result):
+    linked = inventory.loc[inventory.identity_status.isin(LINKED)]
+    temporal = linked.loc[linked.stratum.eq(PRIMARY)]
+    verified = temporal.loc[temporal.provenance.eq(ORIGINAL)]
+    selected = primary_measurements(result)
+    comparable = verified.loc[verified.first_reason.isin(('', 'IDENTICAL_DUPLICATE', 'LATER_ELIGIBLE_DAY',
+                                                         'AMBIGUOUS_EARLIEST_DAY', 'CONSISTENT_EARLIEST_DAY_REPEAT'))]
+    return dict(n_patients_with_any_candidate=linked.patient_id.nunique(),
+                n_temporally_eligible=temporal.patient_id.nunique(),
+                n_date_verified=verified.patient_id.nunique(),
+                n_assay_comparable=comparable.patient_id.nunique(),
+                n_earliest_unambiguous=selected.loc[selected.patient_id.isin(inventory.patient_id), 'patient_id'].nunique())
+
+
+def _baseline_support(outputs, result, members, label, cell, coverage, models, audit):
+    selected = primary_measurements(result)
+    frame = members.merge(selected[['patient_id', 'value', 'window_bin']], on='patient_id',
+                          how='left', validate='one_to_one')
+    complete = frame.value.notna() & _adjustment(frame).notna().all(axis=1)
+    _, prepared = _model_support(frame, label['outcome'] == RF_VALUE, models, cell)
+    model_index = prepared[0].index if prepared is not None and audit['classification'] == INDEPENDENT else []
+
+    def counts(group):
+        candidates = result.inventory.loc[result.inventory.patient_id.isin(group.patient_id)]
+        stages = dict(n_representation_patients=len(group), **_eligibility_counts(candidates, result))
+        stages.update(n_hard_supported=stages['n_earliest_unambiguous'],
+                      n_complete_case=int(complete.loc[group.index].sum()),
+                      n_model_eligible=int(group.index.isin(model_index).sum()))
+        return stages
+
+    counts_by_community, delays = [], []
+    for community, group in frame.groupby('community_id'):
+        scope = dict(label, community_id=community)
+        counts_by_community.extend(_chain(scope, counts(group), cell))
+        bins = group.window_bin.fillna('NO_PRIMARY_MEASUREMENT')
+        partition = _partition(bins.value_counts().to_dict(), cell)
+        if partition is None or len(group) < cell:
+            delays.append(dict(scope, count_unit='patient', status='SUPPRESSED'))
+        else:
+            delays.extend(dict(scope, window_bin=bin_name, status='DESCRIPTIVE',
+                               count_unit='patient', n_total=len(group), n_patients=count)
+                          for bin_name, count in sorted(partition.items()))
+    totals = _chain(label, counts(frame), cell)
+    if coverage['status'] == 'SUPPRESSED' or any(
+            row['status'] == 'SUPPRESSED' for row in totals + counts_by_community + delays):
+        withheld = [dict(label, count_unit='patient', status='SUPPRESSED')]
+        outputs['baseline_eligibility'].extend(withheld)
+        outputs['measurement_delay'].extend(withheld)
+        return
+    outputs['baseline_eligibility'].extend(totals + counts_by_community)
+    outputs['measurement_delay'].extend(delays)
 
 
 def _lab_slices(result):
@@ -148,24 +188,20 @@ def _lab_slices(result):
         for provenance in (ORIGINAL, EDA_ONLY):
             rows = result.selected.loc[result.selected.stratum.eq(stratum) & result.selected.provenance.eq(provenance)]
             definition = result.primary.get((stratum, provenance))
-            if stratum == OLDER:
-                rows = result.inventory.loc[result.inventory.stratum.eq(OLDER) &
-                                            result.inventory.provenance.eq(provenance)].drop_duplicates('patient_id')
-                rows = rows.assign(value=1.)
             main = rows.loc[rows.definition_id.eq(definition)] if definition is not None else rows.iloc[0:0]
-            if stratum == OLDER:
-                main = rows
             yield stratum, provenance, 'PRIMARY', definition, main
             if definition:
                 for alternative, group in rows.loc[rows.definition_id.ne(definition)].groupby('definition_id'):
                     yield stratum, provenance, 'ALTERNATIVE', alternative, group
+    for stratum, rows in result.sensitivities.items():
+        yield stratum, ORIGINAL, 'PRIMARY', result.primary.get((PRIMARY, ORIGINAL)), rows
 
 
 def _label(rep, source, stratum, provenance, topology, **definition):
     interpretation = SCOPE[stratum]
-    if stratum == PRE and provenance == EDA_ONLY:
+    if stratum == PRIMARY and provenance == EDA_ONLY:
         interpretation = 'LOWER_DATE_PROVENANCE_SENSITIVITY'
-    finding_class = ('EXPLORATORY_SENSITIVITY' if stratum == PRE and (provenance == EDA_ONLY or rep != 'R0')
+    finding_class = ('EXPLORATORY_SENSITIVITY' if stratum == PRIMARY and (provenance == EDA_ONLY or rep != 'R0')
                      else interpretation)
     return dict(representation_id=rep, outcome=source, stratum=stratum, provenance=provenance,
                 interpretation=interpretation, finding_class=finding_class, topology_status=topology, **definition)
@@ -179,13 +215,6 @@ def _model(label, frame, independence, prior_rf, table, policy, cell):
     eligible = independence['classification'] == INDEPENDENT
     support = {}
     model_n = 0
-    if table == 'linkage_sensitivity_models':
-        using_recovered = frame.value.notna() & frame.identity_status.eq(PATIENT_ONLY)
-        if not using_recovered.any():
-            return dict(model, status='NOT_APPLICABLE', reason='EXACT_SUBSET_IDENTICAL'), support, model_n
-        if _small(int(using_recovered.sum()), cell):
-            return dict(model, status='SUPPRESSED', reason='LINKAGE_COMPARISON_SUPPRESSED'), support, model_n
-        frame = frame.assign(value=frame.value.where(frame.identity_status.eq(EXACT)))
     if not eligible:
         return dict(model, status=independence['classification'], reason=independence['reason']), support, model_n
     if prior_rf and outcome == RF_TEXT:
@@ -203,7 +232,7 @@ def _model(label, frame, independence, prior_rf, table, policy, cell):
     return model, support, model_n
 
 
-def _analyze(tables, loaded, records, validation, policy, *, audit_only=False):
+def _analyze(tables, loaded, records, validation, policy, *, audit_only=False, selected_measurements=None):
     outputs = {name: [] for name in TABLE_COLUMNS}
     frozen = loaded['frozen']
     baseline, members, features = (frozen[key] for key in ('baseline_raw', 'membership', 'feature_sets'))
@@ -239,6 +268,12 @@ def _analyze(tables, loaded, records, validation, policy, *, audit_only=False):
                 outputs['exclusions'].extend(_exclusions(group, dict(outcome=source, stratum=stratum,
                                                                      provenance=provenance), cell))
             disposition = _test_disposition(result, baseline.patient_id)
+            selection = primary_measurements(result)
+            if (selection.patient_id.duplicated().any() or selection.baseline_offset_days.lt(0).any()
+                    or not selection.window_bin.isin(DAY_BINS[1:5]).all()):
+                raise ValueError('EXPLORATORY_BASELINE_SELECTION_INVALID')
+            if selected_measurements is not None:
+                selected_measurements[source] = selection
         else:
             outputs['cohort_flow'].append(dict(outcome=source, stratum='ALL', stage='n_source_rows',
                                                count_unit='source_row', status='DATA_UNAVAILABLE'))
@@ -253,6 +288,19 @@ def _analyze(tables, loaded, records, validation, policy, *, audit_only=False):
             else:
                 audit = _independence(rep, source, roles, features, registry, dependencies, validation, policy)
             outputs['independence_audit'].append(audit)
+            review = _review(validation, rep, source)
+            prespecs = validation.get('n3_validation', {}).get('prespecified_outcomes', [])
+            version = baseline_policy().policy_version
+            approved = (independence_review_approved(review) and review.get('window_policy_version') == version
+                        and any(row.get('representation_id') == rep and row.get('source_column') == source
+                                and row.get('window_policy_version') == version for row in prespecs))
+            if audit['classification'] == INDEPENDENT and not approved:
+                audit = dict(audit, classification=LINEAGE_UNRESOLVED, reason='INDEPENDENCE_REVIEW_PENDING')
+                outputs['independence_audit'][-1] = audit
+            if audit['classification'] == INDEPENDENT and (
+                    topology.get(rep) not in {'FROZEN_COMMUNITIES', 'R2_EXPLORATORY'} or
+                    loaded['manifest'].get('release_status') == 'NO_STABLE_STRUCTURE'):
+                audit = dict(audit, classification='NOT_ESTIMABLE', reason='TOPOLOGY_NOT_STABLE')
             if rep not in membership or result is None:
                 _unavailable(outputs, rep, source, 'REPRESENTATION_UNAVAILABLE' if rep not in membership else
                              'DATA_UNAVAILABLE')
@@ -263,30 +311,43 @@ def _analyze(tables, loaded, records, validation, policy, *, audit_only=False):
                 frame = membership[rep].merge(selection[['patient_id', 'value', 'identity_status']], on='patient_id',
                                               how='left', validate='one_to_one')
                 observed = int(frame.value.notna().sum())
+                protected_sensitivity = False
+                if stratum in SENSITIVITIES:
+                    compared = primary_measurements(result)
+                    keys = ['patient_id', 'collection_calendar_day', 'value']
+                    compared = compared[keys].merge(selection[keys], how='outer', on=keys, indicator=True)
+                    changed = compared.loc[compared['_merge'].ne('both'), 'patient_id']
+                    protected_sensitivity = _small(changed.loc[changed.isin(frame.patient_id)].nunique(), cell)
                 if definition_role == 'ALTERNATIVE' and observed < cell:
                     continue
                 if observed < cell:
                     label['definition_id'] = None
                 elif source == RF_VALUE and definition_id:
                     label['unit'] = selection.unit.iloc[0]
-                profiles = _profiles(frame, label, source == RF_VALUE, cell) if stratum != OLDER else []
-                if rep in protected_hard and stratum != OLDER:
+                profiles = _profiles(frame, label, source == RF_VALUE, cell)
+                if rep in protected_hard or protected_sensitivity:
                     profiles = [dict(**label, status='SUPPRESSED')]
                 outputs['community_profiles'].extend(profiles)
-                if stratum in {EARLY, LATE}:
+                if stratum == AFTER_BASELINE_WINDOW:
                     outputs['followup_profiles'].extend(profiles)
-                partition = disposition if (stratum, provenance, definition_role) == (PRE, ORIGINAL, 'PRIMARY') else None
+                partition = disposition if (stratum, provenance, definition_role) == (PRIMARY, ORIGINAL, 'PRIMARY') else None
                 coverage = _coverage(frame, label, profiles, cell, partition)
-                if stratum == OLDER:
-                    # Internal subgroup counts still determine whether a total
-                    # could expose a small community cell through subtraction.
-                    coverage = (dict(**label, status='SUPPRESSED') if rep in protected_hard else
-                                _coverage(frame, label, _profiles(frame, label, True, cell), cell))
                 outputs['coverage'].append(coverage)
-                if stratum != PRE or definition_role != 'PRIMARY':
+                if stratum == PRIMARY and provenance == ORIGINAL and definition_role == 'PRIMARY':
+                    _baseline_support(outputs, result, membership[rep], label, cell, coverage, policy['models'], audit)
+                if definition_role != 'PRIMARY':
                     continue
                 for table, (model_provenance, interpretation) in SCOPES.items():
-                    if provenance != model_provenance:
+                    model_stratum = EXACT_WINDOW if table == 'linkage_sensitivity_models' else PRIMARY
+                    if provenance != model_provenance or stratum != model_stratum:
+                        continue
+                    if table == 'linkage_sensitivity_models' and selection[
+                            ['patient_id', 'collection_calendar_day', 'value']].reset_index(drop=True).equals(
+                            primary_measurements(result)[['patient_id', 'collection_calendar_day', 'value']].reset_index(drop=True)):
+                        result_label = dict(label, interpretation=interpretation, status='NOT_APPLICABLE',
+                                            reason='EXACT_SUBSET_IDENTICAL', not_estimable_reason='EXACT_SUBSET_IDENTICAL',
+                                            hypothesis_family=_family(source))
+                        outputs[table].append(result_label)
                         continue
                     model_label = dict(label, interpretation=interpretation)
                     if table != 'models':
@@ -295,6 +356,9 @@ def _analyze(tables, loaded, records, validation, policy, *, audit_only=False):
                                                      table, policy['models'], cell)
                     if model['status'] == ESTIMATED and source in {RF_VALUE, RF_TEXT}:
                         rf_tested.add((rep, table))
+                    if protected_sensitivity or (coverage['status'] == 'SUPPRESSED' and model['status'] == ESTIMATED):
+                        model = dict(model_label, status='SUPPRESSED', reason='COVERAGE_DISCLOSURE_RESTRICTION',
+                                     hypothesis_family=_family(source))
                     if coverage['status'] == 'SUPPRESSED' or 'n' not in model:
                         for key in ('n', 'residual_df_b'):
                             model.pop(key, None)
@@ -302,8 +366,6 @@ def _analyze(tables, loaded, records, validation, policy, *, audit_only=False):
                     outputs[table].append(model)
                     selected_n = len(selection)
                     hard_n = int(frame.value.notna().sum())
-                    if table == 'linkage_sensitivity_models':
-                        hard_n = int((frame.value.notna() & frame.identity_status.eq(EXACT)).sum())
                     independent_n = hard_n if audit['classification'] == INDEPENDENT else 0
                     complete_n = support.get('n_complete_case', 0)
                     stages = dict(n_primary_definition=selected_n, n_hard_community=hard_n,
@@ -316,8 +378,12 @@ def _analyze(tables, loaded, records, validation, policy, *, audit_only=False):
                             row.update(status='SUPPRESSED', n_previous=None, n_remaining=None, n_excluded=None,
                                        all_removed_reason=None)
                     outputs['cohort_flow'].extend(model_flow)
-    _fdr([row for table in SCOPES for row in outputs[table]])
+    for table in SCOPES:
+        _fdr(outputs[table])
     _mask_cohort_complements(outputs, len(baseline), cell)
+    outputs['baseline_inference'] = [
+        dict(row, status=row['status'] if row['status'] == ESTIMATED else 'NOT_ESTIMABLE')
+        for row in outputs['models']]
     return outputs
 
 
@@ -354,13 +420,99 @@ def _empty_outputs(policy):
             outputs['independence_audit'].append(dict(representation_id=rep, outcome=source,
                                                       classification=LINEAGE_UNRESOLVED,
                                                       reason='FROZEN_BASELINE_UNAVAILABLE'))
+    outputs['baseline_inference'] = [dict(row, status='NOT_ESTIMABLE') for row in outputs['models']]
     return outputs
+
+
+def current_source_inputs(root, *, step10=None, context=None, paths=None):
+    """Read the same immutable clinical anchor and original sources for every lab caller."""
+    if paths is None:
+        _, paths = _source_settings(root)
+    else:
+        paths = dict(paths)
+    if step10 is not None:
+        configured_step10 = paths['step10']
+        paths['step10'] = Path(step10)
+        if paths['step10'] != configured_step10:
+            paths['context'] = paths['step10'].with_name('10_integrated_longitudinal_context.parquet')
+    if context is not None:
+        paths['context'] = Path(context)
+    issues = []
+    tables = _inputs(paths, issues)
+    btris_files = {role: cal.btris_files(paths[role]) for role in cal.BTRIS_ROLES}
+    records = _btris_records(btris_files, issues, tables.get('eda_long', pd.DataFrame()))
+    return tables, records, issues
+
+
+def frozen_fingerprints(release, manifest):
+    artifacts = artifact_paths(manifest)
+    values = {'release_manifest': digest(release)}
+    for role in ('baseline_raw', 'membership', 'feature_sets'):
+        if role in artifacts:
+            artifact = release.parent / artifacts[role]
+            if artifact.is_file():
+                values[role] = digest(safe_artifact(release.parent, artifacts[role]))
+    return values
+
+
+def write_baseline_artifacts(staging, outputs, issues, frozen_before, frozen_after, *, temporal_overlap=None,
+                             roles=None):
+    if frozen_before != frozen_after:
+        raise ValueError('EXPLORATORY_GRAPH02_CHANGED_DURING_ANALYSIS')
+    metadata = baseline_policy().metadata()
+    write_json(staging / '03_graph_baseline_window_policy.json', {
+        **asdict(baseline_policy()), **metadata, 'warning': WARNING})
+    profiles = [row for row in outputs['community_profiles'] if row.get('stratum') == PRIMARY and
+                row.get('provenance') == ORIGINAL]
+    if temporal_overlap is None:
+        temporal_overlap = pd.DataFrame([dict(status='NOT_ASSESSED', reason='SEE_GRAPH03_LONGITUDINAL_AUDIT')])
+    for name, suffix in BASELINE_ARTIFACTS.items():
+        if name == 'temporal_overlap':
+            table = temporal_overlap.copy()
+        elif name == 'baseline_profiles':
+            table = pd.DataFrame(profiles, columns=TABLE_COLUMNS['community_profiles'].split())
+        else:
+            table = pd.DataFrame(outputs[name], columns=TABLE_COLUMNS[name].split())
+        if name == 'independence_audit' and roles is not None and not roles.empty:
+            fields = ['representation_id', 'source_column', 'tier', 'direct_in_discovery',
+                      'conflicting_defining_sources', 'lineage_review_status', 'clinical_review_status',
+                      'temporal_baseline_status', 'lineage_evidence', 'source_reference']
+            lineage = roles.reindex(columns=fields).rename(columns={'source_column': 'outcome'})
+            table = table.merge(lineage, on=['representation_id', 'outcome'], how='outer', validate='one_to_one')
+            table['snapshot_basis'] = table.tier.map(
+                lambda tier: FROZEN_SNAPSHOT if tier in ('N1_DEFINING', 'N2_RELATED') else WINDOW_SNAPSHOT)
+        else:
+            table['snapshot_basis'] = WINDOW_SNAPSHOT
+        for key, value in metadata.items():
+            table[key] = value
+        if 'provenance' in table:
+            table['source_provenance_tier'] = table.provenance
+        elif name == 'independence_audit':
+            table['source_provenance_tier'] = 'DOCUMENTARY_LINEAGE'
+        elif name == 'temporal_overlap':
+            table['source_provenance_tier'] = 'VERIFIED_ENDPOINT_SPECIFIC'
+        table['graph02_release_sha256'] = frozen_before.get('release_manifest')
+        table.to_csv(staging / ('03_graph_' + suffix + '.csv'), index=False)
+    qc = dict(**metadata, status='FAILED' if not frozen_before else 'PARTIAL' if issues else 'PASS',
+              graph02_sha256_before=frozen_before, graph02_sha256_after=frozen_after,
+              graph02_frozen_unchanged=bool(frozen_before and frozen_before == frozen_after),
+              n_estimated_primary_pairs=sum(row['status'] == ESTIMATED for row in outputs['baseline_inference']),
+              data_issues=issues, privacy_class='INTERNAL_RESTRICTED', public_export=False)
+    write_json(staging / '03_graph_baseline_window_qc.json', qc)
+    return qc
 
 
 def _write_run(staging, target, base, outputs, n, policy, figure_dir, figure_target):
     files = {name: target / ('03e_' + name + '.csv') for name in TABLE_COLUMNS}
     frames = {name: pd.DataFrame(outputs[name], columns=columns.split()) for name, columns in TABLE_COLUMNS.items()}
     for name, frame in frames.items():
+        for key, value in baseline_policy().metadata().items():
+            frame[key] = value
+        if 'provenance' in frame:
+            frame['source_provenance_tier'] = frame.provenance
+        if name == 'frozen_baseline_profiles':
+            frame['snapshot_basis'] = FROZEN_SNAPSHOT
+            frame['source_provenance_tier'] = 'FROZEN_RELEASE_VALUES'
         frame.to_csv(staging / files[name].name, index=False)
     figures = _figures(figure_dir, frames)
     models = {table: int(frames[table].status.eq(ESTIMATED).sum()) for table in SCOPES}
@@ -375,7 +527,7 @@ def _write_run(staging, target, base, outputs, n, policy, figure_dir, figure_tar
     coverage = frames['coverage']
     r0 = coverage.loc[coverage.representation_id.eq(policy['primary_representation']) &
                       coverage.definition_role.eq('PRIMARY')]
-    visible = r0.loc[r0.n_measured.notna() & r0.stratum.ne(OLDER)]
+    visible = r0.loc[r0.n_measured.notna() & r0.stratum.eq(PRIMARY) & r0.provenance.eq(ORIGINAL)]
     n_outcomes = visible.loc[visible.n_measured.astype(float).gt(0), 'outcome'].nunique()
     summary = dict(**base, status=status, output_dir=str(target),
                    privacy_class=policy['privacy_class'], public_export=policy['public_export'],
@@ -387,6 +539,8 @@ def _write_run(staging, target, base, outputs, n, policy, figure_dir, figure_tar
                    summary=str(target / '03e_summary.json'),
                    report=str(target / '03e_RESULTADOS.md'),
                    figures=[str(figure_target / name) for name in figures],
+                   baseline_window_qc=str(target / '03_graph_baseline_window_qc.json'),
+                   baseline_window_policy=str(target / '03_graph_baseline_window_policy.json'),
                    **{name: str(path) for name, path in files.items()})
     write_json(staging / '03e_summary.json', summary)
     (staging / '03e_RESULTADOS.md').write_text(_markdown(summary, frames))
@@ -458,6 +612,10 @@ def _load_graph02(directory):
 def _graph03_qc(directory, loaded, roles):
     """Check current characterization against discovery before using its context."""
     summary = json.loads(safe_artifact(directory, RESULTS).read_text())
+    require_policy(summary)
+    if (summary.get('window_policy_sha256') != baseline_policy().sha256
+            or summary.get('graph02_release_sha256') != digest(loaded['release'])):
+        raise ValueError(MISMATCH)
     if (not isinstance(summary, dict) or summary.get('schema_version') != RESULTS_SCHEMA
             or summary.get('execution_status') not in {'COMPLETE', 'COMPLETE_WITH_LIMITATIONS'}
             or summary.get('n_patients') != len(loaded['frozen']['baseline_raw'])):
@@ -466,6 +624,11 @@ def _graph03_qc(directory, loaded, roles):
     if (not isinstance(qc, dict) or qc.get('status') != 'PASS'
             or qc.get('eligible_representation_ids') != loaded['manifest']['eligible_representation_ids']):
         raise ValueError('GRAPH03_REPRESENTATION_MISMATCH')
+    baseline_hashes = frozen_fingerprints(loaded['release'], loaded['manifest'])
+    window_qc = json.loads(safe_artifact(directory, '03_graph_baseline_window_qc.json').read_text())
+    if (window_qc.get('window_policy_sha256') != baseline_policy().sha256
+            or window_qc.get('graph02_sha256_after') != baseline_hashes):
+        raise ValueError(MISMATCH)
     keys = ['representation_id', 'source_column', 'direct_in_discovery', 'conflicting_defining_sources']
     previous = pd.read_csv(safe_artifact(directory, '03_graph_clinical_feature_roles.csv'), keep_default_na=False)
     if sorted(previous[keys].itertuples(index=False, name=None)) != sorted(roles[keys].itertuples(index=False, name=None)):
@@ -485,7 +648,7 @@ def run_exploratory_auto(root, cfg=None, *, audit_only=False):
     root = Path(root).resolve()
     issues = []
     base = dict(mode=MODE, graph02_input=None, graph03_input=None, data_issues=issues,
-                limitations=LIMITATIONS)
+                limitations=LIMITATIONS, **baseline_policy().metadata())
     try:
         data, paths = _source_settings(root)
         if cfg is not None:
@@ -506,7 +669,7 @@ def run_exploratory_auto(root, cfg=None, *, audit_only=False):
                 if directory.is_dir():
                     stack.enter_context(output_lock(directory, shared=True))
             staged = stack.enter_context(stage_outputs(
-                destinations, lambda _, name: name.startswith(prefix),
+                destinations, lambda _, name: name.startswith(prefix) or (not audit_only and name.startswith('03_graph_')),
                 failure=('stage', prefix + 'failure.json'), completion=completion))
             staging = staged['stage']
             for artifact, directory, marker in (
@@ -517,7 +680,9 @@ def run_exploratory_auto(root, cfg=None, *, audit_only=False):
                                        reason='LAST_ATTEMPT_FAILED_USING_LAST_COMPLETE_RESULT'))
             policy = _policy(root)
             validation = cfg['validation'] if cfg else yaml.safe_load((root / CONFIGS / VALIDATION).read_text())
+            require_policy(validation)
             loaded = None
+            frozen_before = frozen_after = {}
             for reader in (_load_graph02, _load_baseline_only):
                 try:
                     loaded = reader(graph02)
@@ -533,6 +698,8 @@ def run_exploratory_auto(root, cfg=None, *, audit_only=False):
                 outputs, n = _empty_outputs(policy), None
             else:
                 base['graph02_input'] = graph02.name
+                frozen_before = frozen_fingerprints(loaded['release'], loaded['manifest'])
+                base['graph02_release_sha256'] = frozen_before['release_manifest']
                 baseline = loaded['frozen']['baseline_raw']
                 features = loaded['frozen']['feature_sets']
                 reps = loaded['manifest']['eligible_representation_ids']
@@ -545,27 +712,33 @@ def run_exploratory_auto(root, cfg=None, *, audit_only=False):
                     try:
                         loaded['qc'] = _graph03_qc(graph03, loaded, loaded['roles'])
                         base['graph03_input'] = graph03.name
-                    except READ_ERRORS:
+                    except READ_ERRORS as exc:
                         issues.append(dict(status='DATA_UNAVAILABLE', artifact='graph03_characterization',
-                                           reason='CURRENT_GRAPH03_MISSING_OR_INCONSISTENT'))
-                tables = _inputs(paths, issues)
-                btris_files = {role: cal.btris_files(paths[role]) for role in cal.BTRIS_ROLES}
-                records = _btris_records(btris_files, issues, tables.get('eda_long', pd.DataFrame()))
+                                           reason=MISMATCH if str(exc) == MISMATCH else
+                                           'CURRENT_GRAPH03_MISSING_OR_INCONSISTENT'))
+                integrated = loaded['manifest'].get('source_inputs', {}).get('integrated', {}).get('path')
+                tables, records, source_issues = current_source_inputs(root, step10=integrated, paths=paths)
+                issues.extend(source_issues)
                 outputs = _analyze(tables, loaded, records, validation, policy, audit_only=audit_only)
                 n = len(baseline)
+                frozen_after = frozen_fingerprints(loaded['release'], loaded['manifest'])
+                if frozen_before != frozen_after:
+                    raise ValueError('EXPLORATORY_GRAPH02_CHANGED_DURING_ANALYSIS')
             if audit_only:
                 schema = TABLE_COLUMNS['source_linkage_audit'].split()
                 audit = pd.DataFrame(outputs['source_linkage_audit'], columns=schema)
                 audit.to_csv(staging / '03f_source_linkage_audit.csv', index=False)
                 result = dict(status='AUDITED' if n is not None else 'INPUTS_UNUSABLE',
-                              output_dir=str(target), data_issues=issues,
+                              output_dir=str(target), data_issues=issues, **baseline_policy().metadata(),
                               source_linkage_audit=str(target / '03f_source_linkage_audit.csv'))
                 write_json(staging / '03f_summary.json', result)
             else:
+                write_baseline_artifacts(staging, outputs, issues, frozen_before, frozen_after,
+                                         roles=loaded['roles'] if loaded is not None else None)
                 result = _write_run(staging, target, base, outputs, n, policy,
                                     staged.get('figures', staging), destinations.get('figures', target))
         return result
     except READ_ERRORS + (RuntimeError, yaml.YAMLError) as exc:
         token = str(exc)
-        reason = token if re.fullmatch(r'EXPLORATORY_[A-Z_]+', token) else 'EXPLORATORY_RUN_UNAVAILABLE'
+        reason = token if token == MISMATCH or re.fullmatch(r'EXPLORATORY_[A-Z_]+', token) else 'EXPLORATORY_RUN_UNAVAILABLE'
         return dict(**base, status='EXPLORATORY_RUN_FAILED', output_dir=None, reason=reason)

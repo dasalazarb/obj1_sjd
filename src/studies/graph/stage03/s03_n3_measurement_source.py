@@ -24,6 +24,7 @@ from ..stage02.s02_contracts import safe_artifact
 from .s03_construct_validation import _dependencies, _paths
 from .s03_n3_approved_view import validate_baseline
 from . import s03_n3_calendar_day as cal
+from .s03_baseline_window import MISMATCH, POLICY_PATH, policy, require_policy
 from .s03_n3_decisions import evidence_path
 from .s03_n3_incremental import _pop_status
 from .s03_n3_phasec_adjudication import CANDIDATES, LINEAGE, PROTOCOL_ALIASES, load_phasec_inputs
@@ -616,7 +617,7 @@ def _staged_run(root, run_id):
 def run_source(mode, paths, output_root, config_path, repository_root, *, run_id=None,
                review_path=None, signature_path=None, trust_key=None, verify_calendar_formats=False):
     """Publish a private audit, candidate, or externally signed evidence release."""
-    from .s03_n3_measurement_review import reviewed_measurements, validate_specimen_column
+    from .s03_n3_measurement_review import reviewed_baseline_measurements, reviewed_measurements, validate_specimen_column
 
     root = Path(repository_root).resolve()
     config_path = Path(config_path).resolve()
@@ -630,10 +631,19 @@ def run_source(mode, paths, output_root, config_path, repository_root, *, run_id
     config, validation, phasec = (yaml.safe_load(path.read_text()) for path in rules.values())
     minimum = config.get('minimum_disclosure_cell')
     schema = config.get('schema_version')
-    if (schema not in {SCHEMA, cal.SOURCE_VERSION} or config.get('privacy_class') != 'INTERNAL_RESTRICTED'
+    if (schema not in {SCHEMA, cal.SOURCE_VERSION, cal.BASELINE_SOURCE_VERSION} or config.get('privacy_class') != 'INTERNAL_RESTRICTED'
             or config.get('public_export') is not False or type(minimum) is not int or minimum < 5):
         raise ValueError('INVALID_MEASUREMENT_SOURCE_CONFIG')
-    calendar = cal.validate_settings(config.get('calendar_day')) if schema == cal.SOURCE_VERSION else None
+    current = schema == cal.BASELINE_SOURCE_VERSION
+    calendar = cal.validate_settings(config.get('calendar_day')) if schema != SCHEMA else None
+    if current:
+        require_policy(config)
+        if calendar['contract'] != cal.CONTRACT:
+            raise ValueError(MISMATCH)
+        rules.update(baseline_window=POLICY_PATH, exploratory_config=root / 'src/studies/graph/configs/n3_exploratory_defaults.yaml')
+        rules_hashes.update({name: digest(rules[name]) for name in ('baseline_window', 'exploratory_config')})
+    elif calendar is not None and calendar['contract'] != cal.LEGACY_CONTRACT:
+        raise ValueError(MISMATCH)
     specimen_id_column = None if calendar is not None else config.get('eda_specimen_id_column')
     if calendar is None:
         validate_specimen_column(specimen_id_column)
@@ -683,7 +693,28 @@ def run_source(mode, paths, output_root, config_path, repository_root, *, run_id
         frames, upstream_blocker = _read_inputs(paths, available, specimen_id_column, calendar)
         blockers = list(dict.fromkeys(b for b in (blocker, upstream_blocker) if b))
         records = None
-        if calendar is not None:
+        if current and inputs is not None:
+            if verify_calendar_formats and all(source_hashes[role] for role in cal.BTRIS_ROLES):
+                try:
+                    cal.btris_provenance(paths, calendar, verify_formats=True)
+                except (ValueError, OSError) as exc:
+                    reason = str(exc)
+                    blockers.append(reason if re.fullmatch(r'BTRIS_COLLECTION_[A-Z0-9_]+', reason)
+                                    else 'BTRIS_COLLECTION_PROVENANCE_UNRESOLVED')
+            from .s03_n3_exploratory import _policy, current_source_inputs
+            from .s03_n3_exploratory_source import _candidates, _outcome, primary_measurements
+            settings = _policy(root)
+            source_tables, btris, source_issues = current_source_inputs(root, paths=paths)
+            if {'eda_long', 'step10'} <= set(source_tables):
+                canonical = _candidates(source_tables, inputs['frozen']['baseline_raw'], btris, settings)
+            else:
+                canonical = None
+            if canonical is None or canonical.empty:
+                blockers.append('NO_RECONCILED_ORIGINAL_OBSERVATIONS')
+        else:
+            canonical = None
+            source_issues = []
+        if calendar is not None and not current:
             if all(source_hashes[role] for role in cal.BTRIS_ROLES):
                 try:
                     records = cal.btris_provenance(paths, calendar, verify_formats=verify_calendar_formats)
@@ -698,7 +729,7 @@ def run_source(mode, paths, output_root, config_path, repository_root, *, run_id
                         blockers.append('BTRIS_COLLECTION_PROVENANCE_UNRESOLVED')
             else:
                 blockers.append('BTRIS_COLLECTION_FILES_NOT_AVAILABLE')
-        if not blockers:
+        if not blockers and not current:
             candidates, ledger = _audited_rows(*frames, inputs['frozen']['baseline_raw'], specimen_id_column,
                                                calendar=calendar, records=records)
             if calendar is not None:
@@ -717,6 +748,14 @@ def run_source(mode, paths, output_root, config_path, repository_root, *, run_id
                        runtime=dict(python=platform.python_version(), pandas=pd.__version__, pyarrow=pyarrow.__version__))
         outcomes, aggregates = _outcome_audit(candidates, ledger, inventory, minimum)
         reviewed = {}
+        if current and mode == 'build-candidate' and canonical is not None:
+            selected = [primary_measurements(_outcome(canonical, source, settings)).assign(source_column=source)
+                        for source in sorted(calendar['windows'])]
+            pd.concat(selected, ignore_index=True).assign(
+                source_artifact_status='SOURCE_CANDIDATE_UNAPPROVED',
+                **policy().metadata()).to_parquet(staging / 'unapproved_observations.parquet', index=False)
+            canonical[['patient_id', 'source_episode_id', 'canonical_analyte', 'window_bin', 'identity_status',
+                       'date_evidence']].to_parquet(staging / 'private_ledger.parquet', index=False)
         if mode == 'build-candidate' and candidates is not None and not candidates.empty:
             candidates.to_parquet(staging / 'unapproved_observations.parquet', index=False)
             columns = ['eda_row_offset', 'source_column', 'date_precision', 'step01_context_date_status',
@@ -727,11 +766,15 @@ def run_source(mode, paths, output_root, config_path, repository_root, *, run_id
         if mode == 'build-candidate' and ledger is not None:
             ledger.drop(columns='_patient_match').to_parquet(staging / 'private_ledger.parquet', index=False)
         if mode == 'build-reviewed':
-            if blockers or candidates is None:
+            if blockers or (canonical is None if current else candidates is None):
                 raise ValueError('REVIEWED_BUILD_SOURCE_CONTRACT_NOT_READY')
-            measurements, reviewed_ledger, reviewed = reviewed_measurements(
-                candidates, ledger, inputs['frozen']['baseline_raw'], binding, specimen_id_column,
-                documents, calendar=calendar)
+            if current:
+                measurements, reviewed_ledger, reviewed = reviewed_baseline_measurements(
+                    canonical, inputs['frozen']['baseline_raw'], binding, documents, settings, calendar)
+            else:
+                measurements, reviewed_ledger, reviewed = reviewed_measurements(
+                    candidates, ledger, inputs['frozen']['baseline_raw'], binding, specimen_id_column,
+                    documents, calendar=calendar)
             measurements.to_parquet(staging / 'reviewed_instrument_measurements.parquet', index=False)
             reviewed_ledger.to_parquet(staging / 'private_reviewed_ledger.parquet', index=False)
             for source in reviewed['sources']:
@@ -740,7 +783,18 @@ def run_source(mode, paths, output_root, config_path, repository_root, *, run_id
                     fields.update(assay_id='NOT_IDENTIFIED', sample_id='NOT_IDENTIFIED')
                 outcomes[source].update(status='VERIFIED' if calendar is None else 'SOURCE_REVIEWED',
                                         reason='SIGNED_SOURCE_PROVENANCE_VERIFIED', field_status=fields)
-        if calendar is not None:
+        if current:
+            from .s03_n3_exploratory_reporting import _chain
+            from .s03_n3_exploratory import _eligibility_counts
+            eligibility = []
+            for source in sorted(calendar['windows']):
+                if canonical is None:
+                    eligibility.append(dict(outcome=source, status='DATA_UNAVAILABLE'))
+                else:
+                    result = _outcome(canonical, source, settings)
+                    eligibility.extend(_chain(dict(outcome=source), _eligibility_counts(result.inventory, result), minimum))
+            pd.DataFrame(eligibility).assign(**policy().metadata()).to_csv(staging / 'calendar_day_eligibility.csv', index=False)
+        elif calendar is not None:
             eligibility = _calendar_report(candidates, calendar, inputs, minimum, aggregates,
                                            reviewed_ledger if reviewed else None)
             pd.DataFrame(eligibility).to_csv(staging / 'calendar_day_eligibility.csv', index=False)
@@ -775,8 +829,12 @@ def run_source(mode, paths, output_root, config_path, repository_root, *, run_id
             step01_selection_rule='menor distancia absoluta al anchor, preferencia pre/anchor en empate; posible mediana',
             output_sha256={p.name: digest(p) for p in staging.iterdir()},
         )
+        if current:
+            manifest.update(**policy().metadata(), data_issues=source_issues)
+        else:
+            manifest['snapshot_basis'] = 'LEGACY_PREBASELINE_SOURCE_AUDIT'
         if calendar is not None:
-            manifest.update(measurement_contract=cal.CONTRACT, eligibility_report='calendar_day_eligibility.csv',
+            manifest.update(measurement_contract=calendar['contract'], eligibility_report='calendar_day_eligibility.csv',
                             frozen_sha256_before=frozen_hashes, frozen_sha256_after=frozen_hashes)
             manifest['field_dictionary'].update(
                 clinical_episode_id='episodio oficial del baseline congelado',

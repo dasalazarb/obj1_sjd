@@ -1,3 +1,4 @@
+window_policy_version: graph03_baseline_window_v2
 # Paths are absolute or relative to the obj1_sjd checkout. The default
 # deployment has obj1_sjd, eda_sjd and graph03_n3_private under the same parent.
 data_root: .

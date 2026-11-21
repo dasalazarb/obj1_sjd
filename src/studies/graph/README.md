@@ -1,7 +1,7 @@
 # Graph 01, 02 y 03
 
 Graph02 descubre y evalúa topología basal. Graph03 caracteriza las comunidades
-publicadas por Graph02. Graph03e analiza las mediciones N3 por día calendario.
+publicadas por Graph02. Graph03 y Graph03e comparten la selección de mediciones nuevas por día calendario.
 Los resultados por defecto son **exploratorios**, sin validación clínica confirmatoria.
 
 ## Ejecución completa sin flags
@@ -48,18 +48,30 @@ el perfil actual y reconcilian los analitos, la selección y la cobertura basal
 con Step10. En modo exploratorio las versiones y huellas del perfil son
 informativas.
 
-## Graph03 N3 exploratorio en Biowulf
+## Graph03 sobre el release congelado en Biowulf
 
 ```bash
-/usr/local/Anaconda/envs/py3.10/bin/python /data/salazarda/data/obj1_sjd/src/studies/graph/03e_graph_n3_controlled_inference.py
+python src/studies/graph/03_graph_community_characterization.py --preflight-only
+python src/studies/graph/03_graph_community_characterization.py
+python src/studies/graph/03e_graph_n3_controlled_inference.py
 ```
 
-Los agregados de uso interno quedan en
-`outputs/tables/studies/graph/03_graph_n3_controlled_inference/`.
+Graph03 conserva los perfiles N1/N2 del snapshot de Graph02 y publica aparte
+la caracterización de día 0 a seis meses calendario, ambos inclusive. Para
+cada paciente y definición comparable se elige la primera colección válida.
+Las mediciones pueden no estar disponibles el día 0. La trayectoria posterior
+al índice mantiene su definición y tiene una sensibilidad después de la
+ventana.
+
+Los agregados de 03e quedan en
+`outputs/tables/studies/graph/03_graph_n3_baseline_0_to_6m/`.
 El archivo `03e_RESULTADOS.md` reúne cobertura, perfiles, modelos estimables
 y motivos de exclusión. Las mediciones originales se leen en sus ubicaciones
 de origen. Las filas individuales permanecen en dichas fuentes.
-El protocolo está versionado en [n3_exploratory_defaults.yaml](configs/n3_exploratory_defaults.yaml).
+La ventana y su huella se definen en [baseline_window_03.yaml](configs/baseline_window_03.yaml).
+El [diseño y las limitaciones](../../../docs/graph03_baseline_6_months_design.md)
+y la [migración de rutas](../../../docs/graph03_script_inventory_and_migration.md)
+describen los artefactos y las puertas de revisión.
 
 ## Qué ejecuta Graph02
 
@@ -145,7 +157,7 @@ En caso de error, queda el último resultado completo y se registra un
 | Graph03 | `03_graph_community_characterization/` |
 | Graph03c | `03_graph_n3_clinical_adjudication/` |
 | Graph03d | `03_graph_n3_resolution_preflight/` |
-| Graph03e y auditoría 03f | `03_graph_n3_controlled_inference/` |
+| Graph03e y auditoría 03f | `03_graph_n3_baseline_0_to_6m/` |
 | Ejecutor integral | `run_graph_study/` |
 
 Graph01 conserva la jerarquía habitual de figuras, QC y logs bajo `outputs/`

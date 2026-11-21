@@ -23,7 +23,7 @@ from tests.test_graph03_n3_measurement_source import (
 
 def inspection(kind='numeric', **updates):
     review = dict(
-        measurement_contract=cal.CONTRACT, time_resolution='calendar_day', identity_contract=cal.IDENTITY,
+        measurement_contract=cal.LEGACY_CONTRACT, time_resolution='calendar_day', identity_contract=cal.IDENTITY,
         date_origin=cal.DATE_ORIGIN, selection_rule='latest_prebaseline_calendar_day', duplicate_rule='identical_only',
         calendar_day_origin_verified=True, baseline_calendar_day_verified=True, baseline_window_verified=True,
         selection_and_duplicates_reviewed=True, test_definition_verified=True, source_unit_and_scale_verified=True,
@@ -68,7 +68,7 @@ def calendar_originals(originals, tmp_path):
     cfg = yaml.safe_load(config_path.read_text())
     cfg.update(schema_version=cal.SOURCE_VERSION, eda_specimen_id_column=None)
     cfg['calendar_day'] = {
-        'contract': cal.CONTRACT, 'windows': {RF: dict(lookback_days=30, minimum_days_before_baseline=1)},
+        'contract': cal.LEGACY_CONTRACT, 'windows': {RF: dict(lookback_days=30, minimum_days_before_baseline=1)},
         'linkage_fields': {
             field: dict(eda=eda_name, raw=btris_name, intermediate=btris_name)
             for field, eda_name, btris_name in zip(
@@ -261,7 +261,7 @@ def test_calendar_source_review_fails_closed(calendar_originals, tmp_path, case,
     assert not (calendar_originals[2] / 'runs/blocked').exists()
 
 
-def test_calendar_signed_03e_pair_passes_temporal_but_independent_gates_block_execution(calendar_originals, tmp_path):
+def test_signed_legacy_calendar_day_artifact_cannot_enable_current_inference(calendar_originals, tmp_path):
     paths, _, _, decision_root = calendar_originals
     documents = sign(calendar_originals, tmp_path, {RF: source_rule()})
     _, directory = run(calendar_originals, 'build-reviewed', 'reviewed-v2', **documents)
@@ -304,6 +304,7 @@ def test_calendar_signed_03e_pair_passes_temporal_but_independent_gates_block_ex
     subprocess.run(['openssl', 'dgst', '-sha256', '-sign', str(private_key), '-out', str(signature),
                     str(payload_path)], check=True, capture_output=True)
     row = execute('verified-signature', '--measurement-trust-key', str(key))
-    assert row.temporal_gate == row.measurement_gate == E.PASS
+    assert row.temporal_gate == row.measurement_gate == E.FAIL
+    assert row.temporal_reason == 'BASELINE_WINDOW_POLICY_VERSION_MISMATCH'
     assert row.protocol_gate == row.independence_gate == E.FAIL
     assert row.status == 'NOT_ESTIMABLE'

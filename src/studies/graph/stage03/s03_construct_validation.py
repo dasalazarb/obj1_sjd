@@ -105,6 +105,15 @@ def _review(validation, identifier, source):
     return matches[0] if matches else {}
 
 
+def independence_review_approved(review):
+    return (
+        review.get('lineage_review_status') == review.get('clinical_review_status') == 'APPROVED'
+        and review.get('temporal_baseline_status') == 'VERIFIED'
+        and all(review.get(key) == 'APPROVED' for key in (
+            'origin_review_status', 'proxy_review_status', 'discovery_exclusion_review_status'))
+        and all(review.get(key) for key in ('reviewer', 'source_reference', 'baseline_window')))
+
+
 def feature_roles(feature_sets, baseline, validation, identifiers, clinical_registry=None):
     policy=validation.get('characterization',{})
     if policy.get('schema_version',POLICY_VERSION)!=POLICY_VERSION:
@@ -134,11 +143,7 @@ def feature_roles(feature_sets, baseline, validation, identifiers, clinical_regi
             lineage_status = review.get('lineage_review_status', 'NOT_REVIEWED')
             clinical_status = review.get('clinical_review_status', 'NOT_REVIEWED')
             temporal = review.get('temporal_baseline_status', 'PENDING_REVIEW')
-            approved = (lineage_status == clinical_status == 'APPROVED' and temporal == 'VERIFIED'
-                        and review.get('origin_review_status') == 'APPROVED'
-                        and review.get('proxy_review_status') == 'APPROVED'
-                        and review.get('discovery_exclusion_review_status') == 'APPROVED'
-                        and all(review.get(k) for k in ['reviewer', 'source_reference', 'baseline_window']))
+            approved = independence_review_approved(review)
             role = 'unavailable'; reason = 'not_prespecified_validation_variable'
             if direct: role, reason = 'defining', 'frozen_embedding_or_lens_feature'
             elif conflicts: role, reason = 'derived_from_defining', 'frozen_source_or_construct_lineage:' + '|'.join(conflicts)

@@ -126,7 +126,7 @@ def _save_tables(run_dir, tables, provenance):
         save_table(run_dir / f'03_graph_n3_{name}.csv', frame)
 
 
-def run_n3_validation(run_dir, frames, roles, manifest, config, provenance, config_sha256):
+def run_n3_validation(run_dir, frames, roles, manifest, config, provenance, config_sha256, *, snapshot_only=False):
     """Persist complete audit even if a later model implementation fails."""
     run_dir = Path(run_dir)
     catalog = evidence_catalog(config, Path(__file__).resolve().parents[4])
@@ -141,7 +141,8 @@ def run_n3_validation(run_dir, frames, roles, manifest, config, provenance, conf
     _save_tables(run_dir, audit, metadata)
     phase_b_error = ''
     try:
-        results = n3_incremental_models(baseline, membership, roles, audit['source_inventory'], manifest, config, catalog)
+        results = (blocked_results(manifest, config, 'USE_VERIFIED_BASELINE_WINDOW_FOR_N3') if snapshot_only else
+                   n3_incremental_models(baseline, membership, roles, audit['source_inventory'], manifest, config, catalog))
     except Exception as exc:
         # Record only exception type: exception messages may contain sensitive values.
         phase_b_error = type(exc).__name__

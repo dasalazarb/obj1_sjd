@@ -20,9 +20,10 @@ import pandas as pd
 import yaml
 
 from .._pipeline import digest
-from ..stage02.s02_contracts import safe_artifact
+from ..stage02.s02_contracts import CURRENT_SCHEMA, artifact_paths, safe_artifact
 from .s03_construct_validation import _dependencies, _paths
 from . import s03_n3_calendar_day as cal
+from .s03_baseline_window import MISMATCH, WARNING, policy as baseline_policy, require_policy
 from .s03_n3_approved_view import protocol_view, measurement_values, measurement_values_calendar_day, validate_baseline
 from .s03_n3_decisions import (
     VERSION, details_for, decision_templates, plan_sha256, verify_decisions,
@@ -45,6 +46,8 @@ SAFE_NAME = re.compile(r'[A-Za-z][A-Za-z0-9_/.-]{0,100}\Z')
 
 
 def validate_plan(plan, validation):
+    require_policy(plan)
+    require_policy(validation)
     if not isinstance(plan, dict) or plan.get('schema_version') != VERSION:
         raise ValueError('UNSUPPORTED_CONTROLLED_N3_PLAN')
     if plan.get('privacy_class') != 'INTERNAL_RESTRICTED' or plan.get('public_export') is not False:
@@ -118,7 +121,7 @@ def _failure(call):
 
 
 def prepare_pair(baseline, context, measurements, membership, roles, inventory,
-                 features, registry, manifest, validation, outcome, decisions):
+                 features, registry, manifest, validation, outcome, decisions, *, canonical=None, current=False):
     """Evaluate independent gates together. No failed gate becomes an approval."""
     rep, source = outcome['representation_id'], outcome['source_column']
     review = {k: details_for(decisions, k, rep, source) for k in
@@ -134,16 +137,20 @@ def prepare_pair(baseline, context, measurements, membership, roles, inventory,
         'official_baseline_verified', 'episode_anchor_verified', 'era_date_semantics_verified'))
     gates['baseline'] = _gate(baseline_ok, 'OFFICIAL_BASELINE_AND_ERA_REVIEW_REQUIRED')
     measurement_review = review['measurement']
-    if measurement_review.get('measurement_contract') == cal.CONTRACT:
+    contract = measurement_review.get('measurement_contract')
+    if current and (contract == cal.LEGACY_CONTRACT or
+                    (source in cal.LAB_SOURCES and measurement_review and contract != cal.CONTRACT)):
+        measured, reason, temporal_ok = None, MISMATCH, False
+    elif contract == cal.CONTRACT or (not current and contract == cal.LEGACY_CONTRACT):
         inspection = {key: value for key, value in measurement_review.items() if key != 'source_review_sha256'}
         measured, reason = _failure(lambda: measurement_values_calendar_day(
             baseline, measurements, source, inspection,
-            source_review_sha256=measurement_review.get('source_review_sha256')))
-        temporal_ok = measured is not None  # The v2 view validates origin and the strict day interval.
+            source_review_sha256=measurement_review.get('source_review_sha256'), canonical=canonical))
+        temporal_ok = measured is not None
     elif {'collection_calendar_day', 'date_resolution'} <= set(measurements):
         measured, reason, temporal_ok = None, 'SIGNED_CALENDAR_DAY_SOURCE_AND_PAIR_REVIEW_REQUIRED', False
     else:
-        measured, reason = _failure(lambda: measurement_values(baseline, measurements, source, measurement_review))
+        measured, reason = _failure(lambda: measurement_values(baseline, measurements, source, measurement_review, current=current))
         temporal_ok = (bool(measurement_review) and measurement_review.get('instrument_date_verified') is True
                        and measurement_review.get('date_semantics') == 'instrument_measurement'
                        and measured is not None)
@@ -423,7 +430,7 @@ def input_pins(graph03_run, graph02_release, context_path, measurements_path, re
         graph03_summary=digest(safe_artifact(Path(graph03_run), '03_graph_results_summary.json')),
         context=digest(Path(context_path)), measurements=digest(Path(measurements_path)),
         validation=digest(Path(repository_root) / 'src/studies/graph/configs/validation_03.yaml'),
-        implementation=_implementation_pin(repository_root))
+        implementation=_implementation_pin(repository_root), baseline_window=baseline_policy().sha256)
 
 
 def _implementation_hashes(root):
@@ -500,7 +507,7 @@ def run_controlled(graph03_run, graph02_release, context_path, measurements_path
     input_hashes = dict(graph02_release=digest(release),
         graph03_summary=digest(safe_artifact(graph03, '03_graph_results_summary.json')),
         context=protected[context_path], measurements=protected[measurements_path],
-        validation=protected[validation_path], implementation=_implementation_pin(root))
+        validation=protected[validation_path], implementation=_implementation_pin(root), baseline_window=baseline_policy().sha256)
     if plan.get('input_sha256') != input_hashes:
         raise ValueError('EXPLICIT_INPUT_HASH_PINS_REQUIRED_OR_MISMATCHED')
     created = False
@@ -515,6 +522,12 @@ def run_controlled(graph03_run, graph02_release, context_path, measurements_path
         inputs = load_phasec_inputs(graph03, release, contract, strict=True)
         # Verify the complete Graph03 inventory, not just the Phase A subset.
         summary = json.loads((graph03 / '03_graph_results_summary.json').read_text())
+        current_release = inputs['manifest']['schema_version'] == CURRENT_SCHEMA
+        if current_release:
+            require_policy(summary)
+            if (summary.get('window_policy_sha256') != baseline_policy().sha256
+                    or summary.get('graph02_release_sha256') != input_hashes['graph02_release']):
+                raise ValueError(MISMATCH)
         for name, sha in summary['sha256_by_artifact'].items():
             if digest(safe_artifact(graph03, name)) != sha:
                 raise ValueError('GRAPH03_ARTIFACT_SHA_MISMATCH')
@@ -523,7 +536,7 @@ def run_controlled(graph03_run, graph02_release, context_path, measurements_path
         manifest = inputs['manifest']
         if not {o['representation_id'] for o in plan['outcomes']} <= set(manifest['eligible_representation_ids']):
             raise ValueError('OUTCOME_REPRESENTATION_OUTSIDE_FROZEN_RELEASE')
-        registry = pd.read_csv(safe_artifact(release.parent, manifest['relative_paths']['clinical_registry']))
+        registry = pd.read_csv(safe_artifact(release.parent, artifact_paths(manifest)['clinical_registry']))
         context, measurements = pd.read_parquet(context_path), pd.read_parquet(measurements_path)
         if {'collection_calendar_day', 'date_resolution'} <= set(measurements) and output.is_relative_to(root):
             raise ValueError('CALENDAR_DAY_OUTPUT_MUST_BE_OUTSIDE_REPOSITORY')
@@ -536,11 +549,23 @@ def run_controlled(graph03_run, graph02_release, context_path, measurements_path
         if fingerprint(json.dumps(code_hashes, sort_keys=True)) != input_hashes['implementation']:
             raise ValueError('IMPLEMENTATION_CHANGED_DURING_INPUT_VERIFICATION')
         protected.update({root / name: sha for name, sha in code_hashes.items()})
+        canonical = {}
+        if any(o['source_column'] in cal.LAB_SOURCES for o in plan['outcomes']):
+            from .s03_n3_exploratory import _policy, current_source_inputs
+            from .s03_n3_exploratory_source import _candidates, _outcome, primary_measurements
+            integrated = manifest.get('source_inputs', {}).get('integrated', {}).get('path')
+            tables, records, _ = current_source_inputs(root, step10=integrated, context=context_path)
+            if {'eda_long', 'step10'} <= set(tables):
+                settings = _policy(root)
+                candidates = _candidates(tables, baseline, records, settings)
+                for source in sorted({o['source_column'] for o in plan['outcomes']} & set(cal.LAB_SOURCES)):
+                    canonical[source] = primary_measurements(_outcome(candidates, source, settings))
         preflight, models, comparisons, views, preparations = [], [], [], {}, {}
         for outcome in plan['outcomes']:
             rows, prepared = prepare_pair(baseline, context, measurements, inputs['frozen']['membership'],
                 inputs['roles'], inputs['tables']['source_inventory'], inputs['frozen']['feature_sets'],
-                registry, manifest, validation, outcome, decisions)
+                registry, manifest, validation, outcome, decisions,
+                canonical=canonical.get(outcome['source_column']), current=True)
             pair = (outcome['representation_id'], outcome['source_column'])
             views[pair] = prepared['view']
             preparations[pair] = prepared
@@ -572,6 +597,9 @@ def run_controlled(graph03_run, graph02_release, context_path, measurements_path
         tables = dict(preflight=_safe_table(preflight), models=_safe_table(models),
                       comparisons=_safe_table(comparisons), blockers=_safe_table(blocker_ledger(preflight, states, plan.get('decisions', []))))
         # Patient artifacts are isolated from the report, restricted and never exported.
+        for table in tables.values():
+            for key, value in baseline_policy().metadata().items():
+                table[key] = value
         payloads = {name + '.csv': frame.to_csv(index=False) for name, frame in tables.items()}
         from .s03_n3_validation import _privacy_check
         _privacy_check(tables, baseline)
@@ -605,6 +633,7 @@ def run_controlled(graph03_run, graph02_release, context_path, measurements_path
             privacy_class='INTERNAL_RESTRICTED', public_export=False, no_refit=True,
             graph02_unchanged=True, graph03_unchanged=True, automatic_approvals=0,
             institutional_signature_authentication='EXTERNAL_HUMAN_RESPONSIBILITY',
+            **baseline_policy().metadata(),
             status='COMPLETE_WITH_ESTIMATES' if completed else 'COMPLETE_WITH_BLOCKERS' if execute else 'PREFLIGHT_COMPLETE',
             inference_scope='exploratory_in_sample_conditional_on_frozen_memberships',
             patient_count_disclosure='WITHHELD_WHOLE_RUN',
@@ -624,7 +653,7 @@ def run_controlled(graph03_run, graph02_release, context_path, measurements_path
                 'statsmodels', 'scikit-learn', 'matplotlib', 'PyYAML')})
         (output / 'release.json').write_text(json.dumps(metadata, sort_keys=True, indent=2) + '\n')
         (output / 'README.md').write_text(
-            '# Restricted controlled N3 release\n\n' + metadata['status'] + '\n\n'
+            '# Restricted controlled N3 release\n\n' + metadata['status'] + '\n\n' + WARNING + '\n\n'
             'Use preflight.csv and blockers.csv for simultaneous gate states. '
             'NOT_REQUESTED is distinct from NOT_ESTIMABLE. A/C do not require '
             'topological stability; community contrasts do. All requested models '

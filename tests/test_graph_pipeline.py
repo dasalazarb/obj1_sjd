@@ -246,6 +246,17 @@ def test_zero_argument_full_study_and_standalone_entries(configuration,monkeypat
     assert {p.name for p in study.iterdir()} == {'graph_study_results_summary.md'}
     report = (study / 'graph_study_results_summary.md').read_text()
     assert all(name in report for name in (MANIFEST, '03_graph_results_summary.json', '03e_RESULTADOS.md'))
+    from src.studies.graph.stage03.s03_run_resolution import BASELINE_OUTPUT_DIR
+    baseline_name = '03_graph_n3_baseline_community_profiles.csv'
+    pd.testing.assert_frame_equal(
+        pd.read_csv(roots[1] / baseline_name),
+        pd.read_csv(roots[1].parent / BASELINE_OUTPUT_DIR / baseline_name))
+    for root in (roots[1], roots[1].parent / BASELINE_OUTPUT_DIR):
+        qc = json.loads((root / '03_graph_baseline_window_qc.json').read_text())
+        assert qc['graph02_sha256_before'] == qc['graph02_sha256_after']
+        assert qc['graph02_frozen_unchanged']
+    snapshot = pd.read_csv(roots[1] / '03_graph_community_baseline_table.csv')
+    assert snapshot.snapshot_basis.eq('FROZEN_GRAPH02_BASELINE_SNAPSHOT').all()
     for run in [roots[1]]:
         roles=pd.read_csv(run/'03_graph_clinical_feature_roles.csv')
         anchors=pd.read_csv(run/'03_graph_independent_anchor_validation.csv')

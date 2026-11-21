@@ -7,17 +7,19 @@ import numpy as np
 import pandas as pd
 
 from .s03_n3_exploratory_models import ESTIMATED
-from .s03_n3_exploratory_source import DAY0, EARLY, EDA_ONLY, LATE, OLDER, ORIGINAL, PRE, UNRESOLVED
+from .s03_baseline_window import AFTER_BASELINE_WINDOW, FROZEN_SNAPSHOT, PREBASELINE, PRIMARY, WARNING
+from .s03_n3_exploratory_source import DAY0, DAY30, EXACT_WINDOW, LATEST
 from .s03_profiles import observed_values
 
-FROZEN = 'FROZEN_BASELINE_DESCRIPTION'
+FROZEN = FROZEN_SNAPSHOT
 SCOPE = {
-    PRE: 'NEW_EXPLORATORY_ASSOCIATION',
-    DAY0: 'CONTEMPORANEOUS_DESCRIPTION',
-    EARLY: 'FOLLOWUP_DESCRIPTION',
-    LATE: 'FOLLOWUP_DESCRIPTION',
-    OLDER: 'WINDOW_EXCLUDED_COVERAGE_ONLY',
-    UNRESOLVED: 'UNATTRIBUTED_SOURCE_INVENTORY',
+    PRIMARY: 'RETROSPECTIVE_BASELINE_CHARACTERIZATION',
+    PREBASELINE: 'PREBASELINE_AUXILIARY_DESCRIPTION',
+    AFTER_BASELINE_WINDOW: 'AFTER_CHARACTERIZATION_DESCRIPTION',
+    DAY0: 'DAY0_DESCRIPTIVE_SENSITIVITY',
+    DAY30: 'DAY0_TO_30D_DESCRIPTIVE_SENSITIVITY',
+    LATEST: 'LATEST_IN_WINDOW_DESCRIPTIVE_SENSITIVITY',
+    EXACT_WINDOW: 'EXACT_EPISODE_DESCRIPTIVE_SENSITIVITY',
 }
 LAB_FIELDS = ('representation_id outcome stratum provenance interpretation finding_class topology_status '
               'definition_id definition_role unit')
@@ -45,6 +47,11 @@ TABLE_COLUMNS = {
     'sensitivity_models': MODEL,
     'linkage_sensitivity_models': MODEL,
     'followup_profiles': PROFILE,
+    'baseline_eligibility': (LAB_FIELDS + ' community_id stage count_unit order status '
+                             'n_previous n_remaining n_excluded all_removed_reason'),
+    'measurement_delay': (LAB_FIELDS + ' community_id window_bin count_unit status n_patients n_total'),
+    'baseline_inference': MODEL,
+
 }
 
 
@@ -378,9 +385,9 @@ def _markdown(summary, frames):
             lines.append(f'| {row.outcome} | {row.stratum} | {row.provenance} | {row.community_id} | '
                          f'{int(row.n_measured)} | {statistic} |')
     for table, title, intro in [
-        ('models', 'Asociaciones exploratorias prebaseline', 'Fecha de colección corroborada y linaje documentado.'),
-        ('sensitivity_models', 'Sensibilidad temporal', 'Prebaseline con fecha de EDA sin corroboración original.'),
-        ('linkage_sensitivity_models', 'Sensibilidad de vinculación', 'Prebaseline corroborado con enlace por episodio.')]:
+        ('models', 'Asociaciones exploratorias de día 0 a seis meses', WARNING),
+        ('sensitivity_models', 'Sensibilidad temporal', 'Ventana basal con fecha de EDA sin corroboración original.'),
+        ('linkage_sensitivity_models', 'Sensibilidad de vinculación', 'Ventana basal corroborada con enlace exacto por episodio.')]:
         models = frames[table]
         estimated = models.loc[models.status.eq(ESTIMATED)]
         lines += ['', '## ' + title, '', intro + f' Se estimaron {len(estimated)} pruebas globales.', '']
@@ -402,9 +409,10 @@ def _markdown(summary, frames):
             lines += ['', 'Motivos registrados por par de representación y resultado.', '']
             lines += [f'- `{reason}` ({count} pares)' for reason, count in sorted(reasons.items())]
     lines += ['', '## Día basal y seguimiento', '',
-              'El día 0 es contemporáneo y el orden intradía es desconocido. El seguimiento temprano '
-              'y tardío describe a quienes tuvieron una medición clínica disponible en esas ventanas. '
-              'Los datos anteriores a 365 días se contabilizan en cobertura.', '', '## Límites', '']
+              WARNING,
+              'El orden intradía del día 0 es desconocido. Los resultados prebasales y posteriores al '
+              'límite calendario se describen por separado. La disponibilidad de mediciones y su demora '
+              'pueden depender de la indicación clínica.', '', '## Límites', '']
     lines += [f'- {item}' for item in summary['limitations']]
     if summary['data_issues']:
         lines += ['', 'Insumos con incidencias.', '']

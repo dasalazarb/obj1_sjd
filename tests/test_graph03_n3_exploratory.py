@@ -14,6 +14,7 @@ import pytest
 from src.studies.graph._pipeline import digest
 from src.studies.graph.stage02.s02_contracts import CURRENT_ARTIFACTS
 from src.studies.graph.stage03.s03_construct_validation import feature_roles
+from src.studies.graph.stage03.s03_baseline_window import MISMATCH, VERSION, policy as baseline_policy
 from src.studies.graph.stage03.s03_run_resolution import graph_paths
 from tests.graph_contract_fixtures import install_current_graph02
 from src.studies.graph.stage03 import s03_n3_exploratory as E
@@ -55,7 +56,11 @@ def update_graph03(repo, paths):
     roles = feature_roles(frozen['feature_sets'], frozen['baseline_raw'], validation, reps, loaded['registry'])
     roles.to_csv(directory / '03_graph_clinical_feature_roles.csv', index=False)
     (directory / '03_graph_results_summary.json').write_text(json.dumps(dict(
-        schema_version='graph03_current_v1', execution_status='COMPLETE', n_patients=len(frozen['baseline_raw']))))
+        schema_version='graph03_current_v1', execution_status='COMPLETE', n_patients=len(frozen['baseline_raw']),
+        graph02_release_sha256=digest(paths['graph02_release']), **baseline_policy().metadata())))
+    (directory / '03_graph_baseline_window_qc.json').write_text(json.dumps(dict(
+        graph02_sha256_after=E.frozen_fingerprints(paths['graph02_release'], loaded['manifest']),
+        **baseline_policy().metadata())))
     (directory / '03_graph_release_input_qc.json').write_text(json.dumps(dict(
         status='PASS', eligible_representation_ids=reps)))
 
@@ -77,7 +82,7 @@ def inspect_release(result, expected):
     assert output == expected
     assert output.stat().st_mode & 0o777 == 0o700
     assert all(f.stat().st_mode & 0o777 == 0o600 for f in output.iterdir())
-    assert all(f.is_file() and f.name.startswith(('03e_', '03f_')) for f in output.iterdir())
+    assert all(f.is_file() and f.name.startswith(('03e_', '03f_', '03_graph_')) for f in output.iterdir())
     assert not list(output.glob('*.png'))
     figure_dir = expected.parents[3] / 'figures/studies/graph' / expected.name
     for figure in map(Path, result['figures']):
@@ -97,7 +102,8 @@ def rep_outcome(frame, rep, outcome):
 
 def test_zero_arguments_builds_private_aggregates_and_never_uses_the_guard(current):
     repo, paths, private, expected = current
-    eda = pd.read_parquet(paths['eda_long']).assign(unit='IU/mL')
+    eda = pd.read_parquet(paths['eda_long']).assign(unit='IU/mL', lab_date='2020-01-01')
+    write_btris(paths, eda, repo.parent)
     eda.to_parquet(paths['eda_long'], index=False)
     auto_module = repo / 'src/studies/graph/stage03/s03_n3_auto.py'
     with auto_module.open('a') as handle:
@@ -115,8 +121,8 @@ def test_zero_arguments_builds_private_aggregates_and_never_uses_the_guard(curre
     assert (paths_before(paths), digest(paths['step10'])) == before
     output = inspect_release(result, expected)
     profiles = pd.read_csv(output / '03e_community_profiles.csv')
-    rf = profiles.loc[(profiles.outcome == RF) & profiles.n_measured.gt(0)]
-    assert len(rf) == 4 and rf['median'].notna().all()
+    rf = profiles.loc[(profiles.outcome == RF) & profiles.stratum.eq(S.PRIMARY) & profiles.n_measured.gt(0)]
+    assert not rf.empty and rf['median'].notna().all()
     assert rf.loc[rf.representation_id.eq('R2'), 'topology_status'].eq('R2_EXPLORATORY_UNSTABLE').all()
     assert rf.provenance.eq(S.ORIGINAL).all()
     evidence = pd.read_csv(output / '03e_source_linkage_audit.csv')
@@ -164,7 +170,7 @@ def test_missing_or_tampered_inputs_preserve_only_verifiable_results(current, ta
 
 def test_date_window_source_identity_duplicates_and_definitions(calendar_originals):
     paths, _, _, _ = calendar_originals
-    eda = pd.read_parquet(paths['eda_long']).iloc[:40].copy().assign(unit='IU/mL')
+    eda = pd.read_parquet(paths['eda_long']).iloc[:40].copy().assign(unit='IU/mL', lab_date='2020-01-02')
     eda.loc[:6, 'lab_date'] = ['2018-12-31', '2019-01-01', '2019-12-31', '2020-01-01',
                               '2020-01-02', '2020-12-31', '2021-01-01']
     eda['specimen_datetime'] = eda.lab_date
@@ -179,13 +185,13 @@ def test_date_window_source_identity_duplicates_and_definitions(calendar_origina
     eda.loc[16, 'result_text'] = 'borderline'
     eda.loc[17, 'result_text'] = 'Not_Detected'
     eda.loc[18, 'specimen_date_origin'] = None
-    latest_tie = eda.iloc[[10]].assign(result_numeric_exact=400, result_raw='400')
-    older = eda.iloc[[10]].assign(lab_date='2019-12-28', specimen_datetime='2019-12-28')
+    earliest_tie = eda.iloc[[10]].assign(result_numeric_exact=400, result_raw='400')
+    later = eda.iloc[[10]].assign(lab_date='2020-01-03', specimen_datetime='2020-01-03')
     collision = eda.iloc[[19]].assign(patient_id='SYNTHETIC_-19')
     mixed_unit = eda.iloc[[20]].assign(unit='mg/L')
-    invalid_later = eda.iloc[[21]].assign(lab_date='2020-01-01', specimen_datetime='2020-01-01',
+    invalid_earlier = eda.iloc[[21]].assign(lab_date='2020-01-01', specimen_datetime='2020-01-01',
                                         result_operator='<')
-    eda = pd.concat([eda, latest_tie, older, eda.iloc[[11]], collision, mixed_unit, invalid_later],
+    eda = pd.concat([eda, earliest_tie, later, eda.iloc[[11]], collision, mixed_unit, invalid_earlier],
                     ignore_index=True)
     tables = {role: pd.read_parquet(paths[role]) for role in ('step01', 'step10', 'context')}
     tables['eda_long'] = eda
@@ -194,7 +200,7 @@ def test_date_window_source_identity_duplicates_and_definitions(calendar_origina
     tables['step10'] = pd.concat([analytic, analytic.loc[analytic.patient_id.eq('SYNTHETIC_22')]], ignore_index=True)
     baseline = pd.read_csv(paths['baseline'], dtype={'patient_id': 'string'})
     rows = S._candidates(tables, baseline, S._btris_records({}, []), POLICY)
-    assert rows.loc[:6, 'stratum'].tolist() == [S.OLDER, S.PRE, S.PRE, S.DAY0, S.EARLY, S.EARLY, S.LATE]
+    assert rows.loc[:6, 'window_bin'].tolist() == ['PRE', 'PRE', 'PRE', 'DAY0', 'DAY1_30', 'AFTER_6M', 'AFTER_6M']
     assert rows.loc[1, 'identity_status'] == S.PATIENT_ONLY
     assert rows.loc[1, 'source_episode_unknown'] and pd.isna(rows.loc[1, 'source_episode_id'])
     assert rows.loc[7, 'identity_status'] == 'CROSS_PATIENT_CONFLICT'
@@ -204,16 +210,16 @@ def test_date_window_source_identity_duplicates_and_definitions(calendar_origina
     assert rows.loc[22, 'identity_status'] == 'AMBIGUOUS_IDENTITY'
     rf = S._outcome(rows, RF, POLICY)
     text = S._outcome(rows, RF_TEXT, POLICY)
-    primary = rf.primary[(S.PRE, S.ORIGINAL)]
+    primary = rf.primary[(S.PRIMARY, S.ORIGINAL)]
     assert rf.selected.loc[rf.selected.definition_id.eq(primary), 'unit'].eq('IU/mL').all()
     assert set(rf.selected.loc[rf.selected.definition_id.ne(primary), 'unit']) == {'mg/L', 'IU/mL'}
     assert rf.duplicates.patient_id.tolist() == ['SYNTHETIC_11']
-    assert {10, 20} <= set(rf.inventory.index[rf.inventory.first_reason.eq('AMBIGUOUS_LATEST_DAY')])
+    assert {10, 20} <= set(rf.inventory.index[rf.inventory.first_reason.eq('AMBIGUOUS_EARLIEST_DAY')])
     assert not rf.selected.patient_id.isin({'SYNTHETIC_10', 'SYNTHETIC_20'}).any()
     assert text.inventory.loc[[15, 16], 'first_reason'].eq('UNKNOWN_RESULT_TOKEN').all()
     assert text.selected.loc[17, 'value'] == 0
     assert rf.inventory.loc[14, 'first_reason'] == 'CENSORED_RESULT'
-    assert rf.selected.loc[21, 'stratum'] == S.PRE
+    assert rf.selected.loc[21, 'stratum'] == S.PRIMARY
 
 
 def test_raw_observation_join_does_not_equate_cluster_and_preserves_discordance(calendar_originals):
@@ -290,24 +296,45 @@ def bind_lineage(repo, paths):
     pd.DataFrame({'source_column': columns, 'semantic_feature_id': [
         RF.rsplit('__', 1)[0], RF.rsplit('__', 1)[0], ANA.rsplit('__', 1)[0],
         HEP2.rsplit('__', 1)[0], 'pro__sf36_pcs']}).to_csv(directory / registry, index=False)
+    membership = directory / CURRENT_ARTIFACTS['membership']
+    members = pd.read_csv(membership)
+    members.loc[members.representation_id.eq('R0'), 'structural_stability_status'] = 'stable'
+    members.to_csv(membership, index=False)
+    inventory = paths['graph03_run'] / '03_graph_n3_source_inventory.csv'
+    audit = pd.read_csv(inventory)
+    r0 = audit.representation_id.eq('R0')
+    audit.loc[r0, 'n_stable_hard'] = audit.loc[r0, 'n_hard_supported']
+    audit.loc[r0, 'n_provisional_hard'] = 0
+    audit.to_csv(inventory, index=False)
     sets = pd.read_csv(directory / features)
     sets.loc[sets.representation_id.eq('R2'), 'source_column'] = RF_TEXT
     sets['feature'] = sets.source_column + '__encoded'
     sets.to_csv(directory / features, index=False)
+    path = repo / E.CONFIGS / E.VALIDATION
+    validation = yaml.safe_load(path.read_text())
+    for source in (RF, RF_TEXT, ANA):
+        validation['anchors'].append(dict(source_column=source, type='numeric' if source == RF else 'binary'))
+        scope = dict(representation_id='R0', source_column=source, window_policy_version=VERSION)
+        validation['characterization']['independence_reviews'].append(dict(
+            scope, lineage_review_status='APPROVED', clinical_review_status='APPROVED', temporal_baseline_status='VERIFIED',
+            origin_review_status='APPROVED', proxy_review_status='APPROVED', discovery_exclusion_review_status='APPROVED',
+            reviewer='Synthetic', source_reference='Synthetic test', baseline_window=VERSION))
+        validation['n3_validation']['prespecified_outcomes'].append(scope)
+    path.write_text(yaml.safe_dump(validation))
     update_graph03(repo, paths)
 
 
 def test_end_to_end_ols_logit_rf_lineage_and_distinct_temporal_sensitivity(current):
     repo, paths, private, expected = current
-    eda = pd.read_parquet(paths['eda_long']).assign(unit='IU/mL')
+    eda = pd.read_parquet(paths['eda_long']).assign(unit='IU/mL', lab_date='2020-01-02')
     eda['result_text'] = np.where((eda.index % 3) == 0, 'positive', 'negative')
     ana = eda.assign(canonical_analyte=E.LAB_SOURCES[ANA], unit=None,
                      order_identifier=eda.order_identifier + '_ANA', order_name_original='SYNTHETIC_ANA')
     eda.loc[:9, 'matched_clinical_episode_id'] = None
     original = pd.concat([eda, ana], ignore_index=True)
     write_btris(paths, original, repo.parent)
-    lower_date_provenance = ana.assign(lab_date='2019-12-30', order_identifier=ana.order_identifier + '_EDA')
-    lower_rf = eda.assign(lab_date='2019-12-30', order_identifier=eda.order_identifier + '_EDA',
+    lower_date_provenance = ana.assign(lab_date='2020-02-02', order_identifier=ana.order_identifier + '_EDA')
+    lower_rf = eda.assign(lab_date='2020-02-02', order_identifier=eda.order_identifier + '_EDA',
                           result_numeric_exact=2., result_raw='2')
     pd.concat([original, lower_date_provenance, lower_rf], ignore_index=True).to_parquet(paths['eda_long'], index=False)
     bind_lineage(repo, paths)
@@ -332,16 +359,17 @@ def test_end_to_end_ols_logit_rf_lineage_and_distinct_temporal_sensitivity(curre
     assert rep_outcome(dates, 'R0', RF_TEXT).status.item() == M.ESTIMATED
     links = pd.read_csv(output / '03e_linkage_sensitivity_models.csv')
     assert rep_outcome(links, 'R0', RF).status.item() == M.ESTIMATED
-    tested = pd.concat([rows, dates, links]).loc[lambda frame: frame.status.eq(M.ESTIMATED)]
-    assert tested.fdr_test_count.eq(len(tested)).all()
-    assert tested.q_bh.between(0, 1).all()
+    for table in (rows, dates, links):
+        tested = table.loc[table.status.eq(M.ESTIMATED)]
+        assert tested.fdr_test_count.eq(len(tested)).all()
+        assert tested.q_bh.between(0, 1).all()
     assert (paths_before(paths), digest(paths['step10'])) == before
     profiles = pd.read_csv(output / '03e_community_profiles.csv')
     assert rep_outcome(profiles, 'R0', RF_TEXT).n_measured.gt(0).any()
 
 
 @pytest.mark.parametrize('empty', [False, True])
-def test_no_prebaseline_publishes_real_frozen_descriptives_and_followup(current, empty):
+def test_descriptives_separate_baseline_from_after_window(current, empty):
     repo, paths, private, expected = current
     eda = pd.read_parquet(paths['eda_long']).assign(unit='IU/mL')
     if empty:
@@ -360,7 +388,9 @@ def test_no_prebaseline_publishes_real_frozen_descriptives_and_followup(current,
     assert baseline_plot.stat().st_size > 1000
     assert not pd.read_csv(output / '03e_cohort_flow.csv').empty
     coverage = rep_outcome(pd.read_csv(output / '03e_coverage.csv'), 'R0', RF)
-    assert coverage.loc[coverage.stratum.eq(S.PRE), 'n_measured'].eq(0).all()
+    primary = coverage.loc[coverage.stratum.eq(S.PRIMARY) & coverage.provenance.eq(S.ORIGINAL)]
+    assert primary.n_measured.item() == (0 if empty else 75)
+    assert coverage.loc[coverage.stratum.eq(S.PREBASELINE), 'n_measured'].eq(0).all()
     followup = pd.read_csv(output / '03e_followup_profiles.csv')
     assert followup.n_measured.gt(0).any() != empty
 
@@ -381,3 +411,20 @@ def test_03f_current_audit_is_repeatable_and_preserves_03e(current):
         inspect_release(exploration, expected)
     assert {path.name for path in expected.glob('03f_*')} == {
         '03f_source_linkage_audit.csv', '03f_summary.json'}
+
+
+def test_old_exploratory_config_does_not_overwrite_new_release(current):
+    repo, _, _, _ = current
+    result = command(repo)
+    summary = Path(result['summary'])
+    published = summary.read_bytes()
+    configuration = repo / E.CONFIGS / E.DEFAULTS
+    settings = yaml.safe_load(configuration.read_text())
+    settings.pop('window_policy_version')
+    settings['measurements']['main_window'] = 'prebaseline_primary'
+    configuration.write_text(yaml.safe_dump(settings))
+    script = repo / 'src/studies/graph/03e_graph_n3_controlled_inference.py'
+    run = subprocess.run([sys.executable, str(script)], cwd=repo.parent, capture_output=True, text=True)
+    assert run.returncode == 1
+    assert json.loads(run.stdout)['reason'] == MISMATCH
+    assert summary.read_bytes() == published

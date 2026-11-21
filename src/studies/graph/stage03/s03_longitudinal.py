@@ -9,23 +9,73 @@ from .s03_statistics import bh_qvalues
 from .s03_episode_audit import resolve_endpoint_episodes, resolve_all_endpoints, validate_unique_patients
 
 
-def post_index_data(master,baseline,members,endpoint,config, *, observed_only=True,resolution=None):
+from .s03_baseline_window import AFTER_BASELINE_WINDOW, calendar_windows
+
+POST_INDEX = 'LONGITUDINAL_POST_INDEX'
+POST_WINDOW = 'LONGITUDINAL_POST_CHARACTERIZATION_WINDOW'
+
+
+def after_characterization_window(observations, baseline):
+    if 'clinical_baseline_date' not in baseline:
+        raise ValueError('OFFICIAL_BASELINE_WINDOW_ANCHOR_UNAVAILABLE')
+    anchors = baseline.set_index('patient_id').clinical_baseline_date
+    dates = observations.patient_id.map(anchors)
+    bins = calendar_windows(dates, observations.visit_calendar_day)
+    return observations.loc[bins.temporal_class.eq(AFTER_BASELINE_WINDOW)].copy()
+
+
+def temporal_overlap_audit(resolutions, baseline, membership, manifest, selected, cell):
+    """Aggregate verified visit overlap. Same-source, same-day matches are candidates for reuse."""
+    rows = []
+    for rep in manifest['eligible_representation_ids']:
+        ids = hard_members(membership, rep).patient_id
+        for endpoint, resolution in resolutions.items():
+            label = dict(representation_id=rep, endpoint=endpoint, count_unit='patient')
+            if resolution.reason or endpoint not in selected:
+                rows.append(dict(label, status='NOT_ASSESSED', reason=resolution.reason or
+                                 'NO_MATCHING_BASELINE_OUTCOME'))
+                continue
+            observed = resolution.observations
+            observed = observed.loc[observed.patient_id.isin(ids) & observed.value.notna()]
+            baseline_lab = selected[endpoint]
+            baseline_lab = baseline_lab.loc[baseline_lab.patient_id.isin(ids)]
+            keys = ['patient_id', 'visit_calendar_day']
+            same_source_day = observed[keys].drop_duplicates().merge(
+                baseline_lab[['patient_id', 'collection_calendar_day']].rename(
+                    columns={'collection_calendar_day': 'visit_calendar_day'}), on=keys)
+            total, overlap = baseline_lab.patient_id.nunique(), same_source_day.patient_id.nunique()
+            if any(0 < count < cell for count in (len(ids), total, overlap, total - overlap, len(ids) - total)):
+                rows.append(dict(label, status='SUPPRESSED'))
+            else:
+                rows.append(dict(label, status='DESCRIPTIVE', n_baseline_measurement_patients=total,
+                                 n_same_source_day_candidate_overlap=overlap,
+                                 reason='MATCH_ON_PATIENT_OUTCOME_AND_COLLECTION_DAY'))
+    return pd.DataFrame(rows)
+
+
+def post_index_data(master,baseline,members,endpoint,config, *, observed_only=True,resolution=None,post_characterization=False):
     validate_unique_patients(members, 'MEMBERSHIP')
     resolution=resolution or resolve_endpoint_episodes(master,baseline,endpoint,config)
     if resolution.reason: raise ValueError(resolution.reason)
-    data=resolution.observations[['patient_id','visit_date','index_date','time_years','value']].merge(members,on='patient_id',validate='many_to_one')
+    observations = resolution.observations
+    if post_characterization:
+        observations = after_characterization_window(observations, baseline)
+    data=observations[['patient_id','visit_date','index_date','time_years','value']].merge(members,on='patient_id',validate='many_to_one')
     if observed_only: data=data.loc[data.value.notna()].copy()
     return data
 
 
-def longitudinal(master,baseline,membership,manifest,config, *, resolutions=None):
+def longitudinal(master,baseline,membership,manifest,config, *, resolutions=None,post_characterization=False):
     resolutions=resolutions or resolve_all_endpoints(master,baseline,config)
+    estimand = POST_WINDOW if post_characterization else POST_INDEX
+    population = ('strictly_after_characterization_window_observed_values' if post_characterization
+                  else 'strictly_post_index_observed_values')
     eligibility=[]; models=[]; trajectories=[]
     for identifier in manifest['eligible_representation_ids']:
         members=hard_members(membership,identifier)
         for endpoint in config['longitudinal_endpoints']:
             row={'representation_id':identifier,'endpoint':endpoint,'status':'NOT_ESTIMABLE','n_patients':np.nan,'n_visits':np.nan,
-                 'time_unit':'years_since_frozen_clinical_baseline','analysis_population':'strictly_post_index_observed_values',
+                 'time_unit':'years_since_frozen_clinical_baseline','analysis_population':population,'longitudinal_estimand':estimand,
                  'n_baseline':len(baseline),'n_mapper_covered':membership.loc[membership.representation_id.eq(identifier) & membership.mapper_covered,'patient_id'].nunique(),
                  'n_hard_supported':len(members),'n_model_patients':0,'n_model_visits':0,
                  'n_stable_hard':int(members.structural_stability_status.eq('stable').sum()),
@@ -45,10 +95,11 @@ def longitudinal(master,baseline,membership,manifest,config, *, resolutions=None
             row['n_excluded_ambiguous_visits']=len(rejected.loc[rejected.post_index,['patient_id','visit_date']].drop_duplicates()) if 'post_index' in rejected else 0
             row['temporal_exclusion_reasons']='|'.join(sorted(set(rejected.reason)))
             row['n_raw_records']=int(resolutions[endpoint].audits['resolution'].n_raw_records.iloc[0])
-            model={**row,'p_value':np.nan,'hypothesis_family':f'{identifier}/longitudinal',
+            model={**row,'p_value':np.nan,'hypothesis_family':f'{identifier}/longitudinal' + ('_post_characterization_window' if post_characterization else ''),
                    'inference_scope':'in_sample_exploratory_conditional_trajectory','community_selection_uncertainty':'not_included_conditional_intervals'}
             try:
-                all_visits=post_index_data(master,baseline,members,endpoint,config,observed_only=False,resolution=resolutions[endpoint])
+                all_visits=post_index_data(master,baseline,members,endpoint,config,observed_only=False,resolution=resolutions[endpoint],
+                                           post_characterization=post_characterization)
                 data=all_visits.loc[all_visits.value.notna()].copy()
                 row.update(n_post_index_patients=all_visits.patient_id.nunique(),n_post_index_visits=len(all_visits),
                     n_observed_post_index_visits=len(data),n_missing_endpoint_visits=int(all_visits.value.isna().sum()),
@@ -62,7 +113,7 @@ def longitudinal(master,baseline,membership,manifest,config, *, resolutions=None
                 for (community,timebin),part in all_visits.groupby(['community_id',np.floor(all_visits.time_years)]):
                     observed=part.loc[part.value.notna()]
                     trajectories.append({'representation_id':identifier,'endpoint':endpoint,'community_id':community,
-                        'time_bin_year':timebin,'bin_lower_years':timebin,'bin_upper_years':timebin+1,
+                        'longitudinal_estimand':estimand,'time_bin_year':timebin,'bin_lower_years':timebin,'bin_upper_years':timebin+1,
                         'bin_interval':'[lower,upper)','time_median_years':float(part.time_years.median()),
                         'n_verified_visits':len(part),
                         'n_stable_patients':part.loc[part.structural_stability_status.eq('stable'),'patient_id'].nunique(),
