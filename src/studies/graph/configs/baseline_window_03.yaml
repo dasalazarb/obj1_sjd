@@ -1,0 +1,9 @@
+policy_version: graph03_baseline_window_v2
+anchor: frozen_graph02_clinical_baseline_date
+start_offset_days: 0
+duration_calendar_months: 6
+include_start: true
+include_end: true
+selection_primary: earliest_valid_comparable_measurement
+date_semantics: written_local_calendar_day_without_timezone_conversion_or_intraday_order
+primary_date_provenance: ORIGINAL_COLLECTION_VERIFIED
