@@ -1,4 +1,4 @@
-"""Patient and calendar-day source reconciliation for exploratory 03e only."""
+"""Patient and calendar-day source reconciliation shared by Graph03 baseline analyses."""
 
 from dataclasses import dataclass
 from importlib import import_module
@@ -9,6 +9,10 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from . import s03_n3_calendar_day as cal
+from .s03_baseline_window import (
+    AFTER_BASELINE_WINDOW, BASELINE_DAY0, BASELINE_POST_DAY0_TO_6M, DATE_UNRESOLVED,
+    PREBASELINE, PRIMARY, calendar_day, calendar_windows, select_calendar_rows,
+)
 from .s03_n3_measurement_source import (
     BASE, EDA_FIELDS, EDA_REQUIRED, KEYS, LAB_CONTEXT, LAB_SOURCES, RESULT_LIMIT,
     SELECTED_FIELDS, _text,
@@ -22,13 +26,13 @@ RF_TEXT = 'lab__rheumatoid_factor__text'
 DEFINITION = ['order_name_original', 'cluster_name_original', 'observation_name_original', 'assay', 'unit']
 ORIGINAL = 'ORIGINAL_COLLECTION_VERIFIED'
 EDA_ONLY = 'EDA_DATE_ONLY'
-PRE = 'PREBASELINE_PRIMARY'
-DAY0 = 'BASELINE_SAME_DAY'
-EARLY = 'FOLLOWUP_1_365'
-LATE = 'FOLLOWUP_GT365'
-OLDER = 'OLDER_THAN_365'
-UNRESOLVED = 'UNATTRIBUTED_SOURCE_INVENTORY'
-STRATA = (PRE, DAY0, EARLY, LATE, OLDER)
+UNRESOLVED = DATE_UNRESOLVED
+STRATA = (PRIMARY, PREBASELINE, AFTER_BASELINE_WINDOW)
+LATEST = 'BASELINE_0_TO_6M_LATEST_SENSITIVITY'
+DAY0 = 'BASELINE_DAY0_SENSITIVITY'
+DAY30 = 'BASELINE_0_TO_30D_SENSITIVITY'
+EXACT_WINDOW = 'BASELINE_EXACT_EPISODE_SENSITIVITY'
+SENSITIVITIES = (LATEST, DAY0, DAY30, EXACT_WINDOW)
 EXACT = 'EXACT_EPISODE_LINK'
 PATIENT_ONLY = 'UNIQUE_PATIENT_ONLY_EPISODE_UNKNOWN'
 LINKED = (EXACT, PATIENT_ONLY)
@@ -134,10 +138,7 @@ def _identity_tables(baseline, analytic, context, btris_collisions, eda_ids):
 
 def _collection_days(series):
     """Read written ISO/US calendar days without making timezone assumptions."""
-    days = cal.calendar_days(series, allow_time=True)
-    us = series.astype('string').str.extract(r'^(\d{1,2}/\d{1,2}/\d{4})(?:[ T].*)?$', expand=False)
-    fallback = pd.to_datetime(us, format='%m/%d/%Y', errors='coerce').dt.date
-    return days.fillna(pd.Series(pd.array(fallback, dtype=cal.DATE_DTYPE), index=series.index))
+    return pd.Series(pd.array(series.map(calendar_day), dtype=cal.DATE_DTYPE), index=series.index)
 
 
 @dataclass
@@ -298,6 +299,7 @@ def _candidates(tables, baseline, records, policy):
     pairs = official.set_index('_patient_match')
     rows['patient_id'] = rows._patient_match.map(pairs.frozen_patient_id)
     rows['clinical_baseline_date'] = rows._patient_match.map(pairs.clinical_baseline_date)
+    rows['clinical_episode_id'] = rows._patient_match.map(pairs.clinical_episode_id)
     episode_owners = rows.source_episode_id.map(owners)
     cross_episode = pd.Series(
         [isinstance(ids, frozenset) and bool(ids) and key not in ids
@@ -309,7 +311,7 @@ def _candidates(tables, baseline, records, policy):
     verified = pd.MultiIndex.from_frame(rows[['_patient_match', 'source_episode_id']]).isin(episodes)
     rows['identity_status'] = np.select(
         [rows._patient_match.isna(), cross_episode | dates.cross_patient,
-         ambiguous_episode | (reported & ~link), rows._patient_match.isin(unsafe),
+         ambiguous_episode | (reported & ~link) | _clean(rows.episode_match_ambiguous).str.lower().isin(TRUE), rows._patient_match.isin(unsafe),
          rows.patient_id.isna(), reported & ~verified, reported],
         ['PATIENT_ID_AMBIGUOUS', 'CROSS_PATIENT_CONFLICT', 'AMBIGUOUS_IDENTITY', 'PATIENT_ID_AMBIGUOUS',
          'PATIENT_NOT_RECONCILED_WITH_FROZEN_BASELINE', 'SOURCE_EPISODE_NOT_VERIFIED', EXACT],
@@ -330,26 +332,17 @@ def _candidates(tables, baseline, records, policy):
     rows['step01_context_date_disagreement'] = _selection_comparison(rows, tables)
     valid_temporal = ~rows.date_evidence.isin(DATE_FAILURES) & rows.identity_status.isin(LINKED)
     rows['collection_calendar_day'] = day
-    delta = cal.calendar_age(_collection_days(rows.clinical_baseline_date), day)
-    rows['delta_days'] = delta.where(valid_temporal)
-    rows['stratum'] = _strata(rows.delta_days, policy['time'])
+    windows = calendar_windows(rows.clinical_baseline_date, day.where(valid_temporal))
+    rows[windows.columns] = windows
+    # Compatibility column for audit readers. Prefer the future-positive offset.
+    rows['delta_days'] = -rows.baseline_offset_days
+    rows['stratum'] = rows.temporal_class.replace(
+        {BASELINE_DAY0: PRIMARY, BASELINE_POST_DAY0_TO_6M: PRIMARY})
     rows['provenance'] = np.select([rows.date_evidence.eq(EDA_ONLY), ~rows.date_evidence.isin(DATE_FAILURES)],
                                    [EDA_ONLY, ORIGINAL], default='UNRESOLVED_DATE_PROVENANCE')
     rows['mapping_candidate'] = STEP01._mapping_valid(rows) & _clean(rows.semantic_mapping_status).notna()
     rows['eda_result_valid'] = _clean(rows.result_valid_for_analysis).str.lower().isin(TRUE)
     return rows
-
-
-def _strata(delta, time):
-    """delta = baseline day − collection day. Follow-up has a negative delta."""
-    primary, early = time['prebaseline_primary'], time['followup_early']
-    masks = [delta.between(primary['min_day_difference'], primary['max_day_difference']),
-             delta.eq(time['same_day']['day_difference']),
-             (-delta).between(early['min_day_after_baseline'], early['max_day_after_baseline']),
-             (-delta).ge(time['followup_late']['min_day_after_baseline']),
-             delta.ge(time['earlier_than_prebaseline']['min_day_difference'])]
-    return np.select([mask.fillna(False).to_numpy(dtype=bool) for mask in masks],
-                     STRATA, default=UNRESOLVED)
 
 
 @dataclass
@@ -358,10 +351,11 @@ class Outcome:
     selected: pd.DataFrame
     primary: dict
     duplicates: pd.DataFrame
+    sensitivities: dict
 
 
 def _outcome(candidates, source, policy):
-    """Resolve exact definitions and values before selecting each latest day."""
+    """Resolve validity and exact test definitions before choosing one day per patient."""
     rows = candidates.loc[candidates.canonical_analyte.eq(LAB_SOURCES[source])].copy()
     raw, operator = _clean(rows.result_raw), _clean(rows.result_operator)
     censored = (raw.str.match(RESULT_LIMIT, na=False) | operator.str.match(RESULT_LIMIT, na=False) |
@@ -390,9 +384,9 @@ def _outcome(candidates, source, policy):
                           rows[['cluster_name_original', 'observation_name_original']].isna().all(axis=1))
     rows['first_reason'] = np.select(
         [~rows.identity_status.isin(LINKED), rows.date_evidence.isin(DATE_FAILURES),
-         rows.stratum.eq(UNRESOLVED), rows.stratum.eq(OLDER), ~rows.mapping_candidate, censored, admin,
+         rows.stratum.eq(UNRESOLVED), ~rows.mapping_candidate, censored, admin,
          bad_value, ~rows.eda_result_valid, missing_definition, bad_unit],
-        [rows.identity_status, rows.date_evidence, 'DATE_MISSING', 'OUTSIDE_365_DAY_LOOKBACK',
+        [rows.identity_status, rows.date_evidence, 'DATE_MISSING',
          'ANALYTE_MAPPING_UNVERIFIED', 'CENSORED_RESULT', 'ADMINISTRATIVE_RESULT',
          'NOT_EXACT_NUMERIC_RESULT' if numeric else 'UNKNOWN_RESULT_TOKEN',
          'INVALID_RESULT', 'ORIGINAL_TEST_DEFINITION_UNAVAILABLE', 'NUMERIC_UNIT_UNAVAILABLE'],
@@ -411,24 +405,49 @@ def _outcome(candidates, source, policy):
     rows.loc[valid.index[duplicates], 'first_reason'] = 'IDENTICAL_DUPLICATE'
     duplicate_records = valid.loc[duplicates].copy()
     valid = valid.loc[~duplicates].copy()
-    latest = valid.collection_calendar_day.eq(valid.groupby(group_keys).collection_calendar_day.transform('max'))
-    rows.loc[valid.index[~latest], 'first_reason'] = 'EARLIER_ELIGIBLE_DAY'
-    on_day = valid.loc[latest].copy()
-    conflict = on_day.groupby(group_keys).value.transform('nunique').gt(1)
+    unit_conflict = pd.Series(False, index=valid.index)
     if numeric:
         unit_groups = same_day + assay_fields
-        mixed_units = valid.groupby(unit_groups, dropna=False).unit.transform('nunique').gt(1)
-        conflict |= mixed_units.loc[on_day.index]
-    rows.loc[on_day.index[conflict], 'first_reason'] = 'AMBIGUOUS_LATEST_DAY'
-    safe = on_day.loc[~conflict].sort_values(['date_evidence', 'order_identifier'], kind='stable')
-    selected = safe.drop_duplicates(group_keys).copy()
-    rows.loc[safe.index.difference(selected.index), 'first_reason'] = 'CONSISTENT_LATEST_DAY_REPEAT'
+        unit_conflict = valid.groupby(unit_groups, dropna=False).unit.transform('nunique').gt(1)
+
+    def select(pool, *, latest=False):
+        on_day, conflict = select_calendar_rows(pool, group_keys, latest=latest)
+        conflict |= unit_conflict.loc[on_day.index]
+        safe = on_day.loc[~conflict].sort_values(
+            ['date_evidence', 'order_identifier', 'observation_identifier', 'source_episode_id'],
+            kind='stable', na_position='last')
+        return safe.drop_duplicates(group_keys), on_day, conflict
+
+    selected, on_day, conflict = select(valid)
+    rows.loc[valid.index.difference(on_day.index), 'first_reason'] = 'LATER_ELIGIBLE_DAY'
+    rows.loc[on_day.index[conflict], 'first_reason'] = 'AMBIGUOUS_EARLIEST_DAY'
+    repeated = on_day.index[~conflict].difference(selected.index)
+    rows.loc[repeated, 'first_reason'] = 'CONSISTENT_EARLIEST_DAY_REPEAT'
     primary = {}
     for partition, group in selected.groupby(partitions):
         coverage = group.groupby('definition').patient_id.nunique()
+        # Coverage is cohort-wide with a deterministic definition-key tie break.
+        # Membership, effects and model results are unavailable to this function.
         definition = min(coverage.index, key=lambda key: (-coverage[key], key))
         primary[partition] = cal.fingerprint(definition)
-    return Outcome(rows, selected, primary, duplicate_records)
+
+    main_definition = primary.get((PRIMARY, ORIGINAL))
+    pool = valid.loc[valid.stratum.eq(PRIMARY) & valid.provenance.eq(ORIGINAL) &
+                     valid.definition_id.eq(main_definition)]
+    sensitivities = {
+        LATEST: select(pool, latest=True)[0],
+        DAY0: select(pool.loc[pool.baseline_offset_days.eq(0)])[0],
+        DAY30: select(pool.loc[pool.baseline_offset_days.le(30)])[0],
+        EXACT_WINDOW: select(pool.loc[pool.identity_status.eq(EXACT)])[0],
+    }
+    return Outcome(rows, selected, primary, duplicate_records, sensitivities)
+
+
+def primary_measurements(result):
+    """Canonical selected original-provenance rows for all Graph03 lab routes."""
+    definition = result.primary.get((PRIMARY, ORIGINAL))
+    rows = result.selected
+    return rows.loc[rows.stratum.eq(PRIMARY) & rows.provenance.eq(ORIGINAL) & rows.definition_id.eq(definition)]
 
 
 def _test_disposition(result, patients):
@@ -436,13 +455,11 @@ def _test_disposition(result, patients):
     ledger = result.inventory.loc[result.inventory.identity_status.isin(LINKED)]
     disposition = pd.Series('NO_TEST', index=pd.Index(patients, name='patient_id'), dtype='string')
     disposition.loc[disposition.index.intersection(ledger.patient_id)] = 'TESTED_INVALID'
-    for strata, status in [({OLDER}, 'TESTED_PREBASELINE_NO_MATCH'),
-                           ({EARLY, LATE}, 'TESTED_POSTBASELINE_ONLY'),
-                           ({DAY0}, 'TESTED_DAY0_ONLY'), ({PRE}, 'TESTED_PREBASELINE_NO_MATCH')]:
-        scoped = ledger.loc[ledger.stratum.isin(strata), 'patient_id']
+    for stratum, status in ((PREBASELINE, 'TESTED_PREBASELINE_OUTSIDE_WINDOW'),
+                            (AFTER_BASELINE_WINDOW, 'TESTED_AFTER_BASELINE_WINDOW'),
+                            (PRIMARY, 'TESTED_BASELINE_NO_PRIMARY_MATCH')):
+        scoped = ledger.loc[ledger.stratum.eq(stratum), 'patient_id']
         disposition.loc[disposition.index.intersection(scoped)] = status
-    original = result.selected.loc[result.selected.stratum.eq(PRE) & result.selected.provenance.eq(ORIGINAL)]
-    match = result.primary.get((PRE, ORIGINAL))
-    disposition.loc[disposition.index.intersection(original.loc[original.definition_id.eq(match), 'patient_id'])] = (
-        'TESTED_PREBASELINE_MATCHED')
+    matched = primary_measurements(result)
+    disposition.loc[disposition.index.intersection(matched.patient_id)] = 'TESTED_BASELINE_MATCHED'
     return disposition

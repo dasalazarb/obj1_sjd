@@ -1,4 +1,5 @@
 schema_version: graph03_n3_phasec_v1
+window_policy_version: graph03_baseline_window_v2
 auto_approve_independence: false
 privacy_class: INTERNAL_RESTRICTED
 minimum_disclosure_cell: 5

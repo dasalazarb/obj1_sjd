@@ -282,14 +282,14 @@ def review_rule(source=RF, **updates):
     return rule
 
 
-def signed_review(tmp_path, binding, rules, *, version=REVIEW_VERSION):
+def signed_review(tmp_path, binding, rules, *, version=REVIEW_VERSION, **metadata):
     # Ephemeral test trust anchor and signed synthetic evidence.
     review = tmp_path / 'source_review.yaml'
     attachment = tmp_path / 'synthetic_evidence.txt'
     attachment.write_text('Synthetic fixture. No clinical approval.\n')
     key, public, sig = (tmp_path / name for name in ('key.pem', 'public.pem', 'signature.bin'))
     review.write_text(yaml.safe_dump(dict(schema_version=version, decision='APPROVED_SOURCE_PROVENANCE',
-                                         reviewer='SYNTHETIC', review_id='SYNTHETIC',
+                                         reviewer='SYNTHETIC', review_id='SYNTHETIC', **metadata,
                                          input_sha256=binding, outcomes=rules,
                                          evidence=[dict(path=attachment.name, sha256=digest(attachment))])))
     def openssl(*args):

@@ -1,4 +1,4 @@
-"""Technical lineage and prebaseline model support for exploratory 03e."""
+"""Technical lineage and retrospective baseline model support for exploratory 03e."""
 
 import json
 import warnings

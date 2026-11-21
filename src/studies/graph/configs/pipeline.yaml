@@ -1,5 +1,6 @@
 # Prespecified exploratory protocol; approvals must never be inferred.
 schema_version: graph_pipeline_v1
+window_policy_version: graph03_baseline_window_v2
 includes:
   canonical: ../config.yaml
   sensitivity: ../config_sensitivity.yaml

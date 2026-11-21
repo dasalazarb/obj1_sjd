@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Private Graph03 N3 exploration by default, with explicit flags for controlled inference."""
+"""Graph03 N3 retrospective baseline from day 0 through six calendar months."""
 import argparse
 from datetime import datetime, timezone
 import json
@@ -230,9 +230,11 @@ def main(argv=None):
             result = run_controlled(args.graph03_run, args.graph02_release, args.context,
                 args.measurements, args.output_dir, args.plan, args.decision_root, ROOT,
                 execute=args.execute, measurement_trust_key=args.measurement_trust_key)
-    except (ValueError, OSError, KeyError, TypeError, RuntimeError, yaml.YAMLError):
+    except (ValueError, OSError, KeyError, TypeError, RuntimeError, yaml.YAMLError) as exc:
         # Clinical paths, free values and exception messages stay off console.
-        parser.exit(1, '[Graph03] Controlled N3 stopped: invalid input, integrity or review contract.\n')
+        from src.studies.graph.stage03.s03_baseline_window import MISMATCH
+        reason = MISMATCH if str(exc) == MISMATCH else 'INVALID_INPUT_INTEGRITY_OR_REVIEW_CONTRACT'
+        parser.exit(1, f'[Graph03] Controlled N3 stopped. {reason}.\n')
     print(json.dumps(result, sort_keys=True))
 
 

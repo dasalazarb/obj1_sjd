@@ -18,6 +18,7 @@ from src.studies.graph.stage03.s03_n3_decisions import (
     VERSION, APPROVED, SECTIONS, verify_decisions, decision_templates, plan_sha256,
 )
 from tests.test_graph03_n3_candidate_audit import synthetic_n3, audit
+from src.studies.graph.stage03.s03_baseline_window import VERSION as WINDOW_VERSION, policy as baseline_policy
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = 'ext__biopsy_focus_score'
@@ -245,7 +246,8 @@ def test_pop_needs_explicit_crosswalk_and_cannot_validate_essdai():
 def test_rf_duplicate_hypotheses_rejected_and_thresholds_never_weakened():
     args = fixture()
     validation = args[0][0]
-    plan = dict(schema_version=VERSION, privacy_class='INTERNAL_RESTRICTED', public_export=False,
+    plan = dict(schema_version=VERSION, window_policy_version=WINDOW_VERSION,
+        privacy_class='INTERNAL_RESTRICTED', public_export=False,
         require_human_signoff=True, allow_discovery_refit=False, authorized_reviewers=[], outcomes=[args[-2]])
     E.validate_plan(plan, validation)
     plan['outcomes'] = [{**args[-2], 'source_column':s} for s in
@@ -292,6 +294,9 @@ def attestations(tmp_path, plan, spec):
     evidence = tmp_path / 'source_evidence.md'
     evidence.write_text('SYNTHETIC_ONLY_SOURCE_DOCUMENTATION')
     for section, details in reviews(spec).items():
+        if section == 'measurement' and plan.get('window_policy_version') == WINDOW_VERSION:
+            details.update(window_policy_version=WINDOW_VERSION, selection_rule=baseline_policy().selection_primary)
+            details.pop('lookback_days')
         payload = dict(schema_version=VERSION, section=section, representation_id=spec['representation_id'],
             source_column=spec['source_column'], plan_sha256=plan_sha256(plan), input_sha256=plan['input_sha256'],
             decision=APPROVED, reviewer='SYNTHETIC_ONLY_REVIEWER', review_id='SYNTHETIC_ONLY',
@@ -384,7 +389,7 @@ def release_fixture(tmp_path, *, approved=False):
     context_path = tmp_path / 'context.parquet'
     context.to_parquet(context_path,index=False)
     measurements = baseline[['patient_id','clinical_episode_id']].assign(source_column=SOURCE,
-        value=rng.normal(size=100) + np.repeat([0.,2.],50), measurement_date='2019-12-31',
+        value=rng.normal(size=100) + np.repeat([0.,2.],50), measurement_date='2020-07-01',
         assay_id='SYNTHETIC_ASSAY', unit='SYNTHETIC_UNIT', sample_id='SYNTHETIC_SAMPLE')
     measurements_path = tmp_path / 'measurements.parquet'
     measurements.to_parquet(measurements_path,index=False)

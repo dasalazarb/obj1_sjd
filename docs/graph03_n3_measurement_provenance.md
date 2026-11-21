@@ -1,5 +1,10 @@
 # Procedencia de las mediciones originales para Graph03 N3
 
+> Referencia histórica del circuito previo a `graph03_baseline_window_v2`. Los comandos vigentes y
+> la ruta de migración están en el [inventario de Graph03](graph03_script_inventory_and_migration.md).
+> El [contrato de fuentes y linaje](graph03_source_and_lineage_contract.md) describe los requisitos
+> de revisión y firma para la ventana de día 0 a seis meses calendario.
+
 `03f_build_n3_measurement_source.py` audita fuentes originales frente a Graph02 y Graph03 Fase A elegidos explícitamente. La publicación revisada acredita la procedencia de la medición para el alcance firmado. La elegibilidad de un contraste depende de la revisión del estimando y del preflight de [03e](graph03_controlled_inference.md).
 
 El contrato v1 de timestamps sigue siendo el predeterminado. El [contrato opcional de día calendario](graph03_n3_calendar_day.md) describe el cotejo con BTRIS, la revisión firmada de una definición comparable y los comandos para laboratorios sin identidad verificable de ensayo o espécimen.

@@ -15,6 +15,7 @@ from uuid import uuid4
 
 import numpy as np
 import pandas as pd
+from .s03_baseline_window import MISMATCH, policy as baseline_policy, require_policy
 import yaml
 
 from .._pipeline import digest, output_lock, stage_outputs
@@ -137,6 +138,11 @@ def load_inputs(graph03, release, phasec, config, *, strict=False):
     inputs = load_phasec_inputs(graph03, release, phasec_contract)
     current = inputs['current']
     pins = {}
+    if current:
+        require_policy(qc)
+        if (qc.get('window_policy_sha256') != baseline_policy().sha256
+                or qc.get('graph02_baseline_window_input_sha256') != digest(inputs['release'])):
+            raise ValueError(MISMATCH)
     if not current:
         pins = dict(graph03_run_id=Path(graph03).name, graph02_run_id=inputs['manifest']['run_id'],
             graph02_release_sha256=digest(inputs['release']), graph03_summary_sha256=digest(summary_path),
@@ -682,7 +688,7 @@ Review n3_validation.measurement_policies with original instrument/form, assay,
 unit, category convention, source-specific lookback and repeated-measurement
 rules. The official baseline date, administrative era and endpoint date require
 three separate decisions. Episode clinical_anchor_date does not prove the
-instrument date. Future-derived measurements are ineligible for baseline
+instrument date. Post-index observations are evaluated against the verified calendar window for baseline
 inference. Treatment chronology needs a separate episode audit.
 
 For protocol, confirm the research-protocol meaning, original source,
@@ -822,7 +828,7 @@ def _write_resolution(inputs, config, cfg_path, root, roots, output, strict, dep
         tables, pop_reconciled = build_tables(inputs, config, root, validation)
         if not pop_reconciled:
             raise ValueError('POP_DENOMINATORS_NOT_RECONCILED')
-        metadata = dict(schema_version=VERSION, privacy_class='INTERNAL_RESTRICTED', shareable_export_allowed=False,
+        metadata = dict(**baseline_policy().metadata(), schema_version=VERSION, privacy_class='INTERNAL_RESTRICTED', shareable_export_allowed=False,
             no_inference=True, no_refit=True, clinical_approval_granted=False,
             integrity_gate='PASS', clinical_gate='HUMAN_SIGNOFF_REQUIRED',
             covariate_gate='NEW_CONTRACT_REQUIRED', temporal_gate='SEPARATE_REVIEW_REQUIRED',

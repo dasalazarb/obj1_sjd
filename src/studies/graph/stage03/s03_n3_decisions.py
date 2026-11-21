@@ -14,7 +14,8 @@ import subprocess
 import yaml
 
 from .._pipeline import digest
-from .s03_n3_calendar_day import CONTRACT as CALENDAR_DAY_CONTRACT
+from .s03_baseline_window import VERSION as WINDOW_VERSION, policy as baseline_policy
+from .s03_n3_calendar_day import CONTRACT as CALENDAR_DAY_CONTRACT, LEGACY_CONTRACT
 
 VERSION = 'graph03_controlled_n3_v1'
 APPROVED = 'APPROVED_FOR_THIS_ESTIMAND'
@@ -92,7 +93,7 @@ def verify_decisions(plan, root, input_hashes, *, measurement_trust_key=None):
                 continue
             details = document.get('details')
             if (key[0] == 'measurement' and isinstance(details, dict)
-                    and details.get('measurement_contract') == CALENDAR_DAY_CONTRACT):
+                    and details.get('measurement_contract') in {CALENDAR_DAY_CONTRACT, LEGACY_CONTRACT}):
                 if measurement_trust_key is None:
                     states[key] = 'CALENDAR_DAY_MEASUREMENT_SIGNATURE_REQUIRED'
                     continue
@@ -130,8 +131,11 @@ def decision_templates(plan, input_hashes, representations, sources):
     for rep in representations:
         for source in sources:
             for section in SECTIONS:
+                details = {}
+                if section == 'measurement':
+                    details = dict(window_policy_version=WINDOW_VERSION, selection_rule=baseline_policy().selection_primary)
                 templates.append(dict(common, section=section, representation_id=rep,
-                                      source_column=source))
+                                      source_column=source, details=details))
     return templates
 
 

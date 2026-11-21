@@ -16,10 +16,11 @@ def run(cfg, *, root=None, preflight_only=False):
     from src.studies.graph.stage02.s02_pipeline import run as run02
     from src.studies.graph.stage03.s03_n3_exploratory import run_exploratory_auto
     from src.studies.graph.stage03.s03_pipeline import run as run03
+    from src.studies.graph.stage03.s03_run_resolution import BASELINE_OUTPUT_DIR
 
     root = Path(root).resolve() if root else output_root(cfg, 'study')
     graph02_root, graph03_root = (output_root(cfg, key) for key in ('02', '03'))
-    n3_root = graph03_root.parent / '03_graph_n3_controlled_inference'
+    n3_root = graph03_root.parent / BASELINE_OUTPUT_DIR
     if any(root.is_relative_to(path) or path.is_relative_to(root)
            for stage in (graph02_root, graph03_root, n3_root) for path in stage_destinations(stage).values()):
         raise ValueError('Study summary directory overlaps a Graph stage')

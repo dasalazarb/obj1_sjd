@@ -18,6 +18,7 @@ def fixture(tmp_path):
         "patient_id": ["synthetic_one", "synthetic_two"],
         "clinical_episode_id": ["e1", "e2"],
         "is_clinical_baseline": [True, True],
+        "clinical_baseline_date": ["2019-02-01", "2019-03-01"],
         "lab__ana_status__text": ["positive", "negative"],
     })
     baseline.to_parquet(analytic_dir / "10_integrated_longitudinal_clinical_episode.parquet", index=False)
@@ -44,6 +45,7 @@ def test_never_fabricates_dates_or_assay_or_sample_ids(tmp_path):
     rows = pd.read_parquet(candidate_path)
     assert len(rows) == 2
     assert rows.loc[0, "value"] == "positive"
+    assert rows.window_bin.tolist() == ["DAY0", "UNKNOWN"]
     assert pd.isna(rows.loc[1, "value"])  # date mismatch
     assert rows.loc[1, "date_provenance_status"] == "MISSING_OR_DISCORDANT"
     assert rows["assay_id"].isna().all() and rows["sample_id"].isna().all()

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audita fuentes originales de Graph03 N3 y construye evidencia restringida."""
+"""Audita fuentes originales de la ventana Graph03 de día 0 a seis meses calendario."""
 import argparse
 import json
 from pathlib import Path
@@ -29,7 +29,7 @@ PATHS = {
     'esspri_original': 'Fuente original opcional de ESSPRI, inventario de esquema',
     'biopsy_original': 'Fuente original opcional de biopsia, inventario de esquema',
     'protocol_original': 'Fuente original opcional de asignaciones de protocolo, inventario de esquema',
-    **{role: f'Contrato v2: archivo CSV o carpeta con Lab*.csv de {role}' for role in BTRIS_ROLES},
+    **{role: f'Archivo CSV o carpeta con Lab*.csv de {role}' for role in BTRIS_ROLES},
 }
 
 

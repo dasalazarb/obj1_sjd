@@ -8,6 +8,7 @@ No source records are changed. Patient-level diagnostics stay in memory.
 from dataclasses import dataclass
 import numpy as np
 import pandas as pd
+from .s03_baseline_window import calendar_day
 from .s03_profiles import numeric, observed_values
 
 VERSION = 'graph03_episode_resolution_v1'
@@ -58,6 +59,7 @@ def resolve_endpoint_episodes(master, baseline, endpoint, config):
     raw = master.copy().reset_index(drop=True)
     raw['patient_id'] = raw.patient_id.astype('string')
     raw['_source_row'] = np.arange(len(raw))
+    raw['visit_calendar_day'] = raw[date].map(calendar_day) if date in raw else None
     raw['visit_date'] = pd.to_datetime(raw[date], errors='coerce', utc=True) if date in raw else pd.Series(pd.NaT,index=raw.index,dtype='datetime64[ns, UTC]')
     raw['value'] = (observed_values(raw[endpoint]) if endpoint == config.get('pop_column') else numeric(raw[endpoint])) if endpoint in raw else np.nan
     keys = policy.get('episode_key_fields', [])
