@@ -16,7 +16,7 @@ from .s03_baseline_window import (
     AFTER_BASELINE_WINDOW, DAY_BINS, FROZEN_SNAPSHOT, MISMATCH, PRIMARY, WARNING, WINDOW_SNAPSHOT,
     policy as baseline_policy, require_policy,
 )
-from .s03_construct_validation import _dependencies, feature_roles
+from .s03_construct_validation import _dependencies, _review, feature_roles, independence_review_approved
 from .s03_n3_approved_view import validate_baseline
 from .s03_n3_auto import CONFIGS, VALIDATION, _source_settings
 from .s03_n3_exploratory_models import (
@@ -146,41 +146,40 @@ def _eligibility_counts(inventory, result):
 
 def _baseline_support(outputs, result, members, label, cell, coverage, models, audit):
     selected = primary_measurements(result)
+    frame = members.merge(selected[['patient_id', 'value', 'window_bin']], on='patient_id',
+                          how='left', validate='one_to_one')
+    complete = frame.value.notna() & _adjustment(frame).notna().all(axis=1)
+    _, prepared = _model_support(frame, label['outcome'] == RF_VALUE, models, cell)
+    model_index = prepared[0].index if prepared is not None and audit['classification'] == INDEPENDENT else []
+
+    def counts(group):
+        candidates = result.inventory.loc[result.inventory.patient_id.isin(group.patient_id)]
+        stages = dict(n_representation_patients=len(group), **_eligibility_counts(candidates, result))
+        stages.update(n_hard_supported=stages['n_earliest_unambiguous'],
+                      n_complete_case=int(complete.loc[group.index].sum()),
+                      n_model_eligible=int(group.index.isin(model_index).sum()))
+        return stages
+
     counts_by_community, delays = [], []
-    for community, group in members.groupby('community_id'):
-        ids = group.patient_id
-        candidates = result.inventory.loc[result.inventory.patient_id.isin(ids)]
-        measurements = group.merge(selected[['patient_id', 'value', 'window_bin']], on='patient_id',
-                                   how='left', validate='one_to_one')
-        counts = dict(n_representation_patients=len(group), **_eligibility_counts(candidates, result))
-        counts['n_hard_supported'] = counts['n_earliest_unambiguous']
-        complete = _adjustment(measurements).notna().all(axis=1) & measurements.value.notna()
-        counts['n_complete_case'] = int(complete.sum())
-        # Model eligibility is assessed at the representation level, since communities
-        # must pass the same support and covariate gates on a common population.
-        counts_by_community.extend(_chain(dict(label, community_id=community), counts, cell))
-        bins = measurements.window_bin.fillna('NO_PRIMARY_MEASUREMENT')
+    for community, group in frame.groupby('community_id'):
+        scope = dict(label, community_id=community)
+        counts_by_community.extend(_chain(scope, counts(group), cell))
+        bins = group.window_bin.fillna('NO_PRIMARY_MEASUREMENT')
         partition = _partition(bins.value_counts().to_dict(), cell)
         if partition is None or len(group) < cell:
-            delays.append(dict(label, community_id=community, count_unit='patient', status='SUPPRESSED'))
+            delays.append(dict(scope, count_unit='patient', status='SUPPRESSED'))
         else:
-            delays.extend(dict(label, community_id=community, window_bin=bin_name, status='DESCRIPTIVE',
+            delays.extend(dict(scope, window_bin=bin_name, status='DESCRIPTIVE',
                                count_unit='patient', n_total=len(group), n_patients=count)
                           for bin_name, count in sorted(partition.items()))
-    if coverage['status'] == 'SUPPRESSED' or any(row['status'] == 'SUPPRESSED' for row in counts_by_community + delays):
-        # Totals and complementary communities can reconstruct suppressed losses.
+    totals = _chain(label, counts(frame), cell)
+    if coverage['status'] == 'SUPPRESSED' or any(
+            row['status'] == 'SUPPRESSED' for row in totals + counts_by_community + delays):
         withheld = [dict(label, count_unit='patient', status='SUPPRESSED')]
         outputs['baseline_eligibility'].extend(withheld)
         outputs['measurement_delay'].extend(withheld)
         return
-    counts = _eligibility_counts(result.inventory.loc[result.inventory.patient_id.isin(members.patient_id)], result)
-    counts = dict(n_representation_patients=len(members), **counts)
-    counts['n_hard_supported'] = counts['n_earliest_unambiguous']
-    frame = members.merge(selected[['patient_id', 'value']], on='patient_id', how='left', validate='one_to_one')
-    support, prepared = _model_support(frame, label['outcome'] == RF_VALUE, models, cell)
-    counts.update(n_complete_case=support['n_complete_case'],
-                  n_model_eligible=len(prepared[0]) if prepared is not None and audit['classification'] == INDEPENDENT else 0)
-    outputs['baseline_eligibility'].extend(_chain(label, counts, cell) + counts_by_community)
+    outputs['baseline_eligibility'].extend(totals + counts_by_community)
     outputs['measurement_delay'].extend(delays)
 
 
@@ -289,15 +288,12 @@ def _analyze(tables, loaded, records, validation, policy, *, audit_only=False, s
             else:
                 audit = _independence(rep, source, roles, features, registry, dependencies, validation, policy)
             outputs['independence_audit'].append(audit)
-            role = roles.get((rep, source), {})
-            reviews = validation.get('characterization', {}).get('independence_reviews', [])
+            review = _review(validation, rep, source)
             prespecs = validation.get('n3_validation', {}).get('prespecified_outcomes', [])
-            in_scope = lambda row: row.get('representation_id') == rep and row.get('source_column') == source
-            approved = (role.get('tier') == 'N3_REVIEWED' and any(
-                in_scope(row) and row.get('window_policy_version') == baseline_policy().policy_version
-                for row in reviews) and any(
-                in_scope(row) and row.get('window_policy_version') == baseline_policy().policy_version
-                for row in prespecs))
+            version = baseline_policy().policy_version
+            approved = (independence_review_approved(review) and review.get('window_policy_version') == version
+                        and any(row.get('representation_id') == rep and row.get('source_column') == source
+                                and row.get('window_policy_version') == version for row in prespecs))
             if audit['classification'] == INDEPENDENT and not approved:
                 audit = dict(audit, classification=LINEAGE_UNRESOLVED, reason='INDEPENDENCE_REVIEW_PENDING')
                 outputs['independence_audit'][-1] = audit
@@ -358,11 +354,11 @@ def _analyze(tables, loaded, records, validation, policy, *, audit_only=False, s
                         model_label['finding_class'] = 'EXPLORATORY_SENSITIVITY'
                     model, support, n_model = _model(model_label, frame, audit, (rep, table) in rf_tested,
                                                      table, policy['models'], cell)
+                    if model['status'] == ESTIMATED and source in {RF_VALUE, RF_TEXT}:
+                        rf_tested.add((rep, table))
                     if protected_sensitivity or (coverage['status'] == 'SUPPRESSED' and model['status'] == ESTIMATED):
                         model = dict(model_label, status='SUPPRESSED', reason='COVERAGE_DISCLOSURE_RESTRICTION',
                                      hypothesis_family=_family(source))
-                    if model['status'] == ESTIMATED and source in {RF_VALUE, RF_TEXT}:
-                        rf_tested.add((rep, table))
                     if coverage['status'] == 'SUPPRESSED' or 'n' not in model:
                         for key in ('n', 'residual_df_b'):
                             model.pop(key, None)
@@ -491,6 +487,10 @@ def write_baseline_artifacts(staging, outputs, issues, frozen_before, frozen_aft
             table[key] = value
         if 'provenance' in table:
             table['source_provenance_tier'] = table.provenance
+        elif name == 'independence_audit':
+            table['source_provenance_tier'] = 'DOCUMENTARY_LINEAGE'
+        elif name == 'temporal_overlap':
+            table['source_provenance_tier'] = 'VERIFIED_ENDPOINT_SPECIFIC'
         table['graph02_release_sha256'] = frozen_before.get('release_manifest')
         table.to_csv(staging / ('03_graph_' + suffix + '.csv'), index=False)
     qc = dict(**metadata, status='FAILED' if not frozen_before else 'PARTIAL' if issues else 'PASS',
@@ -512,6 +512,7 @@ def _write_run(staging, target, base, outputs, n, policy, figure_dir, figure_tar
             frame['source_provenance_tier'] = frame.provenance
         if name == 'frozen_baseline_profiles':
             frame['snapshot_basis'] = FROZEN_SNAPSHOT
+            frame['source_provenance_tier'] = 'FROZEN_RELEASE_VALUES'
         frame.to_csv(staging / files[name].name, index=False)
     figures = _figures(figure_dir, frames)
     models = {table: int(frames[table].status.eq(ESTIMATED).sum()) for table in SCOPES}

@@ -78,7 +78,7 @@ def _execute(cfg, release, run_dir, preflight_only, explicit_release, figure_dir
     roles=statistical_role_gates(roles,baseline,membership,manifest,validation)
     window_roles = roles.copy()
     n3_tables,n3_qc=run_n3_validation(run_dir,frames,roles,manifest,validation,
-                                     dict(provenance, snapshot_basis=FROZEN_SNAPSHOT), None, snapshot_only=True)
+                                     dict(provenance, snapshot_basis=FROZEN_SNAPSHOT, source_provenance_tier='FROZEN_RELEASE_VALUES'), None, snapshot_only=True)
     roles=enforce_n3_review_gates(roles,n3_tables['source_inventory'])
     snapshot_n3 = roles.tier.eq('N3_REVIEWED')
     roles.loc[snapshot_n3, 'inferential_eligible'] = False
@@ -209,6 +209,9 @@ def _execute(cfg, release, run_dir, preflight_only, explicit_release, figure_dir
         for key,value in provenance.items(): frame[key]=value
         if name.removeprefix('03_graph_').removesuffix('.csv') in frozen_tables or name.startswith('03_graph_characterization_'):
             frame['snapshot_basis'] = FROZEN_SNAPSHOT
+            frame['source_provenance_tier'] = 'FROZEN_RELEASE_VALUES'
+        elif 'longitudinal' in name or 'trajectory' in name or 'temporal_source' in name:
+            frame['source_provenance_tier'] = 'VERIFIED_ENDPOINT_SPECIFIC'
         save_table(run_dir/name,frame)
     safe_matrix=safe_characterization_panels(characterization['clinical_matrix'],minimum_cell)
     safe_keys=safe_matrix[['representation_id','source_column']].drop_duplicates()

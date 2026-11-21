@@ -252,12 +252,17 @@ def measurement_values_calendar_day(baseline, measurements, source, review, *, s
                    for key in KEYS + ((['source_episode_id', *cal.ORIGINAL_IDENTITY] if not current else []) + ['value']))):
         raise ValueError('CALENDAR_DAY_ARTIFACT_OUTSIDE_SIGNED_SCOPE')
     validate_baseline(baseline)
-    cutoffs = baseline[KEYS].assign(_cutoff=cal.calendar_days(baseline.clinical_baseline_date, allow_time=True))
-    anchors = cal.calendar_days(baseline.clinical_anchor_date, allow_time=True)
+    def written_day(series):
+        if current:
+            return pd.Series(pd.array(series.map(calendar_day), dtype=cal.DATE_DTYPE), index=series.index)
+        return cal.calendar_days(series, allow_time=True)
+
+    cutoffs = baseline[KEYS].assign(_cutoff=written_day(baseline.clinical_baseline_date))
+    anchors = written_day(baseline.clinical_anchor_date)
     if cutoffs._cutoff.isna().any() or not cutoffs._cutoff.eq(anchors).fillna(False).all():
         raise ValueError('OFFICIAL_BASELINE_CALENDAR_DAY_MISMATCH')
     rows = rows.merge(cutoffs, on=KEYS, how='left', validate='many_to_one')
-    rows['collection_calendar_day'] = cal.calendar_days(rows.collection_calendar_day)
+    rows['collection_calendar_day'] = written_day(rows.collection_calendar_day)
     if rows._cutoff.isna().any() or rows.collection_calendar_day.isna().any():
         raise ValueError('CALENDAR_DAY_OR_BASELINE_IDENTITY_INVALID')
     if current:

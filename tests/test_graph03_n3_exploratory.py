@@ -411,3 +411,20 @@ def test_03f_current_audit_is_repeatable_and_preserves_03e(current):
         inspect_release(exploration, expected)
     assert {path.name for path in expected.glob('03f_*')} == {
         '03f_source_linkage_audit.csv', '03f_summary.json'}
+
+
+def test_old_exploratory_config_does_not_overwrite_new_release(current):
+    repo, _, _, _ = current
+    result = command(repo)
+    summary = Path(result['summary'])
+    published = summary.read_bytes()
+    configuration = repo / E.CONFIGS / E.DEFAULTS
+    settings = yaml.safe_load(configuration.read_text())
+    settings.pop('window_policy_version')
+    settings['measurements']['main_window'] = 'prebaseline_primary'
+    configuration.write_text(yaml.safe_dump(settings))
+    script = repo / 'src/studies/graph/03e_graph_n3_controlled_inference.py'
+    run = subprocess.run([sys.executable, str(script)], cwd=repo.parent, capture_output=True, text=True)
+    assert run.returncode == 1
+    assert json.loads(run.stdout)['reason'] == MISMATCH
+    assert summary.read_bytes() == published

@@ -17,12 +17,12 @@ El checkout no contiene entradas 03a/03b. Las fases A y B se ejecutan desde Grap
 |---|---|
 | `s03_baseline_window.py` | Nuevo contrato, calendario, bins, hash y elección de fecha con conflicto. |
 | `s03_n3_exploratory.py`, `s03_n3_exploratory_source.py`, `s03_n3_exploratory_reporting.py`, `s03_n3_exploratory_models.py` | Motor compartido de identidad, procedencia, selección, puertas, sensibilidad y protección de agregados. |
-| `s03_pipeline.py`, `s03_n3_validation.py`, `s03_run_resolution.py` | Consumo del motor, publicación diferenciada, inventario Phase A, bloqueo de Phase B sobre el snapshot y nueva ruta 03e. |
+| `s03_pipeline.py`, `s03_n3_validation.py`, `s03_construct_validation.py`, `s03_run_resolution.py` | Consumo del motor, publicación diferenciada, inventario Phase A, bloqueo de Phase B sobre el snapshot y nueva ruta 03e. |
 | `s03_episode_audit.py`, `s03_longitudinal.py` | Conservan el día original para auditoría y exponen la sensibilidad posterior a la ventana. |
 | `s03_n3_phasec_adjudication.py`, `s03_n3_resolution.py` | Contratos y trazabilidad documental actualizados. |
 | `s03_n3_auto.py`, `s03_n3_calendar_day.py`, `s03_n3_controlled.py`, `s03_n3_decisions.py`, `s03_n3_approved_view.py` | Versionado de documentos, revisión de soporte y comprobación de la selección actual. |
 | `s03_n3_measurement_source.py`, `s03_n3_measurement_review.py`, `s03_n3_source_adapter.py` | Construcción firmada de la selección compartida, auditoría histórica explícita y adaptador Step01/Context con etiqueta de procedencia. |
-| `__init__.py`, `s03_characterization.py`, `s03_construct_validation.py`, `s03_figure_qc.py`, `s03_incremental_value.py`, `s03_method_context.py`, `s03_n3_candidate_audit.py`, `s03_n3_incremental.py`, `s03_n3_resolution_support.py`, `s03_profiles.py`, `s03_rare_events.py`, `s03_release_reader.py`, `s03_reporting.py`, `s03_statistics.py`, `s03_uncertainty.py` | Conservan algoritmos, contratos de insumo o componentes descriptivos. |
+| `__init__.py`, `s03_characterization.py`, `s03_figure_qc.py`, `s03_incremental_value.py`, `s03_method_context.py`, `s03_n3_candidate_audit.py`, `s03_n3_incremental.py`, `s03_n3_resolution_support.py`, `s03_profiles.py`, `s03_rare_events.py`, `s03_release_reader.py`, `s03_reporting.py`, `s03_statistics.py`, `s03_uncertainty.py` | Conservan algoritmos, contratos de insumo o componentes descriptivos. |
 
 ## Ejecución habitual en Biowulf
 
