@@ -16,6 +16,8 @@ POST_WINDOW = 'LONGITUDINAL_POST_CHARACTERIZATION_WINDOW'
 
 
 def after_characterization_window(observations, baseline):
+    if 'clinical_baseline_date' not in baseline:
+        raise ValueError('OFFICIAL_BASELINE_WINDOW_ANCHOR_UNAVAILABLE')
     anchors = baseline.set_index('patient_id').clinical_baseline_date
     dates = observations.patient_id.map(anchors)
     bins = calendar_windows(dates, observations.visit_calendar_day)

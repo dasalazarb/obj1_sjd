@@ -97,7 +97,9 @@ def _identity_tables(baseline, analytic, context, btris_collisions, eda_ids):
     analytic[KEYS] = _episode_keys(analytic).reindex(analytic.index)
 
     # Global episode ownership includes otherwise unverified/duplicate rows.
-    episodes = pd.concat([_episode_keys(table) for table in (baseline, analytic, context)])
+    episode_tables = [_episode_keys(baseline)]
+    episode_tables.extend(_episode_keys(table) for table in (analytic, context) if not table.empty)
+    episodes = pd.concat(episode_tables)
     episodes['_patient_match'] = NORMALIZE(episodes.patient_id)
     owners = episodes.groupby('clinical_episode_id')._patient_match.agg(lambda keys: frozenset(keys.dropna()))
     duplicate_episodes = set(analytic.loc[analytic.duplicated(KEYS, keep=False), 'clinical_episode_id'])

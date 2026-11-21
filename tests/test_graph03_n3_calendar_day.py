@@ -305,6 +305,6 @@ def test_signed_legacy_calendar_day_artifact_cannot_enable_current_inference(cal
                     str(payload_path)], check=True, capture_output=True)
     row = execute('verified-signature', '--measurement-trust-key', str(key))
     assert row.temporal_gate == row.measurement_gate == E.FAIL
-    assert 'BASELINE_WINDOW_POLICY_VERSION_MISMATCH' in row.blocking_reasons
+    assert row.temporal_reason == 'BASELINE_WINDOW_POLICY_VERSION_MISMATCH'
     assert row.protocol_gate == row.independence_gate == E.FAIL
     assert row.status == 'NOT_ESTIMABLE'
