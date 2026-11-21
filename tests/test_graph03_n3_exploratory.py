@@ -78,6 +78,11 @@ def inspect_release(result, expected):
     assert output.stat().st_mode & 0o777 == 0o700
     assert all(f.stat().st_mode & 0o777 == 0o600 for f in output.iterdir())
     assert all(f.is_file() and f.name.startswith(('03e_', '03f_')) for f in output.iterdir())
+    assert not list(output.glob('*.png'))
+    figure_dir = expected.parents[3] / 'figures/studies/graph' / expected.name
+    for figure in map(Path, result['figures']):
+        assert figure.parent == figure_dir and figure.is_file()
+        assert figure.stat().st_mode & 0o777 == 0o600
     assert 'run_id' not in json.loads((output / '03e_summary.json').read_text())
     for path in output.glob('*.csv'):
         contents = path.read_text()
@@ -351,7 +356,8 @@ def test_no_prebaseline_publishes_real_frozen_descriptives_and_followup(current,
     output = inspect_release(result, expected)
     frozen = pd.read_csv(output / '03e_frozen_baseline_profiles.csv')
     assert frozen.n_total.max() == 100 and frozen['median'].notna().any()
-    assert (output / '03e_baseline_congelado.png').stat().st_size > 1000
+    baseline_plot = next(Path(plot) for plot in result['figures'] if Path(plot).name == '03e_baseline_congelado.png')
+    assert baseline_plot.stat().st_size > 1000
     assert not pd.read_csv(output / '03e_cohort_flow.csv').empty
     coverage = rep_outcome(pd.read_csv(output / '03e_coverage.csv'), 'R0', RF)
     assert coverage.loc[coverage.stratum.eq(S.PRE), 'n_measured'].eq(0).all()

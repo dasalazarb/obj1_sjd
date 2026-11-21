@@ -179,11 +179,11 @@ def results_summary(path,results,perturbations,experiments,comparisons,registry,
     path.write_text('\n\n'.join(text)+'\n')
 
 
-def privacy_inventory(root):
+def privacy_inventory(artifacts):
     """Deny by default: an inventory is not authorization for public export."""
-    return [dict(artifact=p.relative_to(root).as_posix(),classification='INTERNAL_RESTRICTED',
+    return [dict(artifact=artifact,classification='INTERNAL_RESTRICTED',
         shareable_export_allowed=False,reason='NIH_publication_review_required;patient_artifacts_never_auto_exported')
-        for p in sorted(root.rglob('*')) if p.is_file()]
+        for artifact in artifacts]
 
 
 def missingness_method_figures(root,spaces,tables,minimum_cell,reference_results=None):

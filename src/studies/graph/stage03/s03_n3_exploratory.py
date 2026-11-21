@@ -8,7 +8,7 @@ import re
 import pandas as pd
 import yaml
 
-from .._pipeline import config_path, output_lock, output_root, stage_outputs, write_json
+from .._pipeline import config_path, output_lock, output_root, stage_destinations, stage_outputs, write_json
 from ..stage02.s02_contracts import CURRENT_SCHEMA, MANIFEST, artifact_paths, safe_artifact, validate_release
 from . import s03_n3_calendar_day as cal
 from .s03_construct_validation import _dependencies, feature_roles
@@ -357,12 +357,12 @@ def _empty_outputs(policy):
     return outputs
 
 
-def _write_run(staging, target, base, outputs, n, policy):
+def _write_run(staging, target, base, outputs, n, policy, figure_dir, figure_target):
     files = {name: target / ('03e_' + name + '.csv') for name in TABLE_COLUMNS}
     frames = {name: pd.DataFrame(outputs[name], columns=columns.split()) for name, columns in TABLE_COLUMNS.items()}
     for name, frame in frames.items():
         frame.to_csv(staging / files[name].name, index=False)
-    figures = _figures(staging, frames)
+    figures = _figures(figure_dir, frames)
     models = {table: int(frames[table].status.eq(ESTIMATED).sum()) for table in SCOPES}
     if n is None:
         status = 'INPUTS_UNUSABLE'
@@ -386,7 +386,7 @@ def _write_run(staging, target, base, outputs, n, policy):
                    models_by_scope=models,
                    summary=str(target / '03e_summary.json'),
                    report=str(target / '03e_RESULTADOS.md'),
-                   figures=[str(target / name) for name in figures],
+                   figures=[str(figure_target / name) for name in figures],
                    **{name: str(path) for name, path in files.items()})
     write_json(staging / '03e_summary.json', summary)
     (staging / '03e_RESULTADOS.md').write_text(_markdown(summary, frames))
@@ -494,8 +494,10 @@ def run_exploratory_auto(root, cfg=None, *, audit_only=False):
         graph02 = output_root(cfg, '02') if cfg else defaults['graph02']
         graph03 = output_root(cfg, '03') if cfg else defaults['graph03']
         target = graph03.parent / defaults['phasee'].name
-        if any(target.is_relative_to(path) or path.is_relative_to(target)
-               for path in (graph02, graph03, *paths.values())):
+        destinations = stage_destinations(target, include_figures=not audit_only)
+        inputs = [*paths.values(), *stage_destinations(graph02).values(), *stage_destinations(graph03).values()]
+        if any(destination.is_relative_to(path) or path.is_relative_to(destination)
+               for destination in destinations.values() for path in inputs):
             raise ValueError('EXPLORATORY_OUTPUT_OVERLAPS_INPUT')
         prefix = '03f_' if audit_only else '03e_'
         completion = target / (prefix + 'summary.json')
@@ -503,9 +505,10 @@ def run_exploratory_auto(root, cfg=None, *, audit_only=False):
             for directory in dict.fromkeys((graph02, graph03)):
                 if directory.is_dir():
                     stack.enter_context(output_lock(directory, shared=True))
-            staging = stack.enter_context(stage_outputs(
-                {'stage': target}, lambda _, name: name.startswith(prefix),
-                failure=('stage', prefix + 'failure.json'), completion=completion))['stage']
+            staged = stack.enter_context(stage_outputs(
+                destinations, lambda _, name: name.startswith(prefix),
+                failure=('stage', prefix + 'failure.json'), completion=completion))
+            staging = staged['stage']
             for artifact, directory, marker in (
                     ('graph02', graph02, '02_graph_failure.json'),
                     ('graph03', graph03, '03_graph_failure.json')):
@@ -559,7 +562,8 @@ def run_exploratory_auto(root, cfg=None, *, audit_only=False):
                               source_linkage_audit=str(target / '03f_source_linkage_audit.csv'))
                 write_json(staging / '03f_summary.json', result)
             else:
-                result = _write_run(staging, target, base, outputs, n, policy)
+                result = _write_run(staging, target, base, outputs, n, policy,
+                                    staged.get('figures', staging), destinations.get('figures', target))
         return result
     except READ_ERRORS + (RuntimeError, yaml.YAMLError) as exc:
         token = str(exc)

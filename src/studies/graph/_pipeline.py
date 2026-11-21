@@ -104,6 +104,28 @@ def output_root(cfg, stage):
     return config_path(cfg['_path'], cfg['paths'][key])
 
 
+def stage_destinations(root, *, include_figures=True):
+    """Mirror the standard table directory for figures; keep custom roots flat."""
+    destinations = {'stage': root}
+    if include_figures:
+        for parent in root.parents:
+            if parent.name == 'tables' and parent.parent.name == 'outputs':
+                figures = (parent.with_name('figures') / root.relative_to(parent)).resolve()
+                if figures.is_relative_to(root) or root.is_relative_to(figures):
+                    raise ValueError('Graph figure destination overlaps the table destination')
+                destinations['figures'] = figures
+                break
+    return destinations
+
+
+def staged_artifact_paths(directory, figure_dir, figure_prefix):
+    paths = [path.name for path in sorted(directory.iterdir()) if path.is_file()]
+    if figure_dir != directory:
+        paths.extend((figure_prefix / path.name).as_posix()
+                     for path in sorted(figure_dir.iterdir()) if path.is_file())
+    return paths
+
+
 def git_commit():
     return subprocess.check_output(['git','rev-parse','HEAD'], cwd=common.PROJECT_ROOT, text=True).strip()
 

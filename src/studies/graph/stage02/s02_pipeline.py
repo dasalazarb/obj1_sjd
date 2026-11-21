@@ -1,13 +1,15 @@
 """Full Graph02 execution: prespecified experiments, QC, and immutable release."""
 from copy import deepcopy
 from functools import partial
+from os.path import relpath
 from pathlib import Path
 import json
 import numpy as np
 import pandas as pd
 from sklearn.decomposition import PCA
 from sklearn.metrics import adjusted_rand_score, pairwise_distances
-from .._pipeline import (load_pipeline, config_path, output_root, stage_outputs, save_table, write_json, utc_now, base_parser)
+from .._pipeline import (load_pipeline, config_path, output_root, stage_destinations, stage_outputs,
+                         staged_artifact_paths, save_table, write_json, utc_now, base_parser)
 from . import s02_legacy as legacy
 from .s02_contracts import CURRENT_SCHEMA, MANIFEST, resolve_sources, validate_release
 from .s02_feature_registry import clinical_registry, domain_coverage, eligible_domain_map, verify_observed_baseline_dates, mapping_counts, RESERVED, CLINICAL
@@ -54,18 +56,28 @@ def prepare_inputs(cfg):
 
 def run(cfg, *, root=None, preflight_only=False):
     root = Path(root).resolve() if root else output_root(cfg, '02')
-    def owned(_, name):
+    destinations = stage_destinations(root, include_figures=not preflight_only)
+    figure_prefix = Path(relpath(destinations.get('figures', root), root))
+
+    def owned(kind, name):
+        if kind == 'figures' and name in {
+            '02_graph_representation_sensitivity_mapper.png',
+            '02_graph_representation_sensitivity_stability.png',
+            '02_graph_stable_core_overlap.png',
+        }:
+            return False
         return name.startswith('02_graph_') or name == 'latest_completed_02.json'
 
-    with stage_outputs({'stage': root}, owned, failure=('stage', '02_graph_failure.json'),
+    with stage_outputs(destinations, owned, failure=('stage', '02_graph_failure.json'),
                        completion=root / MANIFEST, diagnostic=preflight_only, obsolete_dirs=('figures', 'logs')) as staging:
-        status = _execute(cfg, staging['stage'], preflight_only)
+        status = _execute(cfg, staging['stage'], preflight_only,
+                          staging.get('figures', staging['stage']), figure_prefix)
     manifest = None if preflight_only else root / MANIFEST
     print(f'Graph02 {status}; results: {root}')
     return {'run_dir': root, 'manifest': manifest, 'execution_status': status}
 
 
-def _execute(cfg, run_dir, preflight_only):
+def _execute(cfg, run_dir, preflight_only, figure_dir, figure_prefix):
     master,baseline,candidates,manifest,values,config,sources,governance=prepare_inputs(cfg)
     settings=cfg['experiments']; seed=int(config['random_seed']); n=len(baseline)
     families={row.feature:legacy.family_name(row.family) for row in manifest.loc[manifest.included].itertuples()}
@@ -393,7 +405,7 @@ def _execute(cfg, run_dir, preflight_only):
     # refits/artifacts. Historical memberships, summaries and budgets stay intact.
     from .s02_missingness_study import run_missingness_study
     missingness_study=run_missingness_study(results,registry,manifest,baseline,families,config,cfg,
-        run_dir,lab_groups,feature_to_lab)
+        run_dir,lab_groups,feature_to_lab,figure_dir=figure_dir,figure_prefix=figure_prefix)
     for row in missingness_study['experiments']:
         record(row['experiment_id'],row['kind'],row['status'],row['reason'],analysis_role='sensitivity',reference_id=row['reference_id'],
             **{k:row[k] for k in ['graph03_defining','method','method_type','is_mapper','estimator','panel_hash'] if k in row})
@@ -494,15 +506,18 @@ def _execute(cfg, run_dir, preflight_only):
                     'patient_b':baseline.patient_id.iloc[b],'distance':float(space.distance[a,b]),'method':space.method})
     save_table(run_dir/'02_graph_patient_embedding.csv',embedding_rows)
     save_table(run_dir/'02_graph_patient_distances.csv',distance_rows)
-    figures({k:v for k,v in results.items() if k.startswith('R')},stable_frame,run_dir,registry,coverage,alignments)
+    figures({k:v for k,v in results.items() if k.startswith('R')},stable_frame,figure_dir,registry,coverage,alignments)
     with (run_dir/'02_graph_events.jsonl').open('w') as stream:
         for row in logs: stream.write(json.dumps(row,default=str)+'\n')
-    figure_inventory=diagnostic_figures(observation,comparisons,experiments,run_dir,registry,int(settings.get('minimum_publication_cell',5)))
+    figure_inventory=diagnostic_figures(observation,comparisons,experiments,figure_dir,registry,int(settings.get('minimum_publication_cell',5)))
     inventoried={r['artifact'] for r in figure_inventory}
-    figure_inventory.extend(dict(artifact=p.relative_to(run_dir).as_posix(),status='COMPLETE',reason='') for p in sorted(run_dir.iterdir()) if p.suffix in {'.png', '.pdf'} and p.name not in inventoried)
+    figure_inventory.extend(dict(artifact=p.name,status='COMPLETE',reason='') for p in sorted(figure_dir.iterdir()) if p.suffix in {'.png', '.pdf'} and p.name not in inventoried)
+    for row in figure_inventory:
+        row['artifact'] = (figure_prefix / row['artifact']).as_posix()
     save_table(run_dir/'02_graph_figure_inventory.csv',figure_inventory)
     results_summary(run_dir/'02_graph_results_summary.md',results,perturbations,experiments,comparisons,registry,observation,stable_frame,qc)
-    save_table(run_dir/'02_graph_privacy_inventory.csv',privacy_inventory(run_dir))
+    save_table(run_dir/'02_graph_privacy_inventory.csv',
+               privacy_inventory(staged_artifact_paths(run_dir, figure_dir, figure_prefix)))
     manifest_release={'schema_version':CURRENT_SCHEMA,'finalized':True,
         'study_mode':cfg['analysis']['mode'],'feature_policy':cfg['analysis']['feature_policy'],
         'baseline_definition_id':'Step10_is_clinical_baseline_clinical_episode_curated_v2',

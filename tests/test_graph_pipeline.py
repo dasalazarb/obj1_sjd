@@ -161,19 +161,36 @@ def test_pharma_graph_chain_without_flags_overwrites_canonical_artifacts(configu
 
 
 
-def test_zero_argument_full_study_and_standalone_entries(configuration,monkeypatch):
-    cfg=configuration
+def test_zero_argument_full_study_and_standalone_entries(configuration,monkeypatch,tmp_path):
+    config_path = Path(configuration['_path'])
+    pipeline = pipe.read_yaml(config_path)
+    tables = tmp_path / 'outputs/tables/studies/graph'
+    figures = tmp_path / 'outputs/figures/studies/graph'
+    for stage, name in [('02', '02_graph_representation_sensitivity'),
+                        ('03', '03_graph_community_characterization'), ('study', 'run_graph_study')]:
+        pipeline['paths']['output_' + stage] = str(tables / name)
+    config_path.write_text(yaml.safe_dump(pipeline))
+    cfg = pipe.load_pipeline(config_path)
     monkeypatch.setattr(pipe,'DEFAULT_CONFIG',Path(cfg['_path']))
     roots = [pipe.output_root(cfg, key) for key in ('02', '03', 'study')]
+    figure02, figure03 = (figures / root.name for root in roots[:2])
+    roots[0].mkdir(parents=True)
+    (roots[0] / '02_graph_topologies.png').write_text('old misplaced plot')
+    figure02.mkdir(parents=True)
+    legacy_plot = figure02 / '02_graph_stable_core_overlap.png'
+    legacy_plot.write_text('legacy plot')
     executables = ['run_graph_study.py', '02_graph_representation_sensitivity.py', '03_graph_community_characterization.py']
     for executable in executables:
         monkeypatch.setattr(sys,'argv',[str(GRAPH/executable)])
         runpy.run_path(str(GRAPH/executable),run_name='__main__')
-    original_names = [{p.name for p in root.iterdir()} for root in roots]
+    checked_roots = [*roots, figure02, figure03]
+    original_names = [{p.name for p in root.iterdir()} for root in checked_roots]
     monkeypatch.setattr(sys, 'argv', [str(GRAPH / executables[0])])
     runpy.run_path(str(GRAPH / executables[0]), run_name='__main__')
-    assert original_names == [{p.name for p in root.iterdir()} for root in roots]
+    assert original_names == [{p.name for p in root.iterdir()} for root in checked_roots]
     assert all(not any(p.is_dir() for p in root.iterdir()) for root in roots)
+    assert all(not list(root.glob('*.png')) and not list(root.glob('*.pdf')) for root in roots)
+    assert legacy_plot.read_text() == 'legacy plot'
     manifest,path=validate_release(roots[0] / MANIFEST)
     assert manifest['schema_version'] == CURRENT_SCHEMA and 'sha256_by_artifact' not in manifest
     assert manifest['finalized'] and manifest['primary_reference_id']=='R0'
@@ -200,8 +217,8 @@ def test_zero_argument_full_study_and_standalone_entries(configuration,monkeypat
     methods=pd.read_csv(path.parent/'02_graph_resampling_replications.csv')
     assert set(methods.method)=={'repeated_subsampling','classic_bootstrap'}
     assert methods.loc[methods.method.eq('repeated_subsampling')].n_draws.eq(methods.loc[methods.method.eq('repeated_subsampling')].n_unique_patients).all()
-    assert len(list(path.parent.glob('*.png')))>=4
-    assert len(list(path.parent.glob('*.png')))==len(list(path.parent.glob('*.pdf')))
+    assert len(list(figure02.glob('*.pdf'))) >= 4
+    assert {p.stem for p in figure02.glob('*.png') if p != legacy_plot} == {p.stem for p in figure02.glob('*.pdf')}
     figure_inventory=pd.read_csv(path.parent/'02_graph_figure_inventory.csv')
     assert set(figure_inventory.status)<= {'COMPLETE','NOT_ESTIMABLE'}
     assert all((path.parent/r.artifact).is_file() for r in figure_inventory.query("status=='COMPLETE'").itertuples())
@@ -222,7 +239,9 @@ def test_zero_argument_full_study_and_standalone_entries(configuration,monkeypat
     for name in ['imputation_diagnostics','sparse_graph_connectivity','focal_comparison']:
         for extension in ['png','pdf','csv']:
             suffix = '_source.csv' if extension == 'csv' else '.' + extension
-            assert (path.parent / ('02_graph_missingness_' + name + suffix)).is_file()
+            artifact = figure02 / ('02_graph_missingness_' + name + suffix)
+            assert artifact.is_file()
+            assert artifact in {(path.parent / rel).resolve() for rel in sensitivity['artifacts']}
     study = roots[2]
     assert {p.name for p in study.iterdir()} == {'graph_study_results_summary.md'}
     report = (study / 'graph_study_results_summary.md').read_text()
@@ -247,7 +266,14 @@ def test_zero_argument_full_study_and_standalone_entries(configuration,monkeypat
         qc=json.loads((run/'03_graph_n3_validation_qc.json').read_text())
         assert qc['graph02_unchanged'] and qc['no_refit'] and qc['no_unapproved_estimates']
         assert pd.read_csv(run/'03_graph_n3_model_comparison.csv').empty
-        assert list(run.glob('*.pdf'))
+        assert list(figure03.glob('*.pdf'))
+        figure_qc = json.loads((run / '03_graph_figure_qc.json').read_text())
+        artifacts = set(pd.read_csv(run / '03_graph_artifact_inventory.csv').artifact)
+        for item in figure_qc['figures']:
+            assert set(item['artifacts'].values()) <= artifacts
+            for relative in item['artifacts'].values():
+                artifact = (run / relative).resolve()
+                assert artifact.parent == figure03 and artifact.is_file()
 
 
 def test_failed_run_preserves_current_graph_results(configuration, monkeypatch):
@@ -577,6 +603,10 @@ def test_publication_rolls_back_replacements_and_prunes_only_owned_files(tmp_pat
     historical.write_text('historical')
     obsolete = stage / 'figures' / '02_graph_old.png'
     obsolete.write_text('old figure')
+    figures = tmp_path / 'published_figures'
+    figures.mkdir()
+    plot = figures / '02_graph_a.png'
+    plot.write_text('previous plot')
     unrelated = stage / 'other.csv'
     unrelated.write_text('unrelated')
     first = stage / '02_graph_a.csv'
@@ -586,10 +616,11 @@ def test_publication_rolls_back_replacements_and_prunes_only_owned_files(tmp_pat
     failure = ('stage', '02_graph_failure.json')
 
     def publish():
-        with pipe.stage_outputs({'stage': stage}, lambda _, name: name.startswith('02_graph_'),
+        with pipe.stage_outputs({'stage': stage, 'figures': figures}, lambda _, name: name.startswith('02_graph_'),
                                 failure=failure, completion=completion, obsolete_dirs=('figures',)) as staging:
             (staging['stage'] / first.name).write_text('new')
             (staging['stage'] / completion.name).write_text('complete')
+            (staging['figures'] / plot.name).write_text('new plot')
 
     replace = pipe.os.replace
 
@@ -604,9 +635,11 @@ def test_publication_rolls_back_replacements_and_prunes_only_owned_files(tmp_pat
             publish()
     assert first.read_text() == 'old' and completion.read_text() == 'old status'
     assert obsolete.read_text() == 'old figure'
+    assert plot.read_text() == 'previous plot'
     assert (stage / failure[1]).is_file()
     publish()
     assert first.read_text() == 'new' and completion.read_text() == 'complete'
+    assert plot.read_text() == 'new plot'
     assert not obsolete.exists() and not (stage / failure[1]).exists()
     assert unrelated.read_text() == 'unrelated' and historical.read_text() == 'historical'
-    assert list(tmp_path.iterdir()) == [stage]
+    assert set(tmp_path.iterdir()) == {stage, figures}

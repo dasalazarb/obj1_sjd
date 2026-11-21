@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.studies.graph._pipeline import base_parser, load_pipeline, output_root, stage_outputs
+from src.studies.graph._pipeline import base_parser, load_pipeline, output_root, stage_destinations, stage_outputs
 
 SUMMARY = 'graph_study_results_summary.md'
 
@@ -20,8 +20,8 @@ def run(cfg, *, root=None, preflight_only=False):
     root = Path(root).resolve() if root else output_root(cfg, 'study')
     graph02_root, graph03_root = (output_root(cfg, key) for key in ('02', '03'))
     n3_root = graph03_root.parent / '03_graph_n3_controlled_inference'
-    if any(root.is_relative_to(stage) or stage.is_relative_to(root)
-           for stage in (graph02_root, graph03_root, n3_root)):
+    if any(root.is_relative_to(path) or path.is_relative_to(root)
+           for stage in (graph02_root, graph03_root, n3_root) for path in stage_destinations(stage).values()):
         raise ValueError('Study summary directory overlaps a Graph stage')
 
     def owned(_, name):
