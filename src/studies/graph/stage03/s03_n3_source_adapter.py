@@ -98,7 +98,7 @@ def build_candidate(root, context_path, output_path):
                                             "unit_conflict": "_unit_conflict",
                                             "result_conflict": "_result_conflict",
                                             "selection_status": "_selection_status"})
-        m = base[KEYS + [source, date_field]].merge(
+        m = base[KEYS + ["clinical_baseline_date", source, date_field]].merge(
             matching, on=KEYS, how="left", validate="one_to_one")
         left, right = _dates(m[date_field]), _dates(m._selected_date)
         dates_agree = left.notna() & right.notna() & left.eq(right)
