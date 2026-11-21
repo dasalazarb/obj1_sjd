@@ -27,6 +27,11 @@ experimentos, el mapa clínico y la validación de 03. Todos los análisis aplic
 tablas y figuras PNG/PDF se generan en la misma llamada. No requiere generar
 figuras o activar comparadores en un segundo comando.
 
+Graph02, Graph03 y Graph03e publican los plots y sus CSV asociados en
+`outputs/figures/studies/graph/<etapa>/`. Las tablas y los manifiestos se
+publican en `outputs/tables/studies/graph/<etapa>/`. Los inventarios de 02 y 03
+registran las rutas de las figuras relativas al directorio de tablas.
+
 Un comando sin flags sigue necesitando fuentes reales válidas. No crea datos de
 ejemplo cuando falta Step10. El modo `clinical_release` requiere explícitamente las
 aprobaciones vigentes. Ejecuta Pharma00 antes de Graph01 y Graph02.

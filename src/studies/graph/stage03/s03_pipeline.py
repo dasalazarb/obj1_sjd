@@ -1,9 +1,11 @@
 """Clinical interpretation from a verified release; never reconstruct discovery."""
 from contextlib import ExitStack
 from pathlib import Path
+from os.path import relpath
 import json
 import pandas as pd
-from .._pipeline import (load_pipeline,output_root,output_lock,stage_outputs,save_table,write_json,base_parser)
+from .._pipeline import (load_pipeline,output_root,output_lock,stage_destinations,stage_outputs,
+                         staged_artifact_paths,save_table,write_json,base_parser)
 from ..stage02.s02_contracts import CURRENT_SCHEMA as GRAPH02_SCHEMA, MANIFEST
 from .s03_release_reader import RESULTS, RESULTS_SCHEMA, read_release
 from .s03_n3_validation import run_n3_validation,n3_validation_qc,enforce_n3_review_gates
@@ -25,22 +27,26 @@ def run(cfg, *, graph02_release=None, root=None, preflight_only=False):
     release = Path(graph02_release).resolve() if graph02_release else output_root(cfg, '02') / MANIFEST
     release_dir = release if release.is_dir() else release.parent
     root = Path(root).resolve() if root else output_root(cfg, '03')
-    if root.is_relative_to(release_dir) or release_dir.is_relative_to(root):
+    destinations = stage_destinations(root, include_figures=not preflight_only)
+    if any(path.is_relative_to(source) or source.is_relative_to(path)
+           for path in destinations.values() for source in stage_destinations(release_dir).values()):
         raise ValueError('Graph03 destination overlaps Graph02')
+    figure_prefix = Path(relpath(destinations.get('figures', root), root))
     with ExitStack() as stack:
         if release_dir.is_dir():
             stack.enter_context(output_lock(release_dir, shared=True))
         staging = stack.enter_context(stage_outputs(
-            {'stage': root}, lambda _, name: name.startswith('03_graph_'),
+            destinations, lambda _, name: name.startswith('03_graph_'),
             failure=('stage', '03_graph_failure.json'), completion=root / RESULTS, diagnostic=preflight_only,
             obsolete_dirs=('figures', 'logs')))
-        status = _execute(cfg, release, staging['stage'], preflight_only, graph02_release is not None)
+        status = _execute(cfg, release, staging['stage'], preflight_only, graph02_release is not None,
+                          staging.get('figures', staging['stage']), figure_prefix)
     summary = None if preflight_only else root / RESULTS
     print(f'Graph03 {status}; results: {root}')
     return {'run_dir': root, 'manifest': summary, 'execution_status': status}
 
 
-def _execute(cfg, release, run_dir, preflight_only, explicit_release):
+def _execute(cfg, release, run_dir, preflight_only, explicit_release, figure_dir, figure_prefix):
     validate_figure_policy(cfg['validation'])
     manifest,path,frames=read_release(cfg,release if explicit_release else None)
     provenance={'graph02_directory':str(path.parent),
@@ -166,17 +172,19 @@ def _execute(cfg, release, run_dir, preflight_only, explicit_release):
     safe_markers=markers.merge(safe_keys,on=['representation_id','source_column'],how='inner') if not markers.empty else markers
     safe_domains=domains.merge(safe_keys,on=['representation_id','source_column'],how='inner') if 'source_column' in domains else domains
     safe_anchors=tables['anchors'].merge(safe_keys,on=['representation_id','source_column'],how='inner') if not tables['anchors'].empty else tables['anchors']
-    figure_sources=figures(safe_anchors,trajectories,pop,run_dir,flow=tables['flow'],domains=safe_domains,
+    figure_sources=figures(safe_anchors,trajectories,pop,figure_dir,flow=tables['flow'],domains=safe_domains,
         context=context,missingness=missingness,minimum_cell=minimum_cell,primary_reference_id=manifest['primary_reference_id'],
         baseline_table=safe_markers,marker_config=validation.get('clinical_marker_panels',[]),
         raw_matrix=characterization['clinical_matrix'],roles=roles, source_suffix='_source')
-    presentation=characterization_figures(characterization['clinical_matrix'],roles,run_dir,validation,minimum_cell,provenance=provenance, source_suffix='_source')
+    presentation=characterization_figures(characterization['clinical_matrix'],roles,figure_dir,validation,minimum_cell,provenance=provenance, source_suffix='_source')
     save_table(run_dir/'03_graph_characterization_N2_source_selection.csv',presentation['selection'])
     figure_sources.update(presentation['sources'])
-    presentation_qc=figure_qc(run_dir,figure_sources,provenance,protected_matrix=safe_matrix, source_suffix='_source')
+    presentation_qc=figure_qc(figure_dir,figure_sources,provenance,protected_matrix=safe_matrix, source_suffix='_source')
+    for item in presentation_qc['figures']:
+        item['artifacts'] = {ext: (figure_prefix / name).as_posix() for ext, name in item['artifacts'].items()}
     write_json(run_dir/'03_graph_figure_qc.json',presentation_qc)
     if presentation_qc['status']=='FAILED': raise ValueError('GRAPH03_FIGURE_QC_FAILED')
-    (run_dir/'03_graph_figures_README.md').write_text('Aggregate internal figures and source CSVs. Publication review is required; no automatic public export. Small cells are suppressed using the configured publication minimum.\n')
+    (figure_dir/'03_graph_figures_README.md').write_text('Aggregate internal figures and source CSVs. Publication review is required; no automatic public export. Small cells are suppressed using the configured publication minimum.\n')
     limited=any(row['status'] not in {'COMPLETE','DESCRIPTIVE'} for row in statuses) or presentation_qc['status']!='PASS' or 'graph02_last_attempt_status' in input_qc
     status='COMPLETE_WITH_LIMITATIONS' if limited else 'COMPLETE'
     (run_dir/'03_graph_results_summary.md').write_text(f'# Graph03 exploratory interpretation\n\nEXPLORATORY: no confirmatory clinical or predictive claims.\n\nGraph02 input: {path.parent.name}.\n\nPatients: {len(baseline)}; execution: {status}. Raw observed baseline values only; no imputation or discovery refit.\n\nCommunity and time effects are conditional on estimated frozen labels; intervals do not incorporate discovery uncertainty. See validation status for every unavailable or circular hypothesis.\n\nR0 is the frozen primary reference; R2 clinical comparison retains the release mapping and evidence status; other eligible representations are technical comparators.\n\n'
@@ -192,7 +200,8 @@ def _execute(cfg, release, run_dir, preflight_only, explicit_release):
             f'R0/R2 clinical figures displayed: {presentation_qc["n_r0_r2_clinical_figures_displayed"]}.\n\n')
         stream.write('COMPLETE_WITH_LIMITATIONS does not imply clinically shareable figures. '
             'Disclosure withholding is a presentation restriction, not absent clinical evidence or scientific non-estimability. '
-            'Candidate independence review and display status are separate. See 03_graph_figure_qc.json and 03_graph_figure_status.csv.\n\n')
+            'Candidate independence review and display status are separate. See 03_graph_figure_qc.json and '
+            f'[03_graph_figure_status.csv]({(figure_prefix / "03_graph_figure_status.csv").as_posix()}).\n\n')
         stream.write(presentation['inventory'][['figure','display_status','inference_status','reason']].to_csv(index=False))
         stream.write('\nN2 selections and documented N1-to-N2 lineage (metadata only):\n\n')
         stream.write(presentation['selection'].to_csv(index=False))
@@ -206,10 +215,10 @@ def _execute(cfg, release, run_dir, preflight_only, explicit_release):
         stream.write(pop_denominators.to_csv(index=False))
     with (run_dir/'03_graph_events.jsonl').open('w') as stream:
         for row in statuses: stream.write(json.dumps({**provenance,**row},default=str)+'\n')
-    inventory=[dict(artifact=p.relative_to(run_dir).as_posix(),
+    inventory=[dict(artifact=artifact,
         contains_patient_identifiers=False,privacy_class='INTERNAL_RESTRICTED',shareable_export_allowed=False,
         publication_review_required=True,minimum_publication_cell=minimum_cell)
-        for p in sorted(run_dir.rglob('*')) if p.is_file()]
+        for artifact in staged_artifact_paths(run_dir, figure_dir, figure_prefix)]
     save_table(run_dir/'03_graph_artifact_inventory.csv',pd.DataFrame(inventory))
     summary={**provenance,'schema_version':RESULTS_SCHEMA,'execution_status':status,
         'n3_validation':{key:n3_qc[key] for key in ['schema_version','status','phase_a_status','phase_b_status',

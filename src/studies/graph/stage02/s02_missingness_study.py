@@ -46,7 +46,8 @@ def cache_signature(raw,registry,baseline,identifier,policy,config,config_hash,s
     return hashlib.sha256(json.dumps(data,sort_keys=True,default=str).encode()).hexdigest()
 
 
-def run_missingness_study(results,registry,manifest,baseline,families,config,cfg,run_dir,lab_groups,feature_to_lab,source_hash=""):
+def run_missingness_study(results,registry,manifest,baseline,families,config,cfg,run_dir,lab_groups,feature_to_lab,
+                          source_hash="", *, figure_dir=None, figure_prefix=None):
     policy=cfg.get('missingness_methods',{})
     if not policy.get('enabled',False): return {'enabled':False,'experiments':[],'artifacts':[]}
     if policy.get('schema_version')!='graph_missingness_methods_v1': raise ValueError('UNKNOWN_MISSINGNESS_PROTOCOL')
@@ -325,9 +326,12 @@ def run_missingness_study(results,registry,manifest,baseline,families,config,cfg
         if name in schemas: frame=frame.reindex(columns=list(dict.fromkeys([*schemas[name],*frame.columns])))
         save_table(run_dir/f'02_graph_missingness_{name}.csv',frame)
     from .s02_reporting import missingness_method_figures
-    figures=missingness_method_figures(run_dir,spaces,tables,int(settings.get('minimum_publication_cell',5)),results)
+    figure_dir = figure_dir if figure_dir is not None else run_dir
+    figures=missingness_method_figures(figure_dir,spaces,tables,int(settings.get('minimum_publication_cell',5)),results)
     from .s02_reporting import focal_fix_figures
-    figures+=focal_fix_figures(run_dir,tables,int(settings.get('minimum_publication_cell',5)))
+    figures+=focal_fix_figures(figure_dir,tables,int(settings.get('minimum_publication_cell',5)))
+    if figure_prefix is not None:
+        figures = [(figure_prefix / name).as_posix() for name in figures]
     primary=[r for r in tables['method_registry'] if '/' not in r['experiment_id']]
     summary=['# Graph02: sensibilidad transversal a datos faltantes',
         'Análisis técnico exploratorio. R0 y R2 conservan su definición y membresías históricas. Las variantes son sensibilidades no definitorias para Graph03.',
