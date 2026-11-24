@@ -63,8 +63,7 @@ EXPLANATIONS = {
     'MODEL_DIAGNOSTIC_FAILURE': 'Graph03e informó un problema en los diagnósticos del ajuste previo.',
     'PUBLISHED_SELECTION_OR_COVERAGE_DRIFT': 'La selección o cobertura recalculada difiere de un agregado verificable.',
 }
-COMMAND = ('/usr/local/Anaconda/envs/py3.10/bin/python '
-           '/data/salazarda/data/obj1_sjd/src/studies/graph/03g_graph_n3_model_readiness_audit.py')
+COMMAND = 'python src/studies/graph/03g_graph_n3_model_readiness_audit.py'
 
 REVIEW_COLUMNS = [
     'priority', 'representation_id', 'outcome', 'clinical_question', 'structural_class',
@@ -159,7 +158,8 @@ def report(rows, summary, queue):
                   'ANA y HEp-2 comparten una familia de hipótesis. La ficha de proteinuria incluye el constructo renal.',
                   '', 'La interpretación es retrospectiva y exploratoria, condicionada a comunidades congeladas. '
                   'La medición podía estar indisponible en t0. Graph03g ejecutó cero estimadores.', '',
-                  '## Ejecución y salidas', '', '```bash', COMMAND, '```', '',
+                  '## Ejecución y salidas', '', 'Desde la raíz del repositorio, con Python 3.10.', '',
+                  '```bash', COMMAND, '```', '',
                   'Directorio `outputs/tables/studies/graph/03_graph_n3_model_readiness_audit/`.', ''])
     return '\n'.join(lines)
 

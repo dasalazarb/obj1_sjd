@@ -128,7 +128,7 @@ def test_secure_recompute_is_private_reproducible_and_preserves_inputs(published
     assert target.stat().st_mode & 0o777 == 0o700
     assert all(path.stat().st_mode & 0o777 == 0o600 for path in target.iterdir())
     assert all(not any(secret in contents for secret in ('SYNTHETIC_', '2020-01-01', '2020-07-02', str(repo),
-                                                          'p_incremental', 'n_measured'))
+                                                          'p_incremental', 'n_measured', '/data/salazarda/'))
                for contents in outputs.values())
     summary = json.loads(outputs['03g_summary.json'])
     assert summary['frozen_inputs_unchanged'] is True
