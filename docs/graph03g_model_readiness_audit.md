@@ -10,28 +10,33 @@ soporte de los diseños A y B en la misma población que usa Graph03e.
 ## Ejecución
 
 Desde la raíz del repositorio con resultados compatibles de Graph02, Graph03 y
-Graph03e:
+Graph03e, ejecute el script sin argumentos.
 
 ```bash
-python src/studies/graph/03g_graph_n3_model_readiness_audit.py \
-  --mode summaries --representation R0 --strict
+python src/studies/graph/03g_graph_n3_model_readiness_audit.py
 ```
 
-En el entorno institucional con acceso autorizado a las fuentes originales:
+La configuración predeterminada audita R0 en modo `summaries` con
+`strict: true`. Usa agregados publicados, metadatos y huellas de los insumos.
+
+En el entorno institucional autorizado, guarde `mode: secure-recompute` en un
+archivo YAML privado y seleccione el archivo al ejecutar el mismo script.
 
 ```bash
-python src/studies/graph/03g_graph_n3_model_readiness_audit.py \
-  --mode secure-recompute --representation R0 --strict
+GRAPH03G_CONFIG=/ruta/segura/graph03g.yaml python src/studies/graph/03g_graph_n3_model_readiness_audit.py
 ```
 
-La ubicación predeterminada sigue la configuración de Graph03e. Para una
-instantánea archivada compatible con el contrato de agregados de Graph03e,
-indique explícitamente `--graph02-release` (el manifiesto), `--graph03-run` y
-`--graph03e-dir`. Se comprueban las huellas publicadas de Graph02 y la política
-temporal incluso en modo normal. `--strict` exige además el vínculo documentado
-a Graph03 en el resumen de Graph03e, verifica los pins disponibles y rechaza
-discrepancias entre la cobertura publicada y el recálculo. `--representation all`
-incluye las sensibilidades R1–R4. R2 conserva su alcance exploratorio.
+El YAML puede incluir `representation` con un valor de R0 a R4 o `all` para
+evaluar también las sensibilidades. R2 conserva su alcance exploratorio.
+Para una instantánea archivada compatible, indique `graph02_release` (el
+manifiesto), `graph03_run` y `graph03e_dir`. Puede indicar `output_dir` para
+otro destino privado. Las rutas relativas se interpretan desde la carpeta del
+YAML. Las ubicaciones predeterminadas siguen la configuración de Graph03e.
+
+La auditoría siempre comprueba las huellas publicadas de Graph02 y la política
+temporal. `strict: true` exige además el vínculo documentado a Graph03 en el
+resumen de Graph03e, verifica los pins disponibles y rechaza discrepancias
+entre la cobertura publicada y el recálculo.
 
 ## Interpretación
 
@@ -72,7 +77,7 @@ contratos, firmas y decisiones institucionales.
 
 Las salidas se escriben en
 `outputs/tables/studies/graph/03_graph_n3_model_readiness_audit/` dentro del
-entorno autorizado. `--output-dir` permite indicar otro directorio privado y
+entorno autorizado. `output_dir` en el YAML permite indicar otro directorio privado y
 separado de los insumos. La escritura se prepara en un directorio privado y
 publica el resumen de finalización al final.
 

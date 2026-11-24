@@ -20,7 +20,7 @@ from tests.test_graph03_n3_auto import automatic
 from tests.test_graph03_n3_calendar_day import calendar_originals, write_btris
 from tests.test_graph03_n3_measurement_source import originals
 from tests.test_graph03_n3_exploratory import (
-    ANA, CELL, HEP2, POLICY, RF, RF_TEXT, ROOT, URINE, bind_lineage, current, paths_before, update_graph03,
+    ANA, CELL, HEP2, POLICY, RF, RF_TEXT, URINE, bind_lineage, current, paths_before, update_graph03,
 )
 
 
@@ -137,12 +137,45 @@ def test_secure_recompute_is_private_reproducible_and_preserves_inputs(published
     assert source_before == (digest(paths['step10']), digest(paths['eda_long']))
 
 
+def run_cli(repo, *args, config=None):
+    env = os.environ.copy()
+    env.pop('GRAPH03G_CONFIG', None)
+    if config is not None:
+        env['GRAPH03G_CONFIG'] = str(config)
+    script = repo / 'src/studies/graph/03g_graph_n3_model_readiness_audit.py'
+    return subprocess.run([sys.executable, str(script), *args], cwd=repo, capture_output=True, text=True, env=env)
+
+
+def test_cli_runs_without_flags_and_selects_secure_settings_from_yaml(published):
+    repo, _, _, target = published
+    default = run_cli(repo)
+    assert default.returncode == 0, default.stderr
+    assert json.loads(default.stdout)['mode'] == 'summaries'
+    summary = json.loads((target / '03g_summary.json').read_text())
+    assert summary['representations'] == ['R0']
+    assert summary['strict'] is True
+
+    config = target.parent / 'graph03g.yaml'
+    config.write_text(yaml.safe_dump(dict(mode='secure-recompute', representation='all', output_dir='secure-audit')))
+    secure = run_cli(repo, config=config)
+    assert secure.returncode == 0, secure.stderr
+    assert json.loads(secure.stdout)['mode'] == 'secure-recompute'
+    rows = read_output(config.parent / 'secure-audit', 'readiness_matrix').set_index(G.PAIRS)
+    assert set(rows.index.get_level_values('representation_id')) == {'R0', 'R1', 'R2', 'R3', 'R4'}
+    assert rows.loc['R0', HEP2].source_funnel_status == 'OUTSIDE_0_TO_6M'
+
+    rejected = run_cli(repo, '--mode', 'summaries')
+    assert rejected.returncode == 2
+    assert 'sin argumentos' in rejected.stderr
+
+
 @pytest.mark.parametrize(('change', 'reason'), [
     ('window', 'AUDIT_WINDOW_POLICY_MISMATCH'),
     ('release', 'AUDIT_GRAPH03E_ANCESTRY_MISMATCH'),
     ('duplicate', 'AUDIT_DUPLICATE_PUBLISHED_PAIR'),
     ('missing_columns', 'AUDIT_INPUT_SCHEMA_OR_INTEGRITY_ERROR'),
     ('overlap', 'AUDIT_OUTPUT_OVERLAPS_INPUT'),
+    ('invalid_config', 'AUDIT_INVALID_CONFIG'),
 ])
 def test_cli_stops_on_tampered_contract_without_echoing_paths(published, change, reason):
     repo, _, phasee, target = published
@@ -157,15 +190,12 @@ def test_cli_stops_on_tampered_contract_without_echoing_paths(published, change,
         df = pd.read_csv(path)
         df = pd.concat([df, df.iloc[[0]]]) if change == 'duplicate' else df.drop(columns='classification')
         df.to_csv(path, index=False)
-    script = ROOT / 'src/studies/graph/03g_graph_n3_model_readiness_audit.py'
-    cmd = [sys.executable, '-c', (
-        "from pathlib import Path; import runpy; "
-        f"ns = runpy.run_path({str(script)!r}); "
-        f"ns['main'].__globals__['ROOT'] = Path({str(repo)!r}); ns['main']()"),
-        '--mode', 'summaries', '--strict']
-    if change == 'overlap':
-        cmd.extend(['--output-dir', str(phasee)])
-    run = subprocess.run(cmd, capture_output=True, text=True, env={**os.environ, 'PYTHONPATH': str(ROOT)})
+    config = None
+    if change in {'overlap', 'invalid_config'}:
+        config = repo / 'graph03g.yaml'
+        settings = {'output_dir': str(phasee)} if change == 'overlap' else {'strict': 'SYNTHETIC_CORRUPT'}
+        config.write_text(yaml.safe_dump(settings))
+    run = run_cli(repo, config=config)
     assert run.returncode == 1 and reason in run.stderr
     assert all(secret not in run.stderr + run.stdout for secret in ('SYNTHETIC_', str(repo)))
     assert not target.exists()
