@@ -79,6 +79,17 @@ def _policy(root):
     return policy
 
 
+def _prespecified(validation, rep, source, version):
+    return any(row.get('representation_id') == rep and row.get('source_column') == source
+               and row.get('window_policy_version') == version
+               for row in validation.get('n3_validation', {}).get('prespecified_outcomes', []))
+
+
+def _independence_approved(validation, rep, source, review, version):
+    return (independence_review_approved(review) and review.get('window_policy_version') == version
+            and _prespecified(validation, rep, source, version))
+
+
 def _topology(rep, frame):
     if frame.empty:
         return 'R2_EXPLORATORY_NO_HARD_ASSIGNMENTS' if rep == 'R2' else 'NO_SUPPORTED_HARD_ASSIGNMENTS'
@@ -289,11 +300,8 @@ def _analyze(tables, loaded, records, validation, policy, *, audit_only=False, s
                 audit = _independence(rep, source, roles, features, registry, dependencies, validation, policy)
             outputs['independence_audit'].append(audit)
             review = _review(validation, rep, source)
-            prespecs = validation.get('n3_validation', {}).get('prespecified_outcomes', [])
             version = baseline_policy().policy_version
-            approved = (independence_review_approved(review) and review.get('window_policy_version') == version
-                        and any(row.get('representation_id') == rep and row.get('source_column') == source
-                                and row.get('window_policy_version') == version for row in prespecs))
+            approved = _independence_approved(validation, rep, source, review, version)
             if audit['classification'] == INDEPENDENT and not approved:
                 audit = dict(audit, classification=LINEAGE_UNRESOLVED, reason='INDEPENDENCE_REVIEW_PENDING')
                 outputs['independence_audit'][-1] = audit

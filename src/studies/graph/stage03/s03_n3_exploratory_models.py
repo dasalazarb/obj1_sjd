@@ -78,7 +78,8 @@ def _adjustment(frame):
     return pd.DataFrame({'age_at_baseline': age.where(age.between(0, 120)), 'sex': sex, 'baseline_era_5y': era})
 
 
-def _model_support(frame, numeric, policy, cell):
+def _model_support(frame, numeric, policy, cell, *, audit=None):
+    """Shared 03e mask and support gates, optionally exposing private diagnostics."""
     observed = frame.value.notna()
     covariates = _adjustment(frame)
     complete = observed & covariates.notna().all(axis=1)
@@ -92,6 +93,8 @@ def _model_support(frame, numeric, policy, cell):
                 n_model_eligible=len(y))
     if len(y) >= cell and not 0 < int(observed.sum()) - len(y) < cell:
         info['n'] = len(y)
+    if audit is not None:
+        audit.update(complete=complete, common=common, community_counts=counts)
     if len(y) < policy['minimum_complete_cases'] or len(keep) < policy['minimum_groups']:
         return dict(info, reason='INSUFFICIENT_COMPLETE_CASE_COMMUNITY_SUPPORT'), None
     community = frame.loc[common, 'community_id']
@@ -106,6 +109,8 @@ def _model_support(frame, numeric, policy, cell):
     diagnostics = support_diagnostics(
         y, adjustment, pd.DataFrame(index=y.index), community, 'numeric' if numeric else 'binary',
         support, categories_verified=True, minimum_events_per_parameter=policy['minimum_events_per_parameter'])
+    if audit is not None:
+        audit['designs'] = diagnostics
     reasons = set()
     for model in ('A', 'B'):
         reasons.update(filter(None, diagnostics[model]['support_blocking_reasons'].split('|')))

@@ -349,3 +349,22 @@ prescribe ni aprueba outcomes. Consulte
 [`docs/graph03_controlled_inference.md`](../../../docs/graph03_controlled_inference.md)
 para preparación de planes, evidencia institucional, comandos y límites de
 privacidad. No se ha establecido viabilidad inferencial en datos clínicos reales.
+
+### Graph03 G: auditoría de independencia y estimabilidad
+
+El flujo documental es 03c → 03d → 03f/03e → 03g. 03c organiza la adjudicación,
+03d resuelve dependencias y soporte del preflight, 03f audita la fuente
+original y 03e genera los perfiles exploratorios. 03g cruza el linaje y la
+revisión humana con la cobertura y el soporte de A/B, sin ajustar modelos.
+
+```bash
+python src/studies/graph/03f_build_n3_measurement_source.py --audit-only
+python src/studies/graph/03e_graph_n3_controlled_inference.py
+python src/studies/graph/03g_graph_n3_model_readiness_audit.py --mode summaries --representation R0 --strict
+```
+
+Use `--mode secure-recompute` en el entorno institucional para localizar las
+pérdidas del embudo y verificar los casos completos en memoria. Un cero
+publicado describe la cobertura elegible del panel. La cobertura suprimida
+deja el tamaño indeterminado.
+[Guía de Graph03g](../../../docs/graph03g_model_readiness_audit.md)
