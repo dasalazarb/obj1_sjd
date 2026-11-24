@@ -100,6 +100,7 @@ def rep_outcome(frame, rep, outcome):
     return frame.loc[frame.representation_id.eq(rep) & frame.outcome.eq(outcome)]
 
 
+@pytest.mark.skip(reason='Archived Graph03 N3 workflow. Run this test at tag graph03-n3-prearchive-2026-11-24.')
 def test_zero_arguments_builds_private_aggregates_and_never_uses_the_guard(current):
     repo, paths, private, expected = current
     eda = pd.read_parquet(paths['eda_long']).assign(unit='IU/mL', lab_date='2020-01-01')
@@ -142,6 +143,7 @@ def test_zero_arguments_builds_private_aggregates_and_never_uses_the_guard(curre
 
 
 @pytest.mark.parametrize('tamper', ['graph03', 'baseline', 'membership'])
+@pytest.mark.skip(reason='Archived Graph03 N3 workflow. Run this test at tag graph03-n3-prearchive-2026-11-24.')
 def test_missing_or_tampered_inputs_preserve_only_verifiable_results(current, tamper):
     repo, paths, private, expected = current
     paths['eda_long'].unlink()
@@ -324,6 +326,7 @@ def bind_lineage(repo, paths):
     update_graph03(repo, paths)
 
 
+@pytest.mark.skip(reason='Archived Graph03 N3 workflow. Run this test at tag graph03-n3-prearchive-2026-11-24.')
 def test_end_to_end_ols_logit_rf_lineage_and_distinct_temporal_sensitivity(current):
     repo, paths, private, expected = current
     eda = pd.read_parquet(paths['eda_long']).assign(unit='IU/mL', lab_date='2020-01-02')
@@ -369,6 +372,7 @@ def test_end_to_end_ols_logit_rf_lineage_and_distinct_temporal_sensitivity(curre
 
 
 @pytest.mark.parametrize('empty', [False, True])
+@pytest.mark.skip(reason='Archived Graph03 N3 workflow. Run this test at tag graph03-n3-prearchive-2026-11-24.')
 def test_descriptives_separate_baseline_from_after_window(current, empty):
     repo, paths, private, expected = current
     eda = pd.read_parquet(paths['eda_long']).assign(unit='IU/mL')
@@ -395,6 +399,7 @@ def test_descriptives_separate_baseline_from_after_window(current, empty):
     assert followup.n_measured.gt(0).any() != empty
 
 
+@pytest.mark.skip(reason='Archived Graph03 N3 workflow. Run this test at tag graph03-n3-prearchive-2026-11-24.')
 def test_03f_current_audit_is_repeatable_and_preserves_03e(current):
     repo, _, _, expected = current
     exploration = command(repo)
@@ -413,6 +418,7 @@ def test_03f_current_audit_is_repeatable_and_preserves_03e(current):
         '03f_source_linkage_audit.csv', '03f_summary.json'}
 
 
+@pytest.mark.skip(reason='Archived Graph03 N3 workflow. Run this test at tag graph03-n3-prearchive-2026-11-24.')
 def test_old_exploratory_config_does_not_overwrite_new_release(current):
     repo, _, _, _ = current
     result = command(repo)

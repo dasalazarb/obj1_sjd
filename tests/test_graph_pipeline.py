@@ -162,6 +162,14 @@ def test_pharma_graph_chain_without_flags_overwrites_canonical_artifacts(configu
 
 
 def test_zero_argument_full_study_and_standalone_entries(configuration,monkeypatch,tmp_path):
+    from src.studies.graph.stage03 import s03_n3_exploratory, s03_n3_validation
+
+    def unexpected_inference(*args, **kwargs):
+        pytest.fail('Active Graph workflow must not start N3 inference')
+
+    monkeypatch.setattr(s03_n3_exploratory, 'run_exploratory_auto', unexpected_inference)
+    monkeypatch.setattr(s03_n3_exploratory, '_model', unexpected_inference)
+    monkeypatch.setattr(s03_n3_validation, 'n3_incremental_models', unexpected_inference)
     config_path = Path(configuration['_path'])
     pipeline = pipe.read_yaml(config_path)
     tables = tmp_path / 'outputs/tables/studies/graph'
@@ -173,6 +181,10 @@ def test_zero_argument_full_study_and_standalone_entries(configuration,monkeypat
     cfg = pipe.load_pipeline(config_path)
     monkeypatch.setattr(pipe,'DEFAULT_CONFIG',Path(cfg['_path']))
     roots = [pipe.output_root(cfg, key) for key in ('02', '03', 'study')]
+    historic = tables / '03_graph_n3_baseline_0_to_6m'
+    historic.mkdir(parents=True)
+    sentinel = historic / '03e_summary.json'
+    sentinel.write_text('historical artifact')
     figure02, figure03 = (figures / root.name for root in roots[:2])
     roots[0].mkdir(parents=True)
     (roots[0] / '02_graph_topologies.png').write_text('old misplaced plot')
@@ -245,16 +257,14 @@ def test_zero_argument_full_study_and_standalone_entries(configuration,monkeypat
     study = roots[2]
     assert {p.name for p in study.iterdir()} == {'graph_study_results_summary.md'}
     report = (study / 'graph_study_results_summary.md').read_text()
-    assert all(name in report for name in (MANIFEST, '03_graph_results_summary.json', '03e_RESULTADOS.md'))
-    from src.studies.graph.stage03.s03_run_resolution import BASELINE_OUTPUT_DIR
-    baseline_name = '03_graph_n3_baseline_community_profiles.csv'
-    pd.testing.assert_frame_equal(
-        pd.read_csv(roots[1] / baseline_name),
-        pd.read_csv(roots[1].parent / BASELINE_OUTPUT_DIR / baseline_name))
-    for root in (roots[1], roots[1].parent / BASELINE_OUTPUT_DIR):
-        qc = json.loads((root / '03_graph_baseline_window_qc.json').read_text())
-        assert qc['graph02_sha256_before'] == qc['graph02_sha256_after']
-        assert qc['graph02_frozen_unchanged']
+    assert all(name in report for name in (MANIFEST, '03_graph_results_summary.json'))
+    assert [row.split('|')[1].strip() for row in report.splitlines() if row.startswith('| Graph')] == ['Graph02', 'Graph03']
+    assert '03e' not in report and 'N3' not in report
+    assert set(historic.iterdir()) == {sentinel}
+    assert sentinel.read_text() == 'historical artifact'
+    qc = json.loads((roots[1] / '03_graph_baseline_window_qc.json').read_text())
+    assert qc['graph02_sha256_before'] == qc['graph02_sha256_after']
+    assert qc['graph02_frozen_unchanged'] and qc['n_estimated_primary_pairs'] == 0
     snapshot = pd.read_csv(roots[1] / '03_graph_community_baseline_table.csv')
     assert snapshot.snapshot_basis.eq('FROZEN_GRAPH02_BASELINE_SNAPSHOT').all()
     for run in [roots[1]]:
@@ -263,6 +273,7 @@ def test_zero_argument_full_study_and_standalone_entries(configuration,monkeypat
         assert anchors.validation_role.eq('independent_baseline_anchor').all()
         summary=json.loads((run/'03_graph_results_summary.json').read_text())
         assert Path(summary['graph02_directory']) == roots[0]
+        assert summary['n3_inference_status'] == 'ARCHIVED'
         n3=summary['n3_validation']
         assert n3['n_reviewed_independent_sources']==0 and n3['n_models_complete']==0
         inventory=pd.read_csv(run/'03_graph_n3_source_inventory.csv')
@@ -285,6 +296,55 @@ def test_zero_argument_full_study_and_standalone_entries(configuration,monkeypat
             for relative in item['artifacts'].values():
                 artifact = (run / relative).resolve()
                 assert artifact.parent == figure03 and artifact.is_file()
+
+
+@pytest.mark.parametrize(('status02', 'status03', 'expected'), [
+    ('COMPLETE', 'COMPLETE', 'COMPLETE'),
+    ('COMPLETE', 'COMPLETE_WITH_LIMITATIONS', 'COMPLETE_WITH_LIMITATIONS'),
+    ('PARTIAL', 'COMPLETE_WITH_LIMITATIONS', 'PARTIAL'),
+    ('FAILED', None, 'GRAPH02_RESULT_UNAVAILABLE'),
+    ('COMPLETE', 'FAILED', 'GRAPH03_RESULT_UNAVAILABLE'),
+    ('PREFLIGHT_ONLY', None, 'PREFLIGHT_ONLY'),
+])
+def test_study_stage_status_and_preflight(tmp_path, monkeypatch, status02, status03, expected):
+    from src.studies.graph.stage02 import s02_pipeline
+    from src.studies.graph.stage03 import s03_pipeline
+
+    cfg = pipe.load_pipeline()
+    cfg['paths'].update({f'output_{stage}': str(tmp_path / stage) for stage in ('02', '03', 'study')})
+    release = tmp_path / '02' / MANIFEST
+    summary = tmp_path / 'study' / 'graph_study_results_summary.md'
+    summary.parent.mkdir()
+    summary.write_text('previous report')
+    preflight = expected == 'PREFLIGHT_ONLY'
+    calls = []
+
+    def run_graph02(config, *, preflight_only):
+        assert config is cfg and preflight_only == preflight
+        calls.append('02')
+        return {'execution_status': status02, 'manifest': None if preflight else release}
+
+    def run_graph03(config, *, graph02_release):
+        assert config is cfg and graph02_release == release
+        calls.append('03')
+        return {'execution_status': status03, 'manifest': tmp_path / '03' / '03_graph_results_summary.json'}
+
+    monkeypatch.setattr(s02_pipeline, 'run', run_graph02)
+    monkeypatch.setattr(s03_pipeline, 'run', run_graph03)
+    if expected.endswith('_UNAVAILABLE'):
+        with pytest.raises(RuntimeError, match=expected):
+            run_study(cfg)
+        failure = json.loads(summary.with_name('graph_study_failure.json').read_text())
+        assert failure['execution_status'] == 'FAILED' and failure['reason'] == expected
+        assert summary.read_text() == 'previous report'
+    else:
+        result = run_study(cfg, preflight_only=preflight)
+        assert result['execution_status'] == expected
+        if preflight:
+            assert summary.read_text() == 'previous report'
+        else:
+            assert f'**{expected}**' in summary.read_text()
+    assert calls == (['02'] if status03 is None else ['02', '03'])
 
 
 def test_failed_run_preserves_current_graph_results(configuration, monkeypatch):

@@ -183,6 +183,7 @@ def test_candidate_blocks_uncertain_times_crossed_ids_and_small_cells(originals)
     ('missing', 'UPSTREAM_MISSING_OR_UNREADABLE'), ('corrupt', 'UPSTREAM_MISSING_OR_UNREADABLE'),
     ('schema', 'UPSTREAM_REQUIRED_COLUMNS_MISSING'), ('frozen', 'FROZEN_RELEASES_NOT_AVAILABLE'),
 ])
+@pytest.mark.skip(reason='Archived Graph03 N3 workflow. Run this test at tag graph03-n3-prearchive-2026-11-24.')
 def test_blocked_cli_audit_writes_only_aggregate_evidence(originals, case, blocker):
     paths, _, output, _ = originals
     if case == 'missing':
@@ -201,6 +202,7 @@ def test_blocked_cli_audit_writes_only_aggregate_evidence(originals, case, block
     assert blocker in manifest(run_dir)['blockers']
 
 
+@pytest.mark.skip(reason='Archived Graph03 N3 workflow. Run this test at tag graph03-n3-prearchive-2026-11-24.')
 def test_audit_only_with_sources_never_writes_patient_artifacts(originals):
     proc = cli(originals, 'audit-only', 'audit')
     assert proc.returncode == 0, proc.stderr
@@ -301,6 +303,7 @@ def signed_review(tmp_path, binding, rules, *, version=REVIEW_VERSION, **metadat
     return dict(review_path=review, signature_path=sig, trust_key=public)
 
 
+@pytest.mark.skip(reason='Archived Graph03 N3 workflow. Run this test at tag graph03-n3-prearchive-2026-11-24.')
 def test_reviewed_cli_and_03e_prepare_plan_preflight_require_separate_decisions(originals, tmp_path):
     paths, _, output, decision_root = originals
     before = paths_before(paths)

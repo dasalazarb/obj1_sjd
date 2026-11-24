@@ -24,6 +24,8 @@ from tests.test_graph03_n3_exploratory import (
     ANA, CELL, HEP2, POLICY, RF, RF_TEXT, URINE, bind_lineage, current, paths_before, update_graph03,
 )
 
+pytestmark = pytest.mark.skip(reason='Archived Graph03 N3 workflow. Run this test at tag graph03-n3-prearchive-2026-11-24.')
+
 
 def stop_estimation(*args, **kwargs):
     raise AssertionError('03g must never run an estimator or the exploratory orchestrator')

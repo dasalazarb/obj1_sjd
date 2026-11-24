@@ -1,6 +1,8 @@
 # N3 audit contract: graph03_n3_audit_v1
 
-Graph03 consumes verified frozen Graph02 inputs. The N3 audit does not change
+Graph03 retains the documentary audit of frozen Graph02 inputs. The
+[archived N3 workflow](../../../../old/graph03_n3/README.md) contains the historical
+inference entrypoints. The N3 audit does not change
 feature roles, Mapper, hard memberships, R0/R2 labels, historical incremental
 estimators, or longitudinal endpoint policies. N1 is internal characterization;
 N2 is related characterization. Neither becomes independent validation.
@@ -15,7 +17,6 @@ Use the project's configured interpreter when available. This command requires
 the completed Graph02 pointer, its hash-verified artifacts and unchanged source
 inputs. Missing clinical files must be supplied through the existing release
 contract; the audit does not invent a baseline or search arbitrary patient paths.
-Do not run `run_graph_study.py` to obtain N3 outputs: that would rerun discovery.
 
 ## Audit and review
 

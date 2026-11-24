@@ -163,9 +163,9 @@ Do not edit the original raw data. Keep all changes reproducible through scripts
 Run `python src/studies/graph/run_graph_study.py` from the repository root to
 execute the full configured exploratory baseline study without required flags.
 Graph02 freezes topology with artifact hashes; Graph03 consumes that exact release
-for observed-value clinical characterization and estimable post-index analyses.
-Clinical domain approvals remain explicit. See the [Graph guide](src/studies/graph/README.md)
-for sources, default experiments, release contracts, and synthetic validation.
+for descriptive N1/N2 characterization, Pop context, quality checks, and gated
+post-index analyses. The [Graph guide](src/studies/graph/README.md) covers the
+active workflow. The [N3 archive](old/graph03_n3/README.md) records phases 03c–03g.
 
 Graph02 incluye seis sensibilidades transversales de missingness R0/R2 (`-I`, `-D`, `-M`),
 con panel fijo, refit por réplica y artefactos con hashes; Graph03 conserva las

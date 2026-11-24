@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run Graph02, Graph03 and exploratory Graph03 N3 without required flags."""
+"""Run Graph02 and Graph03 without required flags."""
 from pathlib import Path
 import sys
 
@@ -14,15 +14,12 @@ SUMMARY = 'graph_study_results_summary.md'
 
 def run(cfg, *, root=None, preflight_only=False):
     from src.studies.graph.stage02.s02_pipeline import run as run02
-    from src.studies.graph.stage03.s03_n3_exploratory import run_exploratory_auto
     from src.studies.graph.stage03.s03_pipeline import run as run03
-    from src.studies.graph.stage03.s03_run_resolution import BASELINE_OUTPUT_DIR
 
     root = Path(root).resolve() if root else output_root(cfg, 'study')
     graph02_root, graph03_root = (output_root(cfg, key) for key in ('02', '03'))
-    n3_root = graph03_root.parent / BASELINE_OUTPUT_DIR
     if any(root.is_relative_to(path) or path.is_relative_to(root)
-           for stage in (graph02_root, graph03_root, n3_root) for path in stage_destinations(stage).values()):
+           for stage in (graph02_root, graph03_root) for path in stage_destinations(stage).values()):
         raise ValueError('Study summary directory overlaps a Graph stage')
 
     def owned(_, name):
@@ -33,14 +30,20 @@ def run(cfg, *, root=None, preflight_only=False):
         if not cfg['execution']['run_02'] or not cfg['execution']['run_03']:
             raise ValueError('Use the standalone entrypoints for individual stages')
         graph02 = run02(cfg, preflight_only=preflight_only)
+        graph02_status = graph02['execution_status']
         if preflight_only:
-            return {'run_dir': root, 'execution_status': 'PREFLIGHT_ONLY'}
-        graph03 = run03(cfg)
-        n3 = run_exploratory_auto(ROOT, cfg)
-        if n3['status'] in {'EXPLORATORY_RUN_FAILED', 'INPUTS_UNUSABLE'}:
-            raise RuntimeError('GRAPH03_N3_INPUTS_UNAVAILABLE')
-        statuses = (graph02['execution_status'], graph03['execution_status'], n3['status'])
-        if 'PARTIAL' in statuses or 'PARTIAL_WITH_DATA_ISSUES' in statuses:
+            if graph02_status != 'PREFLIGHT_ONLY':
+                raise RuntimeError('GRAPH02_PREFLIGHT_UNAVAILABLE')
+            return {'run_dir': root, 'execution_status': graph02_status}
+        publishable = {'COMPLETE', 'COMPLETE_WITH_LIMITATIONS', 'PARTIAL'}
+        if graph02_status not in publishable or graph02.get('manifest') is None:
+            raise RuntimeError('GRAPH02_RESULT_UNAVAILABLE')
+        graph03 = run03(cfg, graph02_release=graph02['manifest'])
+        graph03_status = graph03['execution_status']
+        if graph03_status not in publishable or graph03.get('manifest') is None:
+            raise RuntimeError('GRAPH03_RESULT_UNAVAILABLE')
+        statuses = (graph02_status, graph03_status)
+        if 'PARTIAL' in statuses:
             status = 'PARTIAL'
         elif 'COMPLETE_WITH_LIMITATIONS' in statuses:
             status = 'COMPLETE_WITH_LIMITATIONS'
@@ -50,10 +53,8 @@ def run(cfg, *, root=None, preflight_only=False):
             '# Graph study\n\n'
             f'Execution status **{status}**.\n\n'
             '| Stage | Status | Current result |\n|---|---|---|\n'
-            f'| Graph02 | {statuses[0]} | `{graph02["manifest"]}` |\n'
-            f'| Graph03 | {statuses[1]} | `{graph03["manifest"]}` |\n'
-            f'| Graph03 N3 | {statuses[2]} | `{n3["report"]}` |\n\n'
-            f'Exploratory primary model pairs estimated in 03e **{n3["n_model_pairs_estimable"]}**.\n')
+            f'| Graph02 | {graph02_status} | `{graph02["manifest"]}` |\n'
+            f'| Graph03 | {graph03_status} | `{graph03["manifest"]}` |\n')
     print(f'Graph study {status}; summary: {root / SUMMARY}')
     return {'run_dir': root, 'execution_status': status}
 

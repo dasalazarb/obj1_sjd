@@ -243,7 +243,8 @@ def _model(label, frame, independence, prior_rf, table, policy, cell):
     return model, support, model_n
 
 
-def _analyze(tables, loaded, records, validation, policy, *, audit_only=False, selected_measurements=None):
+def _analyze(tables, loaded, records, validation, policy, *, estimate_models, audit_only=False,
+             selected_measurements=None):
     outputs = {name: [] for name in TABLE_COLUMNS}
     frozen = loaded['frozen']
     baseline, members, features = (frozen[key] for key in ('baseline_raw', 'membership', 'feature_sets'))
@@ -349,6 +350,12 @@ def _analyze(tables, loaded, records, validation, policy, *, audit_only=False, s
                     model_stratum = EXACT_WINDOW if table == 'linkage_sensitivity_models' else PRIMARY
                     if provenance != model_provenance or stratum != model_stratum:
                         continue
+                    model_label = dict(label, interpretation=interpretation)
+                    if not estimate_models:
+                        outputs[table].append(dict(model_label, status='NOT_ESTIMABLE',
+                                                   not_estimable_reason='N3_WORKFLOW_ARCHIVED',
+                                                   hypothesis_family=_family(source), model_a='A', model_b='B'))
+                        continue
                     if table == 'linkage_sensitivity_models' and selection[
                             ['patient_id', 'collection_calendar_day', 'value']].reset_index(drop=True).equals(
                             primary_measurements(result)[['patient_id', 'collection_calendar_day', 'value']].reset_index(drop=True)):
@@ -357,7 +364,6 @@ def _analyze(tables, loaded, records, validation, policy, *, audit_only=False, s
                                             hypothesis_family=_family(source))
                         outputs[table].append(result_label)
                         continue
-                    model_label = dict(label, interpretation=interpretation)
                     if table != 'models':
                         model_label['finding_class'] = 'EXPLORATORY_SENSITIVITY'
                     model, support, n_model = _model(model_label, frame, audit, (rep, table) in rf_tested,
@@ -728,7 +734,8 @@ def run_exploratory_auto(root, cfg=None, *, audit_only=False):
                 integrated = loaded['manifest'].get('source_inputs', {}).get('integrated', {}).get('path')
                 tables, records, source_issues = current_source_inputs(root, step10=integrated, paths=paths)
                 issues.extend(source_issues)
-                outputs = _analyze(tables, loaded, records, validation, policy, audit_only=audit_only)
+                outputs = _analyze(tables, loaded, records, validation, policy,
+                                   estimate_models=not audit_only, audit_only=audit_only)
                 n = len(baseline)
                 frozen_after = frozen_fingerprints(loaded['release'], loaded['manifest'])
                 if frozen_before != frozen_after:

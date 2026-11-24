@@ -1,8 +1,9 @@
 # Graph 01, 02 y 03
 
 Graph02 descubre y evalúa topología basal. Graph03 caracteriza las comunidades
-publicadas por Graph02. Graph03 y Graph03e comparten la selección de mediciones nuevas por día calendario.
-Los resultados por defecto son **exploratorios**, sin validación clínica confirmatoria.
+publicadas por Graph02 mediante perfiles descriptivos N1/N2, contexto Pop y controles de calidad.
+Los resultados son **exploratorios**. Las fases 03c–03g están
+[archivadas](../../../old/graph03_n3/README.md).
 
 ## Ejecución completa sin flags
 
@@ -18,7 +19,6 @@ También funcionan individualmente sin argumentos:
 python src/studies/graph/01_run_topological_phenotyping.py
 python src/studies/graph/02_graph_representation_sensitivity.py
 python src/studies/graph/03_graph_community_characterization.py
-python src/studies/graph/03e_graph_n3_controlled_inference.py
 ```
 
 La configuración principal es [configs/pipeline.yaml](configs/pipeline.yaml).
@@ -27,7 +27,7 @@ experimentos, el mapa clínico y la validación de 03. Todos los análisis aplic
 tablas y figuras PNG/PDF se generan en la misma llamada. No requiere generar
 figuras o activar comparadores en un segundo comando.
 
-Graph02, Graph03 y Graph03e publican los plots y sus CSV asociados en
+Graph02 y Graph03 publican las figuras y sus CSV asociados en
 `outputs/figures/studies/graph/<etapa>/`. Las tablas y los manifiestos se
 publican en `outputs/tables/studies/graph/<etapa>/`. Los inventarios de 02 y 03
 registran las rutas de las figuras relativas al directorio de tablas.
@@ -53,7 +53,6 @@ informativas.
 ```bash
 python src/studies/graph/03_graph_community_characterization.py --preflight-only
 python src/studies/graph/03_graph_community_characterization.py
-python src/studies/graph/03e_graph_n3_controlled_inference.py
 ```
 
 Graph03 conserva los perfiles N1/N2 del snapshot de Graph02 y publica aparte
@@ -63,11 +62,10 @@ Las mediciones pueden no estar disponibles el día 0. La trayectoria posterior
 al índice mantiene su definición y tiene una sensibilidad después de la
 ventana.
 
-Los agregados de 03e quedan en
-`outputs/tables/studies/graph/03_graph_n3_baseline_0_to_6m/`.
-El archivo `03e_RESULTADOS.md` reúne cobertura, perfiles, modelos estimables
-y motivos de exclusión. Las mediciones originales se leen en sus ubicaciones
-de origen. Las filas individuales permanecen en dichas fuentes.
+La ventana conserva controles de selección y procedencia de mediciones. Las
+auditorías documentales N3 registran los requisitos de revisión y soporte.
+Graph03 mantiene las tablas de compatibilidad con estado no estimable y el
+resumen JSON declara `n3_inference_status: ARCHIVED`.
 La ventana y su huella se definen en [baseline_window_03.yaml](configs/baseline_window_03.yaml).
 El [diseño y las limitaciones](../../../docs/graph03_baseline_6_months_design.md)
 y la [migración de rutas](../../../docs/graph03_script_inventory_and_migration.md)
@@ -155,43 +153,35 @@ En caso de error, queda el último resultado completo y se registra un
 | Graph01 | `01_run_topological_phenotyping/` |
 | Graph02 | `02_graph_representation_sensitivity/` |
 | Graph03 | `03_graph_community_characterization/` |
-| Graph03c | `03_graph_n3_clinical_adjudication/` |
-| Graph03d | `03_graph_n3_resolution_preflight/` |
-| Graph03e y auditoría 03f | `03_graph_n3_baseline_0_to_6m/` |
 | Ejecutor integral | `run_graph_study/` |
 
 Graph01 conserva la jerarquía habitual de figuras, QC y logs bajo `outputs/`
 y de intermedios analíticos bajo `data/analytic/studies/`. Graph02 y Graph03
-publican las figuras junto a las tablas. Los CSV que respaldan las figuras
-llevan el sufijo `_source.csv`.
+publican las figuras bajo `outputs/figures/studies/graph/`. Los CSV que
+respaldan las figuras llevan el sufijo `_source.csv`.
 
 Graph03 comprueba la cohorte, las membresías y el QC de la salida actual de
-Graph02. El ejecutor integral corre Graph02, Graph03 y Graph03e en ese orden y
-publica `graph_study_results_summary.md` con enlaces a los resultados de cada etapa.
+Graph02. El ejecutor integral corre Graph02 y luego Graph03 sobre el release
+recién publicado. `graph_study_results_summary.md` informa el estado y los
+resultados de ambas etapas. Graph01 se ejecuta por separado.
 
 ## Qué ejecuta Graph03
 
 * Flujo de pacientes, denominadores, tabla basal y missingness por comunidad.
-* Roles por representación: definitorias, derivadas de definitorias, anclas
-  independientes y confusores. ESSPRI no valida sus componentes ni ESSDAI/overlap
-  el constructo usado para definir Pop. Los constructos circulares no entran en la
-  tabla de validación independiente.
-* Anclas estimables: Cliff's delta o OR, IC por remuestreo, p exploratorio y FDR
-  por familia de hipótesis. Una característica exige FDR y tamaño mínimo de efecto.
-  Las variables definitorias se describen, sin validación independiente.
-* Correspondencia descriptiva Pop, ARI/NMI y asociaciones incrementales
-  `endpoint ~ Pop + comunidad + ajustes` para endpoints independientes estimables.
-  Son asociaciones dentro de la cohorte; no se anuncian como predicción externa.
+* N1 (`N1_DEFINING`) describe las variables que definieron Mapper. N2
+  (`N2_RELATED`) describe componentes, derivados o constructos relacionados.
+  Ambos conservan roles, linaje y bloqueo de inferencia circular.
+* Contexto Pop descriptivo, con ARI/NMI y denominadores auditados. Los estados
+  inválido, ausente y `Unclassified` se distinguen de la ausencia de comunidad.
+* R0 conserva el papel de referencia congelada. R1, R3 y R4 son comparadores
+  técnicos. R2 conserva su interpretación clínica provisional. Las reglas de
+  supresión y de complemento pueden retener figuras N1/N2 completas.
 * Elegibilidad longitudinal explícita y modelos mixtos parsimoniosos con
   `tiempo × comunidad`, intercepto por paciente y tiempo real irregular posterior
   a la fecha basal congelada. Se comprueban soporte, rango y convergencia.
   Transiciones observadas de Pop son descriptivas, no movimiento por el grafo.
-* Sensibilidad de efectos de anclas a los descubrimientos refitados y congelados
-  en 02, con distribución empírica y consistencia de dirección. Los IC de los
-  modelos siguen siendo condicionales a las etiquetas estimadas; no son intervalos
-  confirmatorios que incorporen toda la selección.
-* MGUS/linfoma/HLA sólo con fuentes y codificaciones exactas aprobadas. Sin ese
-  contrato, quedan explícitamente no estimables. No se entrena proyección externa.
+* Los controles de independencia, estabilidad y soporte siguen aplicándose
+  a los artefactos de compatibilidad. La inferencia N3 queda archivada.
 
 ## Diagnóstico y compatibilidad
 
@@ -325,42 +315,3 @@ Referencias: Josse y Husson, *missMDA* (2016), DOI
 [`missMDA::imputeMFA`](https://search.r-project.org/CRAN/refmans/missMDA/html/imputeMFA.html).
 La validación con enmascaramiento artificial no identifica el mecanismo real de
 missingness; estabilidad técnica no establece validez clínica.
-
-### Graph03 C/D: ejecución autónoma
-
-```bash
-python src/studies/graph/03c_graph_n3_clinical_adjudication.py
-python src/studies/graph/03d_graph_n3_resolution_preflight.py
-```
-
-Graph03c usa los resultados actuales de Graph02 y Graph03. Graph03d incorpora
-el diagnóstico actual de Graph03c. Ambas fases son opcionales para el análisis
-exploratorio. `OBJ1_SJD_ROOT` permite indicar otra raíz para los diagnósticos.
-Graph03d comprueba el soporte de la topología estable de R0 y documenta los
-endpoints pendientes.
-
-### Graph03 E: inferencia condicionada a decisiones humanas
-
-El nuevo contrato `graph03_controlled_n3_v1` añade inventario de esquemas,
-vista basal derivada, decisiones por representación/fuente verificadas por SHA,
-preflight con bloqueos simultáneos y ejecución individualmente condicionada.
-03c/03d conservan su carácter documental. La configuración de producción no
-prescribe ni aprueba outcomes. Consulte
-[`docs/graph03_controlled_inference.md`](../../../docs/graph03_controlled_inference.md)
-para preparación de planes, evidencia institucional, comandos y límites de
-privacidad. No se ha establecido viabilidad inferencial en datos clínicos reales.
-
-### Graph03 G: auditoría integral de preparación de N3
-
-Graph03g comprueba las entradas canónicas de Graph02, Graph03 y Graph03e,
-audita R0–R4 y los cinco desenlaces configurados, y verifica internamente
-la selección de laboratorio y el soporte de los modelos A y B. Genera un
-expediente para la revisión clínica y conserva los diagnósticos protegidos
-en memoria. Ejecuta cero estimadores.
-
-```bash
-/usr/local/Anaconda/envs/py3.10/bin/python \
-  /data/salazarda/data/obj1_sjd/src/studies/graph/03g_graph_n3_model_readiness_audit.py
-```
-
-[Guía de Graph03g](../../../docs/graph03g_model_readiness_audit.md)

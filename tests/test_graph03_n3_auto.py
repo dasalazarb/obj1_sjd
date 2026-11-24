@@ -20,6 +20,8 @@ from tests.test_graph03_n3_calendar_day import calendar_originals, inspection, s
 from tests.test_graph03_n3_controlled import attestations
 from tests.test_graph03_n3_measurement_source import RF, ROOT, originals, paths_before, signed_review
 
+pytestmark = pytest.mark.skip(reason='Archived Graph03 N3 workflow. Run this test at tag graph03-n3-prearchive-2026-11-24.')
+
 
 def write_yaml(path, doc):
     path.write_text(yaml.safe_dump(doc))
