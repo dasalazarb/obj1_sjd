@@ -94,30 +94,43 @@ def _model_support(frame, numeric, policy, cell, *, audit=None):
     if len(y) >= cell and not 0 < int(observed.sum()) - len(y) < cell:
         info['n'] = len(y)
     if audit is not None:
-        audit.update(complete=complete, common=common, community_counts=counts)
+        audit.update(complete=complete, common=common, community_counts=counts, covariates=covariates)
+    cohort_reason = ''
     if len(y) < policy['minimum_complete_cases'] or len(keep) < policy['minimum_groups']:
-        return dict(info, reason='INSUFFICIENT_COMPLETE_CASE_COMMUNITY_SUPPORT'), None
+        cohort_reason = 'INSUFFICIENT_COMPLETE_CASE_COMMUNITY_SUPPORT'
+        if audit is None:
+            return dict(info, reason=cohort_reason), None
     community = frame.loc[common, 'community_id']
+    binary_reason = ''
     if not numeric:
         cells = y.groupby(community).agg(['sum', 'size'])
         if (cells['sum'].lt(policy['minimum_binary_events_per_group']) |
                 (cells['size'] - cells['sum']).lt(policy['minimum_binary_nonevents_per_group'])).any():
-            return dict(info, reason='INSUFFICIENT_BINARY_COMMUNITY_SUPPORT'), None
+            binary_reason = 'INSUFFICIENT_BINARY_COMMUNITY_SUPPORT'
+            if audit is None:
+                return dict(info, reason=binary_reason), None
     support = dict(minimum_model_patients=policy['minimum_complete_cases'],
                    minimum_group_patients=policy['minimum_patients_per_group'],
                    minimum_patients_per_community=policy['minimum_patients_per_group'])
     diagnostics = support_diagnostics(
         y, adjustment, pd.DataFrame(index=y.index), community, 'numeric' if numeric else 'binary',
         support, categories_verified=True, minimum_events_per_parameter=policy['minimum_events_per_parameter'])
-    if audit is not None:
-        audit['designs'] = diagnostics
-    reasons = set()
+    reasons_by_model = {}
     for model in ('A', 'B'):
-        reasons.update(filter(None, diagnostics[model]['support_blocking_reasons'].split('|')))
-        if diagnostics[model]['n_residual_df'] < policy['minimum_residual_degrees_of_freedom']:
+        design = diagnostics[model]
+        reasons = set(filter(None, design['support_blocking_reasons'].split('|')))
+        residual = design['n_residual_df']
+        if residual is not None and residual < policy['minimum_residual_degrees_of_freedom']:
             reasons.add('INSUFFICIENT_RESIDUAL_DF')
-    if reasons:
-        return dict(info, reason='|'.join(sorted(reasons))), None
+        reasons_by_model[model] = reasons
+    if audit is not None:
+        audit.update(designs=diagnostics, reasons_by_model={
+            model: reasons | set(filter(None, (cohort_reason, binary_reason)))
+            for model, reasons in reasons_by_model.items()
+        }, binary_community_blocked=bool(binary_reason))
+    reasons = reasons_by_model['A'] | reasons_by_model['B']
+    if cohort_reason or binary_reason or reasons:
+        return dict(info, reason=cohort_reason or binary_reason or '|'.join(sorted(reasons))), None
     a = _design(adjustment)
     b = pd.concat([a, _design(community.to_frame()).drop(columns='intercept')], axis=1)
     return info, (y, a, b, sorted(community.unique()))

@@ -1,99 +1,85 @@
-# Graph03g: auditoría de independencia y estimabilidad N3
+# Graph03g. Auditoría integral de preparación de N3
 
-Graph03g explica las causas de no estimación de la ruta exploratoria que se
-ejecuta al invocar Graph03e sin argumentos. Conserva las comunidades congeladas
-y cruza tres fuentes de evidencia por representación y desenlace. La primera es
-el linaje de las variables incluidas y el contrato de revisión humana. La
-segunda es la selección de mediciones originales de colección. La tercera es el
-soporte de los diseños A y B en la misma población que usa Graph03e.
-
-## Ejecución
-
-Desde la raíz del repositorio con resultados compatibles de Graph02, Graph03 y
-Graph03e, ejecute el script sin argumentos.
+En Biowulf, ejecute el comando con los resultados canónicos de Graph02, Graph03 y Graph03e disponibles.
 
 ```bash
-python src/studies/graph/03g_graph_n3_model_readiness_audit.py
+/usr/local/Anaconda/envs/py3.10/bin/python \
+  /data/salazarda/data/obj1_sjd/src/studies/graph/03g_graph_n3_model_readiness_audit.py
 ```
 
-La configuración predeterminada audita R0 en modo `summaries` con
-`strict: true`. Usa agregados publicados, metadatos y huellas de los insumos.
+La ejecución usa `secure-recompute` con integridad estricta y audita R0–R4 y los
+cinco desenlaces del protocolo. Descubre las fuentes a través de los contratos
+del repositorio. El proceso devuelve un resumen seguro y un código de salida
+distinto de cero si falla una comprobación de integridad.
 
-En el entorno institucional autorizado, guarde `mode: secure-recompute` en un
-archivo YAML privado y seleccione el archivo al ejecutar el mismo script.
+## Verificaciones
 
-```bash
-GRAPH03G_CONFIG=/ruta/segura/graph03g.yaml python src/studies/graph/03g_graph_n3_model_readiness_audit.py
-```
+- Compara el release y la política temporal con las publicaciones previas
+  y verifica las huellas de los insumos antes y después de la auditoría.
+- Reutiliza el linaje y las membresías congeladas de cada representación.
+  Distingue variables definitorias N1, variables relacionadas N2 y candidatos
+  N3. R2 conserva su alcance exploratorio.
+- Reconstruye la primera medición comparable por paciente desde el día basal
+  hasta seis meses calendario después, inclusive. Audita en memoria las causas
+  de exclusión, las definiciones de ensayo, los empates y las sensibilidades
+  previstas. Concilia las definiciones y los agregados disponibles en Graph03e.
+  La publicación de Graph03e no permite cotejar pares paciente–espécimen.
+  La ausencia de un mapeo reconocido deja pendiente la investigación de
+  variantes que quedan fuera del catálogo de EDA.
+- Compara fechas de selección basal con Step01 y documenta la cobertura
+  longitudinal del contrato de Graph03. La coincidencia por analito y fecha
+  indica posible reutilización. La identidad exacta de la muestra requiere
+  un identificador verificable en ambos contratos.
+- Evalúa en memoria los modelos A (edad, sexo y era basal) y B (con comunidad
+  congelada), con la máscara de casos completos de Graph03e. Calcula soporte,
+  rango, variación, eventos y grados de libertad por modelo. Ejecuta cero
+  estimadores y usa las familias de hipótesis predefinidas. RF cuantitativo
+  tiene prioridad y RF cualitativo es su codificación alternativa. ANA y HEp-2
+  pertenecen a una familia relacionada.
 
-El YAML puede incluir `representation` con un valor de R0 a R4 o `all` para
-evaluar también las sensibilidades. R2 conserva su alcance exploratorio.
-Para una instantánea archivada compatible, indique `graph02_release` (el
-manifiesto), `graph03_run` y `graph03e_dir`. Puede indicar `output_dir` para
-otro destino privado. Las rutas relativas se interpretan desde la carpeta del
-YAML. Las ubicaciones predeterminadas siguen la configuración de Graph03e.
+## Salidas
 
-La auditoría siempre comprueba las huellas publicadas de Graph02 y la política
-temporal. `strict: true` exige además el vínculo documentado a Graph03 en el
-resumen de Graph03e, verifica los pins disponibles y rechaza discrepancias
-entre la cobertura publicada y el recálculo.
-
-## Interpretación
-
-- `graph03e_reason` conserva el motivo efectivo de la ejecución publicada.
-  `structural_independence_classification` evalúa la representación congelada
-  y `approval_gate_status` comprueba el contrato exploratorio vigente. Una
-  clasificación estructural favorable con revisión pendiente sigue bloqueada.
-- Un cero de cobertura se limita a la definición primaria, procedencia original
-  verificada, ventana y membresía del panel. `SUPPRESSED` deja el conteo
-  indeterminado. `NOT_ASSESSABLE_FROM_PUBLISHED_AGGREGATES` señala qué evidencia
-  queda pendiente en el modo de agregados.
-- El recálculo usa las conciliaciones de paciente y episodio de Graph03e, el día
-  calendario original, la ventana cerrada `[t0, t0 + 6 meses calendario]`, las
-  definiciones comparables y la selección original de la primera medición.
-  El embudo distingue fallos de fuente, mapeo, vínculo, ventana, validez y
-  comparabilidad cuando la supresión permite publicar la causa.
-- A incluye edad, sexo y era basal. B añade comunidad congelada. Los dos usan
-  el filtro compartido de casos completos y comunidades de Graph03e. El soporte
-  de rango, variación, balance, eventos y grados de libertad se informa como
-  estados o motivos permitidos por la política. La codificación cuantitativa
-  de RF tiene prioridad sobre la cualitativa. La prioridad definitiva depende
-  de la estimabilidad en Graph03e.
-- `READY_FOR_ESTIMATION` indica que pasaron los controles de preparación
-  evaluados en Graph03g. Graph03e conserva el ajuste y sus diagnósticos, que
-  pueden bloquear un desenlace después del preflight.
-  `STATISTICALLY_PLAUSIBLE_PENDING_REVIEW` requiere soporte comprobado con
-  datos protegidos y sigue sujeto a adjudicación.
-
-La revisión acreditada se incorpora mediante los registros de
-`characterization.independence_reviews` y
-`n3_validation.prespecified_outcomes`, con la misma representación, fuente y
-versión de política. Graph03g indica los campos ausentes sin publicar texto
-libre de los registros. La ruta controlada de Graph03e sigue sus propios
-contratos, firmas y decisiones institucionales.
-[Flujo de inferencia controlada](graph03_controlled_inference.md)
-
-## Archivos y privacidad
-
-Las salidas se escriben en
-`outputs/tables/studies/graph/03_graph_n3_model_readiness_audit/` dentro del
-entorno autorizado. `output_dir` en el YAML permite indicar otro directorio privado y
-separado de los insumos. La escritura se prepara en un directorio privado y
-publica el resumen de finalización al final.
+El directorio canónico es
+`outputs/tables/studies/graph/03_graph_n3_model_readiness_audit/`.
 
 | Archivo | Contenido |
 |---|---|
-| `03g_summary.json` | Política, modo, alcance, huellas de entrada y bloqueos. |
-| `03g_readiness_matrix.csv` | Una fila por representación y desenlace, con bloqueos y decisión. |
-| `03g_independence_lineage.csv` | Linaje estructural y requisitos concretos de revisión. |
-| `03g_measurement_funnel.csv` | Indicadores de fuente, transiciones, cobertura y códigos originales divulgables. |
-| `03g_statistical_support.csv` | Una fila por diseño A o B con motivos y estados de soporte. |
-| `03g_privacy_qc.json` | Política de divulgación y verificación de las salidas. |
-| `03g_RESULTADOS.md` | Interpretación por representación y desenlace. |
+| `03g_summary.json` | Estado, alcance solicitado y política aplicable |
+| `03g_pipeline_checks.csv` | Integridad, disponibilidad y conciliación |
+| `03g_RESULTADOS.md` | Matriz y explicación de bloqueos |
+| `03g_readiness_matrix.csv` | Disposición por representación y desenlace |
+| `03g_independence_lineage.csv` | Linaje estructural y requisitos documentales |
+| `03g_measurement_funnel.csv` | Embudos, procedencia y cobertura divulgable |
+| `03g_source_assay_audit.csv` | Categorías permitidas y alcance temporal y analítico |
+| `03g_statistical_support.csv` | Disposición de A y B y acción de revisión |
+| `03g_review_queue.csv` y `03g_REVIEW_PACKET.md` | Decisiones pendientes y referencias reproducibles |
+| `03g_privacy_qc.json` | Política de publicación aplicada |
 
-La clasificación es `INTERNAL_RESTRICTED` y `public_export=false`. El
-diagnóstico publica evidencia categórica y omite conteos nuevos, valores y
-subgrupos que podrían reconstruirse al cruzar tablas. Se aplican los controles
-de celda mínima y supresión complementaria al publicar las causas. Los
-archivos quedan con permisos `0600` y el directorio con `0700`. Mantenga los
-resultados institucionales fuera de Git y de destinos compartidos.
+## Estados y revisión
+
+- `AUDIT_COMPLETE` indica que se completaron las verificaciones previstas.
+  `AUDIT_COMPLETE_WITH_LIMITATIONS` remite a las limitaciones documentadas,
+  incluidas fuentes ausentes y conclusiones reservadas para revisión autorizada.
+- `AUDIT_FAILED` indica que una dependencia indispensable o una comprobación
+  de integridad bloqueó el uso de los resultados actuales. Consulte el control
+  correspondiente. `PUBLISHED_SELECTION_OR_COVERAGE_DRIFT` señala una
+  discrepancia con Graph03e. Se conserva el diagnóstico estructural disponible.
+- `DATA_UNAVAILABLE` indica que una etapa no dispone de evidencia suficiente
+  para pronunciarse. `ZERO_ELIGIBLE_MEASUREMENTS` se limita a los filtros de
+  la cobertura publicada. `SUPPRESSED` deja la magnitud o el estado indeterminado.
+- `N3_REVIEW_PENDING` requiere adjudicación clínica. Un registro exploratorio
+  compatible se documenta como `CONTRACT_RECORD_PRESENT`. Si existe evidencia
+  firmada de la ruta controlada, Graph03g verifica su alcance y huellas como
+  antecedente documental de ese plan. El equipo habilitado registra las
+  decisiones por el procedimiento institucional vigente.
+- `AUTHORIZED_STATISTICAL_REVIEW_REQUIRED` indica que la factibilidad
+  recalculada de A o B requiere acceso autorizado. El contrato vigente permite
+  trasladar categorías de los agregados publicados y mantiene protegidos los
+  nuevos diagnósticos, incluidos los indicadores de aprobación o fallo.
+  `READY_FOR_03E` queda reservado para una disposición verificable y
+  autorizada. Las fichas requieren una decisión clínica por par candidato.
+
+Las salidas son `INTERNAL_RESTRICTED`, con directorio `0700` y archivos `0600`.
+La escritura es atómica y se realiza bajo bloqueo. Los resultados describen
+una ventana retrospectiva condicionada a comunidades congeladas. Las
+mediciones pueden haber ocurrido después de t0.

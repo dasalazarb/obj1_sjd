@@ -432,7 +432,7 @@ def _empty_outputs(policy):
     return outputs
 
 
-def current_source_inputs(root, *, step10=None, context=None, paths=None):
+def current_source_inputs(root, *, step10=None, context=None, paths=None, btris_files=None):
     """Read the same immutable clinical anchor and original sources for every lab caller."""
     if paths is None:
         _, paths = _source_settings(root)
@@ -447,7 +447,8 @@ def current_source_inputs(root, *, step10=None, context=None, paths=None):
         paths['context'] = Path(context)
     issues = []
     tables = _inputs(paths, issues)
-    btris_files = {role: cal.btris_files(paths[role]) for role in cal.BTRIS_ROLES}
+    if btris_files is None:
+        btris_files = {role: cal.btris_files(paths[role]) for role in cal.BTRIS_ROLES}
     records = _btris_records(btris_files, issues, tables.get('eda_long', pd.DataFrame()))
     return tables, records, issues
 
@@ -579,8 +580,8 @@ def _load_baseline_only(directory):
                                   reason='ONLY_BASELINE_AND_RELEASE_QC_VERIFIED')])
 
 
-def _load_graph02(directory):
-    manifest, release = validate_release(directory / MANIFEST)
+def _load_graph02(directory, *, validated_release=None):
+    manifest, release = validated_release or validate_release(directory / MANIFEST)
     if manifest['schema_version'] != CURRENT_SCHEMA:
         raise ValueError('CURRENT_GRAPH02_REQUIRED')
     artifacts = artifact_paths(manifest)
