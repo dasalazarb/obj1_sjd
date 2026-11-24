@@ -16,7 +16,8 @@ from src.studies.graph.stage03 import s03_n3_model_readiness_audit as G
 from src.studies.graph.stage03 import s03_n3_exploratory as E
 from src.studies.graph.stage03 import s03_n3_exploratory_models as M
 from src.studies.graph.stage03 import s03_n3_exploratory_source as S
-from tests.test_graph03_n3_auto import automatic
+from tests.test_graph03_n3_auto import automatic, run_command, sign
+from tests.test_graph03_n3_controlled import attestations
 from tests.test_graph03_n3_calendar_day import calendar_originals, write_btris
 from tests.test_graph03_n3_measurement_source import originals
 from tests.test_graph03_n3_exploratory import (
@@ -91,7 +92,7 @@ def test_summaries_use_aggregates_and_preserve_published_zero_and_suppression(pu
         G.SUPPRESSED, np.nan, np.nan, np.nan, np.nan)
     coverage.to_csv(coverage_path, index=False)
 
-    assert G.run_audit(repo, mode='summaries', strict=True)['estimators_run'] == 0
+    assert G.run_audit(repo, mode='summaries', representation='R0', strict=True)['estimators_run'] == 0
     matrix = read_output(target, 'readiness_matrix').set_index('outcome')
     assert set(matrix.index) == {RF, RF_TEXT, ANA, HEP2, URINE}
     assert matrix.approval_gate_status.eq('INDEPENDENCE_REVIEW_PENDING').all()
@@ -113,24 +114,40 @@ def test_secure_recompute_is_private_reproducible_and_preserves_inputs(published
     before = paths_before(paths), {path: digest(path) for path in phasee.iterdir() if path.is_file()}
     assert G.run_audit(repo, mode='secure-recompute', representation='all', strict=True)['estimators_run'] == 0
     matrix = read_output(target, 'readiness_matrix').set_index(G.PAIRS)
-    assert matrix.loc['R0', HEP2].source_funnel_status == 'OUTSIDE_0_TO_6M'
+    assert matrix.loc['R0', HEP2].source_funnel_status == 'NO_LINKED_CANDIDATES_IN_PRIMARY_WINDOW'
     assert matrix.loc['R2', RF_TEXT].structural_independence_classification == M.DIRECT
     assert matrix.loc['R2', RF].structural_independence_classification == M.PROXY
     assert matrix.loc['R2', RF].topology_status == 'R2_EXPLORATORY_UNSTABLE'
     assert matrix.loc['R0', RF_TEXT].hypothesis_family == matrix.loc['R0', RF].hypothesis_family
     assert matrix.loc['R0', RF_TEXT].rf_primary_priority == 'QUALITATIVE_IF_NUMERIC_NOT_ESTIMABLE'
-    assert matrix.loc['R0', RF].model_A_support_status == matrix.loc['R0', RF].model_B_support_status == G.PASS
-    assert matrix.loc['R0', RF].readiness_status == 'STATISTICALLY_PLAUSIBLE_PENDING_REVIEW'
+    assert matrix.loc['R0', RF].model_A_support_status == matrix.loc['R0', RF].model_B_support_status == G.SUPPRESSED
+    assert matrix.loc['R0', RF].readiness_status == 'N3_REVIEW_PENDING'
 
     outputs = {path.name: path.read_text() for path in target.iterdir()}
     assert set(outputs) == G.OUTPUT_FILES - {'03g_failure.json'}
     assert target.stat().st_mode & 0o777 == 0o700
     assert all(path.stat().st_mode & 0o777 == 0o600 for path in target.iterdir())
     assert all(not any(secret in contents for secret in ('SYNTHETIC_', '2020-01-01', '2020-07-02', str(repo),
-                                                          'p_incremental', 'n_measured'))
+                                                          'p_incremental', 'n_measured', '/data/salazarda/'))
                for contents in outputs.values())
     summary = json.loads(outputs['03g_summary.json'])
-    assert summary['sha256_before'] == summary['sha256_after']
+    assert summary['frozen_inputs_unchanged'] is True
+    support = read_output(target, 'statistical_support')
+    assert len(support) == 50
+    assert set(support.status) == {G.SUPPRESSED, 'BLOCKED', 'REPRESENTATION_UNAVAILABLE'}
+    assert not support.loc[support.status.eq(G.SUPPRESSED), 'reason'].any()
+    assert 'support_feasible' not in support
+    assert read_output(target, 'pipeline_checks').set_index('check').loc[
+        'MEASUREMENT_RECONCILIATION', 'status'] == 'AGGREGATE_RECONCILED'
+    queue = read_output(target, 'review_queue').set_index(G.PAIRS)
+    assert not queue.index.has_duplicates
+    for column in ('reviewer', 'decision', 'source_reference', 'signature'):
+        assert not queue[column].any()
+    assert 'AUTHORIZED_STATISTICAL_REVIEW_REQUIRED' in queue.loc[('R0', RF), 'actions']
+    assert 'ESSDAI renal' in queue.loc[('R0', URINE), 'clinical_question']
+    assert 'Títulos'.casefold() in queue.loc[('R0', HEP2), 'clinical_question']
+    assert all(not secret in contents for secret in ('03g_config', 'n_complete_case', 'support_feasible')
+               for contents in outputs.values())
     G.run_audit(repo, mode='secure-recompute', representation='all', strict=True)
     assert outputs == {path.name: path.read_text() for path in target.iterdir()}
     assert before == (paths_before(paths), {path: digest(path) for path in phasee.iterdir() if path.is_file()})
@@ -146,24 +163,25 @@ def run_cli(repo, *args, config=None):
     return subprocess.run([sys.executable, str(script), *args], cwd=repo, capture_output=True, text=True, env=env)
 
 
-def test_cli_runs_without_flags_and_selects_secure_settings_from_yaml(published):
+def test_cli_runs_full_audit_without_flags_and_ignores_legacy_environment(published):
     repo, _, _, target = published
-    default = run_cli(repo)
-    assert default.returncode == 0, default.stderr
-    assert json.loads(default.stdout)['mode'] == 'summaries'
+    run = run_cli(repo)
+    assert run.returncode == 0, run.stderr
+    result = json.loads(run.stdout)
+    assert result == dict(status='AUDIT_COMPLETE_WITH_LIMITATIONS', mode='secure-recompute',
+                          representations_requested=['R0', 'R1', 'R2', 'R3', 'R4'], estimators_run=0,
+                          human_review_required=True, privacy_class='INTERNAL_RESTRICTED')
+    assert not run.stderr
     summary = json.loads((target / '03g_summary.json').read_text())
-    assert summary['representations'] == ['R0']
+    assert summary['representations'] == ['R0', 'R1', 'R2', 'R3', 'R4']
     assert summary['strict'] is True
+    matrix = read_output(target, 'readiness_matrix')
+    assert len(matrix) == 25
+    assert set(matrix.outcome) == {RF, RF_TEXT, ANA, HEP2, URINE}
 
-    config = target.parent / 'graph03g.yaml'
-    config.write_text(yaml.safe_dump(dict(mode='secure-recompute', representation='all', output_dir='secure-audit')))
-    secure = run_cli(repo, config=config)
-    assert secure.returncode == 0, secure.stderr
-    assert json.loads(secure.stdout)['mode'] == 'secure-recompute'
-    rows = read_output(config.parent / 'secure-audit', 'readiness_matrix').set_index(G.PAIRS)
-    assert set(rows.index.get_level_values('representation_id')) == {'R0', 'R1', 'R2', 'R3', 'R4'}
-    assert rows.loc['R0', HEP2].source_funnel_status == 'OUTSIDE_0_TO_6M'
-
+    legacy = run_cli(repo, config=repo / 'nonexistent-legacy-config.yaml')
+    assert legacy.returncode == 0
+    assert legacy.stdout == run.stdout
     rejected = run_cli(repo, '--mode', 'summaries')
     assert rejected.returncode == 2
     assert 'sin argumentos' in rejected.stderr
@@ -174,8 +192,7 @@ def test_cli_runs_without_flags_and_selects_secure_settings_from_yaml(published)
     ('release', 'AUDIT_GRAPH03E_ANCESTRY_MISMATCH'),
     ('duplicate', 'AUDIT_DUPLICATE_PUBLISHED_PAIR'),
     ('missing_columns', 'AUDIT_INPUT_SCHEMA_OR_INTEGRITY_ERROR'),
-    ('overlap', 'AUDIT_OUTPUT_OVERLAPS_INPUT'),
-    ('invalid_config', 'AUDIT_INVALID_CONFIG'),
+    ('missing', 'AUDIT_GRAPH03E_ARTIFACT_UNAVAILABLE'),
 ])
 def test_cli_stops_on_tampered_contract_without_echoing_paths(published, change, reason):
     repo, _, phasee, target = published
@@ -190,15 +207,39 @@ def test_cli_stops_on_tampered_contract_without_echoing_paths(published, change,
         df = pd.read_csv(path)
         df = pd.concat([df, df.iloc[[0]]]) if change == 'duplicate' else df.drop(columns='classification')
         df.to_csv(path, index=False)
-    config = None
-    if change in {'overlap', 'invalid_config'}:
-        config = repo / 'graph03g.yaml'
-        settings = {'output_dir': str(phasee)} if change == 'overlap' else {'strict': 'SYNTHETIC_CORRUPT'}
-        config.write_text(yaml.safe_dump(settings))
-    run = run_cli(repo, config=config)
-    assert run.returncode == 1 and reason in run.stderr
+    if change == 'missing':
+        (phasee / '03e_independence_audit.csv').unlink()
+    run = run_cli(repo)
+    assert run.returncode == 1 and json.loads(run.stdout)['reason'] == reason
     assert all(secret not in run.stderr + run.stdout for secret in ('SYNTHETIC_', str(repo)))
-    assert not target.exists()
+    assert json.loads((target / '03g_summary.json').read_text())['status'] == 'AUDIT_FAILED'
+    assert reason in read_output(target, 'pipeline_checks').reason.values
+    matrix = read_output(target, 'readiness_matrix').set_index(G.PAIRS)
+    assert matrix.loc['R2', RF_TEXT].structural_class == M.DIRECT
+
+
+def test_api_rejects_output_overlap(published):
+    repo, _, phasee, _ = published
+    with pytest.raises(G.AuditError, match='AUDIT_OUTPUT_OVERLAPS_INPUT'):
+        G.run_audit(repo, output_dir=phasee)
+
+
+def test_published_coverage_drift_stops_affected_step_and_preserves_lineage(published):
+    repo, _, phasee, target = published
+    path = phasee / '03e_coverage.csv'
+    coverage = pd.read_csv(path)
+    target_pair = (coverage.representation_id.eq('R0') & coverage.outcome.eq(HEP2)
+                   & coverage.provenance.eq(S.ORIGINAL) & coverage.stratum.eq(S.PRIMARY))
+    coverage.loc[target_pair, 'n_measured'] = CELL
+    coverage.to_csv(path, index=False)
+    result = G.run_audit(repo)
+    assert result['status'] == 'AUDIT_FAILED'
+    assert result['reason'] == 'PUBLISHED_SELECTION_OR_COVERAGE_DRIFT'
+    matrix = read_output(target, 'readiness_matrix').set_index(G.PAIRS)
+    assert matrix.loc['R2', RF_TEXT].structural_class == M.DIRECT
+    assert set(matrix.model_A_support_status) == {'INTEGRITY_BLOCKED', 'REPRESENTATION_UNAVAILABLE'}
+    assert not matrix.primary_measurement_status.isin({'ZERO_ELIGIBLE_MEASUREMENTS', 'MEASUREMENTS_OBSERVED'}).any()
+    assert pd.read_csv(path).loc[target_pair, 'n_measured'].iloc[0] == CELL
 
 
 @pytest.mark.parametrize(('total', 'group_two', 'events', 'reason'), [
@@ -225,7 +266,7 @@ def test_support_matches_03e_boundaries(total, group_two, events, reason):
         assert diagnostics['A']['reason'] == diagnostics['B']['reason'] == ''
     else:
         assert ready == (prepared is not None)
-        assert diagnostics['A']['reason'] == diagnostics['B']['reason'] == reason
+        assert all(reason in diagnostics[model]['reason'] for model in ('A', 'B'))
 
 
 def support_frame(total, group_two):
@@ -256,10 +297,11 @@ def test_recompute_unavailable_source_keeps_published_evidence(published, monkey
 
     monkeypatch.setattr(E, 'current_source_inputs', without_eda)
     G.run_audit(repo, mode='secure-recompute', strict=True)
-    rows = read_output(target, 'readiness_matrix').set_index('outcome')
-    assert rows.loc[HEP2, 'primary_measurement_status'] == 'ZERO_ELIGIBLE_MEASUREMENTS'
-    assert rows.source_funnel_status.eq('SOURCE_SCHEMA_UNAVAILABLE').all()
-    assert rows.loc[RF, 'model_A_support_status'] == G.UNKNOWN
+    rows = read_output(target, 'readiness_matrix').set_index(G.PAIRS)
+    assert rows.loc['R0', HEP2].primary_measurement_status == 'ZERO_ELIGIBLE_MEASUREMENTS'
+    assert rows.loc['R0', RF].model_A_support_status == G.UNAVAILABLE
+    assert rows.loc['R0', RF].data_availability_status == G.UNAVAILABLE
+    assert read_output(target, 'pipeline_checks').set_index('check').loc['eda_long', 'status'] == G.UNAVAILABLE
 
 
 @pytest.mark.parametrize(('source', 'changes', 'stage', 'original'), [
@@ -314,7 +356,7 @@ def test_funnel_distinguishes_empty_source_and_suppresses_small_complements(cale
                for row in rows)
 
 
-def test_reviewed_direct_outcome_still_descriptive_and_eligible_pair_ready(published):
+def test_contract_review_is_recorded_without_disclosing_fit_readiness(published):
     repo, _, _, target = published
     config = repo / E.CONFIGS / E.VALIDATION
     validation = yaml.safe_load(config.read_text())
@@ -328,8 +370,107 @@ def test_reviewed_direct_outcome_still_descriptive_and_eligible_pair_ready(publi
     config.write_text(yaml.safe_dump(validation))
     G.run_audit(repo, mode='secure-recompute', representation='all', strict=True)
     rows = read_output(target, 'readiness_matrix').set_index(G.PAIRS)
-    assert rows.loc['R0', RF].readiness_status == 'READY_FOR_ESTIMATION'
+    assert rows.loc['R0', RF].readiness_status == 'N3_REVIEW_RECORDED_READINESS_UNVERIFIED'
+    assert rows.loc['R0', RF].review_status == 'CONTRACT_RECORD_PRESENT'
     assert rows.loc['R0', RF].graph03e_reason == 'INDEPENDENCE_REVIEW_PENDING'
     assert rows.loc['R2', RF_TEXT].approval_gate_status == G.PASS
     assert rows.loc['R2', RF_TEXT].readiness_status == 'N1_DESCRIPTIVE'
     assert 'SYNTHETIC_PRIVATE_PATH' not in (target / '03g_independence_lineage.csv').read_text()
+
+
+
+def test_one_community_and_model_b_rank_deficiency_are_distinct():
+    single = support_frame(30, 0)
+    private = {}
+    G._support(single, True, POLICY['models'], CELL, True, private=private)
+    assert all('INSUFFICIENT_COMMUNITIES' in item['reasons'] for item in private.values())
+    frame = support_frame(30, 15)
+    frame['demo__sex'] = frame.community_id.map({'1': 'female', '2': 'male'})
+    diagnostics, ready = G._support(frame, True, POLICY['models'], CELL, False)
+    assert not ready
+    assert diagnostics['A']['status'] == G.PASS
+    assert diagnostics['B']['reason'] == 'RANK_DEFICIENT_DESIGN'
+
+
+def test_binary_event_parameter_rules_are_diagnosed_under_suppression():
+    frame = support_frame(30, 15)
+    frame['demo__sex'] = ['male', 'female'] * 15
+    frame['value'] = ([0, 1] * 15)
+    private = {}
+    public, ready = G._support(frame, False, POLICY['models'], CELL, True, private=private)
+    assert not ready
+    assert all(public[model]['status'] == G.SUPPRESSED and not public[model]['reason'] for model in ('A', 'B'))
+    assert all(private[model]['support_computed'] for model in ('A', 'B'))
+    assert private['A']['n_parameters'] == 3
+    assert private['B']['n_parameters'] == 4
+    assert 'INSUFFICIENT_EVENTS_PER_PARAMETER' not in private['A']['reasons']
+    assert 'INSUFFICIENT_EVENTS_PER_PARAMETER' in private['B']['reasons']
+
+
+def test_publication_independent_of_new_protected_support_results(published, monkeypatch):
+    repo, _, _, target = published
+    call = G._support
+    G.run_audit(repo)
+    before = {path.name: path.read_bytes() for path in target.iterdir()}
+
+    def with_different_support(frame, numeric, policy, cell, protected, **kwargs):
+        changed = frame.assign(demo__age_at_baseline='SYNTHETIC_PRIVATE_COVARIATE')
+        return call(changed, numeric, policy, cell, protected, **kwargs)
+
+    monkeypatch.setattr(G, '_support', with_different_support)
+    G.run_audit(repo)
+    assert before == {path.name: path.read_bytes() for path in target.iterdir()}
+
+
+def test_raw_source_error_is_never_exposed(published, monkeypatch):
+    repo, _, _, target = published
+
+    def raw_error(*args, **kwargs):
+        raise ValueError(f'{repo}/SYNTHETIC_PATIENT_PRIVATE_VALUE')
+
+    monkeypatch.setattr(E, 'current_source_inputs', raw_error)
+    result = G.run_audit(repo)
+    assert result['reason'] == 'AUDIT_INPUT_SCHEMA_OR_INTEGRITY_ERROR'
+    assert all('SYNTHETIC_PATIENT_PRIVATE_VALUE' not in path.read_text() and str(repo) not in path.read_text()
+               for path in target.iterdir())
+
+
+def test_consume_only_verified_existing_controlled_review(published, automatic, tmp_path):
+    from src.studies.graph.stage03 import s03_n3_controlled as controlled
+
+    repo, paths, _, target = published
+    private = automatic[2]
+    inference = private / 'institution' / 'inference'
+    decisions = inference / 'decisions'
+    decisions.mkdir(parents=True)
+    (private / 'trust').mkdir(exist_ok=True)
+    context = E._source_settings(repo)[1]['context']
+    reviewed = private / 'stages' / 'build-reviewed' / 'synthetic' / 'source' / 'runs' / 'synthetic'
+    reviewed.mkdir(parents=True)
+    measurements = reviewed / 'reviewed_instrument_measurements.parquet'
+    pd.DataFrame({'synthetic': []}).to_parquet(measurements)
+    plan = yaml.safe_load((repo / E.CONFIGS / 'n3_controlled_inference.yaml').read_text())
+    spec = dict(representation_id='R0', source_column=RF, requested_models=['A', 'B'],
+                n1_basis=[], use_pop=False, topology_scope='full', model_family='gaussian_ols',
+                hypothesis_family='rheumatoid_factor')
+    plan.update(outcomes=[spec], authorized_reviewers=['SYNTHETIC_ONLY_REVIEWER'], decisions=[],
+                input_sha256=controlled.input_pins(paths['graph03_run'], paths['graph02_release'],
+                                                   context, measurements, repo))
+    attestations(decisions, plan, spec)
+    plan['decisions'] = [item for item in plan['decisions'] if item['section'] == 'independence']
+    plan_path = inference / 'active.yaml'
+    plan_path.write_text(yaml.safe_dump(plan))
+    key, signature = tmp_path / 'review-private.pem', inference / 'active.sig'
+    run_command('openssl', 'genpkey', '-algorithm', 'RSA', '-pkeyopt', 'rsa_keygen_bits:2048', '-out', str(key))
+    run_command('openssl', 'pkey', '-in', str(key), '-pubout', '-out', str(private / 'trust' / 'pair_public.pem'))
+    sign(plan_path, signature, key)
+    G.run_audit(repo)
+    queue = read_output(target, 'review_queue').set_index(G.PAIRS)
+    assert queue.loc['R0', RF].controlled_review_evidence == 'CONTROLLED_RECORD_CONTENT_VERIFIED'
+    assert queue.loc['R0', RF].review_status == 'PENDING'
+    assert not queue.signature.any()
+    assert 'SYNTHETIC_ONLY_REVIEWER' not in (target / '03g_REVIEW_PACKET.md').read_text()
+    signature.write_bytes(b'synthetic invalid signature')
+    G.run_audit(repo)
+    queue = read_output(target, 'review_queue').set_index(G.PAIRS)
+    assert queue.loc['R0', RF].controlled_review_evidence == 'PENDING'

@@ -350,22 +350,17 @@ prescribe ni aprueba outcomes. Consulte
 para preparación de planes, evidencia institucional, comandos y límites de
 privacidad. No se ha establecido viabilidad inferencial en datos clínicos reales.
 
-### Graph03 G: auditoría de independencia y estimabilidad
+### Graph03 G: auditoría integral de preparación de N3
 
-El flujo documental es 03c → 03d → 03f/03e → 03g. 03c organiza la adjudicación,
-03d resuelve dependencias y soporte del preflight, 03f audita la fuente
-original y 03e genera los perfiles exploratorios. 03g cruza el linaje y la
-revisión humana con la cobertura y el soporte de A/B, sin ajustar modelos.
+Graph03g comprueba las entradas canónicas de Graph02, Graph03 y Graph03e,
+audita R0–R4 y los cinco desenlaces configurados, y verifica internamente
+la selección de laboratorio y el soporte de los modelos A y B. Genera un
+expediente para la revisión clínica y conserva los diagnósticos protegidos
+en memoria. Ejecuta cero estimadores.
 
 ```bash
-python src/studies/graph/03f_build_n3_measurement_source.py
-python src/studies/graph/03e_graph_n3_controlled_inference.py
-python src/studies/graph/03g_graph_n3_model_readiness_audit.py
+/usr/local/Anaconda/envs/py3.10/bin/python \
+  /data/salazarda/data/obj1_sjd/src/studies/graph/03g_graph_n3_model_readiness_audit.py
 ```
 
-Graph03g audita los agregados de R0 por defecto. En el entorno institucional,
-seleccione un YAML con `mode: secure-recompute` mediante `GRAPH03G_CONFIG` para
-localizar las pérdidas del embudo y verificar los casos completos en memoria. Un cero
-publicado describe la cobertura elegible del panel. La cobertura suprimida
-deja el tamaño indeterminado.
 [Guía de Graph03g](../../../docs/graph03g_model_readiness_audit.md)

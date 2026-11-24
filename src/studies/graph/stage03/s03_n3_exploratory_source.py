@@ -356,7 +356,7 @@ class Outcome:
     sensitivities: dict
 
 
-def _outcome(candidates, source, policy):
+def _outcome(candidates, source, policy, *, audit=None):
     """Resolve validity and exact test definitions before choosing one day per patient."""
     rows = candidates.loc[candidates.canonical_analyte.eq(LAB_SOURCES[source])].copy()
     raw, operator = _clean(rows.result_raw), _clean(rows.result_operator)
@@ -393,6 +393,22 @@ def _outcome(candidates, source, policy):
          'NOT_EXACT_NUMERIC_RESULT' if numeric else 'UNKNOWN_RESULT_TOKEN',
          'INVALID_RESULT', 'ORIGINAL_TEST_DEFINITION_UNAVAILABLE', 'NUMERIC_UNIT_UNAVAILABLE'],
         default='')
+    if audit is not None:
+        conditions = {
+            'MAPPING_RECOGNIZED': rows.mapping_candidate,
+            'IDENTITY_VERIFIED': rows.identity_status.isin(LINKED),
+            'COLLECTION_VERIFIED': rows.provenance.eq(ORIGINAL),
+            'TEMPORALLY_ELIGIBLE': rows.stratum.eq(PRIMARY),
+            'CENSORED_RESULT': censored,
+            'ADMINISTRATIVE_RESULT': admin,
+            'NOT_EXACT_NUMERIC_RESULT' if numeric else 'UNKNOWN_RESULT_TOKEN': bad_value,
+            'RESULT_VALID': ~(censored | admin | bad_value) & rows.eda_result_valid,
+            'ASSAY_DEFINITION_UNAVAILABLE': missing_definition,
+            'NUMERIC_UNIT_UNAVAILABLE': bad_unit,
+            'ASSAY_DEFINITION_PRESENT': ~(missing_definition | bad_unit),
+        }
+        audit['patient_categories'] = {key: rows.loc[mask, '_patient_match'].nunique()
+                                       for key, mask in conditions.items()}
     valid = rows.loc[rows.first_reason.eq('')].copy()
     partitions = ['stratum', 'provenance']
     assay_fields = DEFINITION[:-1]
@@ -433,6 +449,12 @@ def _outcome(candidates, source, policy):
         definition = min(coverage.index, key=lambda key: (-coverage[key], key))
         primary[partition] = cal.fingerprint(definition)
 
+    if audit is not None:
+        audit['ambiguous_same_day_patients'] = rows.loc[on_day.index[conflict], '_patient_match'].nunique()
+        audit['unit_conflict_patients'] = rows.loc[unit_conflict.index[unit_conflict], '_patient_match'].nunique()
+        audit['primary_definition_ties'] = sum(
+            int(counts.eq(counts.max()).sum()) > 1 for counts in (
+                group.groupby('definition').patient_id.nunique() for _, group in selected.groupby(partitions)))
     main_definition = primary.get((PRIMARY, ORIGINAL))
     pool = valid.loc[valid.stratum.eq(PRIMARY) & valid.provenance.eq(ORIGINAL) &
                      valid.definition_id.eq(main_definition)]
