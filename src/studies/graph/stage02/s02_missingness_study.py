@@ -47,7 +47,8 @@ def cache_signature(raw,registry,baseline,identifier,policy,config,config_hash,s
 
 
 def run_missingness_study(results,registry,manifest,baseline,families,config,cfg,run_dir,lab_groups,feature_to_lab,
-                          source_hash="", *, figure_dir=None, figure_prefix=None):
+                          source_hash="", *, figure_dir=None, figure_prefix=None,
+                          historical_audit=None, graph_experiments=(), source_hashes=None):
     policy=cfg.get('missingness_methods',{})
     if not policy.get('enabled',False): return {'enabled':False,'experiments':[],'artifacts':[]}
     if policy.get('schema_version')!='graph_missingness_methods_v1': raise ValueError('UNKNOWN_MISSINGNESS_PROTOCOL')
@@ -63,7 +64,7 @@ def run_missingness_study(results,registry,manifest,baseline,families,config,cfg
         'imputation_attempts','imputation_by_type','imputation_rank_summary','iterative_method_audit',
         'sparse_graph_registry','sparse_graph_support_summary','sparse_graph_stability','sparse_graph_comparisons',
         'sparse_graph_refits','focal_fix_qc']}
-    spaces={}; experiments=[]
+    spaces={}; experiments=[]; factorial_comparators={}
     # Audit every historical panel, including Gower. Failures are explicit and
     # cannot change a historical space or R0's release gate.
     for identifier,item in results.items():
@@ -178,6 +179,9 @@ def run_missingness_study(results,registry,manifest,baseline,families,config,cfg
                         distance_policy=dict(policy[method_name])
                         if parameter is not None: distance_policy['minimum_shared_weight_fraction']=parameter
                         evidence=observed_distance(raw,registry,reference,distance_policy,baseline)
+                        if parameter is None:
+                            factorial_comparators[identifier] = dict(mapped=None, distance=evidence.distance,
+                                panel_hash=panel.fingerprint)
                         tables['distance_support_summary'].append(dict(experiment_id=experiment,analysis_role='sensitivity',**evidence.summary))
                         tables['pairwise_support_internal'].extend(dict(experiment_id=experiment,**r) for r in evidence.support.to_dict('records'))
                     tables['panel_comparability'].append(dict(experiment_id=experiment,reference_id=reference,
@@ -271,6 +275,10 @@ def run_missingness_study(results,registry,manifest,baseline,families,config,cfg
                     evidence=observed_distance(raw,registry,reference,policy['observed_pairwise_distance'],baseline)
                     graph=build_sparse_graph(evidence,list(range(n)),graph_policy,k=k,seed=seed,panel_hash=panel.fingerprint)
                     stats=graph.summary
+                    if main:
+                        factorial_comparators[identifier] = dict(
+                            mapped=graph.mapped if stats['status']=='COMPLETE' else None,
+                            distance=evidence.distance, panel_hash=panel.fingerprint)
                     tables['sparse_graph_support_summary'].append(dict(experiment_id=experiment,reference_id=reference,**stats))
                     success=0; comparison={}
                     if stats['status']=='COMPLETE':
@@ -357,8 +365,15 @@ def run_missingness_study(results,registry,manifest,baseline,families,config,cfg
             'n_valid_pair_distances','n_connected','n_successful_refits','estimator','panel_hash'])+' |')
     (run_dir/'02_graph_missingness_focal_fix_summary.md').write_text('\n\n'.join(focal)+'\n')
     artifacts=sorted({p.name for p in run_dir.glob('02_graph_missingness_*') if p.is_file()} | set(figures))
+    from .s02_factorial_study import run_factorial
+    factorial_comparators.update({identifier: dict(**result, distance=result['space'].distance,
+        panel_hash=getattr(result['space'], 'missingness_audit', {}).get('panel_hash', ''))
+        for identifier, result in spaces.items() if '/' not in identifier})
+    factorial = run_factorial(results, registry, manifest, baseline, families, config, cfg, run_dir,
+        lab_groups, feature_to_lab, historical_audit or [], factorial_comparators,
+        graph_experiments, figure_dir, figure_prefix or Path('.'), source_hashes or {})
     return dict(enabled=True,schema_version=policy['schema_version'],estimator_version=policy['estimator_version'],
         analysis_role='sensitivity',references=policy['references'],panel_policy='frozen_reference_sources_and_patients',
-        graph03_defining=False,experiments=experiments,artifacts=artifacts,
+        graph03_defining=False,experiments=experiments,artifacts=artifacts,factorial=factorial,
         statuses={r['experiment_id']:dict(status=r['status'],reason=r['reason']) for r in tables['method_registry']},
         counts={status:sum(r['status']==status for r in primary) for status in ['COMPLETE','FAILED','NOT_ESTIMABLE']})

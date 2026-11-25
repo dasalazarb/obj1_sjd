@@ -127,3 +127,17 @@ def validate_release(path, *, expected_sha=None, baseline_only=False):
             if item.get('shareable_export_allowed') is not False:
                 raise ValueError('Graph02 artifact export requires publication review')
     return manifest,path
+
+
+def validate_factorial_inventory(factorial, defining_ids, staged_paths):
+    """Validate the additive sensitivity at publication, without altering release readers."""
+    if (factorial['analysis_role']!='sensitivity' or factorial['graph03_defining'] is not False
+            or set(factorial['statuses']) & set(defining_ids)):
+        raise ValueError('FACTORIAL_SENSITIVITY_CANNOT_DEFINE_GRAPH03')
+    hashes = factorial['sha256_by_artifact']
+    files = dict(staged_paths)
+    if set(factorial['artifacts'])!=set(hashes):
+        raise ValueError('INCOMPLETE_FACTORIAL_ARTIFACT_INVENTORY')
+    for artifact, expected in hashes.items():
+        if artifact not in files or digest(files[artifact])!=expected:
+            raise ValueError('FACTORIAL_ARTIFACT_SHA_MISMATCH')

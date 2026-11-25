@@ -117,3 +117,121 @@ def observation_summary(panel):
                 instrument_id=unit.instrument_id,n_source_variables=unit.n_source_variables,n_encoded_columns=unit.n_encoded_columns,
                 source_columns='|'.join(unit.sources),availability_origin='original_baseline_before_imputation'))
     return rows
+
+
+# Only explicit upstream codes carry a reason. In particular, "not_requested"
+# alone does not say why the test was not requested.
+REASON_CODES = {
+    'not_requested_clinical_indication': 'clinical_documented',
+    'clinical_not_requested': 'clinical_documented',
+    'not_scheduled_by_protocol': 'administrative',
+    'not_scheduled_by_era': 'administrative',
+    'not_scheduled_for_visit_type': 'administrative',
+    'protocol_not_scheduled': 'administrative',
+    'administrative': 'administrative',
+    'structural': 'structural',
+    'not_applicable': 'structural',
+    'partial': 'partial',
+    'uninterpretable': 'invalid',
+    'invalid': 'invalid',
+    'outside_window': 'outside_window',
+}
+
+
+@dataclass
+class ReasonPanel:
+    observation: ObservationPanel
+    cells: pd.DataFrame
+    eligible: pd.DataFrame
+    valid: pd.DataFrame
+    masks: dict
+    fingerprint: str
+
+
+def classify_panel(raw, registry, reference, baseline, date_column='clinical_anchor_date'):
+    """Read typed reasons and retain per-source evidence before reconstruction."""
+    if not raw.index.equals(baseline.index):
+        raise ValueError('BASELINE_PANEL_INDEX_MISMATCH')
+    panel = build_panel(raw, registry, reference, baseline, date_column)
+    meta = panel_metadata(raw, registry, reference)
+    eligible = pd.DataFrame(False, index=raw.index, columns=raw.columns)
+    valid = raw.notna()
+    source_reasons = {}
+    cells = []
+    for lineage in panel.lineage.itertuples(index=False):
+        source = lineage.source_column
+        columns = meta.index[meta.source_column.eq(source)]
+        available = raw[columns].notna()
+        observed = available.any(axis=1)
+        reason = pd.Series('unknown', index=raw.index)
+        evidence = pd.Series('', index=raw.index)
+        original_state = pd.Series(np.where(observed, 'observed', 'missing'), index=raw.index)
+        stem = source.rsplit('__', 1)[0] if source.startswith('lab__') and source.endswith(('__value','__text')) else source
+        if source in baseline:
+            token = baseline[source].astype('string').str.strip().str.lower()
+            explicit = token.map(REASON_CODES)
+            original_state = token.where(explicit.notna(), original_state)
+            reason = explicit.where(explicit.notna(), reason)
+            evidence = (source+'='+token).where(explicit.notna(), evidence)
+        fields = [stem+'__observation_status', stem+'_status', stem+'__missingness_reason',
+                  source+'__observation_status', source+'_status', source+'__missingness_reason']
+        for field in dict.fromkeys(fields):
+            if field not in baseline:
+                continue
+            token = baseline[field].astype('string').str.strip().str.lower()
+            if not field.endswith('__missingness_reason'):
+                original_state = token.where(token.notna(), original_state)
+            mapped = token.map(REASON_CODES)
+            conflict = reason.eq('conflicting_evidence') | (mapped.notna() & evidence.ne('') & mapped.ne(reason))
+            reason = mapped.where(mapped.notna(), reason).mask(conflict, 'conflicting_evidence')
+            evidence = (field+'='+token).where(mapped.notna(), evidence).mask(conflict, 'conflicting_companion_codes')
+        disallowed = reason.isin(['invalid', 'outside_window', 'conflicting_evidence'])
+        contradicts = observed & (disallowed | reason.isin(['clinical_documented', 'administrative', 'structural']))
+        reason = reason.mask(observed & reason.eq('unknown'), 'observed').mask(contradicts, 'contradiction')
+        target = reason.isin(['unknown', 'clinical_documented', 'partial', 'observed'])
+        eligible[columns] = (~available).mul(target, axis=0)
+        valid[columns] = available.mul(~contradicts, axis=0)
+        source_reasons[source] = reason
+        row = meta.loc[columns[0]]
+        timestamp = next((column for column in (row.get('measurement_date_column'), stem+'__measurement_date',
+                                                 stem+'_measurement_date') if isinstance(column,str) and column in baseline), None)
+        cells.append(pd.DataFrame({
+            'patient_key': baseline.patient_id if 'patient_id' in baseline else raw.index,
+            'index_date': baseline[date_column] if date_column in baseline else pd.NaT,
+            'source_column': source, 'observation_unit': lineage.observation_unit,
+            'semantic_feature_id': row.get('semantic_feature_id', source),
+            'derivation_group': row.get('derivation_group', source),
+            'instrument_id': row.get('instrument_id', 'UNKNOWN'),
+            'family': row.get('technical_family', row.get('family', 'UNKNOWN')),
+            'domain': row.clinical_domain, 'subdomain': row.get('subdomain', 'UNKNOWN'),
+            'original_observation_state': original_state, 'reason_class': reason,
+            'reason_evidence': evidence,
+            'reason_confidence': np.select([evidence.ne('').to_numpy(dtype=bool), reason.eq('observed').to_numpy(dtype=bool)],
+                                           ['explicit_code','observed_source'],
+                                           default='unverified'),
+            'eligible_to_measure': target.astype('boolean').mask(reason.eq('unknown')),
+            'eligible_to_impute': eligible[columns].any(axis=1),
+            'observed_value_valid': valid[columns].any(axis=1),
+            'source_timestamp': baseline[timestamp] if isinstance(timestamp, str) and timestamp in baseline else pd.NaT,
+            'provenance': row.get('provenance', source),
+        }))
+    masks = {name: pd.DataFrame(index=raw.index) for name in
+             ('clinical_documented', 'clinical_plus_unknown', 'administrative_only', 'unknown_only')}
+    for unit, row in panel.metadata.iterrows():
+        reason = pd.concat([source_reasons[source] for source in row.sources], axis=1)
+        observed = reason.eq('observed').all(axis=1)
+        clinical = reason.eq('clinical_documented').all(axis=1)
+        uncertain = reason.isin(['unknown', 'partial', 'invalid']).all(axis=1)
+        administrative = reason.isin(['administrative', 'structural']).all(axis=1)
+        if not row.administrative:
+            masks['clinical_documented'][unit] = np.select([observed, clinical], [0., 1.], default=np.nan)
+            masks['clinical_plus_unknown'][unit] = np.select([observed, clinical, uncertain], [0., 1., 2.], default=np.nan)
+            masks['unknown_only'][unit] = np.select([observed, uncertain], [0., 1.], default=np.nan)
+        masks['administrative_only'][unit] = np.select([observed, administrative], [0., 1.], default=np.nan)
+    # Keep the historical all-state definition as its own explicit comparator.
+    masks['legacy_states'] = panel.states.loc[:, ~panel.metadata.administrative].copy()
+    frame = pd.concat(cells, ignore_index=True)
+    state_hash = pd.util.hash_pandas_object(frame[['patient_key', 'index_date', 'source_column',
+                                                   'reason_class', 'reason_evidence']], index=False)
+    signature = hashlib.sha256(panel.fingerprint.encode() + state_hash.to_numpy().tobytes()).hexdigest()
+    return ReasonPanel(panel, frame, eligible, valid, masks, signature)

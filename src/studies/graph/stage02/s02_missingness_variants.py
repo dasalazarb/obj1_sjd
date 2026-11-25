@@ -80,3 +80,107 @@ def build_variant(identifier,raw,families,config,registry,manifest,baseline,lab_
     if space.features!=list(raw): raise ValueError('FIXED_PANEL_MISMATCH')
     space.missingness_audit=audit
     return space,audit
+
+
+def supported_mask(reasons, reference, layer, policy, *, states=None):
+    """Pair denominators count comparable opportunities, weighted by the fixed panel."""
+
+    states = reasons.masks[layer] if states is None else states
+    meta = reasons.observation.metadata.loc[states.columns]
+    top = 'clinical_domain' if reference == 'R2' else 'family'
+    n = len(states)
+    numerator, denominator = np.zeros((n, n)), np.zeros((n, n))
+    domain_support = {}
+    varying = False
+    for _, group in meta.groupby(top, sort=True):
+        parts = list(group.groupby('subdomain', sort=True)) if reference == 'R2' else [('family', group)]
+        for _, part in parts:
+            weight = 1/(meta[top].nunique()*len(parts)*len(part))
+            for unit, row in part.iterrows():
+                values = states[unit].to_numpy()
+                measured = pd.notna(values)
+                comparable = measured[:, None] & measured[None, :]
+                varying |= states[unit].nunique() > 1
+                denominator += weight*comparable
+                numerator += weight*(comparable & (values[:, None]!=values[None, :]))
+                if row.clinical_domain not in ('UNMAPPED', 'D09'):
+                    domain = domain_support.setdefault(row.clinical_domain, np.zeros((n, n), dtype=bool))
+                    domain |= comparable
+    domains = sum(domain_support.values(), start=np.zeros((n, n), dtype=int))
+    supported = (domains >= policy['minimum_shared_domains']) & (
+        denominator + 1e-12 >= policy['minimum_shared_weight_fraction'])
+    distance = np.divide(numerator, denominator, out=np.full_like(numerator, np.nan), where=supported)
+    np.fill_diagonal(distance, 0.)
+    upper = np.triu_indices(n, 1)
+    pairs = int(supported[upper].sum())
+    audit = dict(mask_layer=layer, n_units=len(meta), n_patients=n, n_pairs=len(upper[0]), n_supported_pairs=pairs,
+                 shared_weight_min=float(denominator[upper].min()) if len(upper[0]) else np.nan,
+                 shared_domains_min=int(domains[upper].min()) if len(upper[0]) else 0,
+                 minimum_shared_domains=policy['minimum_shared_domains'],
+                 minimum_shared_weight_fraction=policy['minimum_shared_weight_fraction'])
+    reason = ('NO_DOCUMENTED_CLINICAL_DISAGREEMENT' if layer=='clinical_documented' else 'NO_MASK_DISAGREEMENT') if not varying else (
+        'INCOMPLETE_COMPARABLE_MASK_PAIRS' if pairs!=len(upper[0]) else '')
+    return distance, denominator, domains, {**audit, 'status': 'NOT_ESTIMABLE' if reason else 'COMPLETE', 'reason': reason}
+
+
+def classical_lens(distance):
+    if (not np.isfinite(distance).all() or np.any(distance < 0)
+            or not np.allclose(distance, distance.T) or not np.allclose(np.diag(distance), 0.)):
+        raise NotEstimable('INVALID_OR_INCOMPLETE_DISSIMILARITY')
+    squared = distance**2
+    gram = -.5*(squared-squared.mean(axis=0)-squared.mean(axis=1)[:, None]+squared.mean())
+    eigenvalues, vectors = np.linalg.eigh(gram)
+    tolerance = np.finfo(float).eps*len(distance)*max(1., np.max(np.abs(eigenvalues)))
+    positive = np.flatnonzero(eigenvalues>tolerance)
+    negative = eigenvalues[eigenvalues < -tolerance]
+    if len(positive)<2:
+        raise NotEstimable('MDS_LENS_INSUFFICIENT_POSITIVE_RANK')
+    order = positive[-2:][::-1]
+    lens = vectors[:, order]*np.sqrt(eigenvalues[order])
+    upper = np.triu_indices(len(distance), 1)
+    stress = np.linalg.norm((pairwise_distances(lens)-distance)[upper])/np.linalg.norm(distance[upper])
+    return lens, dict(positive_rank=len(positive), n_negative_eigenvalues=len(negative),
+                      negative_inertia_fraction=float(-negative.sum()/np.abs(eigenvalues).sum()),
+                      lens_relative_stress=float(stress), eigenvalues='|'.join(map(str, eigenvalues[::-1])))
+
+
+def factorial_mds(base, *, mask=None, weight=0., lens_only=False):
+    from .s02_representations import Space
+    if not 0<=weight<=1:
+        raise ValueError('INVALID_MASK_WEIGHT')
+    if weight == 0 and not lens_only:
+        return base, dict(reference_identity=True, mask_weight=0.)
+    upper = np.triu_indices(len(base.raw), 1)
+    if lens_only:
+        distance = base.distance
+        audit = {}
+    else:
+        rms = np.sqrt(np.mean(base.distance[upper]**2))
+        if not np.isfinite(rms) or rms<=0:
+            raise NotEstimable('ZERO_CLINICAL_DISTANCE_SCALE')
+        clinical_component = (1-weight)*(base.distance/rms)**2
+        mask_component = weight*mask
+        distance = np.sqrt(clinical_component+mask_component)
+        audit = dict(clinical_rms=float(rms), values_squared_energy=float(clinical_component[upper].mean()),
+                     mask_squared_energy=float(mask_component[upper].mean()))
+    lens, lens_audit = classical_lens(distance)
+    method = 'clinical_distance_MDS_control' if lens_only else 'clinical_values_plus_observation_MDS'
+    return Space(base.raw, lens, distance, distance, base.weights, method, base.features), {
+        **audit, **lens_audit, 'mask_weight': weight,
+    }
+
+
+def reconstructed_space(reference, original, completed, families, config, registry, manifest,
+                        baseline, lab_groups, feature_to_lab, method):
+    from .s02_representations import build_space
+    if (not original.index.equals(completed.index) or list(original)!=list(completed)
+            or not np.isfinite(completed.to_numpy()).all()):
+        raise ValueError('INVALID_COMPLETED_FIXED_PANEL')
+    space = build_space(reference, completed, families, config, registry, manifest,
+                        baseline, lab_groups, feature_to_lab)
+    if space.features != list(original):
+        raise ValueError('FIXED_PANEL_MISMATCH')
+    space.raw = original
+    space.method = reference+'_'+method
+    space.weights = space.weights.assign(imputation=method)
+    return space

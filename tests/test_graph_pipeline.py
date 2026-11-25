@@ -67,6 +67,10 @@ def configuration(tmp_path):
         if name=='missingness_methods':
             data['resampling'].update(main_subsampling_replicates_per_variant=2,iterative_bootstrap_replicates=2,parameter_sensitivity_subsampling_replicates=2)
             data['iterative_regularized'].update(masked_validation_repeats=2)
+            factorial = data['factorial_missingness_v3']
+            factorial['resampling'].update(main_subsamples=2, main_bootstrap=2, parameter_subsamples=2)
+            factorial['validation'].update(repeats=2, tuning_repeats=1, patient_ci_replicates=49)
+            factorial['uncertainty'].update(draws=2)
         if name=='validation':
             from tests.test_graph03_episode_resolution import synthetic_policy
             data=synthetic_policy(data,['clinical_episode_id'])
@@ -658,6 +662,12 @@ def test_transversal_variants_preserve_scientific_artifacts_and_graph03(configur
     assert suite['graph03_defining'] is False and manifest['primary_reference_id']=='R0'
     assert not set(suite['statuses'])&set(manifest['eligible_representation_ids'])
     assert len(suite['artifacts'])>=28
+    factorial = suite['factorial_v3']
+    assert factorial['graph03_defining'] is False
+    assert not set(factorial['statuses']) & set(manifest['eligible_representation_ids'])
+    assert len(factorial['statuses']) == 6
+    comparisons = pd.read_csv(extended['run_dir'] / '02_graph_missingness_factorial_comparisons.csv')
+    assert len(comparisons) == 40
     assert all(r['analysis_role']=='sensitivity' for r in manifest['sensitivity_artifacts'])
     assert set(frames['membership'].representation_id)<=set(['R0','R1','R2','R3','R4','S0','S1','S2','S3','S4'])
     artifact = path.parent / '02_graph_missingness_method_registry.csv'
