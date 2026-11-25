@@ -437,8 +437,9 @@ def forest_plot(models: pd.DataFrame, path: Path) -> None:
 
 
 def run(args: argparse.Namespace) -> None:
+    args, selected_source = follow_up(args, {"analytic": DEFAULT_ANALYTIC, "sensitivity_summary": DEFAULT_SENSITIVITY})
     config = load_config(args.config)
-    dirs = create_study_dirs(STUDY_NAME)
+    dirs = create_study_dirs(study_name(STUDY_NAME, selected_source))
     logging.basicConfig(filename=dirs["logs"] / "03_pharma_multistate_biomarkers.log",
                         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
                         force=True)
@@ -478,6 +479,8 @@ def run(args: argparse.Namespace) -> None:
     if not args.dry_run:
         forest_plot(models, dirs["figures"] / "03_pharma_multistate_forest.pdf")
 
+    publish_provenance(selected_source, dirs["tables"], ("03_pharma_multistate_support.csv",
+                                                         "03_pharma_multistate_models.csv"))
     good = ((models.model_status == "success") &
             (models.interpretability_status == "interpretable")) if len(models) else pd.Series(dtype=bool)
     estimable_effects = (models.loc[good, ["biomarker", "transition_id"]].drop_duplicates().shape[0]

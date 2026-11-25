@@ -24,6 +24,7 @@ import pandas as pd
 from statsmodels.tools.sm_exceptions import PerfectSeparationWarning
 
 import common
+from src.studies.pharma._semantic_input import follow_up, study_name, publish_provenance
 from src.studies._shared import create_study_dirs, load_parquet
 
 MAIN_TABLES = common.STUDIES_TABLES_DIR / "pharma" / "01_run_pharma_main"
@@ -368,8 +369,11 @@ def forest_plot(models: pd.DataFrame, path: Path) -> None:
 
 
 def run(args: argparse.Namespace) -> None:
+    args, selected_source = follow_up(args, {"clinical": MAIN_TABLES / "01_pharma_transition_associations.csv",
+                                     "labs": MAIN_TABLES / "01_pharma_lab_transition_associations.csv",
+                                     "analytic": MAIN_ANALYTIC})
     config = load_config(args.config)
-    dirs = create_study_dirs("pharma/02_pharma_sensitivity")
+    dirs = create_study_dirs(study_name("pharma/02_pharma_sensitivity", selected_source))
     logging.basicConfig(filename=dirs["logs"] / "02_pharma_sensitivity.log",
                         level=logging.INFO, force=True)
     candidates = build_candidates(pd.read_csv(args.clinical), pd.read_csv(args.labs))
@@ -383,6 +387,7 @@ def run(args: argparse.Namespace) -> None:
     summary = summarize(models)
     summary.to_csv(dirs["tables"] / "02_pharma_sensitivity_summary.csv", index=False)
     forest_plot(models, dirs["figures"] / "02_pharma_sensitivity_forest.pdf")
+    publish_provenance(selected_source, dirs["tables"], ("02_pharma_sensitivity_summary.csv",))
     valid = (candidates.main_model_status.eq("success") &
              candidates.main_interpretability_status.eq("interpretable"))
     print("ORDER TO REVIEW PHARMA SENSITIVITY OUTPUTS\n\n"

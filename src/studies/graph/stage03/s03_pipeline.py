@@ -4,7 +4,7 @@ from pathlib import Path
 from os.path import relpath
 import json
 import pandas as pd
-from .._pipeline import (digest,load_pipeline,output_root,output_lock,stage_destinations,stage_outputs,
+from .._pipeline import (digest,load_pipeline,output_root,scoped_output,output_lock,stage_destinations,stage_outputs,
                          staged_artifact_paths,save_table,write_json,base_parser)
 from ..stage02.s02_contracts import CURRENT_SCHEMA as GRAPH02_SCHEMA, MANIFEST
 from .s03_release_reader import RESULTS, RESULTS_SCHEMA, read_release
@@ -30,7 +30,7 @@ from .s03_method_context import method_context,missingness_interpretation,repres
 def run(cfg, *, graph02_release=None, root=None, preflight_only=False):
     release = Path(graph02_release).resolve() if graph02_release else output_root(cfg, '02') / MANIFEST
     release_dir = release if release.is_dir() else release.parent
-    root = Path(root).resolve() if root else output_root(cfg, '03')
+    root = scoped_output(cfg, Path(root).resolve()) if root else output_root(cfg, '03')
     destinations = stage_destinations(root, include_figures=not preflight_only)
     if any(path.is_relative_to(source) or source.is_relative_to(path)
            for path in destinations.values() for source in stage_destinations(release_dir).values()):
@@ -60,6 +60,9 @@ def _execute(cfg, release, run_dir, preflight_only, explicit_release, figure_dir
                 'graph02_directory':str(path.parent),
                 'baseline_definition_id':manifest['baseline_definition_id'],'analysis_mode':manifest['study_mode'],
                 'feature_policy':manifest['feature_policy']}
+    selected_source = cfg.get('_semantic_source')
+    if selected_source:
+        provenance['semantic_source'] = selected_source.provenance()
     input_qc = {**provenance, 'status': 'PASS', 'read_mode': 'published_artifacts_no_refit',
                 'missingness_sensitivity': frames['method_context_qc'],
                 'eligible_representation_ids': manifest['eligible_representation_ids']}
@@ -113,7 +116,8 @@ def _execute(cfg, release, run_dir, preflight_only, explicit_release, figure_dir
     window_config = _policy(repository_root)
     if manifest['schema_version'] == GRAPH02_SCHEMA:
         source_tables, records, issues = current_source_inputs(
-            repository_root, step10=manifest['source_inputs']['integrated']['path'])
+            repository_root, step10=manifest['source_inputs']['integrated']['path'],
+            context=selected_source.files.get('context') if selected_source else None)
         study = dict(frozen=frames, registry=frames.get('clinical_registry', pd.DataFrame()),
                      manifest=manifest, roles=window_roles)
         window_outputs = _analyze(source_tables, study, records, validation, window_config,

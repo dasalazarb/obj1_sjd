@@ -23,3 +23,9 @@ data/intermediate/
 *.parquet
 *.manifest.json
 attachments/
+
+# Local paths and the active semantic candidate remain deployment-specific.
+src/semantic_harmonization/configs/local.yaml
+src/semantic_harmonization/configs/input_selection.local.yaml
+Consolidated_Codebook_all_columns.xlsx
+sjd_semantic_knowledge/

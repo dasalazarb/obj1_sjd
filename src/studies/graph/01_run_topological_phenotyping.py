@@ -928,6 +928,8 @@ def _run(args: argparse.Namespace, dirs) -> None:
         allow_without_lab=args.allow_without_lab, release_path=args.clinical_release,
         integrated_path=args.integrated, candidates_path=args.graph_lab_candidates)
     selection_summary.update(mode_status)
+    if getattr(args, "semantic_source", None):
+        selection_summary["semantic_source"] = args.semantic_source
     selection_summary["status"] = "READY_FOR_EXPLORATORY_RUN" if args.analysis_mode == "exploratory" else "READY_FOR_CLINICAL_RELEASE_RUN"
     write_json(dirs["tables"] / "01_graph_selection_summary.json", selection_summary)
     write_json(dirs["tables"] / "01_graph_preflight.json", selection_summary)
@@ -1173,7 +1175,23 @@ def _run(args: argparse.Namespace, dirs) -> None:
 
 
 def run(args):
-    destinations = run_dirs(args, "graph/01_run_topological_phenotyping")
+    from src.semantic_harmonization.study_input import active_study_input
+
+    study = "graph/01_run_topological_phenotyping"
+    selected = active_study_input()
+    if selected:
+        args = argparse.Namespace(**vars(args))
+        args.integrated = selected.select("integrated", args.integrated, default=common.INTEGRATED_LONGITUDINAL_PARQUET)
+        default_profile = (common.STUDIES_TABLES_DIR / "pharma" / "00_profile_labs"
+                           / "00_pharma_graph_lab_candidates.csv")
+        selected.select("pharma_candidates", args.graph_lab_candidates, default=default_profile)
+        args.graph_lab_candidates = selected.require("pharma_candidates")
+        args.semantic_source = selected.provenance()
+        if args.output_dir:
+            args.output_dir = args.output_dir / "semantic_harmonization" / selected.run_id
+        else:
+            study += "/semantic_harmonization/" + selected.run_id
+    destinations = run_dirs(args, study)
     def owned(key, name):
         if key == "figures":
             return name in {

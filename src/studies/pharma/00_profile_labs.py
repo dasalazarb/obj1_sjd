@@ -626,6 +626,28 @@ def _sha256(path: Path) -> str:
 
 
 def run(args: argparse.Namespace) -> pd.DataFrame:
+    from src.semantic_harmonization.study_input import active_study_input
+
+    selected = active_study_input()
+    if selected is None:
+        return run_profile(args)
+    args = argparse.Namespace(**vars(args))
+    selected.select("integrated", args.integrated, default=common.INTEGRATED_LONGITUDINAL_PARQUET)
+    args.integrated = selected.require("integrated")
+    args.context = selected.select("context", getattr(args, "context", None))
+    if getattr(args, "no_context", False) and args.context:
+        raise ValueError("The selected semantic candidate includes a verified context")
+    args.no_context = args.context is None
+    if Path(args.output) == DEFAULT_OUTPUT:
+        args.output = DEFAULT_OUTPUT.parent / "semantic_harmonization" / selected.run_id / DEFAULT_OUTPUT.name
+    if Path(args.output).resolve().is_relative_to(selected.manifest.parent):
+        raise ValueError("Pharma cannot write into a validated semantic publication")
+    return run_profile(args)
+
+
+def run_profile(args: argparse.Namespace, *, provenance_paths: dict[Path, Path] | None = None) -> pd.DataFrame:
+    """Profile an explicit input and publish its coupled Graph sidecars."""
+    provenance_paths = provenance_paths or {}
     integrated, output = Path(args.integrated), Path(args.output)
     if "runs" in output.parts or "runs" in output.resolve().parts:
         raise ValueError("Use a current Pharma00 output directory outside runs")
@@ -671,7 +693,8 @@ def run(args: argparse.Namespace) -> pd.DataFrame:
     summary = {"profile_contract_version": CONTRACT_VERSION, "feature_contract_version": FEATURE_CONTRACT_VERSION,
                "graph_use_mode": "exploratory", "analysis_mode": "exploratory", "profile_output_name": output.name, "clinical_validation": "not_established", "registry_version": registry["registry_version"],
                "thresholds": registry["thresholds"], "dataset_contract": contract,
-               "input_hashes": [{"role": "integrated" if p == integrated else "registry" if p == registry_path else "previous_profile" if previous_path and p == Path(previous_path) else "context", "sha256": sha} for p, sha in hashes.items()],
+               "input_hashes": [{"role": "integrated" if p == integrated else "registry" if p == registry_path else "previous_profile" if previous_path and p == Path(previous_path) else "context", "sha256": sha, **({"path": str(provenance_paths[p])} if p in provenance_paths else {})}
+                                for p, sha in hashes.items()],
                "context_mode": mode, "context_audit": profile.attrs["context_audit"],
                "schema": schema, "reference_schema": expected_schema,
                "schema_comparison_scope": "documented_family_counts_only_exact_header_not_supplied", "schema_matches_reference": schema == expected_schema,

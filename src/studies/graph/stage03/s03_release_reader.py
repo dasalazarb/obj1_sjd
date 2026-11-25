@@ -13,6 +13,16 @@ RESULTS_SCHEMA = 'graph03_current_v1'
 def read_release(cfg,path=None):
     manifest,path=validate_release(path or output_root(cfg,'02') / MANIFEST)
     historical = manifest.get('schema_version') != CURRENT_SCHEMA
+    selected = cfg.get('_semantic_source')
+    if selected:
+        if manifest.get('semantic_source') != selected.provenance():
+            raise ValueError('Graph02 result belongs to a different semantic run')
+        for role in ('integrated', 'pharma_candidates'):
+            recorded = manifest.get('source_inputs', {}).get(role, {})
+            if recorded != {'path': str(selected.require(role)), 'sha256': selected.sha256[role]}:
+                raise ValueError(f'Graph02 {role} lineage does not match the selected semantic run')
+    elif manifest.get('semantic_source'):
+        raise ValueError('Activate the semantic run before using its Graph02 release')
     if historical and path.parent == output_root(cfg, '02'):
         raise ValueError('Graph03 requires a current Graph02 result in the configured directory')
     artifacts = artifact_paths(manifest)
