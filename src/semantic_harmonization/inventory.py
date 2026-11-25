@@ -177,7 +177,7 @@ def inventory(master: pd.DataFrame, context: pd.DataFrame | None, source: pd.Dat
         context_cols = {key: side(prefix + suffix).tolist() for key, suffix in WIDE_CONTEXT.items()} if prefix else {}
         measurement = side(prefix + "measurement_date").map(clean).tolist() if prefix else [None] * len(master)
         availability = side(prefix + "result_available_date").map(clean).tolist() if prefix else [None] * len(master)
-        measurements = side(prefix + "n_measurements").map(clean).tolist() if prefix else [None] * len(master)
+        measurements = [clean(value) for value in side(prefix + "n_measurements")] if prefix else [None] * len(master)
         paired = side(prefix + "value").tolist() if lab and lab[2] == "text" else [None] * len(master)
         nonnull = nonempty = 0
         distinct = set()
