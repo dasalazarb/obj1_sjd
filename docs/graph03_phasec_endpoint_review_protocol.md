@@ -1,5 +1,9 @@
 # Graph03 Phase C: clinical endpoint documentary review
 
+> **Documento histórico.** Las fases 03c–03g se archivaron el 24 de noviembre de 2026.
+> Los comandos de esta guía corresponden al tag de recuperación indicado en el
+> [archivo N3](../old/graph03_n3/README.md).
+
 Phase C creates a separate, restricted audit of six endpoint families. It never
 runs Graph02, Phase B, or longitudinal models, and never promotes a source to
 `N3_REVIEWED`. Passing audit QC means that the audit is internally consistent;

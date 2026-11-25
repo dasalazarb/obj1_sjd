@@ -412,6 +412,7 @@ def run_release(paths, output, execute=True):
 
 
 @pytest.mark.parametrize('approved', [False, True])
+@pytest.mark.skip(reason='Archived Graph03 N3 workflow. Run this test at tag graph03-n3-prearchive-2026-11-24.')
 def test_immutable_release_full_boundary_and_no_disclosure(tmp_path, approved):
     paths = release_fixture(tmp_path, approved=approved)
     before = E._snapshot([paths[0], paths[1].parent])
@@ -439,6 +440,7 @@ def test_immutable_release_full_boundary_and_no_disclosure(tmp_path, approved):
         pd.testing.assert_frame_equal(view[['patient_id','clinical_episode_id']], original[['patient_id','clinical_episode_id']])
 
 
+@pytest.mark.skip(reason='Archived Graph03 N3 workflow. Run this test at tag graph03-n3-prearchive-2026-11-24.')
 def test_input_tampering_and_midrun_failure_do_not_publish(tmp_path, monkeypatch):
     paths = release_fixture(tmp_path, approved=True)
     target = paths[1].parent / 'membership.csv'
@@ -456,6 +458,7 @@ def test_input_tampering_and_midrun_failure_do_not_publish(tmp_path, monkeypatch
     assert not (tmp_path/'failed').exists()
 
 
+@pytest.mark.skip(reason='Archived Graph03 N3 workflow. Run this test at tag graph03-n3-prearchive-2026-11-24.')
 def test_one_approved_pair_advances_without_approving_others(tmp_path):
     paths = release_fixture(tmp_path, approved=False)
     plan = yaml.safe_load(paths[4].read_text())
@@ -472,6 +475,7 @@ def test_one_approved_pair_advances_without_approving_others(tmp_path):
     assert list((tmp_path/'partial').glob('*.png'))
 
 
+@pytest.mark.skip(reason='Archived Graph03 N3 workflow. Run this test at tag graph03-n3-prearchive-2026-11-24.')
 def test_frozen_input_change_during_failure_is_detected(tmp_path, monkeypatch):
     paths = release_fixture(tmp_path, approved=True)
     target = paths[0]/'03_graph_n3_results_summary.md'
@@ -484,6 +488,7 @@ def test_frozen_input_change_during_failure_is_detected(tmp_path, monkeypatch):
     assert not (tmp_path/'must_not_exist').exists()
 
 
+@pytest.mark.skip(reason='Archived Graph03 N3 workflow. Run this test at tag graph03-n3-prearchive-2026-11-24.')
 def test_cli_help_has_explicit_prepare_preflight_execute_and_no_discovery():
     path = ROOT / 'src/studies/graph/03e_graph_n3_controlled_inference.py'
     process = subprocess.run([PYTHON, str(path), '--help'], text=True, capture_output=True)
@@ -492,6 +497,7 @@ def test_cli_help_has_explicit_prepare_preflight_execute_and_no_discovery():
     assert 'run_graph_study' not in path.read_text()
 
 
+@pytest.mark.skip(reason='Archived Graph03 N3 workflow. Run this test at tag graph03-n3-prearchive-2026-11-24.')
 def test_cli_drafts_unsigned_plan_but_rejects_frozen_output_and_overwrites(tmp_path):
     paths = release_fixture(tmp_path)
     script = ROOT / 'src/studies/graph/03e_graph_n3_controlled_inference.py'

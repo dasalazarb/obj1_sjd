@@ -1,5 +1,9 @@
 # Graph03g. Auditoría integral de preparación de N3
 
+> **Documento histórico.** Las fases 03c–03g se archivaron el 24 de noviembre de 2026.
+> Los comandos de esta guía corresponden al tag de recuperación indicado en el
+> [archivo N3](../old/graph03_n3/README.md).
+
 En Biowulf, ejecute el comando con los resultados canónicos de Graph02, Graph03 y Graph03e disponibles.
 
 ```bash

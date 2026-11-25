@@ -418,6 +418,7 @@ def test_code_drift_reports_and_blocks_or_rejects(tmp_path):
         run(paths, tmp_path / 'rejected')
 
 
+@pytest.mark.skip(reason='Archived Graph03 N3 workflow. Run this test at tag graph03-n3-prearchive-2026-11-24.')
 def test_no_fit_refit_projection_or_pipeline_imports_and_cli_explains_missing_dependency(tmp_path, monkeypatch):
     script = ROOT / 'src/studies/graph/03d_graph_n3_resolution_preflight.py'
     result = subprocess.run([PYTHON, str(script), '--help'], capture_output=True, text=True)

@@ -250,6 +250,7 @@ def test_full_audit_no_approved_sources_and_no_overwrites(tmp_path):
         run_phasec(graph03,release,out,cfg,ROOT)
 
 
+@pytest.mark.skip(reason='Archived Graph03 N3 workflow. Run this test at tag graph03-n3-prearchive-2026-11-24.')
 def test_cli_requires_explicit_run_and_never_imports_pipeline_runner():
     cli=ROOT/'src/studies/graph/03c_graph_n3_clinical_adjudication.py'
     result=subprocess.run([sys.executable,str(cli),'--help'],capture_output=True,text=True)

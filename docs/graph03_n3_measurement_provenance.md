@@ -1,5 +1,9 @@
 # Procedencia de las mediciones originales para Graph03 N3
 
+> **Documento histórico.** Las fases 03c–03g se archivaron el 24 de noviembre de 2026.
+> Los comandos de esta guía corresponden al tag de recuperación indicado en el
+> [archivo N3](../old/graph03_n3/README.md).
+
 > Referencia histórica del circuito previo a `graph03_baseline_window_v2`. Los comandos vigentes y
 > la ruta de migración están en el [inventario de Graph03](graph03_script_inventory_and_migration.md).
 > El [contrato de fuentes y linaje](graph03_source_and_lineage_contract.md) describe los requisitos

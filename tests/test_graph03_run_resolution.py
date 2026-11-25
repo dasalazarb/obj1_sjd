@@ -70,6 +70,7 @@ def command(script, data_root, cwd, *flags):
         cwd=cwd, env=os.environ | {'OBJ1_SJD_ROOT': str(data_root)}, capture_output=True, text=True)
 
 
+@pytest.mark.skip(reason='Archived Graph03 N3 workflow. Run this test at tag graph03-n3-prearchive-2026-11-24.')
 def test_both_commands_zero_flags_outside_checkout_and_repeatable(tmp_path, monkeypatch):
     monkeypatch.setenv('OBJ1_SJD_ROOT', str(tmp_path))
     historical03, historical02 = install_bundle(tmp_path / 'seed', tmp_path)

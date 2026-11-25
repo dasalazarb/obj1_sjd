@@ -1,5 +1,9 @@
 # Graph03 C/D: ejecución autónoma y resolución de bloqueos
 
+> **Documento histórico.** Las fases 03c–03g se archivaron el 24 de noviembre de 2026.
+> Los comandos de esta guía corresponden al tag de recuperación indicado en el
+> [archivo N3](../old/graph03_n3/README.md).
+
 ## Cambio mínimo y auditoría arquitectónica
 
 Base revisada: `cafb5f0` (main, 2026-11-05). El checkout inicial estaba en

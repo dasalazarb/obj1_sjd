@@ -114,6 +114,7 @@ def sign(originals, tmp_path, rules):
     return signed_review(tmp_path, manifest(audit)['review_binding'], rules, version=cal.REVIEW_VERSION)
 
 
+@pytest.mark.skip(reason='Archived Graph03 N3 workflow. Run this test at tag graph03-n3-prearchive-2026-11-24.')
 def test_calendar_candidate_and_reviewed_report_provenance_and_discordant_ties(calendar_originals, tmp_path):
     paths, _, _, _ = calendar_originals
     eda = pd.read_parquet(paths['eda_long'])
@@ -261,6 +262,7 @@ def test_calendar_source_review_fails_closed(calendar_originals, tmp_path, case,
     assert not (calendar_originals[2] / 'runs/blocked').exists()
 
 
+@pytest.mark.skip(reason='Archived Graph03 N3 workflow. Run this test at tag graph03-n3-prearchive-2026-11-24.')
 def test_signed_legacy_calendar_day_artifact_cannot_enable_current_inference(calendar_originals, tmp_path):
     paths, _, _, decision_root = calendar_originals
     documents = sign(calendar_originals, tmp_path, {RF: source_rule()})

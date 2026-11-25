@@ -117,7 +117,7 @@ def _execute(cfg, release, run_dir, preflight_only, explicit_release, figure_dir
         study = dict(frozen=frames, registry=frames.get('clinical_registry', pd.DataFrame()),
                      manifest=manifest, roles=window_roles)
         window_outputs = _analyze(source_tables, study, records, validation, window_config,
-                                  selected_measurements=selected)
+                                  selected_measurements=selected, estimate_models=False)
     else:
         window_outputs = _empty_outputs(window_config)
         issues = [dict(artifact='graph02_release', reason='CURRENT_RELEASE_REQUIRED_FOR_BASELINE_WINDOW')]
@@ -233,7 +233,7 @@ def _execute(cfg, release, run_dir, preflight_only, explicit_release, figure_dir
     (figure_dir/'03_graph_figures_README.md').write_text('Aggregate internal figures and source CSVs. Publication review is required; no automatic public export. Small cells are suppressed using the configured publication minimum.\n')
     limited=any(row['status'] not in {'COMPLETE','DESCRIPTIVE'} for row in statuses) or presentation_qc['status']!='PASS' or 'graph02_last_attempt_status' in input_qc or window_qc['status'] != 'PASS'
     status='COMPLETE_WITH_LIMITATIONS' if limited else 'COMPLETE'
-    (run_dir/'03_graph_results_summary.md').write_text(f'# Graph03 exploratory interpretation\n\nEXPLORATORY: no confirmatory clinical or predictive claims.\n\nGraph02 input: {path.parent.name}.\n\nPatients: {len(baseline)}; execution: {status}. Raw observed baseline values only; no imputation or discovery refit.\n\nCommunity and time effects are conditional on estimated frozen labels; intervals do not incorporate discovery uncertainty. See validation status for every unavailable or circular hypothesis.\n\nR0 is the frozen primary reference; R2 clinical comparison retains the release mapping and evidence status; other eligible representations are technical comparators.\n\n'
+    (run_dir/'03_graph_results_summary.md').write_text(f'# Graph03 exploratory N1/N2 characterization\n\nEXPLORATORY: no confirmatory clinical or predictive claims.\n\nGraph02 input: {path.parent.name}.\n\nPatients: {len(baseline)}; execution: {status}. Raw observed baseline values only; no imputation or discovery refit.\n\nCommunity and time effects are conditional on estimated frozen labels; intervals do not incorporate discovery uncertainty. See validation status for every unavailable or circular hypothesis.\n\nR0 is the frozen primary reference; R2 clinical comparison retains the release mapping and evidence status; other eligible representations are technical comparators.\n\n'
         + evidence[['representation_id','analysis_role','clinical_mapping_status','evidence_level','limitation_reason']].to_csv(index=False)
         + '\nFrozen method status inventory:\n'
         + context.loc[context.source_table.isin(['method_registry','unavailable'])].reindex(columns=['experiment_id','status','method_reason','n_patients','n_common']).to_csv(index=False)
@@ -251,7 +251,10 @@ def _execute(cfg, release, run_dir, preflight_only, explicit_release, figure_dir
         stream.write(presentation['inventory'][['figure','display_status','inference_status','reason']].to_csv(index=False))
         stream.write('\nN2 selections and documented N1-to-N2 lineage (metadata only):\n\n')
         stream.write(presentation['selection'].to_csv(index=False))
-        stream.write('\nSource characterization levels: N1 explains internal structure; N2 is related descriptive evidence; N3 candidates are not validated. Only documented reviewed N3 sources may enter exploratory conditional inference after statistical gates. Pending review is NOT_ESTIMABLE / INDEPENDENCE_REVIEW_PENDING.\n\n')
+        stream.write('\nN1 describes the internal structure of Mapper. N2 describes related clinical constructs. '
+                     'Both are dependent on the discovery features. The N3 inference workflow is archived. '
+                     'The retained audit documents review and support requirements for independent evidence. '
+                     'The available evidence does not establish defensible N3 inference under the current contract.\n\n')
         stream.write(characterization['tier_counts'].to_csv(index=False))
         stream.write('\n' + WARNING + ' See 03_graph_baseline_window_qc.json for the verified-source analysis. '
                      'The longitudinal sensitivity begins strictly after the calendar window. '
@@ -270,6 +273,7 @@ def _execute(cfg, release, run_dir, preflight_only, explicit_release, figure_dir
         for artifact in staged_artifact_paths(run_dir, figure_dir, figure_prefix)]
     save_table(run_dir/'03_graph_artifact_inventory.csv',pd.DataFrame(inventory))
     summary={**provenance,'schema_version':RESULTS_SCHEMA,'execution_status':status,
+        'n3_inference_status':'ARCHIVED',
         'n3_validation':{key:n3_qc[key] for key in ['schema_version','status','phase_a_status','phase_b_status',
             'n_inventory_rows','source_counts_by_representation','n_candidates_for_review','n_reviewed_independent_sources',
             'n_models_complete','n_outcomes_modeled','n_not_estimable_models','n_comparisons_complete']},
