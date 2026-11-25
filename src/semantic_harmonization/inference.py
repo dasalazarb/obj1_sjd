@@ -136,7 +136,12 @@ class LocalModel:
         self.tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
         self.engine = LLM(model=path, tokenizer=path, max_model_len=model["max_context_tokens"],
                           gpu_memory_utilization=model["gpu_memory_utilization"], trust_remote_code=False,
-                          seed=model["seed"], disable_log_stats=True)
+                          seed=model["seed"], disable_log_stats=True,
+                          dtype="bfloat16",
+                          load_format="safetensors",
+                          enforce_eager=True,
+                          tensor_parallel_size=1,
+                          disable_custom_all_reduce=True)
         self.params = SamplingParams(temperature=model["temperature"], max_tokens=model["max_output_tokens"],
                                      seed=model["seed"], skip_special_tokens=False, structured_outputs=StructuredOutputsParams(json=Extraction.model_json_schema()))
 
