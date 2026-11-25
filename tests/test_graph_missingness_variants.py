@@ -33,6 +33,7 @@ def synthetic():
     config['mapper'].update(n_cubes=2,perc_overlap=.5,min_samples=2,minimum_node_support=2)
     config['community_detection']['minimum_patients']=2
     policy=deepcopy(cfg['missingness_methods']); policy['iterative_regularized'].update(candidate_rank=[2,3],masked_validation_repeats=2)
+    policy['factorial_missingness_v3']['enabled'] = False
     families=dict(zip(registry.feature,registry.technical_family))
     return raw,registry,baseline,config,policy,families
 

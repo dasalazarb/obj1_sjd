@@ -333,3 +333,207 @@ def focal_fix_figures(root,tables,minimum_cell):
         save_figure(fig,folder,stem)
         artifacts.extend([stem+'_source.csv', stem+'.png', stem+'.pdf'])
     return artifacts
+
+
+def factorial_figures(folder, tables, spaces, minimum, context):
+    """Write figure data with minimum support and inventory unavailable outputs."""
+    import networkx as nx
+    from .._pipeline import save_table
+
+    artifacts, inventory = [], []
+    prefix = '02_graph_missingness_factorial_'
+
+    def unavailable(name):
+        inventory.append(dict(artifact=prefix+name+'.png', status='NOT_ESTIMABLE',
+                              reason='NO_ESTIMATES_WITH_PUBLICATION_SUPPORT'))
+
+    def finish(name, fig, source):
+        stem = prefix+name
+        save_table(folder/(stem+'.csv'), source.assign(**context))
+        save_figure(fig, folder, stem)
+        artifacts.extend(stem+'.'+ext for ext in ('csv','png','pdf'))
+        inventory.extend(dict(artifact=stem+'.'+ext, status='COMPLETE', reason='', source=stem+'.csv')
+                         for ext in ('png','pdf'))
+
+    def frame(name, support, metric):
+        data = pd.DataFrame(tables[name])
+        if data.empty or not {support,metric}<=set(data):
+            return pd.DataFrame()
+        return data.loc[data[support].ge(minimum) & data[metric].notna()].copy()
+
+    reason = suppress_factorial_aggregates('reason_classification_summary',
+        pd.DataFrame(tables['reason_classification_summary']), minimum)
+    if 'n_cells' in reason:
+        reason = reason.loc[reason.n_cells.ge(minimum)]
+    if len(reason):
+        # Count heatmap uses only individually reportable cells and never exposes a residual.
+        reason['row'] = reason.reference_id+' · '+reason.source_column+' · '+reason.context
+        heat = reason.pivot_table(index='row',columns='reason_class',values='n_cells',aggfunc='max')
+        height = max(3., min(23., .22*len(heat)))
+        fig, ax = plt.subplots(figsize=(11,height))
+        img = ax.imshow(np.ma.masked_invalid(heat.to_numpy()), aspect='auto', cmap='Blues')
+        ax.set_xticks(range(len(heat.columns)),heat.columns,rotation=35,ha='right')
+        stride = max(1,len(heat)//65)
+        ax.set_yticks(range(0,len(heat),stride),heat.index[::stride],fontsize=6)
+        ax.set_title('Baseline observation reasons by source and context')
+        fig.colorbar(img,ax=ax,label='Largest reportable count within context')
+        finish('observation_reasons',fig,heat.reset_index())
+    else:
+        unavailable('observation_reasons')
+
+    benchmark = frame('candidate_benchmark','n_predictions','normalized_mae')
+    if 'stage' in benchmark:
+        benchmark = benchmark.loc[benchmark.stage.eq('outer_evaluation')]
+    if len(benchmark):
+        source = benchmark.groupby(['candidate','mechanism']).normalized_mae.mean().unstack()
+        fig,ax = plt.subplots(figsize=(10,4.5))
+        source.plot.bar(ax=ax,rot=20)
+        ax.set_ylabel('Mean source-level normalized MAE')
+        ax.set_xlabel('')
+        ax.legend(title='Artificial masking',fontsize=7)
+        finish('reconstruction_error',fig,source.reset_index())
+        data = benchmark[['reference_id','candidate','source_column','mechanism','n_predictions','observed_mean','predicted_mean']].dropna()
+        fig,ax=plt.subplots(figsize=(6,5))
+        limits = [data[['observed_mean','predicted_mean']].min().min(),data[['observed_mean','predicted_mean']].max().max()]
+        ax.plot(limits,limits,color='0.5',lw=1)
+        for candidate, part in data.groupby('candidate'):
+            ax.scatter(part.observed_mean,part.predicted_mean,label=candidate,s=12,alpha=.6)
+        ax.set(xlabel='Mean hidden observation (source units)',ylabel='Mean prediction (source units)')
+        ax.legend(fontsize=6)
+        finish('distribution_checks',fig,data)
+    else:
+        unavailable('reconstruction_error')
+        unavailable('distribution_checks')
+
+    for reference in ('R0','R2'):
+        comparisons = frame('factorial_comparisons','n_common','ari_primary')
+        if len(comparisons):
+            comparisons = comparisons.loc[comparisons.reference_id.eq(reference) & comparisons.contrast.eq('factorial')]
+        if len(comparisons):
+            ids = [reference, reference+'-I-v3',reference+'-M-v3',reference+'-IM-v3']
+            matrix = np.full((4,4),np.nan)
+            labels = {}
+            for row in comparisons.itertuples():
+                i,j=ids.index(row.left),ids.index(row.right)
+                matrix[i,j]=matrix[j,i]=row.ari_primary
+                labels[i,j]=labels[j,i]=f'{row.ari_primary:.2f}\nJ {row.jaccard_full_mean:.2f}\nn={int(row.n_common)}'
+            fig,ax=plt.subplots(figsize=(5.5,4.5))
+            img=ax.imshow(np.ma.masked_invalid(matrix), cmap='coolwarm',vmin=-1,vmax=1)
+            for (i,j),label in labels.items():
+                ax.text(j,i,label,ha='center',va='center',fontsize=8)
+            ax.set_xticks(range(4),list('ABCD'))
+            ax.set_yticks(range(4),list('ABCD'))
+            ax.set_title(reference+' factorial concordance')
+            fig.colorbar(img,ax=ax,label='Adjusted Rand index')
+            finish(reference+'_comparison_matrix',fig,comparisons[['left','right','n_common','ari_primary','jaccard_full_mean']])
+        else:
+            unavailable(reference+'_comparison_matrix')
+
+        selected = [(k,v) for k,v in spaces.items() if k.startswith(reference)]
+        topology = []
+        fig, axes = plt.subplots(1,4,figsize=(13,3.2),squeeze=False)
+        for ax, (name, result) in zip(axes[0], selected):
+            mapped = result['mapped']
+            nerve = mapped['nerve'].copy()
+            eligible = [node for node in nerve if len(mapped['nodes'].get(node, ()))>=minimum]
+            nerve = nerve.subgraph(eligible)
+            ax.set_title(name)
+            ax.axis('off')
+            if not len(nerve):
+                continue
+            layout = nx.spring_layout(nerve,seed=17)
+            nx.draw_networkx(nerve,layout,ax=ax,with_labels=False,node_size=45,
+                             node_color='#366888',edge_color='#9ea8aa')
+            for node in nerve:
+                topology.append(dict(experiment_id=name, element='node', node_id=node,
+                                     n_node_members=len(mapped['nodes'][node])))
+            topology.extend(dict(experiment_id=name,element='edge',node_id=a,adjacent_node_id=b)
+                            for a,b in nerve.edges())
+        for ax in axes[0][len(selected):]:
+            ax.axis('off')
+        if topology:
+            fig.suptitle('Mapper topology · independent layouts · node support ≥ '+str(minimum))
+            finish(reference+'_mapper',fig,pd.DataFrame(topology))
+        else:
+            plt.close(fig)
+            unavailable(reference+'_mapper')
+
+    registry = frame('factorial_registry','n_patients','n_covered')
+    stable = frame('factorial_stability','n_evaluable','stability')
+    if len(registry):
+        data = registry[['experiment_id','n_patients','n_covered','n_uncovered']].copy()
+        data.loc[data.n_covered.lt(minimum) | data.n_uncovered.between(1,minimum-1),['n_covered','n_uncovered']] = np.nan
+        data['coverage'] = data.n_covered/data.n_patients
+        if len(stable):
+            data = data.merge(stable.groupby('experiment_id').stability.mean().rename('mean_stability'),on='experiment_id',how='left')
+        if data.coverage.notna().any():
+            fig,ax=plt.subplots(figsize=(9,4))
+            data.set_index('experiment_id').filter(items=['coverage','mean_stability']).plot.bar(ax=ax,rot=25)
+            ax.set(ylim=(0,1),xlabel='',ylabel='Fraction of evaluable patients or refits')
+            finish('coverage_stability',fig,data)
+        else:
+            unavailable('coverage_stability')
+    else:
+        unavailable('coverage_stability')
+
+    for name, table, support, measure, x in [
+        ('uncertainty','imputation_uncertainty','n_pairs_evaluable','mean_union_coassignment','experiment_id'),
+        ('mnar_delta','mnar_delta_sensitivity','n_common','ari_primary','delta'),
+        ('mask_weight','factorial_weight_sensitivity','n_common','ari_primary','mask_weight'),
+        ('confounding_controls','confounding_controls','n_common','ari_primary','control'),
+    ]:
+        data = frame(table,support,measure)
+        if data.empty or x not in data:
+            unavailable(name)
+            continue
+        columns = [x,support,measure] + [c for c in ('reference_id','condition','reason_class','comparison_cell') if c in data and c!=x]
+        data = data.loc[data[x].notna(),columns]
+        if data.empty:
+            unavailable(name)
+            continue
+        fig,ax = plt.subplots(figsize=(8,4))
+        if x in ('delta','mask_weight'):
+            for key,part in data.groupby(['reference_id','condition'],dropna=False):
+                part=part.groupby(x,as_index=False)[measure].mean().sort_values(x)
+                ax.plot(part[x],part[measure],marker='o',label=' · '.join(key))
+            ax.legend(fontsize=7)
+        else:
+            data.groupby(x)[measure].mean().plot.bar(ax=ax,rot=20)
+        ax.set_ylabel(measure.replace('_',' ').capitalize())
+        ax.set_xlabel(x.replace('_',' ').capitalize())
+        finish(name,fig,data)
+    return artifacts, inventory
+
+
+def suppress_factorial_aggregates(table, frame, minimum):
+    """Suppress small clinical cells while preserving status and method provenance."""
+    if table.endswith('_internal'):
+        return frame
+    frame = frame.copy()
+    rules = {
+        'candidate_benchmark': ('n_predictions', (
+            'n_predictions','n_paired','n_patient_predictions','mae','rmse','normalized_mae','accuracy',
+            'balanced_accuracy','brier','log_loss','ordinal_mae','class_support','confusion_counts',
+            'paired_loss','paired_median_mode_loss','observed_mean','observed_sd','observed_median',
+            'predicted_mean','predicted_sd','predicted_median','predictions_outside_training_range')),
+        'target_support_audit': ('n_observed_unique', (
+            'n_observed','n_observed_unique','n_missing','training_variance','target_scale','n_levels','category_counts')),
+        'factorial_coverage': ('count', ('count',)),
+        'reason_classification_summary': ('n_cells', (
+            'n_cells','n_eligible','n_valid','n_source_patients','fraction_of_source')),
+    }
+    if table in rules:
+        support, columns = rules[table]
+        if support in frame:
+            suppressed = frame[support].between(1,minimum-1)
+            if table=='reason_classification_summary':
+                groups = [c for c in ('reference_id','source_column','context','context_level') if c in frame]
+                suppressed = suppressed.groupby([frame[c] for c in groups], dropna=False).transform('any')
+            if suppressed.any():
+                frame.loc[suppressed, frame.columns.intersection(columns)] = np.nan
+                frame.loc[suppressed, 'publication_suppression'] = 'BELOW_MINIMUM_CELL'
+    # Detailed categorical cells remain available in the restricted audit tables.
+    for column in ('class_support','confusion_counts','category_counts'):
+        if column in frame:
+            frame[column] = np.nan
+    return frame

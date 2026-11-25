@@ -66,3 +66,39 @@ reporting:
   save_not_estimable_reason: true
   emit_png_pdf: true
   never_export_raw_patient_values_in_public_summary: true
+factorial_missingness_v3:
+  enabled: true
+  version: graph02_factorial_v3
+  defining_for_graph03: false
+  references: [R0, R2]
+  candidates: [low_rank_regularized, mixed_regularized, mice_pmm_regularized]
+  benchmarks: [median_legacy, median_mode]
+  mask:
+    primary_weight: 0.25
+    sensitivity_weights: [0.0, 0.10, 0.50]
+    minimum_shared_domains: 2
+    minimum_shared_weight_fraction: 0.40
+    sensitivity_shared_weight_fraction: [0.25, 0.50]
+  validation:
+    repeats: 10
+    tuning_repeats: 3
+    masking_fraction: [0.10, 0.20]
+    masking_mechanisms: [random_source, instrument_block, domain_block, observed_context, simulated_mnar]
+    minimum_successful_repeat_fraction: 0.80
+    minimum_prediction_coverage: 0.80
+    minimum_relative_improvement: 0.02
+    maximum_domain_deterioration: 0.10
+    minimum_paired_patients: 10
+    patient_ci_replicates: 499
+  estimators:
+    candidate_rank: [1, 2, 3, 4]
+    donor_count: 5
+    chain_sweeps: 5
+  uncertainty:
+    draws: 20
+    nested_draws_per_refit: 1
+    delta: [-0.5, 0.0, 0.5]
+  resampling:
+    main_subsamples: 60
+    main_bootstrap: 20
+    parameter_subsamples: 20

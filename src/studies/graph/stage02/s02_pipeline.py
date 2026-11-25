@@ -9,7 +9,7 @@ import pandas as pd
 from sklearn.decomposition import PCA
 from sklearn.metrics import adjusted_rand_score, pairwise_distances
 from .._pipeline import (load_pipeline, config_path, output_root, stage_destinations, stage_outputs,
-                         staged_artifact_paths, save_table, write_json, utc_now, base_parser)
+                         staged_artifact_paths, save_table, write_json, utc_now, base_parser, digest)
 from . import s02_legacy as legacy
 from .s02_contracts import CURRENT_SCHEMA, MANIFEST, resolve_sources, validate_release
 from .s02_feature_registry import clinical_registry, domain_coverage, eligible_domain_map, verify_observed_baseline_dates, mapping_counts, RESERVED, CLINICAL
@@ -68,16 +68,19 @@ def run(cfg, *, root=None, preflight_only=False):
             return False
         return name.startswith('02_graph_') or name == 'latest_completed_02.json'
 
+    from .s02_factorial_study import checked_policy, historical_failure_audit
+    factorial_enabled = checked_policy(cfg) is not None
     with stage_outputs(destinations, owned, failure=('stage', '02_graph_failure.json'),
                        completion=root / MANIFEST, diagnostic=preflight_only, obsolete_dirs=('figures', 'logs')) as staging:
+        prior = historical_failure_audit(root) if factorial_enabled else None
         status = _execute(cfg, staging['stage'], preflight_only,
-                          staging.get('figures', staging['stage']), figure_prefix)
+                          staging.get('figures', staging['stage']), figure_prefix, prior)
     manifest = None if preflight_only else root / MANIFEST
     print(f'Graph02 {status}; results: {root}')
     return {'run_dir': root, 'manifest': manifest, 'execution_status': status}
 
 
-def _execute(cfg, run_dir, preflight_only, figure_dir, figure_prefix):
+def _execute(cfg, run_dir, preflight_only, figure_dir, figure_prefix, prior=None):
     master,baseline,candidates,manifest,values,config,sources,governance=prepare_inputs(cfg)
     settings=cfg['experiments']; seed=int(config['random_seed']); n=len(baseline)
     families={row.feature:legacy.family_name(row.family) for row in manifest.loc[manifest.included].itertuples()}
@@ -86,6 +89,8 @@ def _execute(cfg, run_dir, preflight_only, figure_dir, figure_prefix):
     write_json(run_dir/'02_graph_preflight.json',{'status':'PASS','n_patients':n,'n_features':len(values),
         'analysis_mode':cfg['analysis']['mode'],'feature_policy':cfg['analysis']['feature_policy'],**governance})
     if preflight_only:
+        if prior is not None:
+            save_table(run_dir/'02_graph_missingness_preflight_historical_failure_audit.csv', prior)
         return 'PREFLIGHT_ONLY'
     save_table(run_dir/'02_graph_clinical_domain_registry.csv',registry)
     mapping_error=None
@@ -405,7 +410,9 @@ def _execute(cfg, run_dir, preflight_only, figure_dir, figure_prefix):
     # refits/artifacts. Historical memberships, summaries and budgets stay intact.
     from .s02_missingness_study import run_missingness_study
     missingness_study=run_missingness_study(results,registry,manifest,baseline,families,config,cfg,
-        run_dir,lab_groups,feature_to_lab,figure_dir=figure_dir,figure_prefix=figure_prefix)
+        run_dir,lab_groups,feature_to_lab,figure_dir=figure_dir,figure_prefix=figure_prefix,
+        historical_audit=prior,graph_experiments=experiments,
+        source_hashes={role: digest(path) for role,path in sources.items()} if prior is not None else None)
     for row in missingness_study['experiments']:
         record(row['experiment_id'],row['kind'],row['status'],row['reason'],analysis_role='sensitivity',reference_id=row['reference_id'],
             **{k:row[k] for k in ['graph03_defining','method','method_type','is_mapper','estimator','panel_hash'] if k in row})
@@ -430,6 +437,11 @@ def _execute(cfg, run_dir, preflight_only, figure_dir, figure_prefix):
     if release_status=='QC_FAILED': raise ValueError('PRIMARY_REFERENCE_QC_FAILED')
     eligible=[i for i in ['R0','R2','R1','R3','R4'] if i in results and qc_by_id.get(i,False)]
     execution_status='PARTIAL' if any(r['status']=='FAILED' for r in experiments) else 'COMPLETE_WITH_LIMITATIONS' if limitations else 'COMPLETE'
+    factorial = missingness_study.pop('factorial', None)
+    if factorial:
+        for row in factorial.pop('experiments'):
+            record(row['experiment_id'],row['kind'],row['status'],row['reason'],analysis_role='sensitivity',
+                   reference_id=row['reference_id'], graph03_defining=False, panel_hash=row.get('panel_hash',''))
     # Freeze raw observed baseline sources and encoded values, without refitting in 03.
     snapshot=baseline.copy()
     for c,s in values.items(): snapshot[c]=s.to_numpy()
@@ -510,10 +522,14 @@ def _execute(cfg, run_dir, preflight_only, figure_dir, figure_prefix):
     with (run_dir/'02_graph_events.jsonl').open('w') as stream:
         for row in logs: stream.write(json.dumps(row,default=str)+'\n')
     figure_inventory=diagnostic_figures(observation,comparisons,experiments,figure_dir,registry,int(settings.get('minimum_publication_cell',5)))
+    if factorial:
+        figure_inventory.extend(factorial.pop('figure_inventory'))
     inventoried={r['artifact'] for r in figure_inventory}
     figure_inventory.extend(dict(artifact=p.name,status='COMPLETE',reason='') for p in sorted(figure_dir.iterdir()) if p.suffix in {'.png', '.pdf'} and p.name not in inventoried)
     for row in figure_inventory:
         row['artifact'] = (figure_prefix / row['artifact']).as_posix()
+        if 'source' in row:
+            row['source'] = (figure_prefix / row['source']).as_posix()
     save_table(run_dir/'02_graph_figure_inventory.csv',figure_inventory)
     results_summary(run_dir/'02_graph_results_summary.md',results,perturbations,experiments,comparisons,registry,observation,stable_frame,qc)
     save_table(run_dir/'02_graph_privacy_inventory.csv',
@@ -540,6 +556,13 @@ def _execute(cfg, run_dir, preflight_only, figure_dir, figure_prefix):
             estimability=missingness_study['statuses']) for rel in missingness_study.get('artifacts',[])],
         'source_inputs':{role: {'path': str(path)} for role, path in sources.items()},
         'protocol_id':settings['protocol_id'],'random_seed':seed,'clinical_validation':governance['clinical_validation']}
+    if factorial:
+        from .s02_contracts import validate_factorial_inventory
+        staged_files = {path.name: path for path in run_dir.iterdir() if path.is_file()}
+        staged_files.update({(figure_prefix / path.name).as_posix(): path
+                             for path in figure_dir.iterdir() if path.is_file()})
+        validate_factorial_inventory(factorial, eligible, staged_files)
+        manifest_release['missingness_sensitivity']['factorial_v3'] = factorial
     manifest_path = run_dir / MANIFEST
     write_json(manifest_path, manifest_release)
     validate_release(manifest_path)

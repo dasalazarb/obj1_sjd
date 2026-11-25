@@ -143,6 +143,106 @@ El descriptor `02_graph_release_manifest.json` registra la referencia, las
 representaciones elegibles y el estado científico. Los archivos por paciente son
 de uso interno restringido.
 
+## Sensibilidad factorial de missingness en Graph02
+
+`configs/missingness_methods_02.yaml` activa `factorial_missingness_v3` al
+ejecutar Graph02 o el ejecutor integral. Se ejecuta por separado para R0 y R2
+con sus pacientes basales, columnas codificadas y configuración de Mapper. A
+es la referencia histórica. B reconstruye valores, C añade la máscara clínica a
+A y D combina la **misma** reconstrucción de B con la **misma** máscara de C.
+Los controles MDS sobre distancia clínica, -I/-M históricos, -D y -DG quedan
+identificados por separado. El registro cubre los seis contrastes dentro del
+factorial, los contrastes históricos y de lente, los cruces con -D/-DG y
+R0 frente a R2 en cada condición.
+
+- **Procedencia.** La máscara se construye antes de imputar. Los códigos
+  explícitos en `__missingness_reason` y los estados documentados de fuente
+  distinguen indicación clínica, protocolo/era/visita, estructura y calidad.
+  `not_requested` sin motivo queda como desconocido. La máscara primaria usa
+  observado frente a ausencia clínica documentada y exige dos dominios
+  compartidos y al menos 40% del peso. El peso principal es 0.25. Se auditan
+  0, 0.10 y 0.50, y los umbrales de soporte 25% y 50%. Los pares indefinidos
+  se conservan como NA. Peso cero conserva la distancia, la lente y Mapper
+  de la representación base. Un constructo con derivación sin regla validada
+  o ausencia estructural puede requerir el control de mediana del panel común.
+- **Reconstrucción.** Mediana histórica y mediana/moda se comparan con bajo
+  rango regularizado en continuas, cadenas ridge/logística penalizada por
+  fuente y cadenas PMM con cinco donantes de entrenamiento. Los ordinales
+  se tratan como categorías de niveles legales. Si la referencia conserva solo
+  parte de una codificación nominal, se usa la proyección de niveles documentada
+  en el catálogo. Los folds externos e internos
+  separan identidades, incluso con multiplicidad bootstrap. Se ocultan 10% y
+  20% de observaciones en réplicas aleatorias, por instrumento o dominio,
+  dependientes de contexto observado y bajo un MNAR simulado. Se excluyen
+  predictores reservados. Las observaciones originales se conservan y las
+  faltantes con motivo desconocido se consideran elegibles solo como supuesto
+  de reconstrucción cuando se mantiene el panel basal.
+- **Selección.** Se requieren 80% de repeticiones exitosas, 80% de cobertura
+  de predicción, 2% de mejora pareada respecto de mediana/moda, un límite
+  inferior del intervalo bootstrap por paciente mayor que cero y un máximo de
+  0.10 de deterioro de pérdida estandarizada por dominio y tipo. Se audita
+  también la regla histórica de 100% de repeticiones. La selección usa
+  reconstrucción y soporte. Las métricas de Mapper y los desenlaces quedan
+  fuera de la selección.
+- **Incertidumbre.** Las 20 realizaciones de PMM, si procede, reestiman con
+  bootstrap por paciente y muestrean donantes/categorías. Se reportan como
+  sensibilidad empírica de imputación. Se separan las realizaciones sobre la
+  cohorte fija de los refits de pacientes, con un diseño anidado reducido de
+  una realización por refit. El delta simétrico ±0.5 desplaza valores continuos
+  por escala de entrenamiento o inclina probabilidades de niveles ordenados.
+  Se aplica dentro de motivos elegibles por separado. El nominal sin dirección
+  preespecificada queda fijo. Estos escenarios dependen de supuestos y no
+  identifican el mecanismo de ausencia.
+- **Topología y falsación.** Se solicitan 60 submuestras, 20 bootstrap
+  clásicos y 20 submuestras para pesos alternativos, además del presupuesto
+  histórico de las referencias. El contrato vigente aporta los umbrales de
+  soporte y matching. ARI/NMI se estiman sobre asignaciones duras compartidas
+  con soporte. La coasignación guarda `n_same` y `n_evaluable`, tanto
+  para asignaciones duras como para uniones de nodos con solapamiento.
+  Se conservan controles N2a–N2d, M1 y N5/N6. El factorial añade máscaras
+  clínicas, administrativas y ampliadas, y permutaciones de filas completas
+  con y sin estratos administrativos.
+
+Los nuevos archivos usan el prefijo `02_graph_missingness_`. El resumen
+`factorial_summary.md` enlaza el registro, las comparaciones, la cobertura,
+los intentos y las decisiones. El manifiesto aditivo
+`missingness_sensitivity.factorial_v3` registra configuración, estados y
+hashes de artefactos. Los CSV de celdas, membresía y pares quedan restringidos
+al entorno autorizado. Las figuras agregadas se generan con sus CSV de
+respaldo y el umbral de publicación de Graph02. La decisión técnica y la
+recomendación de revisión se registran por separado. Las variantes son
+sensibilidades y el conjunto definitorio que lee Graph03 sigue siendo el del
+contrato histórico. Se usan las dependencias CPU existentes en
+`requirements.txt`.
+
+### Auditoría y reproducción clínica
+
+`CLINICAL_VALIDATION_PENDING`. La auditoría histórica documenta R0-I como
+no estimable por nominales no soportados y R2-I por falta de un rango
+validado. Las razones clínicas de R0-M y R2-M siguen sin verificarse. Si la
+corrida anterior está disponible en el destino habitual, Graph02 audita el
+descriptor y los intentos disponibles antes de reemplazar los archivos.
+Si no se dispone del bundle previo se registra `SOURCE_UNAVAILABLE`.
+
+Desde la raíz del repositorio, en el entorno autorizado:
+
+```bash
+python src/studies/graph/02_graph_representation_sensitivity.py --preflight-only
+python src/studies/graph/02_graph_representation_sensitivity.py
+```
+
+El preflight requiere el parquet de Step10
+`data/analytic/10_build_integrated_longitudinal_dataset/10_integrated_longitudinal_clinical_episode.parquet`.
+En `outputs/tables/studies/pharma/00_profile_labs/` requiere el bundle
+Pharma00 compatible con ese parquet, con `00_pharma_graph_lab_candidates.csv`,
+`00_pharma_profile_summary.json`, `00_pharma_graph_lab_selection_audit.csv` y
+`00_pharma_lab_profile.csv` (o el nombre indicado en el resumen Pharma00).
+La tabla
+`data/analytic/blockA/11_integrated_baseline_characterization/11_integrated_baseline_patient_level.csv`
+aporta edad de diagnóstico cuando está disponible. El mapa
+`data/raw/graph_s4_lab_group_map.csv` se conserva en el repositorio.
+El preflight y las pruebas sintéticas verifican el contrato técnico.
+
 ## Archivos vigentes
 
 Cada etapa reemplaza sus propios archivos en su carpeta de siempre. Las etapas
