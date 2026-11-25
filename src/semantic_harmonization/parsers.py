@@ -6,6 +6,7 @@ import json
 import re
 import unicodedata
 
+from .inventory import assay_profile
 from .schemas import Allele, Evidence, Finding, Medication, Semantic
 
 NUMBER = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?"
@@ -14,7 +15,7 @@ OP = r"<=|>=|<|>|=|≤|≥"
 OPERATORS = {"=": "EQ", "<": "LT", "<=": "LE", "≤": "LE", ">": "GT", ">=": "GE", "≥": "GE"}
 SINGLE = re.compile(rf"(?P<operator>{OP})?\s*(?P<number>{NUMBER})\s*(?P<unit>{UNIT})?")
 RANGE = re.compile(rf"(?P<low>{NUMBER})\s*(?:-|–|—|\bto\b)\s*(?P<high>{NUMBER})\s*(?P<unit>{UNIT})?")
-TITER = re.compile(rf"(?:(?P<left>positive|negative)\s+)?(?P<op>{OP})?\s*(?P<num>\d{{1,9}})\s*:\s*(?P<den>\d{{1,9}})(?:\s*\((?P<right>positive|negative)\))?")
+TITER = re.compile(rf"(?:(?P<left>positive|negative)\s+)?\(?\s*(?P<op>{OP})?\s*(?P<num>\d{{1,9}})\s*:\s*(?P<den>\d{{1,9}})(?:\s*\(?(?P<right>positive|negative))?\s*\)?")
 GRADE = re.compile(rf"(?:(?P<descriptor>non[- ]hemolyzed|hemolyzed)\s+)?(?P<grade>trace|[1-4]\+|\+[1-4])\s*(?:\((?P<amount>[^()]*)?(?P<close>\))?)?")
 ALLELE = re.compile(r"(?:(?P<locus>[A-Z][A-Z0-9]*)\*)?(?P<fields>\d{2,3}(?::\d{2,3}){0,3})(?P<suffix>[GPNLSQCA])?")
 READING = re.compile(r"(?P<status>negative|positive)\s+at\s+(?P<duration>\d{1,4})\s*(?P<unit>days?|d\b|hours?|hrs?|h\b)", re.I)
@@ -102,10 +103,12 @@ def threshold_result(result: Semantic, op: str, value: str, otherwise: str | Non
 
 def applicable_protocol(vocab: dict, concept: str, context: dict, unit: str | None) -> dict | None:
     """Select an unambiguous assay-specific protocol by exact context."""
+    if not all(context.get(key) for key in ("assay_id", "method", "relevant_protocol_version")) or not unit:
+        return None
     candidates = [rule for rule in vocab.get("protocol_rules", []) if rule["concept_id"] == concept
                   and rule["assay_key"] == context["assay_id"] and rule["method"] == context["method"]
                   and rule.get("protocol_version") == context["relevant_protocol_version"]
-                  and (not rule.get("units") or unit in rule["units"])]
+                  and unit in rule.get("units", [])]
     return candidates[0] if len(candidates) == 1 else None
 
 def new_finding(entity: str, quote: str, **fields) -> Finding:
@@ -138,7 +141,10 @@ def narrative(text: str, family: str) -> list[Finding]:
             explicit_presence = operator == "EQ" and Decimal(match["value"]) > 0
             results.append(new_finding("cryoprecipitate", match[0], percentage=str(Decimal(match["value"])),
                                        comparator=operator, assertion="present" if explicit_presence else "uncertain"))
-    absence = re.fullmatch(r"no anomalous immunoglobulins[.]?", text.strip(), re.I)
+    absence = re.fullmatch(
+        r"(?:no (?:anomalous|abnormal) immunoglobulins(?: (?:were )?(?:detected|identified|observed|seen))?"
+        r"|(?:anomalous|abnormal) immunoglobulins (?:were )?not (?:detected|identified|observed|seen))"
+        r"(?: by immunofixation)?[.]?", text.strip(), re.I)
     if absence:
         results.append(new_finding("anomalous_immunoglobulins", absence[0], assertion="absent"))
     historical = False
@@ -156,10 +162,11 @@ def narrative(text: str, family: str) -> list[Finding]:
         # The grammar is deliberately closed. Negation and speculation outside it
         # require surrounding context and are handled by the evidence verifier.
         explicit = re.fullmatch(
-            r"(?:(?:previously identified as|currently|now)\s+)?"
+            r"(?:(?:previously(?: identified as)?|currently|now)\s+)?"
             r"(?:(?:faint|trace)\s+)?(?:(?:increased|increase in)\s+)?"
             r"(?:(?:monoclonal|oligoclonal|polyclonal)\s+)?(?:(?:free)\s+)?"
-            r"(?:ig[gmade](?:\s+(?:kappa|lambda))?|kappa|lambda)(?:\s+(?:light chains?|band))?[.]?",
+            r"(?:ig[gmade](?:\s+(?:kappa|lambda|\((?:kappa|lambda)\)))?|kappa|lambda)"
+            r"(?:\s+(?:light chains?|band))?(?:\s+(?:was )?detected)?[.]?",
             norm,
         )
         if explicit and not blocked_scope:
@@ -173,26 +180,27 @@ def narrative(text: str, family: str) -> list[Finding]:
                                        light_chain=chain[1].lower() if chain else None,
                                        pattern=pattern[1] if pattern else None,
                                        intensity_descriptor=intensity[1] if intensity else None,
-                                       temporality="historical" if historical else "unspecified"))
+                                       temporality="historical" if historical else "current" if re.match(r"(?:currently|now)\b", norm) else "unspecified"))
     return results
 
 
 def hla(text: str, locus: str, ipd: dict[str, set[str]]) -> list[Allele]:
-    """Retain reported resolution, ambiguity and missing alleles."""
+    """Retain explicit tokens, leaving unverified or ambiguous identities null."""
+    tokens = [token.strip() for token in re.split(r"[,;|]", text)]
     result = []
-    for i, token in enumerate(re.split(r"\s*[,;/|]\s*", text)):
-        token = token.strip()
+    if not any(ALLELE.fullmatch(token.upper()) or token == "*" or "/" in token for token in tokens):
+        return result
+    for i, token in enumerate(tokens):
         matched = ALLELE.fullmatch(token.upper())
-        if token != "*" and (not matched or matched["locus"] not in (None, locus)):
-            return []
-        allele = f"{locus}*{matched['fields']}{matched['suffix'] or ''}" if matched else None
-        count = len(matched["fields"].split(":")) if matched else None
-        # A bare two-digit group conveys only what was reported.
-        lookup = allele if count and count > 1 else None
-        validated = next((kind for kind, names in ipd.items() if lookup in names), None)
-        result.append(Allele(locus=locus, reported=token, allele=allele if lookup else None,
-                             resolution_fields=count, suffix=matched["suffix"] if matched else None,
-                             source_order=i, ipd_match=validated))
+        if not matched or matched["locus"] not in (None, locus):
+            result.append(Allele(locus=locus, reported=token, allele=None, resolution_fields=None,
+                                 suffix=None, source_order=i, ipd_match=None))
+            continue
+        count = len(matched["fields"].split(":"))
+        allele = f"{locus}*{matched['fields']}{matched['suffix'] or ''}"
+        validated = next((kind for kind, names in ipd.items() if allele in names), None)
+        result.append(Allele(locus=locus, reported=token, allele=allele if count > 1 and validated else None,
+                             resolution_fields=count, suffix=matched["suffix"], source_order=i, ipd_match=validated))
     return result
 
 
@@ -213,21 +221,17 @@ def medications(raw: str, variable: str, cfg: dict, rxnorm: dict[str, str]) -> l
     return entities
 
 
-def parse(row: dict, cfg: dict, vocab: dict) -> Semantic:
+def parse_segment(row: dict, cfg: dict, vocab: dict, text: str, source_field: str, role: str) -> Semantic:
     """Extract fields that have exact source evidence and an applicable route."""
-    raw, family, concept = json.loads(row["raw_json"]), row["family"], row["concept"]
+    family, concept = row["family"], row["concept"]
     context = json.loads(row["context_json"])
     rules = cfg["normalization"]
     ucum = vocab.get("ucum_atoms") or vocab["ucum"]
     result = Semantic()
-    if raw is None:
-        return Semantic(strategy="identity", interpretation_note="Source null.")
-    if isinstance(raw, str) and not raw.strip():
-        return Semantic(strategy="whitespace_to_null", interpretation_note="Whitespace-only source string retained.")
-    text = str(raw).strip()
-    norm = normalize(text)
+    text = text.strip()
+    norm = normalize(text).removesuffix(".")
 
-    def add(values: dict, strategy: str, quote: str = text, source: str = "raw_text",
+    def add(values: dict, strategy: str, quote: str = text, source: str = source_field,
             rule: str = rules["version"]) -> None:
         if not values:
             return
@@ -240,37 +244,78 @@ def parse(row: dict, cfg: dict, vocab: dict) -> Semantic:
             result.evidence.append(Evidence(field=key, quote=quote, source=source, strategy=strategy,
                                             rule=rule))
 
-    lab_family = family not in {"derived", "medication", "other"}
-    if lab_family and isinstance(raw, str):
-        if norm in rules["availability"]:
-            add({"result_availability": rules["availability"][norm]}, "exact_dictionary")
+    lab_family = family not in {"derived", "medication", "other", "protected", "administrative"}
+    if role == "administrative_status":
+        status = norm.replace(" was not processed", " not processed")
+        if status in rules["availability"]:
+            add({"result_availability": rules["availability"][status]}, "exact_dictionary")
+        return result
+    if role == "specimen_information":
         if norm in rules["specimen"]:
             add({"specimen_state": rules["specimen"][norm]}, "exact_dictionary")
+        return result
+    if role == "historical_reference":
+        if family in {"cryoglobulin", "immunofixation"}:
+            findings = [item.model_copy(update={"temporality": "historical"}) for item in narrative(text, family)]
+            add({"findings": findings}, "exact_dictionary")
+        return result
+    if role != "patient_result":
+        return result
     if family == "hla" and result.result_availability is None and result.specimen_state is None:
         alleles = hla(text, concept.removeprefix("hla_").upper(), vocab["ipd"])
         if alleles:
             add({"alleles": alleles}, "hla_parser")
-    if family == "medication" and isinstance(raw, str):
-        if entities := medications(raw, row["variable"], cfg, vocab["rxnorm"]):
+    if family == "medication":
+        if entities := medications(text, row["variable"], cfg, vocab["rxnorm"]):
             add({"medications": entities}, "medication_entity_linking")
-    if family == "ana":
-        if titer := TITER.fullmatch(norm):
+    profile = assay_profile(concept, row["variable"].rsplit("__", 1)[-1], cfg)
+    if family in {"ana", "ana_narrative"} or profile and profile["normalization_profile"] == "titer":
+        if titer := TITER.fullmatch(norm) if norm.count("(") == norm.count(")") else None:
             if int(titer["num"]) > 0 and int(titer["den"]) > 0:
                 add({"titer_numerator": int(titer["num"]), "titer_denominator": int(titer["den"]),
                      "titer_comparator": OPERATORS[titer["op"] or "="]}, "titer_parser")
                 if (qual := titer["left"] or titer["right"]) and not (titer["left"] and titer["right"] and titer["left"] != titer["right"]):
                     add({"qualitative_result": qual}, "titer_parser")
         patterns = [item.strip() for item in re.split(r"[,;/]", norm)]
-        if concept.endswith("_pattern") and set(patterns).issubset(rules["ana_patterns"]):
+        pattern_text = re.sub(r"^(?:observed (?:pattern|cytoplasmic pattern)|cytoplasmic pattern|pattern)\s*:\s*", "", norm).rstrip(" ,;.")
+        if pattern_text in rules["cytoplasmic_patterns"] and (concept.endswith("_pattern") or family == "ana_narrative"):
+            add({"pattern_terms": [pattern_text]}, "exact_dictionary")
+        elif (concept.endswith("_pattern") or family == "ana_narrative") and set(patterns).issubset(rules["ana_patterns"]):
             add({"pattern_terms": patterns}, "exact_dictionary")
-    if family in {"ana", "qualitative", "urine_graded", "cryoglobulin"} and norm in rules["qualitative"]:
+    if family in {"ana", "ana_narrative", "qualitative", "urine_graded", "cryoglobulin"} and norm in rules["qualitative"]:
         add({"qualitative_result": rules["qualitative"][norm]}, "exact_dictionary")
+        if norm in {"repeat reactive", "repeated reactive"}:
+            add({"descriptor": text}, "exact_dictionary")
     if family == "urine_nominal":
         color = normalize(text.replace("-", " "))
-        if color in cfg["concepts"]["urine_nominal"][concept]:
+        if color in rules["nominal"].get(concept, []):
             add({"category": color}, "exact_dictionary")
-    if family == "urine_microscopy" and norm in rules["microscopy"]:
-        add({"category": rules["microscopy"][norm]}, "exact_dictionary")
+    if family in {"urine_microscopy", "cbc_morphology"}:
+        descriptor = norm.split("(", 1)[0].strip()
+        if descriptor in rules["microscopy"]:
+            add({"category": rules["microscopy"][descriptor]}, "exact_dictionary")
+        elif descriptor in {"occ", "present", "absent", "normal", "abnormal"}:
+            add({"descriptor": descriptor}, "exact_dictionary")
+        if family == "cbc_morphology":
+            if percentage := re.fullmatch(rf"(?:(?P<label>[A-Za-z -]+)\s+)?(?P<amount>{NUMBER}\s*%)", text):
+                label = normalize(percentage["label"] or "")
+                if not label or label in rules["microscopy"] or label in concept.replace("_", " "):
+                    if label:
+                        add({"descriptor": label}, "exact_dictionary")
+                    add(numeric(percentage["amount"], ucum), "numeric_parser", percentage["amount"])
+    if family == "urine_graded" and norm in rules["descriptors"]:
+        add({"descriptor": norm}, "exact_dictionary")
+    if family == "m_spike":
+        if re.fullmatch(r"no (?:m[- ]?spike|monoclonal (?:band|protein)) (?:was )?detected", norm):
+            add({"category": "absent"}, "exact_dictionary")
+        status = re.fullmatch(r"(?:(?:m[- ]?spike|monoclonal (?:band|protein))\s*:?\s+)?(not detected|detected|possible)(?:\s+(?:at\s+)?(.+))?", text, re.I)
+        if status and not result.category:
+            polarity, tail = status[1].lower(), status[2]
+            amount = numeric(tail.rstrip("."), ucum) if tail else {}
+            if not tail or amount and polarity != "not detected":
+                add({"category": {"detected": "present", "not detected": "absent", "possible": "uncertain"}[polarity]}, "exact_dictionary")
+                if amount:
+                    add(amount, "numeric_parser", tail)
     if family == "urine_graded" and (grade := GRADE.fullmatch(norm)):
         value = grade["grade"]
         value = value[1] + "+" if value.startswith("+") else value
@@ -284,16 +329,16 @@ def parse(row: dict, cfg: dict, vocab: dict) -> Semantic:
             add(numeric(original, ucum), "numeric_parser", original)
         elif grade["amount"]:
             result.interpretation_note = "Incomplete concentration expression retained."
-    if lab_family and family != "hla" and result.strategy == "unchanged":
+    if lab_family and family not in {"hla", "cbc_morphology", "urine_nominal", "urine_microscopy"} and result.strategy == "unchanged":
         add(numeric(text, ucum), "numeric_parser")
-    if lab_family and family != "hla" and result.comparator and not result.raw_unit and context["unit"]:
-        unit = str(context["unit"])
+    if lab_family and family != "hla" and result.comparator and not result.raw_unit and context.get("unit"):
+        unit = str(context.get("unit"))
         add({"raw_unit": unit}, "numeric_parser", unit, "context.unit")
         if valid_ucum(unit, ucum):
             add({"ucum_unit": unit}, "numeric_parser", unit, "context.unit")
-    protocol = applicable_protocol(vocab, concept, context, result.raw_unit or context["unit"]) if lab_family else None
+    protocol = applicable_protocol(vocab, concept, context, result.raw_unit or context.get("unit")) if lab_family else None
     if protocol:
-        if result.comparator and result.qualitative_result is None and (cutoff := protocol.get("positive_threshold")):
+        if result.comparator and result.qualitative_result is None and (cutoff := protocol.get("positive_threshold")) and cutoff.get("otherwise") == "negative":
             if label := threshold_result(result, cutoff["operator"], cutoff["value"], cutoff.get("otherwise")):
                 add({"qualitative_result": label}, "exact_dictionary", rule=protocol["rule_id"])
         if scale := protocol.get("ordinal_scale"):
@@ -304,23 +349,15 @@ def parse(row: dict, cfg: dict, vocab: dict) -> Semantic:
         findings = narrative(text, family)
         if findings:
             add({"findings": findings}, "exact_dictionary")
-        for field in ("observation_comment", "observation_note"):
-            comment = context.get(field)
-            if not isinstance(comment, str) or not comment.strip():
-                continue
-            for finding in narrative(comment.strip(), family):
-                if finding not in result.findings:
-                    if result.strategy == "unchanged":
-                        result.strategy = "exact_dictionary"
-                    result.findings.append(finding)
-                    result.evidence.append(Evidence(field="findings", quote=finding.quote,
-                                                    source=f"context.{field}", strategy="exact_dictionary",
-                                                    rule=rules["version"]))
     if result.result_availability is None and any(
         getattr(result, field) for field in ("comparator", "qualitative_result", "titer_denominator",
-                                             "pattern_terms", "ordinal_grade", "category", "alleles", "findings")
+                                             "pattern_terms", "ordinal_grade", "category", "descriptor")
     ) and result.specimen_state is None:
         add({"result_availability": "reported"}, "exact_dictionary")
+    if any(item.temporality in {"current", "unspecified"} for item in result.findings):
+        add({"result_availability": "reported"}, "exact_dictionary")
+    if family == "hla" and any(item.allele or item.resolution_fields == 1 for item in result.alleles):
+        add({"result_availability": "reported"}, "hla_parser")
     if not result.interpretation_note:
         if result.comparator in {"LT", "LE", "GT", "GE", "RANGE"}:
             result.interpretation_note = ("Bound or interval retained." if result.qualitative_result else
@@ -328,3 +365,10 @@ def parse(row: dict, cfg: dict, vocab: dict) -> Semantic:
         elif result.strategy == "unchanged":
             result.interpretation_note = "No supported interpretation for this source value."
     return Semantic.model_validate(result.model_dump())
+
+
+def parse(row: dict, cfg: dict, vocab: dict) -> Semantic:
+    """Preserve the original parser entry point with the V2 projection."""
+    from .semantic_facts import parse_mapping
+
+    return parse_mapping(row, cfg, vocab)[0]

@@ -62,3 +62,33 @@ Los run IDs se derivan de los hashes de entradas, código, dependencias, configu
 `paths.audit` permite incorporar el inventario HTML marginal como referencia de procedencia. `paths.gold` permite evaluar anotaciones independientes en JSONL con `mapping_id`, `family`, `group` y `expected`, más `expected_document_ids` si se evaluará recuperación. El grupo debe reunir variantes cercanas del mismo ensayo. El holdout preserva los grupos y la estratificación por familia. Sin anotaciones independientes suficientes, el reporte presenta métricas descriptivas y registra la evaluación clínica como pendiente.
 
 Desde la raíz y dentro del entorno aislado, `python -m pytest tests/test_semantic_harmonization.py` usa fixtures sintéticos para parsers, inferencia verificada, integridad del candidato, caché y el reporte. Cuando Chromium y Playwright para Node están disponibles, el test también verifica búsqueda, filtros, paginación y exportaciones. El Parquet clínico, el codebook operativo y los pesos de NIH no estaban disponibles en el entorno de desarrollo. La ejecución clínica y el smoke de GPU requieren esas fuentes en Biowulf.
+
+## Armonización semántica V2
+
+El directorio QC incluye `semantic_segments.parquet` con los offsets Unicode exactos por fuente, `deterministic_facts.parquet` (M1) y `semantic_facts.parquet` (M4). Cada hecho usa un struct tipado y se enlaza por mapping al linaje original. Los registros de referencia, método y proceso permanecen junto a su evidencia en QC. Los Parquet analíticos incluyen `patient_visit_semantic_observations.parquet` con un enlace a los hechos por observación y `analytical_representation_manifest.parquet` con los roles y reglas de uso. Los enlaces prospectivos requieren disponibilidad documentada antes o durante el episodio.
+
+La referencia V1 se busca por `comparison.baseline_run_id` bajo el directorio QC configurado. Para usar una ubicación local explícita, configura `paths.baseline` en `configs/local.yaml`. La comparación comprueba manifiesto, huellas de los insumos y política del inventario. La comparación del subconjunto V1 se reconstruye a partir del diccionario publicado. `baseline_residual_disposition.csv` y los CSV de cobertura se generan dentro del directorio QC restringido. Si falta la V1, el reporte registra esa ausencia. Si falta `paths.gold`, el estado de la evaluación clínica es `not performed`. El gold V2 usa `schema_version: semantic-facts-v2`, `mapping_id`, `family`, `group`, `expected_facts` y, opcionalmente, `segment_roles`, `expected_document_ids` y `adjudication`. El lector sigue aceptando las anotaciones legacy.
+
+Desde la raíz del repositorio en un nodo CPU autorizado, verifica recursos, identidad y tests con el mismo contenedor, home y bind del launcher Slurm. El comando solo imprime el estado y la identidad.
+
+```bash
+module load apptainer
+BASE=/data/salazarda
+REPO="$BASE/data/obj1_sjd"
+IMAGE="$BASE/containers/vllm-0.11.2.sif"
+PYTHON="$BASE/sjd_container_env/bin/python"
+umask 077
+export APPTAINERENV_SJD_CANONICAL_REPO="$REPO"
+read -r APPTAINERENV_SJD_CONTAINER_SHA256 _ < <(sha256sum -- "$IMAGE")
+export APPTAINERENV_SJD_CONTAINER_SHA256 APPTAINERENV_PYTHONNOUSERSITE=1
+export APPTAINERENV_HF_HUB_OFFLINE=1 APPTAINERENV_TRANSFORMERS_OFFLINE=1
+export APPTAINERENV_HF_HUB_DISABLE_TELEMETRY=1 APPTAINERENV_VLLM_NO_USAGE_STATS=1
+export APPTAINERENV_DO_NOT_TRACK=1 APPTAINERENV_WANDB_MODE=disabled
+container=(apptainer exec --cleanenv --home "$BASE/cache/container-home:/home/salazarda"
+           --bind "$BASE:$BASE" --pwd "$REPO" "$IMAGE" "$PYTHON")
+"${container[@]}" -m src.semantic_harmonization.preflight
+"${container[@]}" -m pytest tests/test_semantic_harmonization.py
+"${container[@]}" -m src.semantic_harmonization.audit_cpu
+```
+
+Tras el preflight, usa el launcher existente desde la raíz canónica y comprueba el estado final del job con `sacct`. El smoke de producción incluye el conjunto completo de hallazgos de crioglobulinas, la negación de inmunofijación, la abstención para ensayos no realizados y validación de los esquemas por perfil. El candidato requiere revisión científica antes de seleccionarlo para los estudios downstream.

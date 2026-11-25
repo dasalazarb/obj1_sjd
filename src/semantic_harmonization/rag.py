@@ -89,11 +89,17 @@ def documents(cfg: dict, manifest: dict) -> list[dict]:
                              concept_id=stem.removeprefix("lab__"),
                              variable_names=[stem + "__text", stem + "__value"]))
     version = cfg["normalization"]["version"]
-    for family, concepts in cfg["concepts"]["narrative"].items():
-        text = {
+    grammar = {
             "immunofixation": "Record only literal findings and polarity. Keep immunoglobulin class, light chain, pattern and historical scope separate. A faint light chain does not establish monoclonality.",
             "cryoglobulin": "Keep individual reading time, result and historical type separate. A planned reading has no result. Preserve the percent operator. A censored amount does not establish positivity.",
-        }[family]
+        "ana": "Preserve named patterns and explicit states without antibody associations.",
+        "ana_narrative": "Use explicitly observed pattern clauses and exclude clinical associations.",
+        "hla": "Preserve the reporting resolution and ambiguity. Group alternatives are not confirmed alleles.",
+        "cbc_morphology": "Preserve explicitly named cell observations and distinguish process metadata.",
+    }
+    for family, text in grammar.items():
+        concepts = [alias for profile in cfg["concepts"]["profiles"].values() if profile["family"] == family
+                    for alias in profile["aliases"]]
         docs.append(document("local_rules", version, f"narrative/{family}", family, concepts, text,
                              family=family, approved=True, rule_ids=[f"{version}:{family}"]))
     protocol = resources.get("protocols", {})
@@ -191,17 +197,19 @@ class KnowledgeIndex:
         context = json.loads(row["context_json"])
         variable, concept = row["variable"], row["concept"]
         query = concept.replace("_", " ")
-        cache_key = (variable, concept, row["family"], serialize({name: context[name] for name in ("assay_id", "method", "unit")}))
+        cache_key = (variable, concept, row["family"], serialize({name: context.get(name) for name in ("assay_id", "method", "unit")}))
         if cache_key in self.cache:
             return self.cache[cache_key]
         allowed, exact = set(), set()
         equivalents = {variable, concept, "lab__" + concept}
         for i, doc in enumerate(self.docs):
-            if doc["assay_key"] is not None and doc["assay_key"] != context["assay_id"]:
+            if doc["family"] and doc["family"] != row["family"]:
                 continue
-            if doc["method"] is not None and doc["method"] != context["method"]:
+            if doc["assay_key"] is not None and doc["assay_key"] != context.get("assay_id"):
                 continue
-            if doc["units"] and context["unit"] not in doc["units"]:
+            if doc["method"] is not None and doc["method"] != context.get("method"):
+                continue
+            if doc["units"] and context.get("unit") not in doc["units"]:
                 continue
             match = doc["concept_id"] == concept or variable in doc["variable_names"] or bool(equivalents & set(doc["aliases"]))
             family = doc["source"] == "local_rules" and doc["family"] == row["family"]

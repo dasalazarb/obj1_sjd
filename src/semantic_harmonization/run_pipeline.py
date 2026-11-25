@@ -1,9 +1,10 @@
 """Run the restricted semantic pipeline without command-line configuration."""
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import datetime, timezone
 import fcntl
-from importlib.metadata import PackageNotFoundError, version
+from importlib.metadata import PackageNotFoundError, distributions, version
 import json
 import os
 from pathlib import Path
@@ -21,16 +22,19 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from .analytic_representation import materialize
+from .compare_runs import baseline_identity, review
 from .application import apply, rebuild, validate_original, write_candidate, write_parquet
 from .evaluation import evaluate
-from .inference import LocalModel, apply_extraction, extract_batch, force_offline, needs_extraction
+from .inference import LocalModel, apply_extraction, extract_batch, force_offline, profile, routing, validate_extraction, validate_profile
 from .inventory import inventory
-from .parsers import parse
+from .semantic_facts import canonical, from_storage, parse_mapping, verify_contract
 from .rag import KnowledgeIndex, documents
 from .report import report
 from .resources import verify, vocabularies
-from .schemas import DICTIONARY, EXTRACTIONS, IDENTITY, INVENTORY, LINEAGE, SEMANTIC, TRACE, Extraction, Semantic
-from .settings import MODULE, ROOT, digest, file_hash, load_config, serialize, write_json
+from .schemas import (DICTIONARY, EXTRACTIONS, FACTS, IDENTITY, INVENTORY, LINEAGE, SEGMENTS, SEMANTIC, TRACE,
+                      Extraction, Semantic, SemanticFact, SemanticSegment)
+from .settings import MODULE, digest, file_hash, load_config, serialize, write_json
 from .study_input import write_source_manifest
 from .validation import comparison, downstream, summarize, validate_mappings
 
@@ -48,7 +52,8 @@ def now() -> str:
 def build_identity(cfg: dict, resources: dict, inputs: dict) -> dict:
     """Bind cache identity to original bytes, executable code and dependencies."""
     source = {p.relative_to(MODULE).as_posix(): file_hash(p) for p in sorted(MODULE.rglob("*"))
-              if p.is_file() and p.suffix in {".py", ".yaml", ".html", ".lock"} and p.name != "local.yaml"}
+              if p.is_file() and (p.suffix in {".py", ".yaml", ".html", ".lock", ".sbatch", ".sh"}
+                                  and not p.name.endswith("local.yaml"))}
     obj1_root = Path(cfg["paths"]["obj1_root"])
     contracts = ["src/block_A/01_serological_profile.py", "src/block_A/10_build_integrated_longitudinal_dataset.py",
                  "src/studies/pharma/00_profile_labs.py", "src/studies/graph/configs/pipeline.yaml"]
@@ -64,7 +69,12 @@ def build_identity(cfg: dict, resources: dict, inputs: dict) -> dict:
     resource_identity = {name: {k: item.get(k) for k in ("revision", "version", "sha256", "status")}
                          for name, item in resources["resources"].items()}
     return dict(inputs=inputs, source=digest(source), obj1_contracts=external, config=digest(cfg),
-                resources=resource_identity, dependencies=packages)
+                resources=resource_identity, dependencies=packages, baseline=baseline_identity(cfg),
+                execution_environment={
+                    "container_sha256": os.environ.get("SJD_CONTAINER_SHA256"),
+                    "runtime_sha256": digest(sorted((item.metadata["Name"], item.version) for item in distributions()
+                                                    if item.metadata["Name"])),
+                })
 
 
 def inputs_for(cfg: dict) -> dict:
@@ -162,7 +172,7 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=ve
             source = pq.read_table(paths["source_events"]) if "source_events" in hashes else None
             inventory_paths = [resume / name for name in ("unique_values.parquet", "row_lineage.parquet", "variable_inventory.csv")]
             inventory_state = resume / "inventory_checkpoint.json"
-            if inventory_state.exists() and json.loads(inventory_state.read_text()) == {p.name: file_hash(p) for p in inventory_paths if p.exists()}:
+            if inventory_state.exists() and all(p.is_file() for p in inventory_paths) and json.loads(inventory_state.read_text()) == {p.name: file_hash(p) for p in inventory_paths}:
                 pairs = pq.read_table(inventory_paths[0], schema=INVENTORY).to_pylist()
                 lineage = pq.read_table(inventory_paths[1], schema=LINEAGE).to_pylist()
                 variables = pd.read_csv(inventory_paths[2]).astype(object).where(lambda df: df.notna(), None).to_dict("records")
@@ -179,16 +189,41 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=ve
             stage("03 deterministic parsing")
             parsed_schema = pa.schema([*IDENTITY, *SEMANTIC])
             deterministic_path = resume / "deterministic_results.parquet"
+            segments_path = resume / "semantic_segments.parquet"
+            deterministic_facts_path = resume / "deterministic_facts.parquet"
             deterministic_state = resume / "deterministic_checkpoint.json"
-            if deterministic_state.is_file() and deterministic_path.is_file() and json.loads(deterministic_state.read_text()) == file_hash(deterministic_path):
+            artifacts = [deterministic_path, segments_path, deterministic_facts_path]
+            vocab = vocabularies(resources)
+            if (deterministic_state.is_file() and all(p.is_file() for p in artifacts)
+                    and json.loads(deterministic_state.read_text()) == {p.name: file_hash(p) for p in artifacts}):
                 deterministic = {row["mapping_id"]: Semantic.model_validate({f: row[f] for f in SEMANTIC.names})
                                  for row in pq.read_table(deterministic_path).to_pylist()}
+                segments = [SemanticSegment.model_validate(row) for row in pq.read_table(segments_path).to_pylist()]
+                m1_facts = [from_storage(row) for row in pq.read_table(deterministic_facts_path).to_pylist()]
             else:
-                vocab = vocabularies(resources)
-                deterministic = {row["mapping_id"]: parse(row, cfg, vocab) for row in pairs}
-                write_parquet(deterministic_path, [dict(row, **deterministic[row["mapping_id"]].model_dump()) for row in pairs], parsed_schema)
-                write_json(deterministic_state, file_hash(deterministic_path))
-            pending = [row for row in pairs if needs_extraction(row, deterministic[row["mapping_id"]])]
+                deterministic, segments, m1_facts = {}, [], []
+                for row in pairs:
+                    parsed, parts, facts = parse_mapping(row, cfg, vocab)
+                    deterministic[row["mapping_id"]] = parsed
+                    segments.extend(parts)
+                    m1_facts.extend(facts)
+                write_parquet(deterministic_path, [dict(row, **deterministic[row["mapping_id"]].model_dump())
+                                                  for row in pairs], parsed_schema)
+                write_parquet(segments_path, [item.model_dump() for item in segments], SEGMENTS)
+                write_parquet(deterministic_facts_path, [item.storage() for item in m1_facts], FACTS)
+                write_json(deterministic_state, {p.name: file_hash(p) for p in artifacts})
+            verify_contract(pairs, segments, m1_facts)
+            parts_by_mapping, facts_by_mapping = defaultdict(list), defaultdict(list)
+            for part in segments:
+                parts_by_mapping[part.mapping_id].append(part)
+            for fact in m1_facts:
+                facts_by_mapping[fact.mapping_id].append(fact)
+            routes = {}
+            for row in pairs:
+                key = row["mapping_id"]
+                routes[key] = routing(row, deterministic[key], parts_by_mapping[key], facts_by_mapping[key])
+            pending = [row for row in pairs if routes[row["mapping_id"]]["send"]]
+            stage(f"03 deterministic counts mappings={len(pairs)} segments={len(segments)} facts={len(m1_facts)} residual={len(pending)}")
             stage("04 compatible retrieval")
             index.measure([row["concept"].replace("_", " ") for row in pending])
             retrieved = {row["mapping_id"]: index.retrieve(row) for row in pending}
@@ -199,56 +234,85 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=ve
             cache = resume / "extractions"
             cache.mkdir(exist_ok=True)
             outputs, missing = {}, []
-            from .inference import validate_extraction
 
             for row in pending:
                 key = row["mapping_id"]
                 target = cache / (key + ".json")
                 if target.is_file():
                     cached = json.loads(target.read_text())
-                    if cached["mapping_id"] != key or cached["status"] not in {"validated", "context_limit", "unsupported_or_invalid"}:
+                    if cached["mapping_id"] != key or cached["status"] not in {
+                        "validated", "context_limit", "unsupported_evidence", "invalid_schema"
+                    }:
                         raise ValueError("Invalid extraction cache record")
-                    validate_extraction(serialize({"findings": cached["findings"]}), row, retrieved[key])
+                    if cached["status"] == "validated":
+                        if profile(row) == "finding":
+                            validate_extraction(serialize({"findings": cached["findings"]}), row, retrieved[key])
+                        else:
+                            candidates = [{field: fact[field] for field in (
+                                "segment_id", "start", "end", "quote", "payload", "document_ids")} for fact in cached["facts"]]
+                            regenerated = validate_profile(serialize({"candidates": candidates}), row, retrieved[key], cfg, vocab)
+                            if [fact.model_dump() for fact in regenerated] != cached["facts"]:
+                                raise ValueError("Cached proposals failed regeneration")
+                    elif cached["findings"] or cached["facts"]:
+                        raise ValueError("Rejected cache record contains proposals")
                     outputs[key] = cached
                 else:
                     missing.append(row)
             size = cfg["model"]["batch_size"]
             for first in range(0, len(missing), size):
-                for result in extract_batch(model, missing[first:first + size], retrieved, cfg["model"]["max_validation_retries"]):
+                for result in extract_batch(model, missing[first:first + size], retrieved, cfg["model"]["max_validation_retries"], cfg=cfg, vocab=vocab):
                     key = result["mapping_id"]
                     write_json(cache / (key + ".json"), result)
                     outputs[key] = result
-            if pending and not any(row["status"] == "validated" for row in outputs.values()) and any(
-                row["status"] == "unsupported_or_invalid" for row in outputs.values()
-            ):
-                raise RuntimeError("Entire GPT-OSS extraction stage failed schema or evidence validation")
-
             stage("06 mapping validation")
             final = {key: value.model_copy(deep=True) for key, value in deterministic.items()}
-            dictionary = []
+            dictionary, final_facts = [], list(m1_facts)
             for row in pairs:
                 key = row["mapping_id"]
                 semantic = final[key]
                 if key in outputs:
                     item = outputs[key]
-                    apply_extraction(semantic, Extraction.model_validate({"findings": item["findings"]}), row, cfg["prompts"]["version"])
-                    if item["status"] != "validated" and semantic.strategy == "unchanged":
+                    item["contribution_status"] = item["status"]
+                    if item["status"] == "validated":
+                        try:
+                            if profile(row) == "finding":
+                                added = apply_extraction(semantic, Extraction.model_validate({"findings": item["findings"]}),
+                                                         row, cfg["prompts"]["version"])
+                            else:
+                                existing = {canonical(fact) for fact in facts_by_mapping[key]}
+                                added = []
+                                for candidate in map(SemanticFact.model_validate, item["facts"]):
+                                    meaning = canonical(candidate)
+                                    if meaning not in existing:
+                                        existing.add(meaning)
+                                        added.append(candidate)
+                        except ValueError:
+                            item["contribution_status"] = "conflict"
+                        else:
+                            final_facts.extend(added)
+                            item["contribution_status"] = ("added" if added else "duplicate"
+                                                           if item["findings"] or item["facts"] else "empty")
+                    elif semantic.strategy == "unchanged":
                         semantic.interpretation_note = ("Full narrative exceeds the model context budget." if item["status"] == "context_limit"
                                                         else "Model extraction did not pass evidence or schema validation.")
                 dictionary.append(dict(row, **semantic.model_dump(), knowledge_doc_ids=[item["doc_id"] for item in retrieved.get(key, [])]))
             validate_mappings(dictionary, lineage, variables, len(master))
+            verify_contract(pairs, segments, final_facts)
 
             with tempfile.TemporaryDirectory(dir=analytic_root, prefix=".candidate-") as analytic_temp, \
                  tempfile.TemporaryDirectory(dir=out_root, prefix=".report-") as out_temp:
                 analytic, out = Path(analytic_temp), Path(out_temp)
-                for artifact in (*inventory_paths, deterministic_path):
+                for artifact in (*inventory_paths, *artifacts):
                     shutil.copyfile(artifact, out / artifact.name)
                 (out / "knowledge_documents.jsonl").write_text("".join(serialize(row) + "\n" for row in docs))
                 write_json(out / "knowledge_index_manifest.json", json.loads((index.path / "manifest.json").read_text()))
                 write_json(out / "resources_manifest.json", resources)
                 trace = [dict(item, mapping_id=key) for key, items in retrieved.items() for item in items]
                 write_parquet(out / "retrieval_trace.parquet", trace, TRACE)
-                write_parquet(out / "llm_extractions.parquet", list(outputs.values()), EXTRACTIONS)
+                write_parquet(out / "llm_extractions.parquet", [
+                    dict(item, facts=[SemanticFact.model_validate(fact).storage() for fact in item["facts"]])
+                    for item in outputs.values()], EXTRACTIONS)
+                write_parquet(out / "semantic_facts.parquet", [fact.storage() for fact in final_facts], FACTS)
                 write_parquet(out / "semantic_dictionary.parquet", dictionary, DICTIONARY)
                 with (out / "semantic_dictionary.jsonl").open("w") as stream:
                     for row in dictionary:
@@ -280,7 +344,13 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=ve
                 pd.DataFrame(impact, columns=IMPACT_COLUMNS).to_csv(out / "downstream_impact.csv", index=False)
                 summary = summarize(master, variables, dictionary, observations, list(outputs.values()), features)
                 summary["clinical_evaluation"] = evaluate(Path(paths["gold"]) if "gold" in hashes else None,
-                                                          pairs, deterministic, final, retrieved, model, cfg)
+                                                          pairs, deterministic, final, retrieved, model, cfg,
+                                                          vocab=vocab, routes=routes, segments=segments,
+                                                          typed_m1=m1_facts, typed_m4=final_facts)
+                summary["v2"] = review(out, cfg, hashes, pairs, segments, m1_facts, final_facts, routes,
+                                       outputs, variables, identity["baseline"])
+                summary["v2"]["analytic_representation"] = materialize(analytic, out, master, observations,
+                                                                       final_facts, features, variables)
                 summary["audit_reference"] = audit_reference(Path(paths["audit"])) if "audit" in hashes else {"status": "unavailable"}
                 summary["source_events"] = "Read-only measurement input profiled alongside the Step 10 candidate" if source is not None else "Step 10 episode-variable adapter"
                 write_json(out / "validation_summary.json", summary)
@@ -288,13 +358,15 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=ve
                     raise ValueError("Source inputs changed before publication")
 
                 stage("10 offline report")
-                revision = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True)
+                revision = subprocess.run(["git", "-C", paths["obj1_root"], "rev-parse", "HEAD"], capture_output=True, text=True)
                 manifest = dict(run_id=run_id, started_at=start, commit=revision.stdout.strip() or None,
                                 schema_version=cfg["schema_version"], inputs=hashes,
                                 input_paths={name: paths[name] for name in hashes}, model=identity["resources"]["gpt_oss"],
                                 prompt={"version": cfg["prompts"]["version"], "sha256": digest(cfg["prompts"])},
                                 identity=identity, patients=summary["patients"], episodes=len(master), columns=len(master.columns))
                 report(out, cfg, manifest)
+                if inputs_for(cfg) != hashes or baseline_identity(cfg) != identity["baseline"]:
+                    raise ValueError("Inputs changed after validation")
                 write_source_manifest(out, analytic, run_id, hashes)
                 stage("validated and ready to publish")
                 (out / "logs").mkdir()
@@ -302,12 +374,19 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=ve
                 manifest.update(completed_at=now(), elapsed_seconds=round(monotonic() - clock, 3),
                                 outputs={"report": file_manifest(out), "analytic": file_manifest(analytic)})
                 write_json(out / "run_manifest.json", manifest)
+                installed_analytic = False
                 if analytic_final.exists():
                     if file_manifest(analytic_final) != manifest["outputs"]["analytic"]:
                         raise ValueError("Incomplete analytic publication differs from this validated run")
                 else:
                     analytic.rename(analytic_final)
-                out.rename(out_final)
+                    installed_analytic = True
+                try:
+                    out.rename(out_final)
+                except OSError:
+                    if installed_analytic:
+                        analytic_final.rename(analytic)
+                    raise
         shutil.rmtree(resume)
     return analytic_final, out_final
 

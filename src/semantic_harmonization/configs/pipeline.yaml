@@ -1,4 +1,4 @@
-schema_version: '1.0'
+schema_version: '2.0'
 paths:
   obj1_root: null
   codebook: null
@@ -13,6 +13,9 @@ paths:
   output: outputs/tables/qc/semantic_harmonization
   audit: null
   gold: null
+  baseline: null
+comparison:
+  baseline_run_id: a344cb394907e6e2821307dd47ab19e532fc879f57c5af087bf66d8acb5f5bd4
 model:
   seed: 42
   temperature: 0.0

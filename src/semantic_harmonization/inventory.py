@@ -57,6 +57,16 @@ def clean(value: Any) -> Any:
     return value
 
 
+def measurement_count(value: Any) -> int | None:
+    """Accept nullable integral source counts without truncating fractions."""
+    value = clean(value)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0 or int(value) != value:
+        raise ValueError("Invalid measurement count")
+    return int(value)
+
+
 def kind(value: Any, arrow_type: str | None = None) -> str:
     """Distinguish null, strings, bool, numeric and compound source values."""
     if clean(value) is None:
@@ -82,6 +92,8 @@ def route(variable: str, cfg: dict) -> tuple[str, str]:
     """Match exact aliases or explicit namespace grammars."""
     rules = cfg["concepts"]
     hla = HLA.fullmatch(variable)
+    if protected(variable, cfg):
+        return variable, "protected"
     if hla and hla[1].upper() in rules["hla_loci"]:
         return f"hla_{hla[1]}", "hla"
     if variable in rules["medications"]:
@@ -91,18 +103,27 @@ def route(variable: str, cfg: dict) -> tuple[str, str]:
         family = "derived" if variable.startswith(("sero__", "pop__", "ovl__", "ext__", "essdai__", "esspri__", "pro__")) else "other"
         return variable, family
     concept, representation = lab.groups()
-    if concept in rules["ana"] and representation == "text":
-        return concept, "ana"
-    for family, concepts in rules["narrative"].items():
-        if concept in concepts and representation == "text":
-            return concept, family
-    if representation == "text":
-        for family in ("urine_nominal", "urine_microscopy", "urine_graded", "qualitative"):
-            if concept in rules[family]:
-                return concept, family
-        if concept.startswith(("urine_", "urinalysis_includes_microscopic")):
-            return concept, "urinalysis"
+    if (profile := assay_profile(concept, representation, cfg)) is not None:
+        return concept, profile["family"]
+    if representation == "text" and concept.startswith(("urine_", "urinalysis_includes_microscopic__")):
+        return concept, "urinalysis"
     return concept, "lab_text" if representation == "text" else "lab_numeric"
+
+
+
+def assay_profile(concept: str, representation: str, cfg: dict) -> dict | None:
+    """Resolve an exact parser profile without claiming concept equivalence."""
+    return next((profile for profile in cfg["concepts"]["profiles"].values()
+                 if concept in profile["aliases"] and representation in profile["allowed_representations"]), None)
+
+
+def routing_basis(variable: str, family: str) -> str:
+    """Describe the source of a route without altering the mapping identity."""
+    if family in {"lab_text", "lab_numeric", "urinalysis", "other", "derived"}:
+        return "fallback"
+    if HLA.fullmatch(variable) or family == "medication":
+        return "namespace"
+    return "exact_alias"
 
 
 def check_keys(frame: pd.DataFrame, label: str) -> pd.MultiIndex:
@@ -177,7 +198,7 @@ def inventory(master: pd.DataFrame, context: pd.DataFrame | None, source: pd.Dat
         context_cols = {key: side(prefix + suffix).tolist() for key, suffix in WIDE_CONTEXT.items()} if prefix else {}
         measurement = side(prefix + "measurement_date").map(clean).tolist() if prefix else [None] * len(master)
         availability = side(prefix + "result_available_date").map(clean).tolist() if prefix else [None] * len(master)
-        measurements = [clean(value) for value in side(prefix + "n_measurements")] if prefix else [None] * len(master)
+        measurements = [measurement_count(value) for value in side(prefix + "n_measurements")] if prefix else [None] * len(master)
         paired = side(prefix + "value").tolist() if lab and lab[2] == "text" else [None] * len(master)
         nonnull = nonempty = 0
         distinct = set()
