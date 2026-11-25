@@ -14,10 +14,17 @@
 <header>
 <h1>SjD semantic harmonization</h1>
 <p class="small" id="run"></p>
-<nav aria-label="Sections"><a href="#summary">Summary</a><a href="#variables">Variables</a><a href="#detail">Before and after</a><a href="#specialized">Specialized views</a><a href="#derived">Derived variables</a><a href="#downstream">Downstream compatibility</a><a href="#methods">Methods</a></nav>
+<nav aria-label="Sections"><a href="#summary">Summary</a><a href="#semantic-v2">Semantic V2</a><a href="#variables">Variables</a><a href="#detail">Before and after</a><a href="#specialized">Specialized views</a><a href="#derived">Derived variables</a><a href="#downstream">Downstream compatibility</a><a href="#methods">Methods</a></nav>
 </header>
 <main>
 <section id="summary"><h2>Executive summary</h2><div id="metrics" class="metrics"></div><p class="small">Patient and episode totals refer to Step 10. Mapping counts distinguish exact source values and assay contexts. Observation counts distinguish episode-variable rows and laboratory source events.</p><details><summary>Strategies and field coverage</summary><pre id="coverage"></pre></details></section>
+<section id="semantic-v2"><h2>Semantic reconciliation</h2>
+<p>Laboratory coverage counts nonempty mappings and their occurrences. Residual segments can coexist with supported facts in the same mapping.</p>
+<details open><summary>Baseline and laboratory coverage</summary><pre id="semantic-baseline"></pre></details>
+<details><summary>Segmentation and typed facts</summary><pre id="semantic-segments"></pre></details>
+<details><summary>Model routing and independent evaluation</summary><pre id="semantic-model"></pre></details>
+<details><summary>Analytical representation and availability</summary><pre id="semantic-representation"></pre></details>
+</section>
 <section id="variables"><h2>Variable explorer</h2>
 <div class="controls"><label>Search<input id="search" type="search" placeholder="Variable, raw value or result"></label><label>Family<select id="family"></select></label><label>Namespace<select id="namespace"></select></label><label>Strategy<select id="strategy"></select></label><label>Sort<select id="sort"><option value="variable">Variable name</option><option value="distinct">Raw cardinality</option><option value="n_interpreted">Interpreted episodes</option><option value="n_semantic_null">Missing semantic fields</option></select></label></div>
 <div id="variableTable"></div></section>
@@ -134,6 +141,14 @@ for (const button of document.querySelectorAll("[data-export]")) button.addEvent
 text(get("run"), `Run ${data.run.run_id} · ${data.run.started_at} · restricted local report`);
 for (const key of ["patients","episodes","variables_processed","variables_protected","unique_raw_pairs","episode_context_keys","unique_mappings","new_candidate_features"]) {
   const card=el("div"); card.className="metric"; card.append(el("span",data.summary[key].toLocaleString()), el("div",label(key))); get("metrics").append(card);
+}
+if (data.summary.v2) {
+  const v2=data.summary.v2;
+  text(get("semantic-baseline"),JSON.stringify({baseline:v2.baseline,laboratory_coverage:v2.laboratory_coverage},null,2));
+  text(get("semantic-segments"),JSON.stringify({roles:v2.segment_roles,fact_types:v2.fact_types},null,2));
+  text(get("semantic-model"),JSON.stringify({llm_outcomes:v2.llm_outcomes,incremental_llm:v2.incremental_llm,
+    clinical_evaluation:data.summary.clinical_evaluation},null,2));
+  text(get("semantic-representation"),JSON.stringify(v2.analytic_representation,null,2));
 }
 text(get("coverage"), JSON.stringify(data.summary,null,2)); text(get("provenance"),JSON.stringify(data.run,null,2));
 text(get("resources"),JSON.stringify(data.resources,null,2));

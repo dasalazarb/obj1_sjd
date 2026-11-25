@@ -1,31 +1,155 @@
-version: local-assay-routing-v1
-protected_prefixes: [demo__, spine__sjogrens_class]
-protected_names: [spine__sjd_ever_1_2_4]
-identifier_tokens: [id, ids, identifier, identifiers, mrn, uuid, guid]
-ana: [ana_status, ana_hep2_status, ana_hep2_titer, ana_hep2_pattern]
-qualitative:
-  [anti_ccp, anti_dsdna, anti_dsdna_igg, anti_ro52, anti_ro60, anti_ro_ssa, anti_la_ssb,
-   anticardiolipin_igg, anticardiolipin_igm, anti_cardiolipin_igg, anti_cardiolipin_igm,
-   anti_endomysial_iga, vzv_igg, varicella_zoster_igg, rheumatoid_factor, anti_tpo,
-   anti_thyroglobulin, quantiferon, quantiferon_tb_gold, beta_hcg]
-narrative:
-  immunofixation: [immunofixation, immunofixation_serum, serum_immunofixation, immunofixation_urine, monoclonal_band, m_spike]
-  cryoglobulin: [cryoglobulins, cryoglobulin]
-hla_loci: [A, B, C, DPB, DPB1, DQB1, DRB, DRB1]
-urine_nominal:
-  urine_color: [yellow, dark yellow, light yellow, pale yellow, amber, colorless, brown, red, orange]
-  urine_clarity: [clear, hazy, cloudy, turbid, slightly cloudy]
-  urine_appearance: [clear, hazy, cloudy, turbid, slightly cloudy]
-urine_microscopy: [urine_bacteria, urine_mucus, urine_crystals]
-urine_graded:
-  [urine_blood, urine_hemoglobin, urine_ketones, urine_leukocyte_esterase, urine_protein,
-   urine_glucose, urine_bilirubin, urine_urobilinogen, urine_nitrite]
-medication_delimiter: ';'
+version: local-assay-routing-v2
+protected_prefixes:
+- demo__
+- spine__sjogrens_class
+protected_names:
+- spine__sjd_ever_1_2_4
+identifier_tokens:
+- id
+- ids
+- identifier
+- identifiers
+- mrn
+- uuid
+- guid
+hla_loci:
+- A
+- B
+- C
+- DPB
+- DPB1
+- DQB1
+- DRB
+- DRB1
+medication_delimiter: ;
 medications:
-  medication__ctdb_reported_names: [CTDB, reported, episode]
-  medication__btris_order_within_episode_names: [BTRIS, order, within_episode]
-  medication__btris_order_before_episode_1y_names: [BTRIS, order, before_episode_1y]
-  medication__btris_order_after_episode_1y_names: [BTRIS, order, after_episode_1y]
-  medication__btris_order_nearby_1y_names: [BTRIS, order, nearby_1y]
-  medication__btris_consent_only_review_names: [BTRIS, consent_review, null]
-  medication__chart_review_candidate_names: [null, candidate, null]
+  medication__ctdb_reported_names:
+  - CTDB
+  - reported
+  - episode
+  medication__btris_order_within_episode_names:
+  - BTRIS
+  - order
+  - within_episode
+  medication__btris_order_before_episode_1y_names:
+  - BTRIS
+  - order
+  - before_episode_1y
+  medication__btris_order_after_episode_1y_names:
+  - BTRIS
+  - order
+  - after_episode_1y
+  medication__btris_order_nearby_1y_names:
+  - BTRIS
+  - order
+  - nearby_1y
+  medication__btris_consent_only_review_names:
+  - BTRIS
+  - consent_review
+  - null
+  medication__chart_review_candidate_names:
+  - null
+  - candidate
+  - null
+profiles:
+  ana_status: {family: ana, aliases: [ana_status], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: ana}
+  ana_hep2_status: {family: ana, aliases: [ana_hep2_status], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: ana}
+  ana_hep2_titer: {family: ana, aliases: [ana_hep2_titer], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: ana}
+  ana_hep2_pattern: {family: ana, aliases: [ana_hep2_pattern], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: ana}
+  ana_hep2_cytoplasmic_pattern: {family: ana, aliases: [ana_hep2_cytoplasmic_pattern], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: ana}
+  anti_ccp: {family: qualitative, aliases: [anti_ccp], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: qualitative}
+  anti_dsdna: {family: qualitative, aliases: [anti_dsdna], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: qualitative}
+  anti_dsdna_igg: {family: qualitative, aliases: [anti_dsdna_igg], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: qualitative}
+  anti_ro52: {family: qualitative, aliases: [anti_ro52], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: qualitative}
+  anti_ro60: {family: qualitative, aliases: [anti_ro60], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: qualitative}
+  anti_ro_ssa: {family: qualitative, aliases: [anti_ro_ssa], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: qualitative}
+  anti_la_ssb: {family: qualitative, aliases: [anti_la_ssb], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: qualitative}
+  anticardiolipin_igg: {family: qualitative, aliases: [anticardiolipin_igg], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: qualitative}
+  anticardiolipin_igm: {family: qualitative, aliases: [anticardiolipin_igm], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: qualitative}
+  anti_cardiolipin_igg: {family: qualitative, aliases: [anti_cardiolipin_igg], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: qualitative}
+  anti_cardiolipin_igm: {family: qualitative, aliases: [anti_cardiolipin_igm], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: qualitative}
+  anti_endomysial_iga: {family: qualitative, aliases: [anti_endomysial_iga], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: titer}
+  vzv_igg: {family: qualitative, aliases: [vzv_igg], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: qualitative}
+  varicella_zoster_igg: {family: qualitative, aliases: [varicella_zoster_igg], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: qualitative}
+  rheumatoid_factor: {family: qualitative, aliases: [rheumatoid_factor], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: qualitative}
+  anti_tpo: {family: qualitative, aliases: [anti_tpo], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: qualitative}
+  anti_thyroglobulin: {family: qualitative, aliases: [anti_thyroglobulin], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: qualitative}
+  quantiferon: {family: qualitative, aliases: [quantiferon], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: qualitative}
+  quantiferon_tb_gold: {family: qualitative, aliases: [quantiferon_tb_gold], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: qualitative}
+  beta_hcg: {family: qualitative, aliases: [beta_hcg], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: qualitative}
+  anti_sm: {family: qualitative, aliases: [anti_sm], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: qualitative}
+  anti_rnp: {family: qualitative, aliases: [anti_rnp], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: qualitative}
+  anti_scl70: {family: qualitative, aliases: [anti_scl70], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: qualitative}
+  anti_jo1: {family: qualitative, aliases: [anti_jo1], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: qualitative}
+  hepatitis_b_core_antibody: {family: qualitative, aliases: [hepatitis_b_core_antibody], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: qualitative}
+  hepatitis_b_surface_antibody: {family: qualitative, aliases: [hepatitis_b_surface_antibody], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: qualitative}
+  hepatitis_b_surface_antigen: {family: qualitative, aliases: [hepatitis_b_surface_antigen], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: qualitative}
+  hepatitis_c_antibody: {family: qualitative, aliases: [hepatitis_c_antibody], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: qualitative}
+  htlv_1_2_antibody: {family: qualitative, aliases: [htlv_1_2_antibody], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: qualitative}
+  sars_cov2_anti_n: {family: qualitative, aliases: [sars_cov2_anti_n], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: qualitative}
+  quantiferon_final_interpretation: {family: qualitative, aliases: [quantiferon_final_interpretation], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: qualitative}
+  urine_pregnancy_test: {family: qualitative, aliases: [urine_pregnancy_test], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: qualitative}
+  urine_bacteria: {family: urine_microscopy, aliases: [urine_bacteria], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: urine_microscopy}
+  urine_mucus: {family: urine_microscopy, aliases: [urine_mucus], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: urine_microscopy}
+  urine_crystals: {family: urine_microscopy, aliases: [urine_crystals], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: urine_microscopy}
+  urinalysis_includes_microscopic__mucous_urinalysis: {family: urine_microscopy, aliases: [urinalysis_includes_microscopic__mucous_urinalysis], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: urine_microscopy}
+  urinalysis_includes_microscopic__bacteria_urinalysis: {family: urine_microscopy, aliases: [urinalysis_includes_microscopic__bacteria_urinalysis], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: urine_microscopy}
+  urinalysis_includes_microscopic__crystals_urinalysis: {family: urine_microscopy, aliases: [urinalysis_includes_microscopic__crystals_urinalysis], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: urine_microscopy}
+  urinalysis_includes_microscopic__calcium_oxalate_crystals_urinalysis: {family: urine_microscopy, aliases: [urinalysis_includes_microscopic__calcium_oxalate_crystals_urinalysis], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: urine_microscopy}
+  urinalysis_includes_microscopic__uric_acid_crystals_urinalysis: {family: urine_microscopy, aliases: [urinalysis_includes_microscopic__uric_acid_crystals_urinalysis], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: urine_microscopy}
+  urinalysis_includes_microscopic__amorphous_crystals_urinalysis: {family: urine_microscopy, aliases: [urinalysis_includes_microscopic__amorphous_crystals_urinalysis], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: urine_microscopy}
+  urinalysis_includes_microscopic__hyalin_casts_urinalysis: {family: urine_microscopy, aliases: [urinalysis_includes_microscopic__hyalin_casts_urinalysis], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: urine_microscopy}
+  urinalysis_includes_microscopic__hyaline_casts_urinalysis: {family: urine_microscopy, aliases: [urinalysis_includes_microscopic__hyaline_casts_urinalysis], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: urine_microscopy}
+  urinalysis_includes_microscopic__granular_casts_urinalysis: {family: urine_microscopy, aliases: [urinalysis_includes_microscopic__granular_casts_urinalysis], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: urine_microscopy}
+  urinalysis_includes_microscopic__unclassified_casts_urinalysis: {family: urine_microscopy, aliases: [urinalysis_includes_microscopic__unclassified_casts_urinalysis], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: urine_microscopy}
+  urinalysis_includes_microscopic__wbc_clumps_urinalysis: {family: urine_microscopy, aliases: [urinalysis_includes_microscopic__wbc_clumps_urinalysis], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: urine_microscopy}
+  urinalysis_includes_microscopic__renal_epithelial_cells_urinalysis: {family: urine_microscopy, aliases: [urinalysis_includes_microscopic__renal_epithelial_cells_urinalysis], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: urine_microscopy}
+  urine_blood: {family: urine_graded, aliases: [urine_blood], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: urine_graded}
+  urine_hemoglobin: {family: urine_graded, aliases: [urine_hemoglobin], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: urine_graded}
+  urine_ketones: {family: urine_graded, aliases: [urine_ketones], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: urine_graded}
+  urine_leukocyte_esterase: {family: urine_graded, aliases: [urine_leukocyte_esterase], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: urine_graded}
+  urine_protein: {family: urine_graded, aliases: [urine_protein], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: urine_graded}
+  urine_glucose: {family: urine_graded, aliases: [urine_glucose], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: urine_graded}
+  urine_bilirubin: {family: urine_graded, aliases: [urine_bilirubin], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: urine_graded}
+  urine_urobilinogen: {family: urine_graded, aliases: [urine_urobilinogen], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: urine_graded}
+  urine_nitrite: {family: urine_graded, aliases: [urine_nitrite], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: urine_graded}
+  urine_glucose_qualitative: {family: urine_graded, aliases: [urine_glucose_qualitative], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: urine_graded}
+  urine_protein_qualitative: {family: urine_graded, aliases: [urine_protein_qualitative], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: urine_graded}
+  urine_color: {family: urine_nominal, aliases: [urine_color], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: urine_nominal}
+  urine_clarity: {family: urine_nominal, aliases: [urine_clarity], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: urine_nominal}
+  urine_appearance: {family: urine_nominal, aliases: [urine_appearance], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: urine_nominal}
+  urinalysis_includes_microscopic__clarity_urinalysis: {family: urine_nominal, aliases: [urinalysis_includes_microscopic__clarity_urinalysis], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: urine_nominal}
+  immunofixation: {family: immunofixation, aliases: [immunofixation], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: immunofixation}
+  immunofixation_serum: {family: immunofixation, aliases: [immunofixation_serum], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: immunofixation}
+  serum_immunofixation: {family: immunofixation, aliases: [serum_immunofixation], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: immunofixation}
+  immunofixation_urine: {family: immunofixation, aliases: [immunofixation_urine], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: immunofixation}
+  monoclonal_band: {family: immunofixation, aliases: [monoclonal_band], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: immunofixation}
+  immunofixation_serum_interpretation: {family: immunofixation, aliases: [immunofixation_serum_interpretation], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: immunofixation}
+  cryoglobulins: {family: cryoglobulin, aliases: [cryoglobulins], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: cryoglobulin}
+  cryoglobulin: {family: cryoglobulin, aliases: [cryoglobulin], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: cryoglobulin}
+  m_spike: {family: m_spike, aliases: [m_spike], value_role: assay_result, allowed_representations: [text], provenance: pipeline_v1, normalization_profile: m_spike}
+  monoclonal_band_m_spike: {family: m_spike, aliases: [monoclonal_band_m_spike], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: m_spike}
+  ana_hep_2_substrate_igg__antinuclear_antibody_ana_hep_2_substrate_comment_blood: {family: ana_narrative, aliases: [ana_hep_2_substrate_igg__antinuclear_antibody_ana_hep_2_substrate_comment_blood], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: ana_narrative}
+  cbc_diff__bands_blood: {family: administrative, aliases: [cbc_diff__bands_blood], value_role: process, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: administrative}
+  ptt_comment: {family: administrative, aliases: [ptt_comment], value_role: process, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: administrative}
+  urine_microscopic_exam: {family: administrative, aliases: [urine_microscopic_exam], value_role: process, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: administrative}
+  urinalysis_includes_microscopic__digital_user_review_urine: {family: administrative, aliases: [urinalysis_includes_microscopic__digital_user_review_urine], value_role: process, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: administrative}
+  cbc_diff__anisocytosis_blood: {family: cbc_morphology, aliases: [cbc_diff__anisocytosis_blood], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: cbc_morphology}
+  cbc_diff__poikilocytosis_blood: {family: cbc_morphology, aliases: [cbc_diff__poikilocytosis_blood], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: cbc_morphology}
+  cbc_diff__polychromasia_blood: {family: cbc_morphology, aliases: [cbc_diff__polychromasia_blood], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: cbc_morphology}
+  cbc_diff__hypochromia_blood: {family: cbc_morphology, aliases: [cbc_diff__hypochromia_blood], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: cbc_morphology}
+  cbc_diff__microcytes_blood: {family: cbc_morphology, aliases: [cbc_diff__microcytes_blood], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: cbc_morphology}
+  cbc_diff__macrocytes_blood: {family: cbc_morphology, aliases: [cbc_diff__macrocytes_blood], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: cbc_morphology}
+  cbc_diff__ovalocytes_blood: {family: cbc_morphology, aliases: [cbc_diff__ovalocytes_blood], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: cbc_morphology}
+  cbc_diff__schistocytes_blood: {family: cbc_morphology, aliases: [cbc_diff__schistocytes_blood], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: cbc_morphology}
+  cbc_diff__target_cells_blood: {family: cbc_morphology, aliases: [cbc_diff__target_cells_blood], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: cbc_morphology}
+  cbc_diff__tear_drop_cells_blood: {family: cbc_morphology, aliases: [cbc_diff__tear_drop_cells_blood], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: cbc_morphology}
+  cbc_diff__spherocytes_blood: {family: cbc_morphology, aliases: [cbc_diff__spherocytes_blood], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: cbc_morphology}
+  cbc_diff__burr_cells_blood: {family: cbc_morphology, aliases: [cbc_diff__burr_cells_blood], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: cbc_morphology}
+  cbc_diff__toxic_granulation_blood: {family: cbc_morphology, aliases: [cbc_diff__toxic_granulation_blood], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: cbc_morphology}
+  cbc_diff__dohle_bodies_blood: {family: cbc_morphology, aliases: [cbc_diff__dohle_bodies_blood], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: cbc_morphology}
+  cbc_diff__giant_platelets_blood: {family: cbc_morphology, aliases: [cbc_diff__giant_platelets_blood], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: cbc_morphology}
+  cbc_diff__platelet_clumps_blood: {family: cbc_morphology, aliases: [cbc_diff__platelet_clumps_blood], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: cbc_morphology}
+  cbc_diff__rbc_morphology_blood: {family: cbc_morphology, aliases: [cbc_diff__rbc_morphology_blood], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: cbc_morphology}
+  cbc_diff__wbc_morphology_blood: {family: cbc_morphology, aliases: [cbc_diff__wbc_morphology_blood], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: cbc_morphology}
+  cbc_diff__platelet_morphology_blood: {family: cbc_morphology, aliases: [cbc_diff__platelet_morphology_blood], value_role: assay_result, allowed_representations: [text], provenance: v2_specification_routing, normalization_profile: cbc_morphology}

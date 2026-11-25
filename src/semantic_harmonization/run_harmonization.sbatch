@@ -18,13 +18,17 @@ PYTHON="$BASE/sjd_container_env/bin/python"
 submitted_root="${OBJ1_ROOT:-${SLURM_SUBMIT_DIR:-}}"
 
 if [[ -z "$submitted_root" || ! -f "$submitted_root/src/semantic_harmonization/repository_root.sh" ]]; then
-    echo "Submit from the obj1_sjd repository root."
+    echo "Submit from the obj1_sjd repository root." >&2
     exit 1
 fi
 
 source "$submitted_root/src/semantic_harmonization/repository_root.sh"
 
 repo="$(sjd_obj1_root "$submitted_root")"
+base_physical="$(cd -- "$BASE" && pwd -P)"
+if [[ "$repo" == "$base_physical/"* ]]; then
+    repo="$BASE/${repo#"$base_physical/"}"
+fi
 
 cd "$repo"
 
@@ -70,6 +74,9 @@ mkdir -p \
 
 test -f "$IMAGE"
 test -x "$PYTHON"
+export APPTAINERENV_SJD_CANONICAL_REPO="$repo"
+read -r image_sha _ < <(sha256sum -- "$IMAGE")
+export APPTAINERENV_SJD_CONTAINER_SHA256="$image_sha"
 
 echo "Starting semantic harmonization"
 echo "Job ID: $SLURM_JOB_ID"

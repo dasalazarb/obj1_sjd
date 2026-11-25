@@ -1,4 +1,4 @@
-version: clinical-lexical-v1
+version: clinical-lexical-v2
 qualitative:
   neg: negative
   negative: negative
@@ -8,8 +8,11 @@ qualitative:
   indeterminate: indeterminate
   borderline: borderline
   reactive: reactive
+  repeat reactive: reactive
+  repeated reactive: reactive
   nonreactive: nonreactive
   non-reactive: nonreactive
+  non reactive: nonreactive
   normal: normal
 availability:
   not done: not_performed
@@ -18,9 +21,9 @@ availability:
   cancelled: not_performed
   pending: pending
   unable to interpret: not_interpretable
-  see below: not_interpretable
-  see comment: not_interpretable
-  see note: not_interpretable
+  sample not processed: not_performed
+  specimen not processed: not_performed
+  not processed: not_performed
 specimen:
   hemolyzed: hemolyzed
   haemolysed: hemolyzed
@@ -39,3 +42,17 @@ microscopy:
   many: many
   none seen: none seen
 ana_patterns: [homogeneous, speckled, nucleolar, centromere, cytoplasmic, nuclear dots, dense fine speckled]
+administrative:
+  - see below
+  - see comment
+  - see note
+  - note
+  - done
+  - referred to external laboratory
+nominal:
+  urine_color: [yellow, dark yellow, light yellow, pale yellow, amber, colorless, brown, red, orange]
+  urine_clarity: [clear, hazy, cloudy, turbid, slightly cloudy]
+  urine_appearance: [clear, hazy, cloudy, turbid, slightly cloudy]
+  urinalysis_includes_microscopic__clarity_urinalysis: [clear, hazy, cloudy, turbid, slightly cloudy]
+descriptors: [small, moderate, large, rare, few, many, occasional]
+cytoplasmic_patterns: [reticular, reticular/ama, cytoplasmic reticular, cytoplasmic reticular/ama]

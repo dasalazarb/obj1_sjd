@@ -397,7 +397,213 @@ def test_launchers_resolve_repo_from_foreign_and_slurm_working_directories(tmp_p
     invalid = subprocess.run(["bash", str(spool)], env=env | {"SLURM_SUBMIT_DIR": str(tmp_path)},
                              cwd=tmp_path, capture_output=True, text=True)
     assert invalid.returncode != 0 and "obj1_sjd" in invalid.stderr
-    subprocess.run(["bash", str(spool)], env=env | {"OBJ1_ROOT": str(repo), "SLURM_JOB_ID": "123"},
+    base = tmp_path / "canonical" / "salazarda"
+    (base / "containers").mkdir(parents=True)
+    (base / "containers" / "vllm-0.11.2.sif").touch()
+    supplemental = base / "sjd_container_env" / "bin"
+    supplemental.mkdir(parents=True)
+    shutil.copyfile(python, supplemental / "python")
+    (supplemental / "python").chmod(0o755)
+    fake_module = venv / "bin" / "module"
+    fake_module.write_text('#!/usr/bin/env bash\n[[ $* == "load apptainer" ]]\n')
+    fake_module.chmod(0o755)
+    apptainer = venv / "bin" / "apptainer"
+    apptainer.write_text(
+        '#!/usr/bin/env bash\n'
+        '[[ $1 == exec && $2 == --nv && $3 == --cleanenv ]] || exit 2\n'
+        'while [[ $1 != --pwd ]]; do shift; done\n'
+        'printf "%s|%s|%s\\n" "$2" "$5" "$APPTAINERENV_HF_HUB_OFFLINE"\n'
+        'cat >/dev/null\n')
+    apptainer.chmod(0o755)
+    alias = tmp_path / "alias"
+    alias.symlink_to(base, target_is_directory=True)
+    inside = base / "obj1 runtime"
+    repo.rename(inside)
+    spool.write_text(spool.read_text().replace("BASE=/data/salazarda", f'BASE="{alias}"'))
+    subprocess.run(["bash", str(spool)], env=env | {"OBJ1_ROOT": str(inside), "SLURM_JOB_ID": "123",
+                   "PATH": f'{venv / "bin"}:{env["PATH"]}'},
                    cwd=tmp_path, capture_output=True, text=True, check=True)
-    log = repo / "work" / "semantic_harmonization" / "job-123.log"
-    assert log.read_text().strip() == f"{module / 'run_pipeline.py'}|1|1"
+    log = inside / "work" / "semantic_harmonization" / "job-123.log"
+    assert log.read_text().splitlines()[-1] == f"{alias / inside.name}|-u|1"
+
+
+@pytest.mark.parametrize("concept, raw, family, expected", [
+    ("anti_sm", "POSITIVE", "qualitative", "positive"),
+    ("anti_rnp", " NEGATIVE ", "qualitative", "negative"),
+    ("anti_scl70", "NEGATIVE", "qualitative", "negative"),
+    ("anti_jo1", "NEGATIVE", "qualitative", "negative"),
+    ("hepatitis_b_surface_antigen", "REPEAT REACTIVE", "qualitative", "reactive"),
+    ("sars_cov2_anti_n", "indeterminate", "qualitative", "indeterminate"),
+    ("urine_pregnancy_test", "Negative", "qualitative", "negative"),
+])
+def test_v2_exact_profiles_resolve_without_model(cfg, concept, raw, family, expected):
+    from src.semantic_harmonization.inference import routing
+    from src.semantic_harmonization.semantic_facts import parse_mapping, verify_contract
+
+    variable = f"lab__{concept}__text"
+    assert route(variable, cfg) == (concept, family)
+    assert route(f"lab__{concept}__value", cfg) == (concept, "lab_numeric")
+    row = dict(mapping_id="fixture", variable=variable, concept=concept, family=family,
+               raw_json=serialize(raw), context_json="{}")
+    semantic, segments, facts = parse_mapping(row, cfg, VOCAB)
+    verify_contract([row], segments, facts)
+    assert facts[0].payload.category == expected
+    if expected == "reactive":
+        assert facts[0].payload.descriptor == "REPEAT REACTIVE"
+    assert not routing(row, semantic, segments, facts)["send"]
+
+
+def v2_row(cfg, key, raw, **context):
+    variable = f"lab__{key}__text"
+    concept, family = route(variable, cfg)
+    return dict(mapping_id=f"fixture-{key}", variable=variable, concept=concept, family=family,
+                raw_json=serialize(raw), context_json=serialize(context))
+
+
+def test_v2_segments_isolate_reference_history_and_transport(cfg):
+    from src.semantic_harmonization.semantic_facts import parse_mapping, verify_contract
+
+    row = v2_row(cfg, "anti_ccp", "  12 mg/dL | Reference range: Negative <5; Positive >=5 ",
+                 observation_comment="Method: synthetic control review", reference_status="Positive")
+    semantic, segments, facts = parse_mapping(row, cfg, VOCAB)
+    verify_contract([row], segments, facts)
+    assert semantic.exact_value == "12"
+    assert semantic.qualitative_result is None
+    assert {part.role for part in segments} == {"patient_result", "reference_rule", "assay_method", "unresolved"}
+    assert [fact.fact_type for fact in facts].count("numeric_result") == 1
+    assert "qualitative_result" not in {fact.fact_type for fact in facts}
+    bad = segments[0].model_copy(update={"start": 1})
+    with pytest.raises(ValueError, match="reconstruction"):
+        verify_contract([row], [bad, *segments[1:]], facts)
+
+
+@pytest.mark.parametrize("key, raw, expected", [
+    ("quantiferon_final_interpretation", "Sample was not processed", "not_performed"),
+    ("anti_sm", "see comment", None),
+    ("anti_sm", "sent to external laboratory", None),
+    ("cbc_diff__bands_blood", "Grouped with neutrophils", None),
+    ("urinalysis_includes_microscopic__digital_user_review_urine", "Done", None),
+])
+def test_v2_process_markers_emit_metadata_only(cfg, key, raw, expected):
+    from src.semantic_harmonization.semantic_facts import parse_mapping
+
+    semantic, _, facts = parse_mapping(v2_row(cfg, key, raw), cfg, VOCAB)
+    assert semantic.result_availability == expected
+    assert not semantic.qualitative_result
+    assert {fact.fact_type for fact in facts} == {"observation_metadata"}
+
+
+def test_v2_urine_ana_spike_and_morphology(cfg):
+    from src.semantic_harmonization.semantic_facts import parse_mapping
+
+    floor = parsed(cfg, "lab__ana_status__text", "Negative (<1:40)")
+    assert (floor.titer_denominator, floor.titer_comparator, floor.qualitative_result) == (40, "LT", "negative")
+    assert parsed(cfg, "lab__ana_status__text", "Positive >= 1:640").titer_comparator == "GE"
+    row = v2_row(cfg, "ana_hep2_cytoplasmic_pattern", "Cytoplasmic reticular may be associated with synthetic antibody")
+    _, _, facts = parse_mapping(row, cfg, VOCAB)
+    assert [(fact.payload.compartment, fact.payload.pattern) for fact in facts if fact.fact_type == "ana_pattern"] == [
+        ("cytoplasmic", "cytoplasmic reticular")]
+    _, _, facts = parse_mapping(v2_row(cfg, row["concept"], "Positive"), cfg, VOCAB)
+    assert any(fact.fact_type == "ana_pattern" and fact.payload.pattern is None for fact in facts)
+    for raw in ("not detected", "No monoclonal band detected"):
+        _, _, facts = parse_mapping(v2_row(cfg, "monoclonal_band_m_spike", raw), cfg, VOCAB)
+        assert facts[0].payload.detection == "absent" and facts[0].payload.concentration is None
+    urine = parsed(cfg, "lab__urine_glucose_qualitative__text", "1+ (25 mg/dL)")
+    assert (urine.ordinal_grade, urine.exact_value, urine.ordinal_score) == ("1+", "25", None)
+    assert parsed(cfg, "lab__urinalysis_includes_microscopic__clarity_urinalysis__text", "Cloudy").category == "cloudy"
+    urine = parsed(cfg, "lab__urine_bacteria__text", "Few (5-10)")
+    assert urine.category == "few" and urine.comparator is None
+    _, _, facts = parse_mapping(v2_row(cfg, "cbc_diff__anisocytosis_blood", "anisocytosis 10%"), cfg, VOCAB)
+    assert facts[0].payload.percentage.exact_value == "10"
+
+
+def test_v2_narrative_hla_and_conflicting_scalars(cfg):
+    from src.semantic_harmonization.semantic_facts import parse_mapping
+
+    immuno = parsed(cfg, "lab__immunofixation_serum_interpretation__text",
+                    "SEE BELOW | Trace IgA (lambda) band detected; Previously identified as IgM kappa")
+    assert [(f.immunoglobulin_class, f.light_chain, f.pattern, f.temporality) for f in immuno.findings] == [
+        ("IgA", "lambda", None, "unspecified"), ("IgM", "kappa", None, "historical")]
+    immune = parsed(cfg, "lab__immunofixation_serum_interpretation__text", "See note: No anomalous immunoglobulins")
+    assert [(f.entity, f.assertion) for f in immune.findings] == [("anomalous_immunoglobulins", "absent")]
+    hla = v2_row(cfg, "hla_drb1", "04:01:01G, * | Method: DRB1*04:01:02G")
+    _, _, facts = parse_mapping(hla, cfg, VOCAB)
+    assert [(f.payload.token, f.payload.nomenclature) for f in facts if f.fact_type == "hla_result"] == [
+        ("04:01:01G", "group"), ("*", "unresolved")]
+    _, _, facts = parse_mapping(v2_row(cfg, "hla_drb", "04:01/04:02"), cfg, VOCAB)
+    assert facts[0].payload.alternatives == ["04:01", "04:02"] and facts[0].payload.allele is None
+    semantic, _, facts = parse_mapping(v2_row(cfg, "anti_sm", "Positive | Negative"), cfg, VOCAB)
+    assert semantic.qualitative_result is None and semantic.interpretation_note.startswith("Conflicting")
+    assert {f.payload.category for f in facts} == {"positive", "negative"}
+
+
+def test_v2_model_requires_verbatim_profile_spans_and_licensed_roles(cfg):
+    from src.semantic_harmonization.inference import apply_extraction, validate_profile
+    from src.semantic_harmonization.schemas import Extraction, Semantic
+    from src.semantic_harmonization.segmentation import segment
+
+    row = v2_row(cfg, "immunofixation_serum_interpretation", "Reference range: No anomalous immunoglobulins")
+    finding = new_finding("anomalous_immunoglobulins", "No anomalous immunoglobulins", assertion="absent")
+    with pytest.raises(ValueError, match="source span"):
+        validate_extraction(serialize({"findings": [finding.model_dump()]}), row, [])
+    row = v2_row(cfg, "immunofixation_serum_interpretation", "A faint lambda band was detected.")
+    finding = new_finding("light_chain", "faint lambda", light_chain="lambda", intensity_descriptor="faint")
+    answer = Extraction(findings=[finding])
+    semantic = Semantic()
+    assert len(apply_extraction(semantic, answer, row, "synthetic")) == 1
+    assert not apply_extraction(semantic, answer, row, "synthetic")
+    contradicted = Semantic(findings=[finding.model_copy(update={"assertion": "absent"})])
+    with pytest.raises(ValueError, match="conflicts"):
+        apply_extraction(contradicted, answer, row, "synthetic")
+    row = v2_row(cfg, "ana_hep2_cytoplasmic_pattern", "Positive")
+    part, = segment(row)
+    proposal = dict(segment_id=part.segment_id, start=0, end=8, quote="Positive", document_ids=[],
+                    payload=dict(compartment="cytoplasmic", pattern=None, state="positive"))
+    assert len(validate_profile(serialize({"candidates": [proposal]}), row, [], cfg, VOCAB)) == 1
+    for invalid in (dict(quote="positive"), dict(document_ids=["unknown"]), dict(extra="unexpected")):
+        with pytest.raises(ValueError):
+            validate_profile(serialize({"candidates": [proposal | invalid]}), row, [], cfg, VOCAB)
+
+
+def test_v2_publication_reuses_checkpoints_and_compares_published_baseline(tmp_path, monkeypatch, cfg):
+    from src.semantic_harmonization import run_pipeline as pipeline
+
+    _, manifest = synthetic(tmp_path, cfg)
+    options = dict(encoder=Encoder(), model_factory=Model, resource_verify=lambda cfg: manifest)
+    original_report = pipeline.report
+
+    def stop(*args):
+        raise RuntimeError("synthetic stop before publication")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(pipeline, "report", stop)
+        with pytest.raises(RuntimeError, match="synthetic stop"):
+            pipeline.run(cfg, **options)
+    assert not list(Path(cfg["paths"]["analytic"]).iterdir())
+    assert not list(Path(cfg["paths"]["output"]).glob("*/run_manifest.json"))
+    with monkeypatch.context() as patch:
+        patch.setattr(pipeline, "parse_mapping", stop)
+        patch.setattr(pipeline, "report", original_report)
+        analytic, baseline = pipeline.run(cfg, **options)
+    cfg["paths"]["baseline"] = str(baseline)
+    _, report_dir = pipeline.run(cfg, **options)
+    summary = json.loads((report_dir / "validation_summary.json").read_text())
+    assert summary["v2"]["baseline"]["status"] == "reconciled"
+    assert summary["v2"]["baseline"]["added_facts"] == 0
+    assert summary["v2"]["llm_outcomes"] == {"added": 1}
+    assert summary["clinical_evaluation"]["status"] == "not performed"
+    facts = pq.read_table(report_dir / "semantic_facts.parquet").to_pylist()
+    view = pq.read_table(analytic / "patient_visit_semantic_observations.parquet").to_pylist()
+    assert len({row["observation_id"] for row in view}) == len(view)
+    assert {key for row in view for key in row["fact_ids"]} <= {fact["fact_id"] for fact in facts}
+    future = [row for row in view if row["result_available_date"] == "2024-01-15"]
+    assert len(future) == 1 and future[0]["fact_ids"] and future[0]["as_of_fact_ids"] == []
+
+
+def test_v2_measurement_counts_are_nullable_and_integral():
+    from src.semantic_harmonization.inventory import measurement_count
+
+    assert measurement_count(float("nan")) is None
+    assert measurement_count(3.0) == 3
+    with pytest.raises(ValueError):
+        measurement_count(1.5)
