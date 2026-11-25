@@ -24,10 +24,15 @@ def serialize(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
-def file_hash(path: Path) -> str:
-    """Hash a file without loading it into memory."""
-    with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+def file_hash(path):
+    """Compute SHA-256 hash, compatible with Python 3.10+."""
+    sha256 = hashlib.sha256()
+
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            sha256.update(chunk)
+
+    return sha256.hexdigest()
 
 
 def read_yaml(path: Path) -> dict:
