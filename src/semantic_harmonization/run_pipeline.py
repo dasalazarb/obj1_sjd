@@ -318,8 +318,19 @@ def main() -> None:
         raise SystemExit("Configure this command through YAML.")
     try:
         cfg = load_config()
-    except (ValueError, FileNotFoundError) as error:
-        raise SystemExit(f"Harmonization configuration error. {error}") from None
+    except (ValueError, RuntimeError) as error:
+        import traceback
+
+        print(f"ERROR TYPE: {type(error).__name__}", file=sys.stderr)
+
+        for frame in traceback.extract_tb(error.__traceback__):
+            print(
+                f"{frame.filename}:{frame.lineno} "
+                f"in {frame.name}",
+                file=sys.stderr
+            )
+
+        raise SystemExit(1) from None
     try:
         _, out = run(cfg)
     except PermissionError as error:
