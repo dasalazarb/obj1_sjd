@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 
 import common
+from src.studies.pharma._semantic_input import follow_up, study_name
 from src.studies._shared import create_study_dirs, load_parquet, validate_predictors
 
 STUDY_NAME = "pharma/04_pharma_history_aware"
@@ -137,6 +138,8 @@ def compare_with_step03(models: pd.DataFrame, step03: pd.DataFrame) -> pd.DataFr
 
 
 def run(args: argparse.Namespace) -> None:
+    args, selected_source = follow_up(args, {"analytic": DEFAULT_ANALYTIC, "support": DEFAULT_SUPPORT,
+                                     "cells": DEFAULT_CELLS, "step03": DEFAULT_STEP03})
     import yaml
     config = yaml.safe_load(args.config.read_text())
     minimum_events = int(config["minimum_counts"]["events_for_multivariable_model"])
@@ -152,7 +155,7 @@ def run(args: argparse.Namespace) -> None:
     summary = pd.DataFrame([{"n_combinations_go": len(eligible),
                              "n_models_attempted": len(models),
                              "n_models_successful": int(models.model_status.eq("success").sum()) if len(models) else 0}])
-    dirs = create_study_dirs(STUDY_NAME)
+    dirs = create_study_dirs(study_name(STUDY_NAME, selected_source))
     logging.basicConfig(filename=dirs["logs"] / "04_pharma_history_aware.log", level=logging.INFO, force=True)
     models.to_csv(dirs["tables"] / "04_pharma_history_models.csv", index=False)
     comparison.to_csv(dirs["tables"] / "04_pharma_history_comparison.csv", index=False)

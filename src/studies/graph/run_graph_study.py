@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.studies.graph._pipeline import base_parser, load_pipeline, output_root, stage_destinations, stage_outputs
+from src.studies.graph._pipeline import base_parser, load_pipeline, output_root, scoped_output, stage_destinations, stage_outputs
 
 SUMMARY = 'graph_study_results_summary.md'
 
@@ -16,7 +16,7 @@ def run(cfg, *, root=None, preflight_only=False):
     from src.studies.graph.stage02.s02_pipeline import run as run02
     from src.studies.graph.stage03.s03_pipeline import run as run03
 
-    root = Path(root).resolve() if root else output_root(cfg, 'study')
+    root = scoped_output(cfg, Path(root).resolve()) if root else output_root(cfg, 'study')
     graph02_root, graph03_root = (output_root(cfg, key) for key in ('02', '03'))
     if any(root.is_relative_to(path) or path.is_relative_to(root)
            for stage in (graph02_root, graph03_root) for path in stage_destinations(stage).values()):

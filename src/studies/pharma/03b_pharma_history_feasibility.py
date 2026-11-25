@@ -228,8 +228,9 @@ def summarize(support: pd.DataFrame, biomarkers: list[str]) -> pd.DataFrame:
 
 
 def run(args: argparse.Namespace) -> None:
+    args, selected_source = follow_up(args, {"analytic": DEFAULT_ANALYTIC, "support": DEFAULT_SUPPORT, "models": DEFAULT_MODELS})
     minimum_events, minimum_cell = load_config(args.config)
-    dirs = create_study_dirs(STUDY_NAME)
+    dirs = create_study_dirs(study_name(STUDY_NAME, selected_source))
     logging.basicConfig(filename=dirs["logs"] / "03b_pharma_history_feasibility.log",
                         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
                         force=True)
@@ -270,6 +271,9 @@ def run(args: argparse.Namespace) -> None:
     enriched[trace_columns].to_parquet(
         dirs["analytic"] / "03b_pharma_history_enriched.parquet", index=False)
 
+    publish_provenance(selected_source, dirs["analytic"], ("03b_pharma_history_enriched.parquet",))
+    publish_provenance(selected_source, dirs["tables"], ("03b_pharma_history_support.csv",
+                                                         "03b_pharma_previous_pop_cells.csv"))
     previous_events = int(history_support.n_events_with_previous_pop.sum())
     state_events = int(history_support.n_events_with_state_entry_observed.sum())
     logging.info("Events retained after history requirements: previous_pop=%d; state_entry=%d",

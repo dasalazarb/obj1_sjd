@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from sklearn.decomposition import PCA
 from sklearn.metrics import adjusted_rand_score, pairwise_distances
-from .._pipeline import (load_pipeline, config_path, output_root, stage_destinations, stage_outputs,
+from .._pipeline import (load_pipeline, config_path, output_root, scoped_output, stage_destinations, stage_outputs,
                          staged_artifact_paths, save_table, write_json, utc_now, base_parser, digest)
 from . import s02_legacy as legacy
 from .s02_contracts import CURRENT_SCHEMA, MANIFEST, resolve_sources, validate_release
@@ -55,7 +55,7 @@ def prepare_inputs(cfg):
 
 
 def run(cfg, *, root=None, preflight_only=False):
-    root = Path(root).resolve() if root else output_root(cfg, '02')
+    root = scoped_output(cfg, Path(root).resolve()) if root else output_root(cfg, '02')
     destinations = stage_destinations(root, include_figures=not preflight_only)
     figure_prefix = Path(relpath(destinations.get('figures', root), root))
 
@@ -87,7 +87,8 @@ def _execute(cfg, run_dir, preflight_only, figure_dir, figure_prefix, prior=None
     primary,_,_=legacy.select_features(values,families,'S3',config,manifest)
     registry=clinical_registry(manifest,cfg['clinical_domains'],primary)
     write_json(run_dir/'02_graph_preflight.json',{'status':'PASS','n_patients':n,'n_features':len(values),
-        'analysis_mode':cfg['analysis']['mode'],'feature_policy':cfg['analysis']['feature_policy'],**governance})
+        'analysis_mode':cfg['analysis']['mode'],'feature_policy':cfg['analysis']['feature_policy'],
+        **({'semantic_source': cfg['_semantic_source'].provenance()} if cfg.get('_semantic_source') else {}), **governance})
     if preflight_only:
         if prior is not None:
             save_table(run_dir/'02_graph_missingness_preflight_historical_failure_audit.csv', prior)
@@ -563,6 +564,13 @@ def _execute(cfg, run_dir, preflight_only, figure_dir, figure_prefix, prior=None
                              for path in figure_dir.iterdir() if path.is_file()})
         validate_factorial_inventory(factorial, eligible, staged_files)
         manifest_release['missingness_sensitivity']['factorial_v3'] = factorial
+    if selected := cfg.get('_semantic_source'):
+        manifest_release['semantic_source'] = selected.provenance()
+        for role, path in sources.items():
+            checksum = digest(path)
+            if checksum != selected.sha256[role]:
+                raise ValueError(f'Semantic {role} changed during Graph02 execution')
+            manifest_release['source_inputs'][role]['sha256'] = checksum
     manifest_path = run_dir / MANIFEST
     write_json(manifest_path, manifest_release)
     validate_release(manifest_path)

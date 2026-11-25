@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import yaml
 import common
+from src.semantic_harmonization.study_input import active_study_input
 
 GRAPH = Path(__file__).resolve().parent
 DEFAULT_CONFIG = GRAPH / 'configs/pipeline.yaml'
@@ -47,6 +48,8 @@ def load_pipeline(path=DEFAULT_CONFIG):
     if cfg.get('schema_version') != 'graph_pipeline_v1':
         raise ValueError('Unsupported pipeline schema')
     cfg['_path'] = str(path)
+    if source := active_study_input():
+        cfg['_semantic_source'] = source
     hashes = {'pipeline': digest(path)}
     for name, value in cfg['includes'].items():
         p = config_path(path, value)
@@ -101,7 +104,12 @@ def utc_now():
 
 def output_root(cfg, stage):
     key = f'output_{stage}'
-    return config_path(cfg['_path'], cfg['paths'][key])
+    return scoped_output(cfg, config_path(cfg['_path'], cfg['paths'][key]))
+
+
+def scoped_output(cfg, path):
+    source = cfg.get('_semantic_source')
+    return path / 'semantic_harmonization' / source.run_id if source else path
 
 
 def stage_destinations(root, *, include_figures=True):

@@ -1,0 +1,3 @@
+# All participating studies read the same selection. Override in input_selection.local.yaml.
+mode: original
+run_id: null

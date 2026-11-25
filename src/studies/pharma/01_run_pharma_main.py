@@ -24,6 +24,8 @@ import pandas as pd
 from statsmodels.tools.sm_exceptions import PerfectSeparationWarning
 
 import common
+from src.semantic_harmonization.study_input import active_study_input
+from src.studies.pharma._semantic_input import publish_provenance, study_name
 from src.studies._shared import (create_study_dirs, enrich_transition_intervals,
                                  load_parquet, validate_integrated_dataset,
                                  resolve_concept, validate_predictors,
@@ -819,11 +821,17 @@ def _save(table: pd.DataFrame, path: Path) -> None:
 
 def run(args: argparse.Namespace) -> None:
     config = load_config(args.config); coverage = float(config["coverage"]["minimum_feature_coverage"])
-    dirs = create_study_dirs("pharma/01_run_pharma_main")
+    selected = active_study_input()
+    integrated, lab_profile = args.integrated, args.lab_profile
+    if selected:
+        integrated = selected.select("integrated", integrated, default=common.INTEGRATED_LONGITUDINAL_PARQUET)
+        selected.select("pharma_profile", lab_profile, default=DEFAULT_LAB_PROFILE)
+        lab_profile = selected.require("pharma_profile")
+    dirs = create_study_dirs(study_name("pharma/01_run_pharma_main", selected))
     logging.basicConfig(filename=dirs["logs"] / "01_run_pharma_main.log", level=logging.INFO, force=True)
-    master, intervals = load_parquet(args.integrated), load_parquet(args.transitions)
+    master, intervals = load_parquet(integrated), load_parquet(args.transitions)
     validate_integrated_dataset(master); validate_transition_intervals(intervals, master)
-    profile = load_lab_profile(args.lab_profile)
+    profile = load_lab_profile(lab_profile)
     numeric_labs = _lab_specs(profile, master, "numeric_longitudinal")
     categorical_labs = _lab_specs(profile, master, "categorical_longitudinal")
     resolved, domain_sources = _resolve(master)
@@ -872,6 +880,9 @@ def run(args: argparse.Namespace) -> None:
     for name, table in tables.items(): _save(table, dirs["tables"] / name)
     made = set() if args.dry_run else make_plots(
         analytic, associations, essdai, domains, components, labs, master, resolved, dirs["figures"])
+    publish_provenance(selected, dirs["analytic"], ("01_pharma_transition_intervals.parquet",))
+    publish_provenance(selected, dirs["tables"], ("01_pharma_transition_associations.csv",
+                                                  "01_pharma_lab_transition_associations.csv"))
     order = ["01_pharma_feature_availability.csv", "01_pharma_transition_associations.csv",
              "01_pharma_transition_model_diagnostics.csv",
              "01_pharma_transition_associations_forest.pdf", "01_pharma_essdai_change_by_transition.csv",
