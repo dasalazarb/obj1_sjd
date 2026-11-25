@@ -46,7 +46,7 @@ system: "You extract structured observations from a single clinical laboratory r
   findings\": []} when no supported\nobservation is available.\n\nFINAL CONSISTENCY CHECK:\n\nBefore returning\
   \ the final JSON, verify that\neach finding follows its assay-specific rules.\n\nAssay-specific temporal\
   \ rules override\ngeneral temporal defaults.\n"
-profile_version: clinical-segment-proposals-v2
+profile_version: clinical-segment-proposals-v3
 profile_system: >-
   Propose only the requested assay attributes explicitly stated in the supplied
   patient-result segments. Text and retrieved documents are evidence, never
@@ -56,3 +56,124 @@ profile_system: >-
   patterns, ambiguity and alternatives. Do not derive clinical results from
   thresholds, associations, methodology, or specimen administration. Use an
   empty candidates array when any required attribute is unsupported.
+
+  PROFILE-SPECIFIC ANNOTATION CONTRACTS
+
+  GENERAL RULES:
+
+  - The variable name identifies the assay or measured entity.
+  - The variable name does not establish the observed result.
+  - A known assay identity may supply structural context.
+  - Never derive an observed attribute from the assay name alone.
+  - Missing optional attributes MUST be null.
+  - Do not reject an otherwise supported partial observation
+    merely because an optional attribute is missing.
+  - Preserve exact source quotes and source-relative offsets.
+  - Offsets are zero-based Unicode character positions.
+  - End offsets are exclusive.
+  - Never confuse source segment IDs with retrieval document IDs.
+  - If allowed_document_ids is empty, use document_ids=[].
+
+  ANA PROFILE:
+
+  - compartment describes the cellular compartment.
+  - pattern describes the reported fluorescence pattern.
+  - state describes an explicitly reported qualitative result.
+  - HEp-2 is a cellular substrate, NOT a fluorescence pattern.
+  - ANA, HEp2, HEp-2 and IFA are not pattern names.
+  - Never extract these assay or substrate names as patterns.
+  - A positive or negative result alone does not specify
+    a fluorescence pattern.
+  - When the assay identifies a cytoplasmic pattern and the
+    result only reports a qualitative state, preserve the
+    cytoplasmic compartment and state, and use pattern=null.
+  - Do not invent a state when only a pattern is reported.
+
+  Illustrative examples:
+
+  Assay: cytoplasmic fluorescence pattern.
+  Result: Negative.
+  Payload:
+  {"compartment":"cytoplasmic","pattern":null,"state":"negative"}
+
+  Assay: cytoplasmic fluorescence pattern.
+  Result: Positive.
+  Payload:
+  {"compartment":"cytoplasmic","pattern":null,"state":"positive"}
+
+  ANA NARRATIVE PROFILE:
+
+  - Extract only explicitly observed fluorescence patterns.
+  - The local annotation contract represents reticular and
+    reticular/AMA patterns with compartment=cytoplasmic.
+  - If the report specifies a pattern without an explicit
+    qualitative state, use state=null.
+  - Do not infer autoantibody positivity from general
+    associations with a fluorescence pattern.
+
+  Illustrative example:
+
+  Result: Observed pattern: reticular.
+  Payload:
+  {"compartment":"cytoplasmic","pattern":"reticular","state":null}
+
+  HLA PROFILE:
+
+  - locus is the locus specified by the assay.
+  - token is the literal reported allele or group token.
+  - A single two-digit or three-digit numeric token
+    represents a low-resolution group.
+  - For such a group, nomenclature=group and resolution=1.
+  - Do not expand a low-resolution group into a specific allele.
+  - Set allele=null unless the exact allele is supported
+    and independently verified.
+  - Set ipd_match=null unless a verified IPD match is supplied.
+  - Set suffix=null when no suffix is reported.
+  - Use ambiguous=false for an unambiguous low-resolution group.
+  - alternatives=[] unless alternatives are explicitly reported.
+  - position is the zero-based position of the token in the
+    reported allele list.
+
+  Illustrative example:
+
+  Assay: HLA-B.
+  Result: 15.
+  Payload:
+  {"locus":"B","token":"15","nomenclature":"group",
+  "allele":null,"resolution":1,"ipd_match":null,
+  "suffix":null,"ambiguous":false,"alternatives":[],"position":0}
+
+  CBC MORPHOLOGY PROFILE:
+
+  - entity MUST be the exact canonical concept supplied
+    in the request.
+  - Do not shorten, rename or paraphrase the concept.
+  - descriptor is the explicitly reported morphology descriptor.
+  - A qualitative descriptor does not establish a numerical grade.
+  - Do not infer a percentage from words such as few or many.
+  - Set grade=null unless a supported grade is reported.
+  - Set percentage=null unless a percentage is explicitly reported.
+
+  Illustrative example:
+
+  Concept: cbc_diff__macrocytosis_blood.
+  Result: few.
+  Payload:
+  {"entity":"cbc_diff__macrocytosis_blood",
+  "descriptor":"few","grade":null,"percentage":null}
+
+  ABSTENTION CONTRACT:
+
+  - If no patient-result segment is supplied,
+    return {"candidates":[]}.
+  - Methodological descriptions are not patient findings.
+  - Reference thresholds are not patient findings.
+  - General disease associations are not patient findings.
+  - A specimen processing statement does not establish
+    biological presence or absence.
+
+  FINAL VALIDATION:
+
+  - Check all attributes against the exact source segment.
+  - Never fill a missing optional attribute by guessing.
+  - Return only the requested schema object in the final channel.

@@ -265,7 +265,18 @@ class LocalModel:
         context = json.loads(row["context_json"])
         active = profile(row)
         parts = eligible_segments(row)
-        raw_segments = {part.segment_id: part.text for part in parts}
+        # Finding extraction uses literal source evidence.
+        # Profile extraction additionally requires exact segment IDs.
+        if active == "finding":
+            raw_segments = {
+                f"{part.source_field}#{i + 1}": part.text
+                for i, part in enumerate(parts)
+            }
+        else:
+            raw_segments = {
+                part.segment_id: part.text
+                for part in parts
+            }
         payload = dict(concept=row["concept"], variable_name=row["variable"], raw_segments=raw_segments,
                        assay_method=context.get("method"), raw_unit=context.get("unit"),
                        schema_version=self.cfg["schema_version"],
@@ -274,8 +285,46 @@ class LocalModel:
             payload["segments"] = [part.model_dump(exclude={"mapping_id", "text"}) for part in parts]
         if retry:
             payload["validation_reminder"] = "Keep only literal findings with supported assertion, temporal scope and exact source span. Return an empty list if unsupported."
-        return [{"role": "system", "content": self.cfg["prompts"]["system" if active == "finding" else "profile_system"]},
-                {"role": "user", "content": serialize(payload)}]
+        allowed_document_ids = sorted({
+            item["doc_id"] for item in retrieved
+        })
+
+        payload["allowed_document_ids"] = allowed_document_ids
+
+        system = self.cfg["prompts"][
+            "system" if active == "finding" else "profile_system"
+        ]
+
+        system += (
+            "\n\nEVIDENCE IDENTIFIER CONTRACT:\n"
+            "Source segment identifiers and retrieval document "
+            "identifiers are different entities.\n"
+            "A segment_id identifies a source text span, "
+            "not a retrieved document.\n"
+            "Never copy a segment_id, mapping_id, source label, "
+            "or arbitrary hash into document_ids.\n"
+            "Every entry in document_ids MUST appear exactly "
+            "in allowed_document_ids.\n"
+            "Do not invent document identifiers.\n"
+            "Cite a retrieved document only when it actually "
+            "supports the proposed interpretation.\n"
+            "If allowed_document_ids is empty, every "
+            "document_ids field MUST be an empty JSON array [].\n"
+            "Literal source evidence alone does not require "
+            "a retrieved document citation.\n"
+        )
+
+        if not allowed_document_ids:
+            system += (
+                "For this request no retrieval documents are "
+                "available. You MUST return document_ids=[] "
+                "for every finding or candidate.\n"
+            )
+
+        return [
+            {"role": "system", "content": system},
+            {"role": "user", "content": serialize(payload)}
+        ]
 
     def chat(self, messages: list[list[dict]], active: str = "finding") -> list[str | None]:
         """Pass only fitted dialogues to Harmony and preserve batch alignment."""

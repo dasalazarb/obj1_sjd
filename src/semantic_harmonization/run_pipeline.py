@@ -417,7 +417,19 @@ def main() -> None:
     except FileNotFoundError as error:
         raise SystemExit(f"Harmonization stopped because a required file is missing ({error}).") from None
     except (ValueError, RuntimeError) as error:
-        raise SystemExit(f"Harmonization stopped before publication ({type(error).__name__}). See configuration and restricted stage progress.") from None
+        import traceback
+
+        print(f"ERROR TYPE: {type(error).__name__}", file=sys.stderr)
+
+        for frame in traceback.extract_tb(error.__traceback__):
+            print(
+                f"{frame.filename}:{frame.lineno} in {frame.name}",
+                file=sys.stderr,
+            )
+
+        raise SystemExit(
+            "Harmonization stopped before publication."
+        ) from None
     print(f"Validated staging run: {out}")
 
 
