@@ -689,10 +689,11 @@ def run(args: argparse.Namespace) -> pd.DataFrame:
     if getattr(args, "no_context", False) and args.context:
         raise ValueError("The selected semantic candidate includes a verified context")
     args.no_context = args.context is None
-    args.semantic_feature_manifest = selected.require("feature_manifest")
+    args.semantic_feature_manifest = selected.select("feature_manifest")
     if Path(args.output) == DEFAULT_OUTPUT:
         args.output = DEFAULT_OUTPUT.parent / "semantic_harmonization" / selected.run_id / DEFAULT_OUTPUT.name
-    if Path(args.output).resolve().is_relative_to(selected.manifest.parent):
+    output = Path(args.output).resolve()
+    if any(output.is_relative_to(directory) for directory in (selected.manifest.parent, args.integrated.parent)):
         raise ValueError("Pharma cannot write into a validated semantic publication")
     return run_profile(args)
 

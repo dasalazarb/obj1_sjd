@@ -12,7 +12,7 @@ from urllib.request import urlopen
 import xml.etree.ElementTree as ET
 
 from .parsers import normalize
-from .settings import digest, file_hash, read_yaml, write_json
+from .settings import digest, file_hash, inference_mode, read_yaml, write_json
 
 
 def fingerprint(path: Path) -> dict:
@@ -193,19 +193,33 @@ def prepare(cfg: dict) -> dict:
     return output
 
 
-def verify(cfg: dict) -> dict:
-    """Reject stale local resources and any missing core resource."""
+def verify(cfg: dict, *, require_inference=True) -> dict:
+    """Verify prepared resources and optionally require the local GPT-OSS assets."""
     manifest = json.loads((Path(cfg["paths"]["knowledge_dir"]) / "resources_manifest.json").read_text())
     resources = manifest["resources"]
-    required = {"gpt_oss": "gpt_oss", "sapbert": "embedding_model", "codebook": "codebook",
-                "pharma_registry": "pharma_registry"}
+    required = {"codebook": "codebook", "pharma_registry": "pharma_registry"}
+    harmony = Path(cfg["paths"]["knowledge_dir"]) / "harmony" / "o200k_base.tiktoken"
+    gpt = resources.get("gpt_oss", {})
+    model_path = cfg["paths"].get("gpt_oss")
+    if not require_inference and inference_mode(cfg) == "disabled":
+        for name in ("gpt_oss", "sapbert", "harmony"):
+            resources[name] = {"status": "not_used"}
+    elif require_inference or (gpt.get("status") == "available" and model_path and Path(model_path).exists()
+                               and harmony.is_file()):
+        required.update(gpt_oss="gpt_oss", sapbert="embedding_model")
+        if not harmony.is_file() or file_hash(harmony) != cfg["resources"]["harmony"]["sha256"]:
+            raise ValueError("Prepare the verified local Harmony vocabulary before running inference")
+        if "harmony" not in resources:
+            resources["harmony"] = {"status": "available", "path": str(harmony), **fingerprint(harmony)}
+        if resources["harmony"].get("path") != str(harmony) or resources["harmony"].get("status") != "available":
+            raise ValueError("Prepared Harmony resource does not match the verified local vocabulary")
+    else:
+        resources["gpt_oss"] = {"status": "unavailable"}
+        resources["sapbert"] = resources["harmony"] = {"status": "not_used"}
     for name, config_key in required.items():
         item = resources.get(name, {})
         if item.get("status") != "available" or item.get("path") != cfg["paths"][config_key]:
             raise ValueError(f"Prepare the configured {name} before clinical execution")
-    harmony = Path(cfg["paths"]["knowledge_dir"]) / "harmony" / "o200k_base.tiktoken"
-    if not harmony.is_file() or file_hash(harmony) != cfg["resources"]["harmony"]["sha256"]:
-        raise ValueError("Prepare the verified local Harmony vocabulary before running inference")
     for name, item in resources.items():
         if item["status"] == "available" and fingerprint(Path(item["path"]))["sha256"] != item["sha256"]:
             raise ValueError(f"Resource fingerprint changed: {name}")

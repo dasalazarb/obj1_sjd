@@ -14,7 +14,7 @@ from .closure_audit import COMMENT, COMMENT_SUMMARY, DERIVED, HISTORICAL_WORK, M
 from .effective_values import AUDIT as EFFECTIVE_AUDIT, SUMMARY as EFFECTIVE_SUMMARY
 from .inference_audit import SMOKE_AUDIT, SMOKE_SUMMARY
 from .report_progress import compare_runs
-from .schemas import FACTS, SEMANTIC, STR, INT, BOOL
+from .schemas import FACTS, ROUTES, SEMANTIC, STR, INT, BOOL
 from .settings import MODULE, serialize, write_json
 from .table_exports import export_csv
 
@@ -47,15 +47,6 @@ WORK = pa.schema([
     ("remaining_fragments", pa.list_(pa.struct([("start", INT), ("end", INT), ("text", STR)]))),
     ("current_structured_result", FACT_LIST), ("document_ids", pa.list_(STR)),
 ])
-ROUTES = pa.schema([
-    *[(k, STR) for k in ("mapping_id", "profile", "reason", "final_disposition", "extraction_status", "contribution_status", "extraction_reason_code")],
-    ("send", BOOL), *[(k, INT) for k in ("relevant_segments", "resolved_segments", "residual_segments")],
-    ("pending_reason_codes", pa.list_(STR)), ("residual_segment_ids", pa.list_(STR)),
-    *[(k, INT) for k in ("residual_segments_m4", "facts_added_m4", "facts_removed_m4")],
-    ("residual_m4", pa.list_(pa.struct([("segment_id", STR), ("start", INT), ("end", INT), ("text", STR)]))),
-])
-
-
 IMPACT = pa.schema([
     *[(key, STR) for key in ("study", "feature", "version", "scope", "eligibility_before", "eligibility_after", "status")],
     ("observed_before", INT), ("observed_after", INT),

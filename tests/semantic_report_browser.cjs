@@ -131,7 +131,7 @@ async function main() {
     assert.match(exported.csv, /<\/script><img/);
     assert.match(exported.injection, /^"'/);
     assert.equal(exported.backlog.length,1);
-    assert.match(exported.full,/derived_rule_or_availability_missing/);
+    assert.match(exported.full,/ambiguous_semantics/);
     await page.setViewportSize({width:375,height:800});
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     assert.deepEqual(network, []);

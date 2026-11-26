@@ -14,6 +14,7 @@ import pyarrow.parquet as pq
 import pytest
 from openpyxl import Workbook
 
+from src.semantic_harmonization.effective_values import EFFECTIVE
 from src.semantic_harmonization.inference import LocalModel, profile, supports, validate_extraction
 from src.semantic_harmonization.inventory import CONTEXT_FIELDS, route
 from src.semantic_harmonization.parsers import new_finding, parse
@@ -209,48 +210,37 @@ def synthetic(tmp_path, cfg):
     return master, {"resources": resources}
 
 
-def test_pipeline_integration_cache_and_offline_report(tmp_path, cfg):
+def test_pipeline_integration_cache_and_separate_offline_report(tmp_path, cfg):
+    from src.semantic_harmonization.report_existing import generate
+
     original, manifest = synthetic(tmp_path, cfg)
     Model.calls = 0
     options = dict(encoder=Encoder(), model_factory=Model, resource_verify=lambda cfg: manifest)
     analytic, output = run(cfg, **options)
-    candidate = pd.read_parquet(analytic / "10_integrated_longitudinal_clinical_episode_harmonized.parquet")
-    pd.testing.assert_frame_equal(original, candidate[original.columns])
-    assert candidate["harm__lab__anti_ro60__text__limit_value"].iloc[:2].tolist() == [1300.0, 1300.0]
-    assert "harm__lab__anti_ro60__text__exact_value" not in candidate
-    microscopy = "harm__lab__urinalysis_includes_microscopic__"
-    for name in ("hyalin_casts", "renal_epithelial_cells"):
-        base = microscopy + name + "_urinalysis__text__"
-        assert candidate[base + "limit_value"].iloc[0] == 1
-        assert candidate[base + "comparator"].iloc[0] == "LT"
-        assert base + "exact_value" not in candidate
-    base = microscopy + "unclassified_casts_urinalysis__text__"
-    assert candidate[base + "range_low"].tolist() == [0, 3, 6]
-    assert candidate[base + "range_high"].tolist() == [2, 5, 10]
-    assert candidate["harm__lab__urine_bacteria__text__limit_value"].iloc[0] == 10000
-    assert candidate["harm__lab__immunofixation__text__igg_lambda_present"].iloc[1] == True
-    assert pd.isna(candidate["harm__lab__immunofixation__text__igg_lambda_present"].iloc[0])
-    assert not {"harm__lab__immunofixation__text__igg_kappa_present",
-                "harm__lab__immunofixation__text__abnormal_band_present"} & set(candidate)
+    effective = pd.read_parquet(analytic / EFFECTIVE)
+    pd.testing.assert_frame_equal(original.drop(columns="lab__anti_sm__text"),
+                                  effective.drop(columns="lab__anti_sm__text"))
+    assert effective["lab__anti_sm__text"].tolist() == ["negative", "positive", "  Unknown  "]
+    assert not list(analytic.glob("*clinical_episode_harmonized*"))
+    assert not list(output.glob("*.html"))
     for directory in (analytic, output):
         for path in directory.glob("*.parquet"):
             assert path.with_suffix(".csv").is_file()
             assert path.with_suffix(".csv.schema.json").is_file()
-    comment = pq.read_table(output / "comment_prefix_audit.parquet").to_pylist()
-    assert comment[0]["disposition"] == "fully_structured"
-    assert len({r["mapping_id"] for r in comment}) == 1
-    audit = pq.read_table(output / "semantic_materialization_audit.parquet").to_pylist()
-    assert any(r["status"] == "linked" and r["wide_fields"] == ["harm__lab__immunofixation__text__igg_lambda_present"] for r in audit)
-    assert candidate["harm__sero__ana_status__ever_positive_through_episode"].iloc[1] == True
-    assert pd.isna(candidate["harm__sero__ana_status__ever_positive_through_episode"].iloc[0])
-    assert candidate["harm__sero__ana_status__ever_positive_through_episode"].iloc[2] == False
+    observations = pq.read_table(analytic / "harmonized_observations.parquet").to_pylist()
+    casts = [row for row in observations if "unclassified_casts" in row["variable"]]
+    assert [(row["range_low"], row["range_high"]) for row in casts] == [("0", "2"), ("3", "5"), ("6", "10")]
     source = pq.read_table(analytic / "harmonized_source_events.parquet")
     assert source.num_rows == 3
     mappings = pq.read_table(output / "semantic_dictionary.parquet").to_pylist()
     censor = [row for row in mappings if row["variable"] == "lab__anti_ro60__text" and row["comparator"] == "GT"]
     assert len(censor) == 2 and len({row["mapping_id"] for row in censor}) == 2
     assert not {row["variable"] for row in mappings} & {"spine__sjogrens_class_patient_values", "demo__name", "ext__source_identifier"}
-    html = output / "semantic_harmonization_final.html"
+    report, _ = generate(cfg, {"target_run_id": output.name}, tmp_path / "historical")
+    comment = pq.read_table(report / "comment_prefix_audit.parquet").to_pylist()
+    assert comment[0]["disposition"] == "fully_structured"
+    assert len({row["mapping_id"] for row in comment}) == 1
+    html = report / "semantic_harmonization_final.html"
     content = html.read_text()
     assert "</script><img" not in content and "synthetic-A" not in content and "private-synthetic-a" not in content
     assert "\\u003c/script\\u003e" in content and "\\u0026" in content and "connect-src 'none'" in content
@@ -305,54 +295,40 @@ def test_protocol_threshold_uses_the_whole_interval(cfg):
     assert measure(">10", unit="IU/L").qualitative_result is None
 
 
-def test_candidate_bundle_pairs_real_pharma_and_graph_inputs(tmp_path, cfg, monkeypatch):
+def test_effective_source_can_be_profiled_separately(tmp_path, cfg, monkeypatch):
+    from importlib import import_module
+
     from src.studies import economic
-    from src.studies.graph import _pipeline
     from src.studies.graph._lab_contract import load_current_profile
-    from src.studies.graph.stage02.s02_contracts import resolve_sources
-    from src.studies.graph.stage03 import s03_release_reader
+    from src.semantic_harmonization.report_sources import file_manifest
 
     _, resources = synthetic(tmp_path, cfg)
-    cfg["paths"]["obj1_root"] = str(ROOT)
-    cfg["paths"]["pharma_registry"] = str(ROOT / "src/studies/pharma/expected_lab_concepts.yaml")
     cfg["validation"]["profile_pharma"] = True
-    options = dict(encoder=Encoder(), model_factory=Model, resource_verify=lambda cfg: resources)
-    analytic, report = run(cfg, **options)
-    selected = verify_source(analytic.name, analytic_root=analytic.parent, report_root=report.parent)
-    assert json.loads((report / SOURCE_MANIFEST).read_text())["run_id"] == analytic.name
+    analytic, qc = run(cfg, encoder=Encoder(), model_factory=Model, resource_verify=lambda _: resources)
+    selected = verify_source(analytic.name, analytic_root=analytic.parent, report_root=qc.parent)
+    assert json.loads((qc / SOURCE_MANIFEST).read_text())["run_id"] == analytic.name
+    assert selected.require("integrated") == selected.require("effective_integrated") == analytic / EFFECTIVE
     assert selected.require("context").parent == analytic
-    assert selected.require("pharma_candidates").is_relative_to(report)
     assert selected.require("feature_temporal_coverage").parent == analytic
-    semantic = pq.read_table(selected.require("pharma_semantic_profile")).to_pylist()
-    assert {row["study"] for row in semantic} == {"Pharma", "Graph"}
-    assert any(row["encoding"] == "censored" for row in semantic if row["study"] == "Pharma")
-    assert all(row["encoding"] != "exact_numeric" for row in semantic if "__limit_value" in row["feature_name"])
-    master = pd.read_parquet(selected.require("integrated"))
-    _, graph_report = load_current_profile(master, selected.require("integrated"), selected.require("pharma_candidates"), "exploratory")
-    assert graph_report["input_hash"] == selected.sha256["integrated"]
-    impact = pd.read_csv(report / "downstream_impact.csv")
-    assert {"Pharma eligibility profile", "Graph exploratory eligibility"} <= set(impact.study)
-    pharma_summary = json.loads(selected.require("pharma_provenance").read_text())
-    assert pharma_summary["input_hashes"][0]["path"] == str(selected.require("integrated"))
+    assert selected.select("pharma_candidates") is None
+    assert not (qc / "study_inputs").exists()
 
     monkeypatch.setattr(economic, "active_study_input", lambda: selected)
-    assert economic.resolve_inputs() == (selected.require("integrated"), selected.require("context"), selected.provenance())
-    monkeypatch.setattr(_pipeline, "active_study_input", lambda: selected)
-    graph_cfg = _pipeline.load_pipeline()
-    assert resolve_sources(graph_cfg) == {role: selected.require(role) for role in ("integrated", "pharma_candidates")}
-    assert _pipeline.output_root(graph_cfg, "02").name == selected.run_id
-    other = tmp_path / "other_graph.csv"
-    graph_cfg["paths"]["pharma_candidates"] = str(other)
-    with pytest.raises(ValueError, match="conflicts"):
-        resolve_sources(graph_cfg)
-    monkeypatch.setattr(s03_release_reader, "validate_release",
-                        lambda path: ({"schema_version": "graph02_current_v1"}, Path(path)))
-    with pytest.raises(ValueError, match="different semantic run"):
-        s03_release_reader.read_release(graph_cfg, tmp_path / "foreign_graph_run.json")
-    selected.require("pharma_selection").write_text("changed")
-    with pytest.raises(ValueError, match="hash or path mismatch: pharma_selection"):
-        verify_source(analytic.name, analytic_root=analytic.parent, report_root=report.parent)
-
+    assert economic.resolve_inputs() == (analytic / EFFECTIVE, selected.require("context"), selected.provenance())
+    monkeypatch.setattr("src.semantic_harmonization.study_input.active_study_input", lambda: selected)
+    pharma = import_module("src.studies.pharma.00_profile_labs")
+    profile_dir = tmp_path / "pharma-after-publication"
+    before = file_manifest(analytic), file_manifest(qc)
+    pharma.run(pharma.parse_args(["--output", str(profile_dir / pharma.DEFAULT_OUTPUT.name)]))
+    candidates = profile_dir / pharma.GRAPH_CANDIDATES_NAME
+    master = pd.read_parquet(analytic / EFFECTIVE)
+    _, graph = load_current_profile(master, analytic / EFFECTIVE, candidates, "exploratory")
+    assert graph["input_hash"] == selected.sha256["effective_integrated"]
+    assert (file_manifest(analytic), file_manifest(qc)) == before
+    with selected.require("effective_integrated_csv").open("a") as stream:
+        stream.write("changed")
+    with pytest.raises(ValueError, match="hash or path mismatch: effective_integrated_csv"):
+        verify_source(analytic.name, analytic_root=analytic.parent, report_root=qc.parent)
 
 def test_selection_is_opt_in_and_rejects_unpublished_runs(tmp_path):
     from src.semantic_harmonization.study_input import selection_id
@@ -605,40 +581,37 @@ def test_v2_model_requires_verbatim_profile_spans_and_licensed_roles(cfg):
             validate_profile(serialize({"candidates": [proposal | invalid]}), row, [], cfg, VOCAB)
 
 
-def test_v2_publication_reuses_checkpoints_and_compares_published_baseline(tmp_path, monkeypatch, cfg):
+def test_effective_publication_resumes_revalidated_checkpoints(tmp_path, monkeypatch, cfg):
     from src.semantic_harmonization import run_pipeline as pipeline
 
     _, manifest = synthetic(tmp_path, cfg)
+    Model.calls = 0
     options = dict(encoder=Encoder(), model_factory=Model, resource_verify=lambda cfg: manifest)
-    original_report = pipeline.report
 
     def stop(*args, **kwargs):
         raise RuntimeError("synthetic stop before publication")
 
     with monkeypatch.context() as patch:
-        patch.setattr(pipeline, "report", stop)
+        patch.setattr(pipeline, "build_effective", stop)
         with pytest.raises(RuntimeError, match="synthetic stop"):
             pipeline.run(cfg, **options)
     assert not list(Path(cfg["paths"]["analytic"]).iterdir())
     assert not list(Path(cfg["paths"]["output"]).glob("*/run_manifest.json"))
     with monkeypatch.context() as patch:
         patch.setattr(pipeline, "parse_mapping", stop)
-        patch.setattr(pipeline, "report", original_report)
-        analytic, baseline = pipeline.run(cfg, **options)
-    cfg["paths"]["baseline"] = str(baseline)
-    _, report_dir = pipeline.run(cfg, **options)
-    summary = json.loads((report_dir / "validation_summary.json").read_text())
-    assert summary["v2"]["baseline"]["status"] == "reconciled"
-    assert summary["v2"]["baseline"]["added_facts"] == 0
-    assert summary["v2"]["llm_outcomes"] == {"added": 1}
-    assert summary["clinical_evaluation"]["status"] == "not performed"
-    facts = pq.read_table(report_dir / "semantic_facts.parquet").to_pylist()
+        analytic, qc = pipeline.run(cfg, **options)
+    assert Model.calls == 1
+    summary = json.loads((qc / "validation_summary.json").read_text())
+    assert summary["comparison"] == {"status": "not_used"}
+    assert summary["clinical_evaluation"] == "not performed"
+    assert summary["inference"]["revalidated_checkpoint_mappings"] == 1
+    assert pq.read_table(qc / "llm_extractions.parquet")["revalidated_checkpoint"].to_pylist() == [True]
+    facts = pq.read_table(qc / "semantic_facts.parquet").to_pylist()
     view = pq.read_table(analytic / "patient_visit_semantic_observations.parquet").to_pylist()
     assert len({row["observation_id"] for row in view}) == len(view)
     assert {key for row in view for key in row["fact_ids"]} <= {fact["fact_id"] for fact in facts}
     future = [row for row in view if row["result_available_date"] == "2024-01-15"]
     assert len(future) == 1 and future[0]["fact_ids"] and future[0]["as_of_fact_ids"] == []
-
 
 def test_v2_measurement_counts_are_nullable_and_integral():
     from src.semantic_harmonization.inventory import measurement_count
@@ -968,10 +941,10 @@ def test_effective_wide_and_long_are_verified_together_without_inference(tmp_pat
     selected = verify_source(analytic.name, analytic_root=analytic.parent, report_root=qc.parent)
     assert selected.require("effective_integrated") == analytic / EFFECTIVE
     assert selected.require("effective_integrated_csv_schema").is_file()
-    payload = json.loads((qc / "semantic_harmonization_final.html").read_text().split(
-        '<script id="payload" type="application/json">', 1)[1].split("</script>", 1)[0])
+    effective_audit = pq.read_table(qc / "effective_value_audit.parquet").to_pylist()
     assert any(item["effective_json"] == '"negative"' and item["effective_origin"] == "current_validated"
-               for row in payload["mappings"] for item in row.get("effective_values") or [])
+               for item in effective_audit)
+
 
 
 def test_hla_resolution_verifies_without_extending_the_reported_allele(cfg):
@@ -1037,7 +1010,7 @@ def test_historical_value_uses_a_revalidated_fact_and_refuses_conflict(cfg):
 
 
 def test_selector_requires_comparable_history_and_complete_effective_assets():
-    from src.semantic_harmonization.run_pipeline import selector_blockers
+    from src.semantic_harmonization.report_progress import selector_blockers
 
     valid = dict(regression_counts={}, assessment={"V1": "paired", "Previous V2": "paired", "Recent V2": "paired"},
                  frozen_work={"units": 10}, effective_values={"integrity_failures": 0})
@@ -1048,26 +1021,24 @@ def test_selector_requires_comparable_history_and_complete_effective_assets():
     assert selector_blockers(valid | {"effective_values": None})
 
 
-def test_compatible_sealed_residual_can_be_revalidated_on_cpu(tmp_path, cfg):
+def test_effective_identity_and_reuse_ignore_historical_configuration(tmp_path, cfg):
     _, resources = synthetic(tmp_path, cfg)
     analytic, qc = run(cfg, encoder=Encoder(), model_factory=Model, resource_verify=lambda _: resources)
-    cfg["comparison"]["recent_v2_run_id"] = qc.name
-    cfg["comparison"]["recent_report_id"] = None
+    cfg["comparison"].update(recent_v2_run_id=qc.name, recent_report_id="invalid")
+    cfg["paths"].update(baseline=str(tmp_path / "missing-v1"), audit=str(tmp_path / "missing-audit"),
+                        gold=str(tmp_path / "missing-gold"))
 
     def no_inference(_):
-        pytest.fail("compatible sealed residual initialized GPT-OSS")
+        pytest.fail("the unchanged Effective run initialized GPT-OSS")
 
-    new_analytic, new_qc = run(cfg, encoder=Encoder(), model_factory=no_inference, resource_verify=lambda _: resources)
-    assert new_analytic != analytic
-    summary = json.loads((new_qc / "validation_summary.json").read_text())
-    inference = summary["inference"]
-    assert not inference["model_initialized"]
-    assert inference["status"] == "not_run"
-    assert inference["revalidated_historical_mappings"] == inference["accepted_historical_facts"] == 1
-    assert inference["fresh_residual_mappings"] == 0
-    audit = pq.read_table(new_qc / "effective_value_audit.parquet").to_pylist()
-    assert any(ev["reference_run_id"] == qc.name for row in audit for ev in row["evidence"])
-
+    assert run(cfg, encoder=Encoder(), model_factory=no_inference, resource_verify=lambda _: resources) == (analytic, qc)
+    manifest = json.loads((qc / "run_manifest.json").read_text())
+    assert manifest["identity"]["baseline"] == manifest["identity"]["comparison"] == {"status": "not_used"}
+    assert set(manifest["inputs"]) == {"integrated", "context", "source_events"}
+    with (qc / "llm_extractions.parquet").open("ab") as stream:
+        stream.write(b"synthetic corruption")
+    with pytest.raises(ValueError, match="checksums differ"):
+        run(cfg, encoder=Encoder(), model_factory=no_inference, resource_verify=lambda _: resources)
 
 @pytest.mark.parametrize("answer,status", [
     (None, "context_limit"), ("", "empty_response"), ("{}", "invalid_schema"),
@@ -1245,12 +1216,6 @@ def with_profile_residuals(tmp_path, cfg):
 @pytest.mark.parametrize("failed", [(), ("ana_narrative",), ("hla",), ("finding",),
                                      ("finding", "ana", "ana_narrative", "hla", "cbc_morphology")])
 def test_profile_gating_seals_lossless_candidate_and_audit(tmp_path, cfg, failed):
-    from zipfile import ZipFile
-
-    from src.semantic_harmonization.effective_values import EFFECTIVE
-    from src.semantic_harmonization.report_existing import generate
-    from src.semantic_harmonization.run_pipeline import comparative_root
-
     resources = with_profile_residuals(tmp_path, cfg)
     def timeout(*args):
         raise TimeoutError
@@ -1287,24 +1252,18 @@ def test_profile_gating_seals_lossless_candidate_and_audit(tmp_path, cfg, failed
                for f in facts) == ("finding" not in failed)
     validation = json.loads((qc / "validation_summary.json").read_text())
     assert validation["technical_integrity"] == "passed"
-    assert validation["semantic_completeness"]["status"] == "incomplete"
-    assert validation["downstream_activation"]["status"] == "retained"
+    assert validation["comparison"] == {"status": "not_used"}
+    assert validation["clinical_evaluation"] == "not performed"
     assert validation["inference"]["status"] == ("degraded" if failed else "available")
     assert validation["effective_values"]["new_nulls"] == 0
     assert set(validation["inference"]["profile_summary"]) == {"finding", "ana", "ana_narrative", "hla", "cbc_morphology"}
     for name in failed:
         assert validation["inference"]["profile_summary"][name]["status"] == "disabled"
         assert validation["inference"]["profile_summary"][name]["sent_to_model_mappings"] == 0
-    report_dir, _ = generate(cfg, {"target_run_id": qc.name}, comparative_root(cfg))
-    names = ["inference_smoke_audit", "inference_profile_summary"]
-    for directory in (qc, report_dir):
-        with ZipFile(directory / "inference_smoke_qc.zip") as archive:
-            assert set(archive.namelist()) == {name + suffix for name in names
-                                              for suffix in (".parquet", ".csv", ".csv.schema.json")}
-            for name in names:
-                schema = json.loads(archive.read(name + ".csv.schema.json"))
-                assert schema["sha256"] == {file: file_hash(directory / file) for file in schema["sha256"]}
-    assert not (comparative_root(cfg) / "current_v2.json").exists()
+    for name in ("inference_smoke_audit", "inference_profile_summary"):
+        schema = json.loads((qc / f"{name}.csv.schema.json").read_text())
+        assert schema["sha256"] == {file: file_hash(qc / file) for file in schema["sha256"]}
+    assert not list(qc.glob("*.html"))
     if failed and len(failed) == 5:
         healthy = SmokeModel(cfg)
         next_analytic, next_qc = run(cfg, encoder=Encoder(), model_factory=lambda _: healthy,
@@ -1351,40 +1310,27 @@ def test_fixture_or_unclassified_runtime_error_aborts_publication(tmp_path, cfg,
     assert not list(Path(cfg["paths"]["analytic"]).iterdir())
 
 
-def test_disabled_inference_withholds_model_dependent_holdout_and_rejects_tampered_history(tmp_path, cfg):
-    from src.semantic_harmonization.run_pipeline import build_identity, inputs_for
+def test_disabled_inference_publishes_without_model_or_retrieval(tmp_path, cfg, monkeypatch):
+    from src.semantic_harmonization import run_pipeline as pipeline
 
     _, resources = synthetic(tmp_path, cfg)
-    auto_identity = build_identity(cfg, resources, inputs_for(cfg))
-    options = dict(encoder=Encoder(), resource_verify=lambda _: resources)
-    _, old = run(cfg, model_factory=Model, **options)
-    dictionary = pq.read_table(old / "unique_values.parquet").to_pylist()
-    annotated = [row for row in dictionary if row["family"] == "immunofixation" and row["raw_json"] != "null"]
-    gold = tmp_path / "gold.jsonl"
-    gold.write_text("".join(serialize(dict(mapping_id=row["mapping_id"], group=str(i), family="immunofixation",
-                                           expected={})) + "\n" for i, row in enumerate(annotated)))
-    cfg["paths"]["gold"] = str(gold)
+    inputs = pipeline.inputs_for(cfg)
+    auto_identity = pipeline.build_identity(cfg, resources, inputs)
     cfg["model"]["inference_mode"] = "disabled"
-    disabled_identity = build_identity(cfg, resources, inputs_for(cfg))
+    disabled_identity = pipeline.build_identity(cfg, resources, inputs)
     assert auto_identity["inference_profile"] == disabled_identity["inference_profile"]
     assert auto_identity["inference_mode"] != disabled_identity["inference_mode"]
 
-    def no_model(_):
-        pytest.fail("disabled inference instantiated a model")
+    def unexpected(*_):
+        pytest.fail("disabled inference initialized model or retrieval")
 
-    cfg["comparison"]["recent_v2_run_id"] = old.name
-    cfg["comparison"]["recent_report_id"] = None
-    _, qc = run(cfg, model_factory=no_model, **options)
+    monkeypatch.setattr(pipeline, "KnowledgeIndex", unexpected)
+    _, qc = run(cfg, model_factory=unexpected, resource_verify=lambda _: resources)
     summary = json.loads((qc / "validation_summary.json").read_text())
-    assert summary["clinical_evaluation"]["status"] == "not performed"
-    assert summary["clinical_evaluation"]["unavailable_profiles"] == ["finding"]
+    assert summary["clinical_evaluation"] == "not performed"
     assert {p["status"] for p in summary["inference"]["profile_summary"].values()} == {"not_run"}
-    assert summary["inference"]["revalidated_historical_mappings"] == 1
-    with (old / "llm_extractions.parquet").open("ab") as stream:
-        stream.write(b"synthetic corruption")
-    with pytest.raises(ValueError, match="checksums differ"):
-        run(cfg, model_factory=no_model, **options)
-
+    extraction, = pq.read_table(qc / "llm_extractions.parquet").to_pylist()
+    assert extraction["status"] == "not_run" and extraction["reason_code"] == "inference_disabled"
 
 def test_preflight_checks_resource_hashes_without_gpu(tmp_path, cfg, monkeypatch, capsys):
     from src.semantic_harmonization import preflight, resources as local_resources
@@ -1415,28 +1361,56 @@ def test_preflight_checks_resource_hashes_without_gpu(tmp_path, cfg, monkeypatch
         preflight.main()
 
 
-def test_incompatible_historical_proposal_stays_rejected_in_disabled_mode(tmp_path, cfg, monkeypatch):
+def test_missing_gpt_oss_resources_allow_deterministic_publication(tmp_path, cfg):
+    from src.semantic_harmonization.resources import fingerprint
+
+    original, _ = synthetic(tmp_path, cfg)
+    paths = cfg["paths"]
+    paths["gpt_oss"] = str(tmp_path / "missing-gpt-oss")
+    resources = {
+        name: dict(status="available", path=paths[name], sha256=fingerprint(Path(paths[name]))["sha256"])
+        for name in ("codebook", "pharma_registry")
+    }
+    for name, spec in cfg["resources"]["optional"].items():
+        resources[name] = dict(status="unavailable", path=spec["path"], version=spec["version"])
+    resources.update(ipd={"status": "unavailable"}, ucum={"status": "unavailable"})
+    knowledge = Path(paths["knowledge_dir"])
+    knowledge.mkdir()
+    (knowledge / "resources_manifest.json").write_text(serialize({"resources": resources}))
+
+    def no_model(_):
+        pytest.fail("a missing model was initialized")
+
+    analytic, qc = run(cfg, model_factory=no_model)
+    effective = pd.read_parquet(analytic / EFFECTIVE)
+    pd.testing.assert_series_equal(effective["lab__immunofixation__text"], original["lab__immunofixation__text"])
+    assert effective["lab__anti_sm__text"].tolist() == ["negative", "positive", "  Unknown  "]
+    manifest = json.loads((qc / "run_manifest.json").read_text())
+    assert manifest["model"]["status"] == "unavailable"
+
+
+def test_incompatible_checkpoint_is_rejected_and_retried(tmp_path, cfg):
     from src.semantic_harmonization import run_pipeline as pipeline
 
     _, resources = synthetic(tmp_path, cfg)
-
-    def bad_candidates(references, inputs, pending, *args):
-        bad = new_finding("anomalous_immunoglobulins", "Unrelated synthetic evidence").model_dump()
-        return {row["mapping_id"]: [("historic", dict(mapping_id=row["mapping_id"], status="validated",
-                                                    findings=[bad], facts=[]))] for row in pending}
-
-    def no_model(_):
-        pytest.fail("disabled inference instantiated a model")
-
-    cfg["model"]["inference_mode"] = "disabled"
-    monkeypatch.setattr(pipeline, "incoming_reuse", bad_candidates)
-    _, qc = run(cfg, encoder=Encoder(), model_factory=no_model, resource_verify=lambda _: resources)
+    run_id = digest(pipeline.build_identity(cfg, resources, pipeline.inputs_for(cfg)))
+    cache = Path(cfg["paths"]["output"]) / ".staging" / run_id / "extractions"
+    cache.mkdir(parents=True)
+    master = pq.read_table(cfg["paths"]["integrated"])
+    context = pd.read_parquet(cfg["paths"]["context"])
+    events = pd.read_parquet(cfg["paths"]["source_events"])
+    pairs, _, _ = pipeline.inventory(master.to_pandas(), context, events, pipeline.inputs_for(cfg), cfg,
+                                     arrow_episode=master, arrow_source=pq.read_table(cfg["paths"]["source_events"]))
+    mapping = next(row for row in pairs if json.loads(row["raw_json"]) == "A faint lambda band was detected.")
+    key = mapping["mapping_id"]
+    bad = new_finding("anomalous_immunoglobulins", "Unrelated synthetic evidence").model_dump()
+    (cache / f"{key}.json").write_text(serialize(dict(mapping_id=key, status="validated", findings=[bad], facts=[])))
+    _, qc = run(cfg, encoder=Encoder(), model_factory=Model, resource_verify=lambda _: resources)
     extraction, = pq.read_table(qc / "llm_extractions.parquet").to_pylist()
-    assert extraction["status"] == "not_run" and not extraction["findings"]
-    assert extraction["reason_code"] == "inference_disabled"
+    assert extraction["status"] == "validated" and extraction["findings"][0]["quote"] == "faint lambda"
     summary = json.loads((qc / "validation_summary.json").read_text())
-    assert summary["inference"]["revalidated_historical_mappings"] == 0
-
+    assert summary["inference"]["revalidated_checkpoint_mappings"] == 0
+    assert summary["inference"]["fresh_residual_mappings"] == 1
 
 @pytest.mark.parametrize("failure", ["writing", "new_null"])
 def test_effective_write_failure_or_changed_original_blocks_publication(tmp_path, cfg, monkeypatch, failure):
@@ -1463,26 +1437,53 @@ def test_effective_write_failure_or_changed_original_blocks_publication(tmp_path
     assert not list(Path(cfg["paths"]["output"]).glob("*/run_manifest.json"))
 
 
-def test_cli_retains_selector_and_reports_new_run_and_report_ids(tmp_path, cfg, monkeypatch, capsys):
+def test_effective_csv_corrupted_before_seal_blocks_publication(tmp_path, cfg, monkeypatch):
     from src.semantic_harmonization import run_pipeline as pipeline
 
+    _, resources = synthetic(tmp_path, cfg)
+    pair = pipeline.pair_directory
+
+    def corrupt_effective_csv(directory):
+        pair(directory)
+        path = (directory / EFFECTIVE).with_suffix(".csv")
+        if path.is_file():
+            with path.open("a") as stream:
+                stream.write("corruption")
+
+    monkeypatch.setattr(pipeline, "pair_directory", corrupt_effective_csv)
+    with pytest.raises(ValueError, match="Effective CSV and Parquet hashes changed"):
+        run(cfg, encoder=Encoder(), model_factory=Model, resource_verify=lambda _: resources)
+    assert not list(Path(cfg["paths"]["analytic"]).iterdir())
+    assert not list(Path(cfg["paths"]["output"]).glob("*/run_manifest.json"))
+
+
+def test_cli_publishes_effective_with_no_history_and_keeps_selector(tmp_path, cfg, monkeypatch, capsys):
+    from src.semantic_harmonization import report_existing, report_progress, run_pipeline as pipeline
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("publication consulted historical reports or the approval selector")
+
+    for name in ("baseline_run", "previous_run", "frozen_references", "generate", "update_report_pointer"):
+        monkeypatch.setattr(report_existing, name, unexpected)
+    monkeypatch.setattr(report_progress, "selector_blockers", unexpected)
     resources = with_profile_residuals(tmp_path, cfg)
-    reference = pipeline.comparative_root(cfg)
+    reference = Path(cfg["paths"]["obj1_root"]) / "outputs/tables/qc/semantic_harmonization_reports"
     reference.mkdir(parents=True)
     pointer = reference / "current_v2.json"
     prior = serialize({"target_run_id": "a" * 64, "report_id": "b" * 64})
     pointer.write_text(prior)
+    cfg["paths"]["baseline"] = str(tmp_path / "missing-v1")
     model = SmokeModel(cfg, {"finding": empty_smoke})
     monkeypatch.setattr(pipeline, "load_config", lambda: cfg)
     monkeypatch.setattr(pipeline.sys, "argv", ["run_pipeline"])
     monkeypatch.setattr(pipeline, "run", lambda cfg: run(
         cfg, encoder=Encoder(), model_factory=lambda _: model, resource_verify=lambda _: resources))
     pipeline.main()
-    output = capsys.readouterr().out
     assert pointer.read_text() == prior
-    assert "V2 selector retained (comparison unavailable" in output
+    assert list(reference.iterdir()) == [pointer]
     analytic, = Path(cfg["paths"]["analytic"]).iterdir()
-    report_dir, = (p for p in reference.iterdir() if p.is_dir())
-    assert f"V2 run ID: {analytic.name}" in output
-    assert f"Comparative report ID: {report_dir.name}" in output
-    assert "Effective Parquet:" in output and "Effective CSV:" in output
+    assert capsys.readouterr().out.splitlines()[-3:] == [
+        f"Effective Parquet: {analytic / EFFECTIVE}",
+        f"Effective CSV: {(analytic / EFFECTIVE).with_suffix('.csv')}",
+        f"V2 run ID: {analytic.name}",
+    ]

@@ -338,4 +338,14 @@ class MorphologyExtraction(Strict):
 
 EXTRACTIONS = (EXTRACTIONS.append(pa.field("contribution_status", STR))
                .append(pa.field("facts", pa.list_(pa.struct(FACTS))))
-               .append(pa.field("reason_code", STR)))
+               .append(pa.field("reason_code", STR))
+               .append(pa.field("revalidated_checkpoint", BOOL)))
+
+
+ROUTES = pa.schema([
+    *[(k, STR) for k in ("mapping_id", "profile", "reason", "final_disposition", "extraction_status", "contribution_status", "extraction_reason_code")],
+    ("send", BOOL), *[(k, INT) for k in ("relevant_segments", "resolved_segments", "residual_segments")],
+    ("pending_reason_codes", pa.list_(STR)), ("residual_segment_ids", pa.list_(STR)),
+    *[(k, INT) for k in ("residual_segments_m4", "facts_added_m4", "facts_removed_m4")],
+    ("residual_m4", pa.list_(pa.struct([("segment_id", STR), ("start", INT), ("end", INT), ("text", STR)]))),
+])
