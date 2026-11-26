@@ -96,27 +96,4 @@ exec apptainer exec \
     --home "$BASE/cache/container-home:/home/salazarda" \
     "${BIND_ARGS[@]}" \
     --pwd "$repo" \
-    "$IMAGE" "$PYTHON" -u - <<'PY'
-
-import platform
-import torch
-import vllm
-import vllm._C
-import vllm._moe_C
-
-print("GLIBC:", platform.libc_ver())
-print("PyTorch:", torch.__version__)
-print("vLLM:", vllm.__version__)
-
-assert torch.cuda.is_available()
-assert hasattr(torch.ops._moe_C, "topk_softmax")
-
-print("GPU:", torch.cuda.get_device_name(0))
-print("CUDA EXTENSIONS: SUCCESS")
-
-from src.semantic_harmonization.run_pipeline import main
-
-print("STARTING FULL SEMANTIC HARMONIZATION PIPELINE")
-
-main()
-PY
+    "$IMAGE" "$PYTHON" -u -m src.semantic_harmonization.run_pipeline

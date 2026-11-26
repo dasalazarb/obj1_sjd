@@ -9,7 +9,7 @@ def main() -> None:
     force_offline()
     try:
         cfg = load_config()
-        identity = build_identity(cfg, verify(cfg), inputs_for(cfg))
+        identity = build_identity(cfg, verify(cfg, require_inference=False), inputs_for(cfg))
     except (OSError, ValueError, KeyError) as error:
         raise SystemExit(f"Semantic preflight failed ({type(error).__name__}).") from None
     print(f"Semantic preflight passed. Run identity {digest(identity)}")

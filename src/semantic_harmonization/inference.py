@@ -367,12 +367,20 @@ class LocalModel:
     def __init__(self, cfg: dict):
         force_offline()
         os.environ["TIKTOKEN_ENCODINGS_BASE"] = str(Path(cfg["paths"]["knowledge_dir"]) / "harmony")
-        from openai_harmony import HarmonyEncodingName, Role, load_harmony_encoding
-        from torch.cuda import OutOfMemoryError
-        from transformers import AutoTokenizer
-        from vllm import LLM, SamplingParams
-        from vllm.sampling_params import StructuredOutputsParams
-        from vllm.v1.engine.exceptions import EngineDeadError
+        try:
+            from openai_harmony import HarmonyEncodingName, Role, load_harmony_encoding
+            import torch
+            from torch.cuda import OutOfMemoryError
+            from transformers import AutoTokenizer
+            from vllm import LLM, SamplingParams
+            import vllm._C
+            import vllm._moe_C
+            from vllm.sampling_params import StructuredOutputsParams
+            from vllm.v1.engine.exceptions import EngineDeadError
+        except (ImportError, OSError) as error:
+            raise InferenceUnavailable("Local inference dependencies are unavailable") from error
+        if not torch.cuda.is_available() or not hasattr(torch.ops._moe_C, "topk_softmax"):
+            raise InferenceUnavailable("Local inference CUDA extensions are unavailable")
 
         self.engine_errors = (EngineDeadError, OutOfMemoryError)
         # The deployed engine runs in-process. Its crash dump can include scheduler token IDs.

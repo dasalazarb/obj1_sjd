@@ -1,4 +1,4 @@
-"""Run the restricted semantic pipeline without command-line configuration."""
+"""Publish the Step 10 Effective dataset and its typed sidecars."""
 from __future__ import annotations
 
 from collections import Counter, defaultdict
@@ -23,10 +23,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from .analytic_representation import materialize, write_readiness
-from .compare_runs import baseline_identity, review
-from .application import apply, rebuild, validate_original, write_candidate, write_parquet
+from .application import apply, validate_original, write_parquet
 from .effective_values import EFFECTIVE, RULE as EFFECTIVE_CONTRACT, build_effective
-from .evaluation import evaluate
 from .inference import (EvidenceError, InferenceUnavailable, LocalModel, apply_extraction, empty_extraction,
                         extract_batch, force_offline, profile, routing, skipped_smoke, smoke_cases, validate_extraction,
                         validate_profile)
@@ -34,27 +32,14 @@ from .inference_audit import SMOKE_AUDIT, SMOKE_SUMMARY, TRANSIENT, summarize_in
 from .inventory import inventory
 from .semantic_facts import canonical, from_storage, parse_mapping, verify_contract
 from .rag import KnowledgeIndex, documents
-from .recovery import historical_narratives, incoming_reuse, proposal_meanings, reconcile_narratives
-from .report import report
-from .report_existing import baseline_run, frozen_references, generate, previous_run, update_report_pointer
-from .report_progress import selector_blockers
-from .report_sources import Run, file_manifest
+from .report_sources import file_manifest, published
 from .resources import verify, vocabularies
-from .schemas import (DICTIONARY, EXTRACTIONS, FACTS, IDENTITY, INVENTORY, LINEAGE, SEGMENTS, SEMANTIC, TRACE,
+from .schemas import (DICTIONARY, EXTRACTIONS, FACTS, IDENTITY, INVENTORY, LINEAGE, ROUTES, SEGMENTS, SEMANTIC, TRACE,
                       Extraction, Semantic, SemanticFact, SemanticSegment)
 from .settings import MODULE, digest, file_hash, inference_contract, inference_mode, load_config, serialize, write_json
-from .study_input import verify_source, write_source_manifest
+from .study_input import EFFECTIVE_PUBLICATION, write_source_manifest
 from .table_exports import export_csv, pair_directory
-from .validation import comparison, downstream, summarize, validate_mappings
-
-DERIVED_SCHEMA = pa.schema([("variable", pa.string()), ("recomputed", pa.bool_()), ("evaluated_episodes", pa.int64()),
-                            *[(name, pa.string()) for name in ("before", "after", "transitions", "rule")],
-                            ("before_distinct", pa.int64()), ("after_distinct", pa.int64())])
-IMPACT_COLUMNS = ["study", "feature", "observed_before", "observed_after", "eligibility_before", "eligibility_after", "status"]
-
-
-def comparative_root(cfg: dict) -> Path:
-    return Path(cfg["paths"]["obj1_root"]) / "outputs/tables/qc/semantic_harmonization_reports"
+from .validation import summarize, validate_mappings
 
 
 def now() -> str:
@@ -62,29 +47,14 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def comparison_identity(cfg):
-    """Bind the configured frozen comparisons to their sealed manifests."""
-    refs = cfg.get("comparison", {})
-    comparison_paths = {
-        "previous_v2": Path(cfg["paths"]["output"]) / str(refs.get("previous_v2_run_id")) / "run_manifest.json",
-        "recent_v2": Path(cfg["paths"]["output"]) / str(refs.get("recent_v2_run_id")) / "run_manifest.json",
-        "historical_work": comparative_root(cfg) / str(refs.get("historical_report_id")) / "report_manifest.json",
-        "recent_report": comparative_root(cfg) / str(refs.get("recent_report_id")) / "report_manifest.json",
-    }
-    return {name: file_hash(path) if path.is_file() else None for name, path in comparison_paths.items()}
-
-
 def build_identity(cfg: dict, resources: dict, inputs: dict) -> dict:
     """Bind cache identity to original bytes, executable code and dependencies."""
-    source = {p.relative_to(MODULE).as_posix(): file_hash(p) for p in sorted(MODULE.rglob("*"))
-              if p.is_file() and (p.suffix in {".py", ".yaml", ".html", ".lock", ".sbatch", ".sh"}
-                                  and not p.name.endswith("local.yaml"))}
-    obj1_root = Path(cfg["paths"]["obj1_root"])
-    contracts = ["src/block_A/01_serological_profile.py", "src/block_A/10_build_integrated_longitudinal_dataset.py",
-                 "src/studies/pharma/00_profile_labs.py", "src/studies/graph/configs/pipeline.yaml"]
-    contracts += ["src/studies/graph/_feature_catalog.py", "src/studies/graph/_lab_contract.py",
-                  "src/studies/graph/_pipeline.py", "src/studies/_shared.py"]
-    external = {name: file_hash(obj1_root / name) for name in contracts if (obj1_root / name).is_file()}
+    source = {p.relative_to(MODULE).as_posix(): file_hash(p) for p in sorted(MODULE.iterdir())
+              if p.is_file() and p.suffix in {".py", ".lock", ".sbatch", ".sh"}}
+    effective_config = {name: value for name, value in cfg.items()
+                        if name not in {"comparison", "report", "validation", "paths"}}
+    effective_config["paths"] = {name: value for name, value in cfg["paths"].items()
+                                 if name not in {"baseline", "audit", "gold"}}
     packages = {}
     for name in ("pandas", "pyarrow", "pydantic", "numpy", "torch", "transformers", "vllm", "rank-bm25", "rapidfuzz"):
         try:
@@ -93,9 +63,11 @@ def build_identity(cfg: dict, resources: dict, inputs: dict) -> dict:
             packages[name] = None
     resource_identity = {name: {k: item.get(k) for k in ("revision", "version", "sha256", "status")}
                          for name, item in resources["resources"].items()}
-    return dict(effective_contract=EFFECTIVE_CONTRACT, inference_profile=digest(inference_contract(cfg)), inference_mode=inference_mode(cfg),
-                comparison=comparison_identity(cfg), inputs=inputs, source=digest(source), obj1_contracts=external, config=digest(cfg),
-                resources=resource_identity, dependencies=packages, baseline=baseline_identity(cfg),
+    return dict(publication=EFFECTIVE_PUBLICATION, effective_contract=EFFECTIVE_CONTRACT,
+                inference_profile=digest(inference_contract(cfg)), inference_mode=inference_mode(cfg),
+                comparison={"status": "not_used"}, baseline={"status": "not_used"},
+                inputs=inputs, source=digest(source), config=digest(effective_config),
+                resources=resource_identity, dependencies=packages,
                 execution_environment={
                     "container_sha256": os.environ.get("SJD_CONTAINER_SHA256"),
                     "runtime_sha256": digest(sorted((item.metadata["Name"], item.version) for item in distributions()
@@ -109,61 +81,30 @@ def inputs_for(cfg: dict) -> dict:
     if not Path(paths["integrated"]).is_file():
         raise FileNotFoundError(f"Step 10 input missing: {paths['integrated']}")
     hashes = {}
-    for name in ("integrated", "context", "source_events", "audit", "gold"):
+    for name in ("integrated", "context", "source_events"):
         path = Path(paths[name]) if paths.get(name) else None
         if path is not None and path.is_file():
             hashes[name] = file_hash(path)
-        elif path is not None and name in {"gold", "audit", "source_events"}:
-            raise FileNotFoundError(f"Configured input missing: {path}")
+        elif path is not None and name == "source_events":
+            raise FileNotFoundError(f"Configured source events missing: {path}")
     return hashes
 
 
-def completed(out: Path, analytic: Path, identity: dict) -> bool:
+def completed(out: Path, analytic: Path, identity: dict) -> None:
     """Verify an existing completed run before reusing it."""
-    manifest = json.loads((out / "run_manifest.json").read_text())
-    if (manifest["identity"] != identity or manifest["outputs"]["report"] != file_manifest(out, skip={"run_manifest.json"})
-            or manifest["outputs"]["analytic"] != file_manifest(analytic)):
-        raise ValueError("Published run failed content verification")
-    return True
+    if published(out, analytic.parent, expected_id=analytic.name).manifest["identity"] != identity:
+        raise ValueError("Published run failed identity verification")
 
 
-def audit_reference(path: Path) -> dict:
-    """Read the marginal audit only as an inventory reference."""
-    from html.parser import HTMLParser
-
-    class Payload(HTMLParser):
-        reading = False
-        content = ""
-
-        def handle_starttag(self, tag, attrs):
-            if tag == "script" and dict(attrs).get("id") == "payload":
-                self.reading = True
-
-        def handle_data(self, data):
-            if self.reading:
-                self.content += data
-
-        def handle_endtag(self, tag):
-            if tag == "script":
-                self.reading = False
-
-    parser = Payload()
-    parser.feed(path.read_text())
-    decoded = json.loads(parser.content)
-    if not isinstance(decoded, dict):
-        raise ValueError("Categorical audit payload must be an object")
-    return {"status": "loaded as marginal reference", "sha256": file_hash(path)}
-
-
-def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=verify) -> tuple[Path, Path]:
-    """Stage and verify a content-addressed candidate and its report."""
+def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=None) -> tuple[Path, Path]:
+    """Stage and verify the Effective dataset before publishing it."""
     os.umask(0o077)
     force_offline()
     start = now()
     clock = monotonic()
     paths = cfg["paths"]
     hashes = inputs_for(cfg)
-    resources = resource_verify(cfg)
+    resources = verify(cfg, require_inference=False) if resource_verify is None else resource_verify(cfg)
     identity = build_identity(cfg, resources, hashes)
     run_id = digest(identity)
     out_root, analytic_root = Path(paths["output"]), Path(paths["analytic"])
@@ -176,14 +117,6 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=ve
         fcntl.flock(lock, fcntl.LOCK_EX)
         if inputs_for(cfg) != hashes:
             raise ValueError("Source content changed while waiting for the staging lock")
-        baseline = baseline_run(cfg)
-        previous = previous_run(cfg)
-        recent = previous_run(cfg, reference="recent_v2_run_id")
-        frozen, historical_hash, recent_report_hash = frozen_references(cfg, comparative_root(cfg), previous, recent, baseline)
-        for reference, expected in (("historical_work", historical_hash), ("recent_report", recent_report_hash)):
-            if expected is not None and expected != identity["comparison"][reference]:
-                raise ValueError("Pinned report changed before harmonization")
-
         if out_final.exists():
             completed(out_final, analytic_final, identity)
             return analytic_final, out_final
@@ -255,9 +188,12 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=ve
                        for row in pairs if routes[row["mapping_id"]]["send"]]
             pending_by_id = {row["mapping_id"]: row for row in pending}
             stage(f"03 deterministic counts mappings={len(pairs)} segments={len(segments)} facts={len(m1_facts)} residual={len(pending)}")
+            mode = identity["inference_mode"]
+            model_resource = identity["resources"]["gpt_oss"]
+            can_extract = mode == "auto" and model_resource["status"] == "available"
             stage("04 compatible retrieval")
-            retrieved, knowledge = {}, {"status": "no eligible residual retrieval"}
-            if pending:
+            retrieved, knowledge = {}, {"status": "not_used"}
+            if pending and can_extract:
                 index = KnowledgeIndex(cfg, resources, docs, Path(paths["knowledge_dir"]) / "knowledge_index", encoder)
                 index.measure([row["concept"].replace("_", " ") for row in pending])
                 retrieved = {row["mapping_id"]: index.retrieve(row) for row in pending}
@@ -265,57 +201,43 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=ve
             stage("05 residual extraction and revalidation")
             cache = resume / "extractions"
             cache.mkdir(exist_ok=True)
-            reusable = incoming_reuse((recent, previous, baseline), hashes, pending, lineage, cfg,
-                                      identity["resources"], knowledge, retrieved)
-            outputs, missing, reused, checkpoints = {}, [], {}, set()
+            outputs, missing, checkpoints = {}, [], set()
 
-            def revalidate(item, row, *, published_cache=False):
+            def revalidate(item, row):
                 key = row["mapping_id"]
                 if item["mapping_id"] != key or item["status"] != "validated":
                     raise ValueError("Invalid extraction cache record")
-                records = item["facts"] or []
-                item = dict(item, facts=[])
                 if profile(row) == "finding":
-                    if records:
+                    if item["facts"]:
                         raise ValueError("Finding cache record contains profile facts")
                     validate_extraction(serialize({"findings": item["findings"]}), row, retrieved[key])
-                else:
-                    if item["findings"]:
-                        raise ValueError("Profile cache record contains narrative findings")
-                    facts = [from_storage(fact) if published_cache else SemanticFact.model_validate(fact)
-                             for fact in records]
-                    proposals = [{field: getattr(fact, field) if field != "payload" else fact.payload.model_dump()
-                                  for field in ("segment_id", "start", "end", "quote", "payload", "document_ids")}
-                                 for fact in facts]
-                    item["facts"] = validate_profile(serialize({"candidates": proposals}), row, retrieved[key], cfg, vocab)
-                return item
+                    return item
+                if item["findings"]:
+                    raise ValueError("Profile cache record contains narrative findings")
+                facts = [SemanticFact.model_validate(fact) for fact in item["facts"]]
+                proposals = [{field: getattr(fact, field) for field in
+                              ("segment_id", "start", "end", "quote", "document_ids")} |
+                             {"payload": fact.payload.model_dump()} for fact in facts]
+                validated = validate_profile(serialize({"candidates": proposals}), row, retrieved[key], cfg, vocab)
+                return dict(item, facts=[fact.model_dump() for fact in validated])
 
             for row in pending:
                 key = row["mapping_id"]
                 target = cache / (key + ".json")
-                if target.is_file():
-                    cached = json.loads(target.read_text())
-                    validated = revalidate(cached, row)
-                    outputs[key] = dict(validated, facts=[f.model_dump() for f in validated["facts"]])
-                    checkpoints.add(key)
-                    continue
-                candidates = []
-                for source_id, item in reusable.get(key, ()):
+                if can_extract and target.is_file():
                     try:
-                        candidates.append((source_id, revalidate(item, row, published_cache=True)))
-                    except (KeyError, ValueError):
+                        outputs[key] = revalidate(json.loads(target.read_text()), row)
+                    except (OSError, KeyError, TypeError, ValueError):
+                        stage("05 ignored an invalid extraction checkpoint")
+                    else:
+                        checkpoints.add(key)
                         continue
-                if candidates and all(proposal_meanings(item) == proposal_meanings(candidates[0][1])
-                                      for _, item in candidates):
-                    source_id, item = candidates[0]
-                    outputs[key] = dict(item, facts=[f.model_dump() for f in item["facts"]])
-                    reused[key] = source_id
-                else:
-                    missing.append(row)
-            mode = identity["inference_mode"]
+                missing.append(row)
             model = None
             smoke = skipped_smoke("inference_disabled" if mode == "disabled" else "no_residual_inference")
-            if mode == "auto" and (missing or pending and "gold" in hashes):
+            if mode == "auto" and missing and not can_extract:
+                smoke = skipped_smoke("inference_runtime_error", status="disabled")
+            if can_extract and missing:
                 stage("05 GPT-OSS GPU smoke and extraction")
                 fixtures = smoke_cases(cfg)
                 try:
@@ -370,9 +292,8 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=ve
             if outputs.keys() != pending_by_id.keys():
                 raise ValueError("Residual extraction audit does not cover every routed mapping")
             stage("06 mapping validation")
-            prior_findings = historical_narratives((recent, previous, baseline), hashes, pairs, lineage, segments)
             final = {key: value.model_copy(deep=True) for key, value in deterministic.items()}
-            dictionary, final_facts, historical_facts, added_counts = [], list(m1_facts), {}, Counter()
+            dictionary, final_facts, added_counts = [], list(m1_facts), Counter()
             for row in pairs:
                 key = row["mapping_id"]
                 semantic = final[key]
@@ -399,8 +320,6 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=ve
                         else:
                             final_facts.extend(added)
                             added_counts[key] = len(added)
-                            if key in reused:
-                                historical_facts.update((fact.fact_id, reused[key]) for fact in added)
                             item["contribution_status"] = ("added" if added else "duplicate"
                                                            if item["findings"] or item["facts"] else "empty")
                     elif semantic.strategy == "unchanged":
@@ -410,29 +329,17 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=ve
                             "model_unavailable": "The local inference engine was unavailable.",
                             "not_run": "Model inference was disabled by configuration.",
                         }.get(item["status"], "Model extraction did not pass evidence or schema validation.")
-                recovered, provenance = reconcile_narratives(
-                    row, semantic, [*facts_by_mapping[key], *added], prior_findings.get(key),
-                    retrieved.get(key, []), cfg["prompts"]["version"])
-                final_facts.extend(recovered)
-                historical_facts.update(provenance)
                 dictionary.append(dict(row, **semantic.model_dump(), knowledge_doc_ids=[item["doc_id"] for item in retrieved.get(key, [])]))
             validate_mappings(dictionary, lineage, variables, len(master))
             verify_contract(pairs, segments, final_facts)
 
-            evaluation = evaluate(Path(paths["gold"]) if "gold" in hashes else None,
-                                  pairs, deterministic, final, retrieved, model if engine_available else None, cfg,
-                                  vocab=vocab, routes=routes, segments=segments, typed_m1=m1_facts, typed_m4=final_facts,
-                                  enabled_profiles=enabled)
-            if evaluation.get("engine_failed"):
-                engine_available = False
             failures = {key: item["status"] for key, item in outputs.items() if item["status"] in TRANSIENT}
-            degraded = (any(result.status == "disabled" for result in smoke.profiles.values()) or bool(failures)
-                        or evaluation.get("reason") == "Inference unavailable during holdout")
+            degraded = any(result.status == "disabled" for result in smoke.profiles.values()) or bool(failures)
             if degraded:
                 # Keep a recoverable run from permanently occupying the normal
                 # identity. An unchanged degraded outcome can still be reused.
                 identity["inference_degradation"] = digest({
-                    "smoke": smoke.audit, "failures": failures, "evaluation": evaluation,
+                    "smoke": smoke.audit, "failures": failures,
                     "profiles": {name: result.status for name, result in smoke.profiles.items()},
                     "added_facts": sorted(fact.fact_id for fact in final_facts[len(m1_facts):]),
                 })
@@ -443,8 +350,8 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=ve
                     shutil.rmtree(resume)
                     return analytic_final, out_final
 
-            with tempfile.TemporaryDirectory(dir=analytic_root, prefix=".candidate-") as analytic_temp, \
-                 tempfile.TemporaryDirectory(dir=out_root, prefix=".report-") as out_temp:
+            with tempfile.TemporaryDirectory(dir=analytic_root, prefix=".effective-") as analytic_temp, \
+                 tempfile.TemporaryDirectory(dir=out_root, prefix=".qc-") as out_temp:
                 analytic, out = Path(analytic_temp), Path(out_temp)
                 for artifact in (*inventory_paths, *artifacts):
                     shutil.copyfile(artifact, out / artifact.name)
@@ -454,53 +361,47 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=ve
                 trace = [dict(item, mapping_id=key) for key, items in retrieved.items() for item in items]
                 write_parquet(out / "retrieval_trace.parquet", trace, TRACE)
                 write_parquet(out / "llm_extractions.parquet", [
-                    dict(item, facts=[SemanticFact.model_validate(fact).storage() for fact in item["facts"]])
-                    for item in outputs.values()], EXTRACTIONS)
+                    dict(item, facts=[SemanticFact.model_validate(fact).storage() for fact in item["facts"]],
+                         revalidated_checkpoint=key in checkpoints)
+                    for key, item in outputs.items()], EXTRACTIONS)
                 write_parquet(out / "semantic_facts.parquet", [fact.storage() for fact in final_facts], FACTS)
                 write_parquet(out / "semantic_dictionary.parquet", dictionary, DICTIONARY)
                 with (out / "semantic_dictionary.jsonl").open("w") as stream:
                     for row in dictionary:
                         stream.write(serialize(row) + "\n")
 
-                stage("07 apply")
-                wide, features, observations = apply(original, source, lineage, dictionary, analytic, final_facts)
-                context_candidate = None
+                write_parquet(out / "mapping_routing.parquet", [
+                    dict(route, mapping_id=key, extraction_status=outputs.get(key, {}).get("status"),
+                         contribution_status=outputs.get(key, {}).get("contribution_status"),
+                         extraction_reason_code=outputs.get(key, {}).get("reason_code"))
+                    for key, route in routes.items()
+                ], ROUTES)
+
+                stage("07 materialize typed observations")
+                _, _, observations = apply(original, source, lineage, dictionary, analytic, final_facts,
+                                           project_wide=False)
                 if context is not None:
                     context_table = pq.read_table(paths["context"])
-                    context_candidate = analytic / "10_integrated_longitudinal_context_harmonized.parquet"
-                    pq.write_table(context_table, context_candidate)
-                    validate_original(context_table, pq.read_table(context_candidate))
-                stage("08 derived reconstruction")
-                wide, derived = rebuild(master, wide, observations, features)
-                write_parquet(out / "derived_comparison.parquet", derived, DERIVED_SCHEMA)
-                candidate_path = write_candidate(analytic, wide, features)
-                stage("09 dataset validation")
-                candidate = pq.read_table(candidate_path)
-                validate_original(original, candidate)
-                observed_original = candidate.select(original.column_names).to_pandas()
-                pd.testing.assert_frame_equal(master, observed_original, check_exact=True)
-                if inputs_for(cfg) != hashes:
-                    raise ValueError("Source inputs changed during harmonization")
+                    context_path = analytic / "10_integrated_longitudinal_context_harmonized.parquet"
+                    pq.write_table(context_table, context_path)
+                    validate_original(context_table, pq.read_table(context_path))
                 representation, entries, temporal, baseline_counts = materialize(
-                    analytic, out, master, observations, final_facts, features, variables, wide)
-                stage("09a effective values and Arrow validation")
+                    analytic, out, master, observations, final_facts, [], variables)
+                write_readiness(out, entries, temporal, baseline_counts)
+
+                stage("08 effective values and Arrow validation")
                 effective = build_effective(
                     original, source, lineage, dictionary, final_facts, segments, cfg, run_id, analytic, out,
-                    historical=historical_facts, outputs=outputs, routes=routes)
-                comparison_rows = comparison(variables, dictionary)
-                pd.DataFrame(comparison_rows).to_csv(out / "variable_comparison.csv", index=False)
-                impact = downstream(master, candidate.to_pandas(), features, cfg, out, candidate_path,
-                                    context_candidate, analytic_final)
-                write_readiness(out, entries, temporal, baseline_counts)
-                pd.DataFrame(impact, columns=IMPACT_COLUMNS).to_csv(out / "downstream_impact.csv", index=False)
-                summary = summarize(master, variables, dictionary, observations, list(outputs.values()), features)
+                    outputs=outputs, routes=routes)
+                summary = summarize(master, variables, dictionary, observations, list(outputs.values()), [])
                 summary["technical_integrity"] = "passed"
-                summary["clinical_evaluation"] = evaluation
                 summary["effective_values"] = effective
+                summary["analytic_representation"] = representation
+                summary["comparison"] = identity["comparison"]
                 audit_batches = pq.ParquetFile(out / "effective_value_audit.parquet").iter_batches(
                     columns=["mapping_id", "effective_origin", "source_grain", "occurrences"])
                 profile_summary = summarize_inference(
-                    smoke, pending, outputs, reused.keys() | checkpoints, sent, lineage,
+                    smoke, pending, outputs, checkpoints, sent, lineage,
                     (row for batch in audit_batches for row in batch.to_pylist()), added_counts)
                 inference_tables = {}
                 for name, rows, schema in (("inference_smoke_audit", smoke.audit, SMOKE_AUDIT),
@@ -513,50 +414,36 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=ve
                 summary["inference"] = {"mode": mode, "model_initialized": model_initialized,
                                         "model_available": engine_available,
                                         "status": "degraded" if degraded else "available" if enabled else "not_run",
-                                        "revalidated_historical_mappings": len(reused),
-                                        "accepted_historical_facts": len(historical_facts),
+                                        "revalidated_checkpoint_mappings": len(checkpoints),
                                         "fresh_residual_mappings": len(missing),
                                         "profile_summary": {row["profile"]: row for row in profile_summary},
                                         "artifacts": inference_tables}
-                summary["v2"] = review(out, cfg, hashes, pairs, segments, m1_facts, final_facts, routes,
-                                       outputs, variables, identity["baseline"])
-                summary["v2"]["analytic_representation"] = representation
-                summary["audit_reference"] = audit_reference(Path(paths["audit"])) if "audit" in hashes else {"status": "unavailable"}
-                summary["source_events"] = "Read-only measurement input profiled alongside the Step 10 candidate" if source is not None else "Step 10 episode-variable adapter"
                 write_json(out / "validation_summary.json", summary)
+
+                stage("09 verify paired exports and seal manifests")
+                pair_directory(analytic)
+                pair_directory(out)
                 if inputs_for(cfg) != hashes:
                     raise ValueError("Source inputs changed before publication")
-
-                stage("10 offline report")
                 revision = subprocess.run(["git", "-C", paths["obj1_root"], "rev-parse", "HEAD"], capture_output=True, text=True)
                 manifest = dict(run_id=run_id, started_at=start, commit=revision.stdout.strip() or None,
                                 schema_version=cfg["schema_version"], inputs=hashes,
-                                input_paths={name: paths[name] for name in hashes}, model=identity["resources"]["gpt_oss"],
+                                input_paths={name: paths[name] for name in hashes}, model=model_resource,
                                 prompt={"version": cfg["prompts"]["version"], "sha256": digest(cfg["prompts"])},
                                 identity=identity, patients=summary["patients"], episodes=len(master), columns=len(master.columns))
-                comparison_model = report(out, cfg, manifest, target=Run(out, analytic, manifest),
-                                          baseline=baseline, previous=previous, recent=recent, frozen=frozen, routes=routes)
-                for key in ("semantic_completeness", "downstream_activation"):
-                    summary[key] = comparison_model["summary"][key]
-                write_json(out / "validation_summary.json", summary)
-                pair_directory(analytic)
-                pair_directory(out)
-                if (inputs_for(cfg) != hashes or baseline_identity(cfg) != identity["baseline"]
-                        or comparison_identity(cfg) != identity["comparison"]):
-                    raise ValueError("Inputs changed after validation")
-                for key, config_key, reference in (("previous_v2", "previous_v2_run_id", previous),
-                                                   ("recent_v2", "recent_v2_run_id", recent)):
-                    if reference:
-                        verified = previous_run(cfg, reference=config_key)
-                        if (not verified or verified.manifest != reference.manifest
-                                or file_hash(verified.qc / "run_manifest.json") != identity["comparison"][key]):
-                            raise ValueError("A pinned V2 publication changed before publication")
-                write_source_manifest(out, analytic, run_id, hashes)
+                write_source_manifest(out, analytic, run_id, hashes, publication=EFFECTIVE_PUBLICATION)
                 stage("validated and ready to publish")
                 (out / "logs").mkdir()
                 shutil.copyfile(resume / "progress.log", out / "logs" / "pipeline.log")
+                analytic_hashes = file_manifest(analytic)
+                effective_csv = Path(EFFECTIVE).with_suffix(".csv").name
+                effective_schema = Path(EFFECTIVE).with_suffix(".csv.schema.json").name
+                if json.loads((analytic / effective_schema).read_text())["sha256"] != {
+                    name: analytic_hashes[name] for name in (EFFECTIVE, effective_csv)
+                }:
+                    raise ValueError("Effective CSV and Parquet hashes changed after verification")
                 manifest.update(completed_at=now(), elapsed_seconds=round(monotonic() - clock, 3),
-                                outputs={"report": file_manifest(out), "analytic": file_manifest(analytic)})
+                                outputs={"report": file_manifest(out), "analytic": analytic_hashes})
                 write_json(out / "run_manifest.json", manifest)
                 installed_analytic = False
                 if analytic_final.exists():
@@ -586,14 +473,6 @@ def main() -> None:
         raise SystemExit(f"Harmonization configuration is incomplete ({error}).") from None
     try:
         analytic, out = run(cfg)
-        report_dir, summary = generate(cfg, {"target_run_id": out.name}, comparative_root(cfg))
-        verify_source(out.name, analytic_root=analytic.parent, report_root=out.parent)
-        blockers = selector_blockers(summary)
-        if blockers:
-            print("V2 selector retained (" + "; ".join(blockers) + ").")
-        else:
-            update_report_pointer(comparative_root(cfg), out.name, report_dir.name)
-            print("V2 selector updated.")
     except PermissionError as error:
         raise SystemExit(f"Harmonization stopped because an input or staging path is inaccessible ({error.filename}).") from None
     except FileNotFoundError as error:
@@ -612,11 +491,9 @@ def main() -> None:
         raise SystemExit(
             "Harmonization stopped before publication."
         ) from None
-    print(f"V2 run ID: {out.name}")
-    print(f"Comparative report ID: {report_dir.name}")
     print(f"Effective Parquet: {analytic.resolve() / EFFECTIVE}")
     print(f"Effective CSV: {(analytic.resolve() / EFFECTIVE).with_suffix('.csv')}")
-    print(f"Comparative HTML: {report_dir.resolve() / 'semantic_harmonization_final.html'}")
+    print(f"V2 run ID: {out.name}")
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ from .settings import MODULE, ROOT, digest, file_hash, merge, pipeline_config, r
 
 SOURCE_MANIFEST = "candidate_source_manifest.json"
 RUN_MANIFEST = "run_manifest.json"
+EFFECTIVE_PUBLICATION = "effective"
 ANALYTIC_FILES = {
     "integrated": "10_integrated_longitudinal_clinical_episode_harmonized.parquet",
     "context": "10_integrated_longitudinal_context_harmonized.parquet",
@@ -99,7 +100,7 @@ def selection_id(dirs: Path = MODULE / "configs") -> str | None:
     return run_id
 
 
-def write_source_manifest(out: Path, analytic: Path, run_id: str, original: dict) -> None:
+def write_source_manifest(out: Path, analytic: Path, run_id: str, original: dict, *, publication=None) -> None:
     """Describe the validated files relative to their matched run directories."""
     assets = {}
     for group, root, names in (
@@ -110,7 +111,7 @@ def write_source_manifest(out: Path, analytic: Path, run_id: str, original: dict
             path = root / relative
             if path.is_file():
                 assets[role] = {"group": group, "path": relative, "sha256": file_hash(path)}
-    if not {"integrated", "feature_manifest"} <= assets.keys():
+    if publication != EFFECTIVE_PUBLICATION and not {"integrated", "feature_manifest"} <= assets.keys():
         raise ValueError("Validated candidate is missing a core asset")
     if ("context" in original) != ("context" in assets):
         raise ValueError("Candidate context disagrees with Step 10 context availability")
@@ -158,13 +159,16 @@ def verify_source(run_id: str, *, analytic_root: Path, report_root: Path) -> Stu
         **{role: ("report", (PROFILE_DIR / name).as_posix()) for role, name in (PROFILE_FILES | OPTIONAL_PROFILE_FILES).items()},
     }
     assets = manifest.get("assets", {})
-    if not {"integrated", "feature_manifest"} <= assets.keys() or ("context" in original) != ("context" in assets):
+    effective_only = identity.get("publication") == EFFECTIVE_PUBLICATION
+    core_assets = {"effective_integrated"} if effective_only else {"integrated", "feature_manifest"}
+    if not core_assets <= assets.keys() or ("context" in original) != ("context" in assets):
         raise ValueError("Semantic source manifest lacks required assets")
     if manifest_version == "sjd_semantic_source_v2" and not (TYPED_ANALYTIC.keys() | TYPED_REPORT.keys()) <= assets.keys():
         raise ValueError("Semantic source manifest lacks typed analytical assets")
     if set(assets) & PROFILE_FILES.keys() and not PROFILE_FILES.keys() <= assets.keys():
         raise ValueError("Semantic source manifest has an incomplete Pharma/Graph bundle")
-    effective = identity.get("effective_contract") == EFFECTIVE_CONTRACT or bool(set(assets) & EFFECTIVE_ANALYTIC.keys())
+    effective = (effective_only or identity.get("effective_contract") == EFFECTIVE_CONTRACT
+                 or bool(set(assets) & EFFECTIVE_ANALYTIC.keys()))
     if effective and (not run.get("completed_at") or not EFFECTIVE_ANALYTIC.keys() <= assets.keys()):
         raise ValueError("Semantic source manifest lacks effective analytical assets")
     files, hashes = {}, {}
@@ -178,6 +182,9 @@ def verify_source(run_id: str, *, analytic_root: Path, report_root: Path) -> Stu
                 or file_hash(path) != asset["sha256"]):
             raise ValueError(f"Semantic candidate asset hash or path mismatch: {role}")
         files[role], hashes[role] = path, asset["sha256"]
+    if effective_only:
+        files["integrated"] = files["effective_integrated"]
+        hashes["integrated"] = hashes["effective_integrated"]
     return StudyInput(run_id, manifest_path, files, hashes)
 
 

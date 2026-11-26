@@ -119,8 +119,8 @@ def include_typed_projection(observation: dict, facts) -> None:
 
 
 def apply(input_table: pa.Table, source: pa.Table | None, lineage: list[dict], dictionary: list[dict],
-          analytic: Path, facts=()) -> tuple[pa.Table, list[dict], list[dict]]:
-    """Join every observation m:1 and materialize the Arrow outputs."""
+          analytic: Path, facts=(), *, project_wide=True) -> tuple[pa.Table, list[dict], list[dict]]:
+    """Join every observation m:1 and materialize the typed sidecars."""
     lookup = {row["mapping_id"]: row for row in dictionary}
     if len(lookup) != len(dictionary) or set(lookup) != {row["mapping_id"] for row in lineage}:
         raise ValueError("Semantic dictionary failed the m:1 mapping contract")
@@ -168,7 +168,7 @@ def apply(input_table: pa.Table, source: pa.Table | None, lineage: list[dict], d
     for variable, rows in episode_variables.items():
         if [row["source_row"] for row in rows] != list(range(wide.num_rows)):
             raise ValueError(f"Episode inventory alignment failed for {variable}")
-        if rows[0]["family"] in {"other", "derived"} or variable == "spine__interval_name":
+        if not project_wide or rows[0]["family"] in {"other", "derived"} or variable == "spine__interval_name":
             continue
         for field, dtype in {**WIDE_FIELDS, "pattern_terms": pa.list_(pa.string()),
                              **dict.fromkeys(FINDING_WIDE_FIELDS, pa.bool_())}.items():
