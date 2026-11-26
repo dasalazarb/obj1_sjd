@@ -24,13 +24,14 @@ def resolve_sources(cfg):
     paths = cfg['paths']
     integrated = config_path(cfg['_path'], paths['integrated'])
     if selected := cfg.get("_semantic_source"):
-        selected.select("integrated", integrated, default=common.INTEGRATED_LONGITUDINAL_PARQUET)
+        selected.select("integrated", integrated, default=common.EFFECTIVE_LONGITUDINAL_PARQUET)
         profile = (Path(cfg["_path"]).parent / paths["pharma_candidates"]).resolve()
         default_profile = (common.STUDIES_TABLES_DIR / "pharma" / "00_profile_labs"
                            / "00_pharma_graph_lab_candidates.csv")
         selected.select("pharma_candidates", profile, default=default_profile)
         return {"integrated": selected.require("integrated"),
                 "pharma_candidates": selected.require("pharma_candidates")}
+    integrated = common.resolve_effective_longitudinal_input(integrated)
     if not integrated.is_file():
         raise FileNotFoundError('Missing integrated baseline source; run the authorized upstream pipeline first')
     candidates = LAB.current_profile_path(Path(cfg['_path']).parent / paths['pharma_candidates'])

@@ -144,7 +144,7 @@ def preimputation_coverage(state: pd.DataFrame) -> pd.DataFrame:
                          "state_coverage_fraction":observed/total},index=state.index)
 
 def parse_args(argv=None):
-    p=argparse.ArgumentParser(); p.add_argument("--integrated",type=Path,default=common.INTEGRATED_LONGITUDINAL_PARQUET)
+    p=argparse.ArgumentParser(); p.add_argument("--integrated",type=common.resolve_effective_longitudinal_input,default=str(common.EFFECTIVE_LONGITUDINAL_PARQUET))
     p.add_argument("--intervals",type=Path,default=common.POP_TRANSITION_INTERVALS_PARQUET)
     p.add_argument("--config",type=Path,default=Path(__file__).with_name("config.yaml")); p.add_argument("--dry-run",action="store_true")
     p.add_argument("--output-root",type=Path,help="Isolated preparation outputs")
@@ -192,6 +192,8 @@ def prepare_serology(master, cfg, registry, args, dirs=None):
     return result
 
 def run(args):
+    sidecar_base = common.step10_sidecar_base(args.integrated)
+    registry_path = sidecar_base.with_name("10_variable_registry.csv")
     if args.dry_run:
         cfg=load_config(args.config)
         if not args.integrated.exists():
@@ -200,7 +202,6 @@ def run(args):
             master=load_parquet(args.integrated); contract=validate_integrated_dataset(master)
             intervals=build_consecutive_intervals(master)
             if args.intervals.exists(): validate_transition_intervals(load_parquet(args.intervals),master)
-            registry_path=args.integrated.with_name("10_variable_registry.csv")
             registry=pd.read_csv(registry_path) if registry_path.exists() else None
             manifest,_=feature_manifest(master,intervals,cfg,registry)
             if not manifest.included.any(): raise ValueError("No eligible longitudinal state features")
@@ -219,7 +220,6 @@ def run(args):
         validate_transition_intervals(canonical,master)
         base_cols=["patient_id","from_clinical_episode_id","to_clinical_episode_id","interval_days","interval_years"]
         intervals=canonical[base_cols].merge(intervals.drop(columns=["interval_days","interval_years"]),on=base_cols[:3],validate="one_to_one")
-    registry_path=args.integrated.with_name("10_variable_registry.csv")
     registry=pd.read_csv(registry_path) if registry_path.exists() else None
     manifest,state=feature_manifest(master,intervals,cfg,registry)
     included=manifest.loc[manifest.included,"feature"].tolist()

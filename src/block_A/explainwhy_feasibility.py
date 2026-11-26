@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 
+import common
+
 from src.block_A.observed_patterns import (
     build_observed_patterns, pattern_summary, verified_baseline_pop, write_manifest,
 )
@@ -172,9 +174,11 @@ def modality_feasibility(df, baseline, endpoints, variable_registry, step14):
 
 
 def input_paths(args):
-    return {"step10_integrated": Path(args.integrated), "step11_baseline": Path(args.baseline),
-        "step10_context": getattr(args, "context", None) or Path(args.integrated).with_name("10_integrated_longitudinal_context.parquet"),
-        "step10_registry": getattr(args, "variable_registry", None) or Path(args.integrated).with_name("10_variable_registry.csv"),
+    integrated = Path(args.integrated)
+    sidecar_base = common.step10_sidecar_base(integrated)
+    return {"step10_integrated": integrated, "step11_baseline": Path(args.baseline),
+        "step10_context": getattr(args, "context", None) or sidecar_base.with_name("10_integrated_longitudinal_context.parquet"),
+        "step10_registry": getattr(args, "variable_registry", None) or sidecar_base.with_name("10_variable_registry.csv"),
         "step13_episode": Path(args.progression),
         "step13_delta_endpoints": Path(args.output_root)/"data/analytic/blockA/13_disease_activity_progression/13_essdai_patient_delta_endpoints.parquet"}
 

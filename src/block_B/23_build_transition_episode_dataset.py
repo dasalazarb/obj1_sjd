@@ -36,7 +36,8 @@ OBSERVATION_FLAGS = ["avail_essdai", "avail_esspri_complete", "avail_sf36_comple
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", type=Path, default=common.INTEGRATED_LONGITUDINAL_PARQUET)
+    parser.add_argument("--input", type=common.resolve_effective_longitudinal_input,
+                        default=str(common.EFFECTIVE_LONGITUDINAL_PARQUET))
     parser.add_argument("--observation-input", type=Path, default=common.INTERMEDIATE_DATA_DIR / "20_missingness_and_observation_process" / "20_observation_process_patient_visit.parquet")
     parser.add_argument("--baseline-input", type=Path, default=common.INTERMEDIATE_DATA_DIR / "21_multidimensional_baseline_phenotypes" / "21_multidimensional_baseline_patient.parquet")
     parser.add_argument("--legacy-interval-input", type=Path, default=common.POP_TRANSITION_INTERVALS_PARQUET)

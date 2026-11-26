@@ -383,7 +383,7 @@ def interval_coverage_summary(intervals, membership, maximum_interval_years=None
 
 def parse_args(argv=None):
     p=argparse.ArgumentParser(); dirs=qc.study_paths(common)
-    p.add_argument("--integrated",type=Path,default=common.INTEGRATED_LONGITUDINAL_PARQUET); p.add_argument("--state",type=Path,default=dirs["analytic"]/"01_longitudinal_visit_state.parquet")
+    p.add_argument("--integrated",type=common.resolve_effective_longitudinal_input,default=str(common.EFFECTIVE_LONGITUDINAL_PARQUET)); p.add_argument("--state",type=Path,default=dirs["analytic"]/"01_longitudinal_visit_state.parquet")
     p.add_argument("--serology-state", type=Path, help="Separate validated Script-01 OHE state")
     p.add_argument("--metadata",type=Path,default=dirs["analytic"]/"01_longitudinal_visit_metadata.parquet")
     p.add_argument("--intervals",type=Path,default=dirs["analytic"]/"01_longitudinal_intervals.parquet")

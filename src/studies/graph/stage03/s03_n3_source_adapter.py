@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pandas as pd
 
+import common
+
 from .s03_baseline_window import calendar_day, calendar_windows, policy
 
 from .._pipeline import digest
@@ -46,8 +48,9 @@ def _dates(values):
 def build_candidate(root, context_path, output_path):
     """Create a private, versioned-by-hash source candidate, not an approved assay."""
     root, context_path, output_path = map(Path, (root, context_path, output_path))
-    analytic_path = (root / "data/analytic/10_build_integrated_longitudinal_dataset/"
-                     "10_integrated_longitudinal_clinical_episode.parquet")
+    analytic_path = common.resolve_effective_longitudinal_input(
+        root / common.EFFECTIVE_LONGITUDINAL_PARQUET.relative_to(common.PROJECT_ROOT)
+    )
     analytes_path = (root / "data/intermediate/block_A/01_serological_profile/"
                      "01_labs_episode_analyte_level.parquet")
     if any(not p.is_file() for p in (analytic_path, context_path, analytes_path)):

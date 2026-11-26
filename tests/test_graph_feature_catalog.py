@@ -172,7 +172,7 @@ def test_real_three_script_boundary_preflight_and_privacy(tmp_path,script,prefix
 
 def test_graph01_zero_flags_overwrites_canonical_outputs(tmp_path, monkeypatch):
     _, integrated, candidates, _ = bundle(tmp_path)
-    monkeypatch.setattr(G.common, 'INTEGRATED_LONGITUDINAL_PARQUET', integrated)
+    monkeypatch.setattr(G.common, 'EFFECTIVE_LONGITUDINAL_PARQUET', integrated)
     monkeypatch.setattr(G.common, 'INTEGRATED_BASELINE_CSV', tmp_path / 'no_age_input.csv')
     tables = tmp_path / 'tables' / 'studies'
     monkeypatch.setattr(G.common, 'STUDIES_TABLES_DIR', tables)

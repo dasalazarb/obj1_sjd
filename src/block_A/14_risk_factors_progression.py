@@ -1753,7 +1753,8 @@ def parse_args(argv=None):
     # ESSDAI-index extension. Explicit legacy/audit modes remain available.
     invoked_without_flags = len(sys.argv[1:] if argv is None else argv) == 0
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--integrated", type=Path, default=common.INTEGRATED_LONGITUDINAL_PARQUET)
+    parser.add_argument("--integrated", type=common.resolve_effective_longitudinal_input,
+                        default=str(common.EFFECTIVE_LONGITUDINAL_PARQUET))
     parser.add_argument("--baseline", type=Path, default=common.INTEGRATED_BASELINE_PARQUET)
     parser.add_argument("--context", type=Path, default=None,
                         help="Step 10 context companion (default: beside --integrated, if present)")
@@ -1791,16 +1792,15 @@ def parse_args(argv=None):
     if args.no_prior_result_comparison and not args.explainwhy_inclusive_main:
         parser.error("--no-prior-result-comparison requires --explainwhy-inclusive-main")
     if args.explainwhy_inclusive_main:
-        # Derive context/registry from the selected canonical Step 10 file and
-        # resolve v2 producer artifacts relative to this repository. These
+        # Resolve the Step 10 sidecars and v2 producer artifacts. These
         # defaults only apply to the inclusive mode; historical CLI behavior
         # and explicitly supplied locations are not modified.
         step13_v2_dir = ROOT / "data/analytic/blockA/13_disease_activity_progression"
         step13_v2_qc = ROOT / "outputs/qc/blockA/13_disease_activity_progression"
         if args.context is None:
-            args.context = args.integrated.with_name("10_integrated_longitudinal_context.parquet")
+            args.context = common.step10_sidecar_base(args.integrated).with_name("10_integrated_longitudinal_context.parquet")
         if args.variable_registry is None:
-            args.variable_registry = args.integrated.with_name("10_variable_registry.csv")
+            args.variable_registry = common.step10_sidecar_base(args.integrated).with_name("10_variable_registry.csv")
         for name, default in (
             ("patterns_v2", step13_v2_dir / "13_essdai_patient_observed_patterns_v2.parquet"),
             ("selected_dates_v2", step13_v2_dir / "13_essdai_pattern_selected_dates_v2.parquet"),
@@ -2168,15 +2168,19 @@ def main(args=None):
     LOG.setLevel(logging.INFO)
     LOG.addHandler(handler)
     try:
-        context_path = getattr(args, "context", None) or Path(args.integrated).with_name("10_integrated_longitudinal_context.parquet")
-        metadata = build_analysis_metadata(args, context_path,
+        sidecar_base = common.step10_sidecar_base(args.integrated)
+        context_path = getattr(args, "context", None) or sidecar_base.with_name("10_integrated_longitudinal_context.parquet")
+        explicit_registry = getattr(args, "variable_registry", None)
+        variable_registry_path = explicit_registry or sidecar_base.with_name("10_variable_registry.csv")
+        metadata_args = argparse.Namespace(**vars(args))
+        metadata_args.variable_registry = variable_registry_path
+        metadata = build_analysis_metadata(metadata_args, context_path,
             bool(args.progression and Path(args.progression).exists()), args.dry_run, backup)
         (dirs["qc"]/"14_analysis_metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
         LOG.info("Input paths integrated=%s baseline=%s progression=%s", args.integrated, args.baseline, args.progression)
-        context_path = getattr(args, "context", None) or Path(args.integrated).with_name("10_integrated_longitudinal_context.parquet")
         missing = [str(path) for path in (args.integrated, args.baseline) if not Path(path).is_file()]
         if missing:
-            metadata = build_analysis_metadata(args, context_path, False, args.dry_run, backup)
+            metadata = build_analysis_metadata(metadata_args, context_path, False, args.dry_run, backup)
             metadata["missing_canonical_inputs"] = missing
             metadata["treatment_adjustment"] = {"status": "not_audited", "reason": "canonical inputs unavailable"}
             write_closure_summary(metadata, dirs, pending=["Required canonical inputs unavailable: " + "; ".join(missing)])
@@ -2202,8 +2206,7 @@ def main(args=None):
             raise
         LOG.info("Input rows=%s patients=%s baseline rows=%s", len(df), df.patient_id.nunique(), len(baseline))
         registry = resolve_predictors(build_predictor_registry(), baseline, df)
-        variable_registry_path = getattr(args, "variable_registry", None) or Path(args.integrated).with_name("10_variable_registry.csv")
-        if getattr(args, "variable_registry", None) and not variable_registry_path.exists():
+        if explicit_registry and not variable_registry_path.exists():
             raise ValueError(f"Explicit variable registry does not exist: {variable_registry_path}")
         variable_registry = pd.read_csv(variable_registry_path) if variable_registry_path.exists() else None
         treatment_qc, treatment_metadata, treatment_exposures = treatment_adjustment_decision(
@@ -2257,7 +2260,7 @@ def main(args=None):
             for task, _, meta in prepared])
         support = build_cross_domain_support(tasks, len(base), args.minimum_events)
         _write_csv(build_adjustment_selection_qc(feasibility), dirs["qc"]/"14_adjustment_selection_qc.csv")
-        metadata = build_analysis_metadata(args, context_path, progression is not None, args.dry_run, backup)
+        metadata = build_analysis_metadata(metadata_args, context_path, progression is not None, args.dry_run, backup)
         metadata["structural_qc_status"] = "pass"
         metadata["temporal_leakage_status"] = "0 violations"
         metadata["treatment_adjustment"] = treatment_metadata

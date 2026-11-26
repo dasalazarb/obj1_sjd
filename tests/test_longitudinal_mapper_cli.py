@@ -25,7 +25,7 @@ def common_paths(tmp_path):
         STUDIES_FIGURES_DIR=tmp_path / "outputs/figures/studies",
         STUDIES_QC_DIR=tmp_path / "outputs/qc/studies",
         STUDIES_LOGS_DIR=tmp_path / "outputs/logs/studies",
-        INTEGRATED_LONGITUDINAL_PARQUET=tmp_path / "integrated.parquet",
+        EFFECTIVE_LONGITUDINAL_PARQUET=tmp_path / "integrated.parquet",
     )
 
 
@@ -144,7 +144,7 @@ def test_bare_cli_executes_default_candidate_with_generated_id(tmp_path, monkeyp
     state.to_parquet(inputs / "01_longitudinal_visit_state.parquet")
     metadata.to_parquet(inputs / "01_longitudinal_visit_metadata.parquet")
     intervals.to_parquet(inputs / "01_longitudinal_intervals.parquet")
-    raw.to_parquet(paths.INTEGRATED_LONGITUDINAL_PARQUET)
+    raw.to_parquet(paths.EFFECTIVE_LONGITUDINAL_PARQUET)
     monkeypatch.setattr(MAP, "load_config", lambda path: copy.deepcopy(cfg))
     full_registry = review_runner.candidate_registry
     # Keep this CLI regression focused; the existing integration test covers all candidates.

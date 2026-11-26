@@ -1179,9 +1179,9 @@ def run(args):
 
     study = "graph/01_run_topological_phenotyping"
     selected = active_study_input()
+    args = argparse.Namespace(**vars(args))
     if selected:
-        args = argparse.Namespace(**vars(args))
-        args.integrated = selected.select("integrated", args.integrated, default=common.INTEGRATED_LONGITUDINAL_PARQUET)
+        args.integrated = selected.select("integrated", args.integrated, default=common.EFFECTIVE_LONGITUDINAL_PARQUET)
         default_profile = (common.STUDIES_TABLES_DIR / "pharma" / "00_profile_labs"
                            / "00_pharma_graph_lab_candidates.csv")
         selected.select("pharma_candidates", args.graph_lab_candidates, default=default_profile)
@@ -1191,6 +1191,8 @@ def run(args):
             args.output_dir = args.output_dir / "semantic_harmonization" / selected.run_id
         else:
             study += "/semantic_harmonization/" + selected.run_id
+    else:
+        args.integrated = common.resolve_effective_longitudinal_input(args.integrated)
     destinations = run_dirs(args, study)
     def owned(key, name):
         if key == "figures":
@@ -1240,7 +1242,7 @@ def write_run_failure(args, prefix, exc):
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     folder = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--integrated", type=Path, default=common.INTEGRATED_LONGITUDINAL_PARQUET)
+    parser.add_argument("--integrated", type=Path, default=common.EFFECTIVE_LONGITUDINAL_PARQUET)
     parser.add_argument(
         "--graph-lab-candidates", type=Path,
         default=common.STUDIES_TABLES_DIR / "pharma" / "00_profile_labs" /

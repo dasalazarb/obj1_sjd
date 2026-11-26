@@ -108,7 +108,7 @@ def test_pharma_graph_chain_without_flags_overwrites_canonical_artifacts(configu
     graph02_dir = tables / 'graph/02_graph_representation_sensitivity'
     source = Path(configuration['paths']['integrated'])
     original_source = source.read_bytes()
-    monkeypatch.setattr(common, 'INTEGRATED_LONGITUDINAL_PARQUET', source)
+    monkeypatch.setattr(common, 'EFFECTIVE_LONGITUDINAL_PARQUET', source)
     monkeypatch.setattr(common, 'INTEGRATED_BASELINE_CSV', tmp_path / 'absent_baseline.csv')
     monkeypatch.setattr(common, 'STUDIES_TABLES_DIR', tables)
     for key in ('figures', 'qc', 'logs'):

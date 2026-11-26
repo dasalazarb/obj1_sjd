@@ -312,7 +312,7 @@ def validate_followup_hard_qc(metrics: pd.DataFrame, baseline: pd.DataFrame, ret
 
 def parse_args():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input",type=Path,default=common.INTEGRATED_LONGITUDINAL_PARQUET)
+    parser.add_argument("--input",type=common.resolve_effective_longitudinal_input,default=str(common.EFFECTIVE_LONGITUDINAL_PARQUET))
     parser.add_argument("--tables-dir",type=Path,default=common.BLOCKA_TABLES_DIR/"12_followup_characterization")
     parser.add_argument("--qc-dir",type=Path,default=common.BLOCKA_QC_DIR/"12_followup_characterization")
     parser.add_argument("--analytic-dir",type=Path,default=common.ANALYTIC_DATA_DIR/"blockA"/"12_followup_characterization")

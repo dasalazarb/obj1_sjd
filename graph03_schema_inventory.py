@@ -10,6 +10,8 @@ import csv
 import json
 from pathlib import Path
 
+import common
+
 REGISTRY_FIELDS = ('variable', 'source', 'family', 'role', 'destination',
                    'canonical_variable', 'alias_of', 'dtype', 'producer_script',
                    'original_variable', 'public_variable', 'temporal_scope')
@@ -18,13 +20,13 @@ REGISTRY_FIELDS = ('variable', 'source', 'family', 'role', 'destination',
 def schema_inventory(base, graph02_run, master=None):
     import pyarrow.parquet as pq
     base, graph02_run = Path(base), Path(graph02_run)
-    master = Path(master) if master else base / (
-        'data/analytic/10_build_integrated_longitudinal_dataset/'
-        '10_integrated_longitudinal_clinical_episode.parquet')
+    default_master = base / common.EFFECTIVE_LONGITUDINAL_PARQUET.relative_to(common.PROJECT_ROOT)
+    master = common.resolve_effective_longitudinal_input(master or default_master)
+    sidecar_base = common.step10_sidecar_base(master)
     sources = {
         'Step10_analytic_master': master,
-        'Step10_context': master.with_name('10_integrated_longitudinal_context.parquet'),
-        'Step10_variable_registry': master.with_name('10_variable_registry.csv'),
+        'Step10_context': sidecar_base.with_name('10_integrated_longitudinal_context.parquet'),
+        'Step10_variable_registry': sidecar_base.with_name('10_variable_registry.csv'),
         'Graph02_baseline': graph02_run / '02_graph_baseline_raw.csv',
     }
     result = dict(schema_version='graph03_schema_inventory_v1',

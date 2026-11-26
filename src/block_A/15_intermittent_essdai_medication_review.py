@@ -36,7 +36,7 @@ STEM = "step15_intermittent_medication_review"
 # ROOT is resolved, so equivalent institutional mount aliases use the same path.
 # Every setting remains overridable through its corresponding CLI option.
 DEFAULT_CONFIG = dict(
-    integrated=common.INTEGRATED_LONGITUDINAL_PARQUET,
+    integrated=str(common.EFFECTIVE_LONGITUDINAL_PARQUET),
     baseline=common.INTEGRATED_BASELINE_PARQUET,
     patterns=common.DISEASE_ACTIVITY_PROGRESSION_DIR / "13_essdai_patient_observed_patterns_v2.parquet",
     patterns_manifest=common.BLOCKA_QC_DIR / "13_disease_activity_progression/13_essdai_observed_pattern_manifest_v2.json",
@@ -63,7 +63,7 @@ DEFAULT_CONFIG = dict(
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, epilog=NOTICE,
                                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    p.add_argument("--integrated", type=Path)
+    p.add_argument("--integrated", type=common.resolve_effective_longitudinal_input)
     p.add_argument("--baseline", type=Path)
     p.add_argument("--patterns", type=Path)
     p.add_argument("--patterns-manifest", type=Path)
@@ -147,7 +147,8 @@ def run(args):
     sequence = read_table(protected["selected_dates"])
     x, _, patterns = validate_inputs(read_table(args.integrated), read_table(args.baseline),
         read_table(protected["patterns"]), read_table(protected["eligibility"]), sequence, args.data_cutoff)
-    context = args.context or args.integrated.with_name("10_integrated_longitudinal_context.parquet")
+    sidecar_base = common.step10_sidecar_base(args.integrated)
+    context = args.context or sidecar_base.with_name("10_integrated_longitudinal_context.parquet")
     if context.is_file():
         x = attach_context(x, read_table(context))
         fingerprints["step10_context"] = dict(path=str(context.resolve()), sha256=sha256(context))

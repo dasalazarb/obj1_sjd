@@ -102,7 +102,7 @@ def next_visit_permutation_null(attached,replicates,seed):
     return pd.DataFrame(rows)
 
 def parse_args(argv=None):
-    p=argparse.ArgumentParser(); d=qc.study_paths(common); p.add_argument("--integrated",type=Path,default=common.INTEGRATED_LONGITUDINAL_PARQUET)
+    p=argparse.ArgumentParser(); d=qc.study_paths(common); p.add_argument("--integrated",type=common.resolve_effective_longitudinal_input,default=str(common.EFFECTIVE_LONGITUDINAL_PARQUET))
     p.add_argument("--intervals",type=Path,default=d["analytic"]/"01_longitudinal_intervals.parquet"); p.add_argument("--membership",type=Path,default=d["analytic"]/"02_visit_mapper_membership.parquet"); p.add_argument("--nodes",type=Path,default=d["analytic"]/"02_mapper_node_membership.parquet"); p.add_argument("--config",type=Path,default=Path(__file__).with_name("config.yaml")); p.add_argument("--dry-run",action="store_true")
     p.add_argument("--mode", choices=("reference-only", "approved-temporal"), default="reference-only")
     p.add_argument("--readiness", type=Path)

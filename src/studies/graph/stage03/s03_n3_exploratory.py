@@ -9,6 +9,8 @@ import re
 import pandas as pd
 import yaml
 
+import common
+
 from .._pipeline import config_path, digest, output_lock, output_root, stage_destinations, stage_outputs, write_json
 from ..stage02.s02_contracts import CURRENT_SCHEMA, MANIFEST, artifact_paths, safe_artifact, validate_release
 from . import s03_n3_calendar_day as cal
@@ -448,7 +450,8 @@ def current_source_inputs(root, *, step10=None, context=None, paths=None, btris_
         configured_step10 = paths['step10']
         paths['step10'] = Path(step10)
         if paths['step10'] != configured_step10:
-            paths['context'] = paths['step10'].with_name('10_integrated_longitudinal_context.parquet')
+            paths['context'] = common.step10_sidecar_base(paths['step10']).with_name(
+                '10_integrated_longitudinal_context.parquet')
     if context is not None:
         paths['context'] = Path(context)
     issues = []
@@ -667,7 +670,9 @@ def run_exploratory_auto(root, cfg=None, *, audit_only=False):
     try:
         data, paths = _source_settings(root)
         if cfg is not None:
-            paths['step10'] = config_path(cfg['_path'], cfg['paths']['integrated'])
+            paths['step10'] = common.resolve_effective_longitudinal_input(
+                config_path(cfg['_path'], cfg['paths']['integrated'])
+            )
         defaults = graph_paths(root, data_root=data)
         graph02 = output_root(cfg, '02') if cfg else defaults['graph02']
         graph03 = output_root(cfg, '03') if cfg else defaults['graph03']

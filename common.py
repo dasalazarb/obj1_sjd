@@ -6,6 +6,7 @@ create files on import, except via helper functions called by scripts.
 """
 
 import os
+import stat
 from pathlib import Path
 
 # Repository root is the directory containing this file.
@@ -84,6 +85,10 @@ EXTENDED_CLINICAL_LONGITUDINAL_PARQUET = (
 LABS_EPISODE_WIDE_PARQUET = BLOCKA_INTERMEDIATE_DATA_DIR / "01_serological_profile" / "01_labs_episode_wide.parquet"
 SEROLOGY_EPISODE_PARQUET = BLOCKA_INTERMEDIATE_DATA_DIR / "01_serological_profile" / "01_serology_episode_level.parquet"
 INTEGRATED_LONGITUDINAL_PARQUET = ANALYTIC_DATA_DIR / "10_build_integrated_longitudinal_dataset" / "10_integrated_longitudinal_clinical_episode.parquet"
+_EFFECTIVE_FILENAME = "10_integrated_longitudinal_clinical_episode_effective.parquet"
+EFFECTIVE_LONGITUDINAL_PARQUET = (
+    ANALYTIC_DATA_DIR / "semantic_harmonization" / "*" / _EFFECTIVE_FILENAME
+)
 INTEGRATED_BASELINE_PARQUET = ANALYTIC_DATA_DIR / "blockA" / "11_integrated_baseline_characterization" / "11_integrated_baseline_patient_level.parquet"
 INTEGRATED_BASELINE_CSV = INTEGRATED_BASELINE_PARQUET.with_suffix(".csv")
 DISEASE_ACTIVITY_PROGRESSION_DIR = ANALYTIC_DATA_DIR / "blockA" / "13_disease_activity_progression"
@@ -92,6 +97,33 @@ RISK_FACTORS_PROGRESSION_DIR = ANALYTIC_DATA_DIR / "blockA" / "14_risk_factors_p
 RISK_FACTORS_PROGRESSION_PARQUET = RISK_FACTORS_PROGRESSION_DIR / "14_lagged_interval_dataset.parquet"
 TRANSITION_EPISODE_PARQUET = INTERMEDIATE_DATA_DIR / "23_build_transition_episode_dataset" / "23_transition_episode_dataset.parquet"
 TRANSITION_EPISODE_CSV = INTERMEDIATE_DATA_DIR / "23_build_transition_episode_dataset" / "23_transition_episode_dataset.csv"
+
+
+def resolve_effective_longitudinal_input(value: str | Path) -> Path:
+    """Select by parquet modification time and keep unmatched patterns for missing-input checks."""
+    path = Path(value)
+    if path.name != _EFFECTIVE_FILENAME or path.parent.name != "*":
+        return path
+
+    candidates = []
+    for candidate in path.parent.parent.glob(f"*/{_EFFECTIVE_FILENAME}"):
+        if candidate.parent.name.startswith("."):
+            continue
+        try:
+            metadata = candidate.stat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISREG(metadata.st_mode):
+            candidates.append((metadata.st_mtime_ns, candidate))
+    return max(candidates, default=(0, path))[1]
+
+
+def step10_sidecar_base(integrated: str | Path) -> Path:
+    """Locate the original Step 10 companions for an Effective parquet."""
+    path = Path(integrated)
+    if path.name == _EFFECTIVE_FILENAME and path.parent.parent.name == "semantic_harmonization":
+        return path.parents[2] / INTEGRATED_LONGITUDINAL_PARQUET.relative_to(ANALYTIC_DATA_DIR)
+    return path
 
 
 def script_output_dir(root: Path, script_name: str) -> Path:

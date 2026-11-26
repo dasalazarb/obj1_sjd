@@ -46,7 +46,8 @@ DEFAULT_DATA_CUTOFF = '2026-05-31'
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--integrated', type=Path, default=common.INTEGRATED_LONGITUDINAL_PARQUET)
+    p.add_argument('--integrated', type=common.resolve_effective_longitudinal_input,
+                        default=str(common.EFFECTIVE_LONGITUDINAL_PARQUET))
     p.add_argument('--baseline', type=Path, default=common.INTEGRATED_BASELINE_PARQUET)
     p.add_argument('--patterns', type=Path, default=common.DISEASE_ACTIVITY_PROGRESSION_DIR/'13_essdai_patient_observed_patterns_v2.parquet')
     p.add_argument('--patterns-manifest', type=Path, default=common.BLOCKA_QC_DIR/'13_disease_activity_progression/13_essdai_observed_pattern_manifest_v2.json')

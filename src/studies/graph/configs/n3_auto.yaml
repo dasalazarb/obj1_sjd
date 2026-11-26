@@ -7,7 +7,7 @@ private_root: ../graph03_n3_private
 source_paths:
   eda_long: data_analytic/BTRIS/20_btris_lab_records_long.parquet
   step01: data/intermediate/block_A/01_serological_profile/01_labs_episode_analyte_level.parquet
-  step10: data/analytic/10_build_integrated_longitudinal_dataset/10_integrated_longitudinal_clinical_episode.parquet
+  step10: data/analytic/semantic_harmonization/*/10_integrated_longitudinal_clinical_episode_effective.parquet
   context: data/analytic/10_build_integrated_longitudinal_dataset/10_integrated_longitudinal_context.parquet
   btris_raw_11d: data_raw/BTRIS/11D
   btris_raw_15d: data_raw/BTRIS/15D

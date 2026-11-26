@@ -19,6 +19,8 @@ import pyarrow
 import pyarrow.parquet as pq
 import yaml
 
+import common
+
 from .._pipeline import config_path as resolve_config_path, digest
 from ..stage02.s02_contracts import safe_artifact
 from .s03_construct_validation import _dependencies, _paths
@@ -582,6 +584,8 @@ def _configured_sources(overrides, config, config_path, root, calendar):
             value = settings.get(role)
             path = resolve_config_path(config_path, value) if value is not None else None
             paths[role] = (data_root / path.relative_to(root)).resolve() if path and path.is_relative_to(root) else path
+    if paths['step10'] is not None:
+        paths['step10'] = common.resolve_effective_longitudinal_input(paths['step10'])
     return paths
 
 
