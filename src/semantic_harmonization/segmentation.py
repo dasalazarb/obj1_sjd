@@ -46,6 +46,7 @@ PROCESS = re.compile(
 SPECIMEN = re.compile(r"(?:(?:specimen )?ha?emolyzed|clotted|specimen rejected|quantity insufficient|qns)\.?$", re.I)
 NARRATIVE = {"immunofixation", "cryoglobulin", "ana_narrative", "cbc_morphology"}
 RESULT_LABEL = re.compile(r"^\s*(?:current\s+)?(?:patient\s+)?result\s*:\s*", re.I)
+HLA_LABEL = re.compile(r"^\s*HLA\s+(?:typing|result)\s*:\s*", re.I)
 HLA_TOKEN = re.compile(r"(?:[A-Z][A-Z0-9]*\*)?\d{2,3}(?::\d{2,3}){0,3}[GPNLSQCA]?|\*", re.I)
 
 
@@ -66,7 +67,7 @@ def boundaries(text: str, family: str) -> list[tuple[int, int]]:
     spans = []
     start = depth = 0
     hla_list = family == "hla" and all(HLA_TOKEN.fullmatch(token.strip())
-                                     for token in re.split(r"[|,;/]", text))
+                                     for token in re.split(r"[|,;/]", HLA_LABEL.sub("", text)))
     for index, char in enumerate(text):
         if char == "(":
             depth += 1
@@ -127,6 +128,7 @@ def segment(row: dict) -> list[SemanticSegment]:
                 clause = text[start:end]
                 trimmed = clause.strip()
                 if not trimmed:
+                    emit(start, end, "unresolved", "transport")
                     continue
             if family in {"other", "derived"}:
                 emit(start, end, "unresolved", "outside_clinical_profiles")
@@ -166,7 +168,7 @@ def segment(row: dict) -> list[SemanticSegment]:
                 elif (scoped == "patient_result" or (source == "raw_text" or linked_comment or marker) and
                       (RESULT_FORM.match(value) or family in DESCRIPTIVE and re.fullmatch(r"[\w /.+()%,-]+", value)
                        or family == "hla" and any(HLA_TOKEN.fullmatch(token.strip())
-                                                   for token in re.split(r"[,/|]", value))) or
+                                                   for token in re.split(r"[,/|]", HLA_LABEL.sub("", value)))) or
                       family in NARRATIVE | {"m_spike", "ana"} and NARRATIVE_SIGNAL.search(value)):
                     role, rule = "patient_result", "assay_source" if source == "raw_text" else "assay_comment"
                 else:

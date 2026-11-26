@@ -1,6 +1,7 @@
 """Conservative, assay-routed deterministic extraction."""
 from __future__ import annotations
 
+from bisect import bisect_left
 from decimal import Decimal, InvalidOperation
 import json
 import re
@@ -168,21 +169,23 @@ def narrative(text: str, family: str) -> list[Finding]:
         if re.search(r"\b(?:no|not|without|cannot exclude|possible|suspected)\b", norm):
             blocked_scope = True
         if family == "immunofixation" and not blocked_scope and re.fullmatch(
-            r"(?:polyclonal (?:increase|gammopathy)|increase in polyclonal immunoglobulins)[.]?", norm
+            r"(?:(?:polyclonal|oligoclonal) (?:increase|gammopathy|pattern|bands?)|increase in polyclonal immunoglobulins)[.]?", norm
         ):
-            results.append(new_finding("immunoglobulin", text if historical else clause, pattern="polyclonal",
+            results.append(new_finding("immunoglobulin", text if historical else clause, pattern="oligoclonal" if "oligoclonal" in norm else "polyclonal",
                                        temporality="historical" if historical else "unspecified"))
         # The grammar is deliberately closed. Negation and speculation outside it
         # require surrounding context and are handled by the evidence verifier.
         explicit = re.fullmatch(
             r"(?:(?:previously(?: identified as)?|currently|now)\s+)?"
+            r"(?:(?P<scope>no|possible|cannot exclude)\s+)?"
             r"(?:(?:faint|trace)\s+)?(?:(?:increased|increase in)\s+)?"
             r"(?:(?:monoclonal|oligoclonal|polyclonal)\s+)?(?:(?:free)\s+)?"
             r"(?:ig[gmade](?:\s+(?:kappa|lambda)|\s*\((?:kappa|lambda)\))?|kappa|lambda)"
             r"(?:\s+(?:light chains?|band))?(?:\s+(?:was )?detected)?[.]?",
             norm,
         )
-        if explicit and not blocked_scope:
+        explicit_scope = explicit["scope"] if explicit else None
+        if explicit and (not blocked_scope or explicit_scope and re.search(r"\b(?:band|detected|light chains?)\b", norm)):
             ig, chain = IG.search(clause), CHAIN.search(clause)
             pattern = re.search(r"\b(monoclonal|oligoclonal|polyclonal)\b", norm)
             intensity = re.search(r"\b(faint|trace)\b", norm)
@@ -192,28 +195,57 @@ def narrative(text: str, family: str) -> list[Finding]:
                                        immunoglobulin_class=f"Ig{ig[1].upper()}" if ig else None,
                                        light_chain=chain[1].lower() if chain else None,
                                        pattern=pattern[1] if pattern else None,
+                                       assertion="absent" if explicit_scope == "no" else
+                                       "uncertain" if explicit_scope else "present",
                                        intensity_descriptor=intensity[1] if intensity else None,
                                        temporality="historical" if historical else "current" if re.match(r"(?:currently|now)\b", norm) else "unspecified"))
     return results
 
 
-def hla(text: str, locus: str, ipd: dict[str, set[str]]) -> list[Allele]:
-    """Retain explicit tokens, leaving unverified or ambiguous identities null."""
+HLA_LOCUS_ALIASES = {"DPB": "DPB1", "DPA": "DPA1", "DQA": "DQA1", "DQB": "DQB1"}
+
+
+def hla(text: str, locus: str, ipd: dict) -> list[Allele]:
+    """Retain reported nomenclature and separately verify IPD compatibility."""
     tokens = [token.strip() for token in re.split(r"[,;|]", text)]
-    result = []
     if not any(ALLELE.fullmatch(token.upper()) or token == "*" or "/" in token for token in tokens):
-        return result
+        return []
+    result = []
+    lookup_locus = HLA_LOCUS_ALIASES.get(locus, locus)
+    names = ipd.get("allele", set())
+    prefixes = ipd.get("sorted_alleles")
     for i, token in enumerate(tokens):
         matched = ALLELE.fullmatch(token.upper())
-        if not matched or matched["locus"] not in (None, locus):
-            result.append(Allele(locus=locus, reported=token, allele=None, resolution_fields=None,
-                                 suffix=None, source_order=i, ipd_match=None))
-            continue
-        count = len(matched["fields"].split(":"))
-        allele = f"{locus}*{matched['fields']}{matched['suffix'] or ''}"
-        validated = next((kind for kind, names in ipd.items() if allele in names), None)
-        result.append(Allele(locus=locus, reported=token, allele=allele if count > 1 and validated else None,
-                             resolution_fields=count, suffix=matched["suffix"], source_order=i, ipd_match=validated))
+        explicit = matched["locus"] if matched else None
+        compatible_locus = matched and locus != "DRB" and (explicit is None or HLA_LOCUS_ALIASES.get(explicit, explicit) == lookup_locus)
+        allele = normalized = group = resolved_locus = None
+        count = len(matched["fields"].split(":")) if matched else None
+        suffix = matched["suffix"] if matched else None
+        match = "ambiguous_locus" if matched and not compatible_locus else None
+        if compatible_locus:
+            resolved_locus = lookup_locus
+            normalized = f"{resolved_locus}*{matched['fields']}{suffix or ''}"
+            legacy_token = f"{locus}*{matched['fields']}{suffix or ''}"
+            if suffix in {"G", "P"}:
+                group = normalized
+                label = f"{suffix.lower()}_group"
+                candidates = ipd.get(label, set())
+                match = label if normalized in candidates or legacy_token in candidates else "no_match" if ipd else "resource_unavailable"
+            elif count > 1 and (normalized in names or legacy_token in names):
+                allele = normalized if normalized in names else legacy_token
+                match = "allele"
+            elif not suffix and names:
+                if prefixes is None:
+                    prefixes = sorted(names)
+                prefix = normalized + ":"
+                position = bisect_left(prefixes, prefix)
+                match = ("compatible_resolution" if position < len(prefixes) and prefixes[position].startswith(prefix)
+                         else "no_match")
+            else:
+                match = "no_match" if ipd else "resource_unavailable"
+        result.append(Allele(locus=locus, reported=token, allele=allele, resolution_fields=count,
+                             suffix=suffix, source_order=i, ipd_match=match, lookup_locus=resolved_locus,
+                             normalized_report=normalized, group=group))
     return result
 
 
@@ -377,7 +409,9 @@ def parse_segment(row: dict, cfg: dict, vocab: dict, text: str, source_field: st
         add({"result_availability": "reported"}, "exact_dictionary")
     if any(item.temporality in {"current", "unspecified"} for item in result.findings):
         add({"result_availability": "reported"}, "exact_dictionary")
-    if family == "hla" and any(item.allele or item.resolution_fields == 1 for item in result.alleles):
+    if family == "hla" and any(item.ipd_match in {"allele", "g_group", "p_group", "compatible_resolution"}
+                               or item.resolution_fields == 1 and item.ipd_match != "ambiguous_locus"
+                               for item in result.alleles):
         add({"result_availability": "reported"}, "hla_parser")
     if not result.interpretation_note:
         if result.comparator in {"LT", "LE", "GT", "GE", "RANGE"}:

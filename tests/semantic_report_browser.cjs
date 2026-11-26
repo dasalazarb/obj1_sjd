@@ -50,6 +50,27 @@ async function main() {
     await detail.getByRole("button", {name:"Evidence", exact:true}).click();
     assert.equal(await page.locator("#which").inputValue(), "lab__anti_ro60__text");
     await detail.getByRole("button", {name:"Before / V1 / V2"}).click();
+    await page.locator("#which").selectOption("lab__anti_sm__text");
+    const effective = detail.getByRole("columnheader", {name: "Effective output", exact: true});
+    await detail.getByLabel("Effective origin").selectOption("current_validated");
+    assert.match(await detail.locator("td.version-final").last().textContent(), /Current correction/);
+    await effective.getByRole("button").press("Enter");
+    assert.equal(await effective.getAttribute("aria-sort"), "ascending");
+    assert.match(await detail.locator("td.version-final").last().textContent(), /negative/);
+    await effective.getByRole("button").press("Space");
+    assert.equal(await effective.getAttribute("aria-sort"), "descending");
+    assert.match(await detail.locator("td.version-final").last().textContent(), /positive/);
+    await detail.getByLabel("Effective origin").selectOption("original_fallback");
+    const retained = detail.locator("td.version-retained");
+    assert.equal(await retained.locator("code").textContent(), "  Unknown  ");
+    assert.match(await retained.textContent(), /Original retained/);
+    assert.deepEqual(await page.evaluate(() => {
+      const root = document.createElement("div");
+      const rows = [{value:"2024-12-10"},{value:null},{value:"2024-01-02"},{value:"2023-12-31"}];
+      table(root,rows,[["Date"]].map(([label]) => [label,row => row.value]));
+      root.querySelector("th button").click();
+      return tableRows.get(root).map(row => row.value);
+    }), ["2023-12-31", "2024-01-02", "2024-12-10", null]);
     await page.locator("#which").selectOption("lab__other__text");
     await page.locator("#kind").selectOption("ana");
     assert.match(await page.locator("#specialTable [role=status]").textContent(), /Page 1 of/);

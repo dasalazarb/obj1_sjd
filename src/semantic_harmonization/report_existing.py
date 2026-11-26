@@ -32,13 +32,13 @@ def baseline_run(cfg, override=None):
     return None
 
 
-def previous_run(cfg, override=None):
+def previous_run(cfg, override=None, *, reference="previous_v2_run_id"):
     """Load the explicitly pinned previous V2 when it is available."""
-    previous_id = override or cfg.get("comparison", {}).get("previous_v2_run_id")
+    previous_id = override or cfg.get("comparison", {}).get(reference)
     if previous_id is None:
         return None
     if not isinstance(previous_id, str) or not RUN_ID.fullmatch(previous_id):
-        raise ValueError("previous_v2_run_id must be a full run ID")
+        raise ValueError(f"{reference} must be a full run ID")
     root = Path(cfg["paths"]["output"]) / previous_id
     if not root.is_dir() and override is None:
         return None
@@ -48,13 +48,13 @@ def previous_run(cfg, override=None):
     return run
 
 
-def frozen_work(cfg, output_root, previous, baseline=None):
-    """Authenticate the historical report and read its original work identities."""
-    reference = cfg.get("comparison", {}).get("historical_report_id")
+def frozen_work(cfg, output_root, previous, baseline=None, *, report_reference="historical_report_id"):
+    """Authenticate a pinned report and read its original work identities."""
+    reference = cfg.get("comparison", {}).get(report_reference)
     if previous is None or reference is None:
         return None, None
     if not isinstance(reference, str) or not RUN_ID.fullmatch(reference):
-        raise ValueError("historical_report_id must be a full report ID")
+        raise ValueError(f"{report_reference} must be a full report ID")
     path = output_root / reference
     if not path.is_dir():
         return None, None
@@ -79,6 +79,30 @@ def frozen_work(cfg, output_root, previous, baseline=None):
     if len({row["work_id"] for row in rows}) != len(rows):
         raise ValueError("Frozen report contains duplicate work IDs")
     return rows, file_hash(path / "report_manifest.json")
+
+
+def frozen_references(cfg, output_root, previous, recent, baseline):
+    """Carry the original work IDs from either authenticated comparison publication."""
+    frozen, historical_hash = frozen_work(cfg, output_root, previous, baseline)
+    recent_work, recent_hash = frozen_work(cfg, output_root, recent, baseline, report_reference="recent_report_id")
+    if frozen is None and recent_hash:
+        crosswalk = output_root / cfg["comparison"]["recent_report_id"] / "historical_work_crosswalk.parquet"
+        if crosswalk.is_file():
+            current = {item["work_id"]: item for item in recent_work}
+            entries = pq.read_table(crosswalk).to_pylist()
+            if entries:
+                if len({row["work_id"] for row in entries}) != len(entries):
+                    raise ValueError("Historical crosswalk contains duplicate work IDs")
+                frozen = []
+                for row in entries:
+                    work = current.get(row["current_work_id"], {})
+                    frozen.append(work | dict(
+                        work_id=row["work_id"], recent_work_id=row["current_work_id"],
+                        mapping_id=work.get("mapping_id") or row["mapping_id"], variable=row["variable"],
+                        problem_kind=row["kind"], state_v1=row["state_v1"], state_v2=row["state_previous_v2"],
+                        confirmed_initial=True, frozen_reconciliation=row["reconciliation"],
+                        frozen_evidence=row["evidence"]))
+    return frozen, historical_hash, recent_hash
 
 
 def target_run(cfg, baseline, selection):
@@ -139,13 +163,17 @@ def generate(cfg, selection, output_root):
         if selection.get("previous_v2_run_id"):
             raise ValueError("Previous and target V2 publications must differ")
         previous = None
-    frozen, historical_hash = frozen_work(cfg, output_root, previous, baseline)
+    recent = previous_run(cfg, reference="recent_v2_run_id")
+    if recent and recent.manifest["run_id"] == target.manifest["run_id"]:
+        recent = None
+    frozen, historical_hash, recent_report_hash = frozen_references(cfg, output_root, previous, recent, baseline)
+    references = (("v1", baseline), ("previous_v2", previous), ("recent_v2", recent), ("v2", target))
     sources = {key: dict(run_id=run.manifest["run_id"], manifest_sha256=file_hash(run.qc / "run_manifest.json"),
                          outputs=run.manifest["outputs"], inputs=run.manifest["inputs"]) if run else None
-               for key, run in (("v1", baseline), ("previous_v2", previous), ("v2", target))}
+               for key, run in references}
     code = {path.relative_to(MODULE).as_posix(): file_hash(path) for path in sorted(MODULE.rglob("*"))
             if path.is_file() and path.suffix in {".py", ".html", ".yaml"} and not path.name.endswith("local.yaml")}
-    identity = dict(sources=sources, frozen_work_sha256=historical_hash, code=code, rules=VERSION, selection=selection,
+    identity = dict(sources=sources, frozen_work_sha256=historical_hash, recent_report_sha256=recent_report_hash, code=code, rules=VERSION, selection=selection,
                     protection=cfg["concepts"], normalization=cfg["normalization"], report=cfg["report"])
     report_id = digest(identity)
     output_root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -161,18 +189,26 @@ def generate(cfg, selection, output_root):
             return final, json.loads((final / "progress_summary.json").read_text())
         with tempfile.TemporaryDirectory(dir=output_root, prefix=".report-") as staging:
             staged = Path(staging)
-            model = report(staged, cfg, target.manifest, target=target, baseline=baseline, previous=previous, frozen=frozen)
-            for key, run in (("v1", baseline), ("previous_v2", previous), ("v2", target)):
+            model = report(staged, cfg, target.manifest, target=target, baseline=baseline, previous=previous, recent=recent, frozen=frozen)
+            for key, run in references:
                 if run and (file_hash(run.qc / "run_manifest.json") != sources[key]["manifest_sha256"]
                             or published(run.qc, run.analytic.parent).manifest != run.manifest):
                     raise ValueError("A published input changed during report generation")
             if historical_hash and frozen_work(cfg, output_root, previous, baseline)[1] != historical_hash:
                 raise ValueError("Frozen historical work changed during report generation")
+            if recent_report_hash and frozen_work(
+                    cfg, output_root, recent, baseline, report_reference="recent_report_id")[1] != recent_report_hash:
+                raise ValueError("Recent V2 report changed during report generation")
             for path in staged.iterdir():
                 path.chmod(0o600)
+            summary = model["summary"]
+            denominator_keys = ("cumulative", "incremental", "historical_denominator",
+                                "comparable_mappings", "previous_v2_comparable_mappings", "recent_v2_comparable_mappings")
+            effective = summary.get("effective_values") or {}
             write_json(staged / "report_manifest.json", dict(report_id=report_id, identity=identity, sources=sources,
-                       scope=model["summary"]["scope"], missing=model["missing"], definitions=DEFINITIONS,
-                       denominators={k: model["summary"][k] for k in ("cumulative", "incremental", "historical_denominator")},
+                       scope=summary["scope"], assessment=summary["assessment"], missing=model["missing"],
+                       definitions=DEFINITIONS, denominators={k: summary[k] for k in denominator_keys} | {
+                           k: effective.get(k) for k in ("episode_cells", "source_event_cells", "protected_cells")},
                        version=VERSION, completed_at=datetime.now(timezone.utc).isoformat(), outputs=file_manifest(staged)))
             staged.rename(final)
     return final, model["summary"]

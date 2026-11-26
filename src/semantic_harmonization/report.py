@@ -10,6 +10,7 @@ from markupsafe import Markup
 from .application import write_parquet
 from .analytic_representation import READINESS
 from .closure_audit import COMMENT, COMMENT_SUMMARY, DERIVED, HISTORICAL_WORK, MATERIALIZATION, REGRESSION
+from .effective_values import AUDIT as EFFECTIVE_AUDIT, SUMMARY as EFFECTIVE_SUMMARY
 from .report_progress import compare_runs
 from .schemas import FACTS, SEMANTIC, STR, INT, BOOL
 from .settings import MODULE, serialize, write_json
@@ -22,13 +23,14 @@ FEATURE = pa.struct([("name", STR), ("kind", STR), ("semantic_field", STR), ("ob
                      ("verified", INT), ("as_of", INT)])
 MAPPING = pa.schema([
     *[(k, STR) for k in ("mapping_id", "baseline_mapping_id", "variable", "concept", "family", "raw_type", "raw_json",
-                        "context_json", "previous_v2_mapping_id", "previous_v2_change", "comparison_scope", "comparison_reason", "v1_strategy", "v2_strategy",
+                        "context_json", "recent_v2_mapping_id", "previous_v2_mapping_id", "previous_v2_change", "comparison_scope", "comparison_reason", "v1_strategy", "v2_strategy",
                         "change_kind", "actual_application", "initial_disposition", "final_disposition", "llm_outcome")],
     *[(k, BOOL) for k in ("v1_available", "v2_available", "comparable", "nonempty", "old_nonempty", "clinical_v1", "clinical_v2")],
     *[(k, INT) for k in ("episodes", "source_events", "occurrences", "patients", "baseline_episodes", "m1_m4_added", "m1_m4_removed")],
     *[(k, pa.struct(list(SEMANTIC))) for k in ("v1_legacy_fields", "v2_legacy_fields")],
     *[(k, pa.list_(CANONICAL)) for k in ("v1_canonical_facts", "m1_canonical_facts", "facts_added", "facts_removed", "facts_retained")],
-    ("v2_typed_facts", FACT_LIST), ("previous_v2_typed_facts", FACT_LIST), ("evidence", SEMANTIC.field("evidence").type),
+    ("v2_typed_facts", FACT_LIST), ("previous_v2_typed_facts", FACT_LIST), ("recent_v2_typed_facts", FACT_LIST),
+    ("effective_values", pa.list_(pa.struct(list(EFFECTIVE_AUDIT)))), ("evidence", SEMANTIC.field("evidence").type),
     *[(k, pa.list_(FEATURE)) for k in ("materialized_features", "baseline_features")],
     *[(k, pa.list_(STR)) for k in ("v2_fact_strategies", "pending_reason_codes", "knowledge_document_ids", "disposition_notes")],
     ("retrieval", pa.list_(pa.struct([("doc_id", STR), ("source", STR), ("source_version", STR), ("rank", INT)]))),
@@ -85,9 +87,10 @@ def render(output, model):
                 for key, value in fact.items() if key not in private_keys}
     payload["mappings"] = [
         row | {version: [public_fact(fact) for fact in row[version]] if row[version] is not None else None
-               for version in ("previous_v2_typed_facts", "v2_typed_facts")}
+               for version in ("previous_v2_typed_facts", "recent_v2_typed_facts", "v2_typed_facts")}
         for row in model["mappings"]
     ]
+    payload.pop("effective_audit", None)
     payload["work"] = [{key: value for key, value in row.items() if key != "current_structured_result"}
                        for row in model["work"]]
     payload["materialization_audit"] = [{key: value for key, value in row.items() if key != "fact_id"}
@@ -100,13 +103,19 @@ def render(output, model):
     return path
 
 
-def report(output: Path, cfg: dict, manifest: dict, *, target, baseline=None, routes=None, previous=None, frozen=None):
+def report(output: Path, cfg: dict, manifest: dict, *, target, baseline=None, routes=None, previous=None, recent=None,
+           frozen=None):
     """Generate identical report artifacts for historical and future runs."""
     if target.manifest != manifest:
         raise ValueError("Report provenance differs from the target run")
-    model = compare_runs(target, baseline, cfg, routes=routes, previous=previous, frozen=frozen)
+    model = compare_runs(target, baseline, cfg, routes=routes, previous=previous, recent=recent, frozen=frozen)
     pending = [item for item in model["work"] if item["state_v2"] != "resolved"]
     tables = [
+        *((name, model[key], schema) for key, name, schema in (
+            ("effective_audit", "effective_value_audit", EFFECTIVE_AUDIT),
+            ("effective_variables", "effective_variable_summary", EFFECTIVE_SUMMARY),
+            ("effective_families", "effective_family_summary", EFFECTIVE_SUMMARY.remove(0)),
+        ) if model[key] is not None and target.qc != output),
         ("mapping_comparison", model["mappings"], MAPPING), ("pending_work", pending, WORK),
         ("work_snapshot", model["work"], WORK), ("mapping_routing", model["routes"], ROUTES),
         ("comment_prefix_audit", model["comments"], COMMENT), ("comment_prefix_summary", model["comment_summary"], COMMENT_SUMMARY),

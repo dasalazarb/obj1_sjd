@@ -11,6 +11,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from .settings import KEYS, digest, serialize
@@ -151,7 +152,7 @@ def source_concept(row: dict) -> str | None:
 
 
 def inventory(master: pd.DataFrame, context: pd.DataFrame | None, source: pd.DataFrame | None,
-              hashes: dict, cfg: dict) -> tuple[list[dict], list[dict], list[dict]]:
+              hashes: dict, cfg: dict, *, arrow_episode=None, arrow_source=None) -> tuple[list[dict], list[dict], list[dict]]:
     """Inventory every eligible episode value and each source observation."""
     index = check_keys(master, "Step 10")
     if context is not None:
@@ -162,9 +163,14 @@ def inventory(master: pd.DataFrame, context: pd.DataFrame | None, source: pd.Dat
     types = pq.read_schema(Path(cfg["paths"]["integrated"]))
     counts, lineages, variables = {}, [], []
 
-    def record(variable: str, raw: Any, context_fields: dict, lineage: dict, arrow_type: str | None) -> None:
+    def record(variable: str, raw: Any, context_fields: dict, lineage: dict, arrow_type: str | None, *, physical=False) -> None:
         concept, family = route(variable, cfg)
-        raw_type, raw_value = kind(raw, arrow_type), clean(raw)
+        raw_value = clean(raw)
+        if physical and isinstance(raw, (float, np.floating)) and np.isnan(raw):
+            raw_value = "nan"
+            raw_type = "float" if arrow_type is None else f"float:{arrow_type}"
+        else:
+            raw_type = kind(raw, arrow_type)
         mapping_id = digest([variable, raw_type, raw_value, context_fields])
         if mapping_id not in counts:
             counts[mapping_id] = dict(mapping_id=mapping_id, variable=variable, concept=concept, family=family,
@@ -205,8 +211,18 @@ def inventory(master: pd.DataFrame, context: pd.DataFrame | None, source: pd.Dat
         paired = side(prefix + "value").tolist() if lab and lab[2] == "text" else [None] * len(master)
         nonnull = nonempty = 0
         distinct = set()
+        dtype = types.field(variable).type
+        physical = arrow_episode[variable] if arrow_episode is not None and (
+            pa.types.is_floating(dtype) or pa.types.is_integer(dtype) and pd.api.types.is_float_dtype(master[variable])
+        ) else None
         for i, (key, value) in enumerate(zip(index, master[variable], strict=True)):
-            raw = clean(value)
+            if physical is not None:
+                actual = physical[i].as_py()
+                if isinstance(actual, float) and np.isnan(actual):
+                    value = actual
+                elif actual is None or pa.types.is_integer(dtype) and (pd.isna(value) or int(value) != actual):
+                    value = actual
+            raw = "nan" if physical is not None and isinstance(value, (float, np.floating)) and np.isnan(value) else clean(value)
             nonnull += raw is not None
             nonempty += raw is not None and (not isinstance(raw, str) or bool(raw.strip()))
             if raw is not None:
@@ -219,7 +235,7 @@ def inventory(master: pd.DataFrame, context: pd.DataFrame | None, source: pd.Dat
                 source_hash=hashes["integrated"], measurement_date=measurement[i],
                 result_available_date=availability[i], paired_numeric_json=serialize(clean(paired[i])),
                 n_measurements=measurements[i], source_reference_status=metadata["reference_status"],
-                result_valid=None, baseline=base[i]), str(types.field(variable).type))
+                result_valid=None, baseline=base[i]), str(dtype), physical=physical is not None)
         variables.append(dict(variable=variable, family=family, policy="eligible", dtype=str(master[variable].dtype),
                               episodes=len(master), nonnull=nonnull, nonempty=nonempty, distinct=len(distinct)))
 
@@ -227,6 +243,8 @@ def inventory(master: pd.DataFrame, context: pd.DataFrame | None, source: pd.Dat
         required = {"patient_id", "result_raw", "matched_clinical_episode_id", "lab_date", "canonical_analyte"}
         if not required.issubset(source):
             raise ValueError(f"BTRIS source is missing contracted columns: {sorted(required.difference(source))}")
+        raw_physical = (arrow_source["result_raw"] if arrow_source is not None and
+                        pa.types.is_floating(arrow_source["result_raw"].type) else None)
         for i, row in enumerate(source.to_dict("records")):
             concept = source_concept(row)
             variable = f"lab__{concept or 'unmapped_source_observation'}__text"
@@ -235,7 +253,8 @@ def inventory(master: pd.DataFrame, context: pd.DataFrame | None, source: pd.Dat
             metadata["source_system"] = "BTRIS"
             pid, episode = clean(row["patient_id"]), clean(row["matched_clinical_episode_id"])
             source_id = clean(row.get("observation_identifier"))
-            record(variable, row["result_raw"], metadata, dict(
+            raw = row["result_raw"] if raw_physical is None else raw_physical[i].as_py()
+            record(variable, raw, metadata, dict(
                 observation_id=digest(["btris", hashes["source_events"], i]), patient_id=None if pid is None else str(pid),
                 clinical_episode_id=None if episode is None else str(episode), source_grain="btris_observation",
                 source_row=i, source_observation_id=str(source_id) if source_id is not None else None,
@@ -243,7 +262,7 @@ def inventory(master: pd.DataFrame, context: pd.DataFrame | None, source: pd.Dat
                 result_available_date=clean(row.get("result_available_date")),
                 paired_numeric_json=serialize(clean(row.get("result_numeric_exact"))), n_measurements=1,
                 source_reference_status=metadata["reference_status"], result_valid=clean(row.get("result_valid_for_analysis")),
-                baseline=None), None)
+                baseline=None), None, physical=raw_physical is not None)
 
     for row in counts.values():
         row.update(episodes=len(row["episodes"]), patients=len(row["patients"]))

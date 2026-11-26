@@ -51,7 +51,7 @@ def as_of_licensed(row, fact):
     if not clinical(fact) or row["variable"].startswith("sero__hla_"):
         return False
     if fact.fact_type == "hla_result":
-        return fact.payload.nomenclature == "allele" and bool(fact.payload.ipd_match)
+        return fact.payload.nomenclature == "allele" and fact.payload.ipd_match == "allele" and bool(fact.payload.allele)
     return True
 
 
