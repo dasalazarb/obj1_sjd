@@ -17,7 +17,7 @@ import pyarrow.parquet as pq
 from .settings import file_hash, write_json
 
 csv.field_size_limit(sys.maxsize)
-NULL = r"\N"
+NULL = r""
 FORMULA = re.compile(r"^(?:\s*[=+\-@＝＋－＠]|[\t\r\n])")
 
 
