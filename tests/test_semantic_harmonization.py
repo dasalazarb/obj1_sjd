@@ -796,9 +796,9 @@ def test_closure_morphology_hla_and_mixed_immunofixation(cfg):
         ("IgG", "kappa", None), (None, None, "polyclonal"), (None, "lambda", "oligoclonal")]
 
 
-def test_closure_csv_roundtrip_distinguishes_blank_null_false_and_zero(tmp_path):
+def test_closure_csv_roundtrip_with_shared_empty_cells(tmp_path):
     import csv
-    from src.semantic_harmonization.table_exports import export_csv, unescape
+    from src.semantic_harmonization.table_exports import CSV_ENCODING, export_csv, unescape
 
     table = pa.table(dict(raw=["", None, "=formula", "'literal", r"\N"],
                           flag=[False, True, None, None, False],
@@ -810,9 +810,14 @@ def test_closure_csv_roundtrip_distinguishes_blank_null_false_and_zero(tmp_path)
     with path.with_suffix(".csv").open(newline="") as stream:
         reader = csv.reader(stream)
         assert next(reader) == table.column_names
-        recovered = [[unescape(value, field.type) for field, value in zip(table.schema, row)] for row in reader]
-    assert recovered == [list(row.values()) for row in table.to_pylist()]
-    assert path.with_suffix(".csv.schema.json").is_file()
+        rows = list(reader)
+    assert [row[0] for row in rows] == ["", "", "'=formula", "''literal", "'" + r"\N"]
+    recovered = [[unescape(value, field.type) for field, value in zip(table.schema, row)] for row in rows]
+    expected = [list(row.values()) for row in table.to_pylist()]
+    expected[0][0] = None
+    assert recovered == expected
+    assert pq.read_table(path).equals(table)
+    assert json.loads(path.with_suffix(".csv.schema.json").read_text())["encoding"] == CSV_ENCODING
     assert stat_mode(path.with_suffix(".csv")) == 0o600
 
 
