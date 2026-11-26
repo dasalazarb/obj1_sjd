@@ -1415,7 +1415,8 @@ def plot_domain_forest(models, path):
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--integrated", type=Path, default=common.INTEGRATED_LONGITUDINAL_PARQUET)
+    p.add_argument("--integrated", type=common.resolve_effective_longitudinal_input,
+                        default=str(common.EFFECTIVE_LONGITUDINAL_PARQUET))
     p.add_argument("--baseline", type=Path, default=common.INTEGRATED_BASELINE_PARQUET)
     p.add_argument("--output-root", type=Path, default=common.PROJECT_ROOT)
     p.add_argument("--overwrite", action=argparse.BooleanOptionalAction, default=True,

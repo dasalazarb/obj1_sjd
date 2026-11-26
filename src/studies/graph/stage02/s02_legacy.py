@@ -1362,7 +1362,8 @@ def run(args):
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     folder = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--integrated", type=Path, default=common.INTEGRATED_LONGITUDINAL_PARQUET)
+    parser.add_argument("--integrated", type=common.resolve_effective_longitudinal_input,
+                        default=str(common.EFFECTIVE_LONGITUDINAL_PARQUET))
     parser.add_argument("--graph-lab-candidates", type=Path,
                         default=common.STUDIES_TABLES_DIR / "pharma" / "00_profile_labs" / "00_pharma_graph_lab_candidates.csv")
     parser.add_argument("--baseline-metrics", type=Path,

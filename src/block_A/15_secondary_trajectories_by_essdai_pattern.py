@@ -35,7 +35,8 @@ def parse_args(argv=None):
         "No classification, model fitting, imputation or upstream writes. Missing/unverified upstream blocks the run. "
         "Synthetic bundles are isolated under output-root/synthetic_validation and visibly labeled. "
         "Windows are [start,end) years, one last observed contribution per patient; actual trajectory dates are retained."))
-    parser.add_argument("--integrated", type=Path, default=common.INTEGRATED_LONGITUDINAL_PARQUET, help="Unmodified canonical Step 10 input hashed by Step 13")
+    parser.add_argument("--integrated", type=common.resolve_effective_longitudinal_input,
+                        default=str(common.EFFECTIVE_LONGITUDINAL_PARQUET), help="Unmodified canonical Step 10 input hashed by Step 13")
     parser.add_argument("--baseline", type=Path, default=common.INTEGRATED_BASELINE_PARQUET, help="Unmodified official Step 11 baseline hashed by Step 13")
     parser.add_argument("--patterns", type=Path, default=common.DISEASE_ACTIVITY_PROGRESSION_DIR/"13_essdai_patient_observed_patterns_v2.parquet", help="Manifest-authenticated protected v2 assignment, never recalculated")
     parser.add_argument("--patterns-manifest", type=Path, default=common.BLOCKA_QC_DIR/"13_disease_activity_progression/13_essdai_observed_pattern_manifest_v2.json", help="All listed artifacts and Step 10/11 hashes must match")
@@ -143,8 +144,9 @@ def _run(args, cleanup, runtime):
         raise ContractError("BLOCKED_UPSTREAM: missing canonical inputs/artifacts: "+", ".join(missing))
     manifest, protected = verified_manifest(args.patterns_manifest, args.patterns, args.integrated, args.baseline, args.input_origin)
     inputs = {"step10": args.integrated, "step11": args.baseline, "step13_manifest": args.patterns_manifest, **protected}
-    context = args.context or args.integrated.with_name("10_integrated_longitudinal_context.parquet")
-    registry_path = args.source_registry or args.integrated.with_name("10_variable_registry.csv")
+    sidecar_base = common.step10_sidecar_base(args.integrated)
+    context = args.context or sidecar_base.with_name("10_integrated_longitudinal_context.parquet")
+    registry_path = args.source_registry or sidecar_base.with_name("10_variable_registry.csv")
     for role, path, explicit in (("context", context, args.context), ("source_registry", registry_path, args.source_registry)):
         if path.is_file():
             inputs[role] = path

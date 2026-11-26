@@ -683,7 +683,7 @@ def run(args: argparse.Namespace) -> pd.DataFrame:
     if selected is None:
         return run_profile(args)
     args = argparse.Namespace(**vars(args))
-    selected.select("integrated", args.integrated, default=common.INTEGRATED_LONGITUDINAL_PARQUET)
+    selected.select("integrated", args.integrated, default=common.EFFECTIVE_LONGITUDINAL_PARQUET)
     args.integrated = selected.require("integrated")
     args.context = selected.select("context", getattr(args, "context", None))
     if getattr(args, "no_context", False) and args.context:
@@ -701,7 +701,7 @@ def run(args: argparse.Namespace) -> pd.DataFrame:
 def run_profile(args: argparse.Namespace, *, provenance_paths: dict[Path, Path] | None = None) -> pd.DataFrame:
     """Profile an explicit input and publish its coupled Graph sidecars."""
     provenance_paths = provenance_paths or {}
-    integrated, output = Path(args.integrated), Path(args.output)
+    integrated, output = common.resolve_effective_longitudinal_input(args.integrated), Path(args.output)
     if "runs" in output.parts or "runs" in output.resolve().parts:
         raise ValueError("Use a current Pharma00 output directory outside runs")
 
@@ -713,7 +713,8 @@ def run_profile(args: argparse.Namespace, *, provenance_paths: dict[Path, Path] 
         if not context_path.is_file():
             raise FileNotFoundError(f"Explicit context file not found: {context_path}")
     else:
-        companion = integrated.with_name("10_integrated_longitudinal_context.parquet")
+        sidecar_base = common.step10_sidecar_base(integrated)
+        companion = sidecar_base.with_name("10_integrated_longitudinal_context.parquet")
         context_path = companion if companion.is_file() else None
         mode = "adjacent_context" if context_path else "integrated_only_no_companion"
     logging.info("Laboratory metadata mode: %s", mode)
@@ -817,7 +818,7 @@ def run_profile(args: argparse.Namespace, *, provenance_paths: dict[Path, Path] 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--integrated", type=Path, default=common.INTEGRATED_LONGITUDINAL_PARQUET)
+    parser.add_argument("--integrated", type=Path, default=common.EFFECTIVE_LONGITUDINAL_PARQUET)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     context = parser.add_mutually_exclusive_group()
     context.add_argument("--context", type=Path)

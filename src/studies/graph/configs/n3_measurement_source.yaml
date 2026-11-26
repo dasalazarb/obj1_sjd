@@ -11,7 +11,7 @@ minimum_disclosure_cell: 5
 eda_specimen_id_column: null
 source_paths:
   step01: ../../../../data/intermediate/block_A/01_serological_profile/01_labs_episode_analyte_level.parquet
-  step10: ../../../../data/analytic/10_build_integrated_longitudinal_dataset/10_integrated_longitudinal_clinical_episode.parquet
+  step10: ../../../../data/analytic/semantic_harmonization/*/10_integrated_longitudinal_clinical_episode_effective.parquet
   context: ../../../../data/analytic/10_build_integrated_longitudinal_dataset/10_integrated_longitudinal_context.parquet
   spine: ../../../../data/intermediate/00_episode_spine_all.parquet
   # Rutas a proporcionar para el entorno institucional, sin selección automática.

@@ -329,9 +329,13 @@ def test_templates_unsigned_and_evidence_tamper_scope_and_authorization_fail_clo
 
 def test_schema_inventory_never_reads_patient_rows_or_exports_counts(tmp_path, monkeypatch):
     import pyarrow.parquet as pq
+    import common
+
     directory = tmp_path / 'data/analytic/10_build_integrated_longitudinal_dataset'
     directory.mkdir(parents=True)
-    master = directory / '10_integrated_longitudinal_clinical_episode.parquet'
+    pattern = tmp_path / common.EFFECTIVE_LONGITUDINAL_PARQUET.relative_to(common.PROJECT_ROOT)
+    master = pattern.parent.parent / "synthetic-run" / pattern.name
+    master.parent.mkdir(parents=True)
     pd.DataFrame(dict(patient_id=['PRIVATE_SECRET_ID'], measurement_date=['2020-01-01'])).to_parquet(master)
     (directory / '10_variable_registry.csv').write_text(
         'variable,role,n_nonmissing,classification_reason\nspine__source_protocol,CONTEXT,1,PRIVATE_SECRET\n')

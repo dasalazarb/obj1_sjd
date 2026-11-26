@@ -5,12 +5,17 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+import common
+
 from src.studies.graph.stage03.s03_n3_source_adapter import build_candidate
 
 
 def fixture(tmp_path):
     root = tmp_path
-    analytic_dir = root / "data/analytic/10_build_integrated_longitudinal_dataset"
+    pattern = root / common.EFFECTIVE_LONGITUDINAL_PARQUET.relative_to(common.PROJECT_ROOT)
+    integrated = pattern.parent.parent / "synthetic-run" / pattern.name
+    integrated.parent.mkdir(parents=True)
+    analytic_dir = root / common.INTEGRATED_LONGITUDINAL_PARQUET.relative_to(common.PROJECT_ROOT).parent
     analytes_dir = root / "data/intermediate/block_A/01_serological_profile"
     analytic_dir.mkdir(parents=True)
     analytes_dir.mkdir(parents=True)
@@ -21,7 +26,7 @@ def fixture(tmp_path):
         "clinical_baseline_date": ["2019-02-01", "2019-03-01"],
         "lab__ana_status__text": ["positive", "negative"],
     })
-    baseline.to_parquet(analytic_dir / "10_integrated_longitudinal_clinical_episode.parquet", index=False)
+    baseline.to_parquet(integrated, index=False)
     context = baseline[["patient_id", "clinical_episode_id"]].copy()
     context["lab__ana_status__measurement_date"] = ["2019-02-01", "2019-03-02"]
     context_path = analytic_dir / "10_integrated_longitudinal_context.parquet"

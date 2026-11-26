@@ -43,7 +43,7 @@ MODEL_COLUMNS = ["predictor","level_or_contrast","coefficient","standard_error",
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--input",type=Path,default=common.INTEGRATED_LONGITUDINAL_PARQUET)
+    p.add_argument("--input",type=common.resolve_effective_longitudinal_input,default=str(common.EFFECTIVE_LONGITUDINAL_PARQUET))
     p.add_argument("--pros-input",type=Path,default=common.PROS_LONGITUDINAL_PARQUET)
     p.add_argument("--min-gap-days",type=int,default=180)
     p.add_argument("--overwrite",dest="overwrite",action="store_true",default=True)

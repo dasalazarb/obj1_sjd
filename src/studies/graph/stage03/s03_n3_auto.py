@@ -17,6 +17,8 @@ import warnings
 
 import yaml
 
+import common
+
 from .._pipeline import digest
 from . import s03_n3_calendar_day as cal
 from .s03_baseline_window import MISMATCH, VERSION as WINDOW_VERSION, policy as baseline_policy, require_policy
@@ -157,6 +159,7 @@ def _source_settings(root):
         raise ValueError('AUTO_SOURCE_PATHS_INVALID')
     paths = {role: _relative(eda if role.startswith(('eda_', 'btris_')) else data, value)
              for role, value in definitions.items()}
+    paths['step10'] = common.resolve_effective_longitudinal_input(paths['step10'])
     return data, paths
 
 

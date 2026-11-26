@@ -48,7 +48,10 @@ def characterize_categorical(frame,variables,roles):
     return pd.DataFrame(rows)
 
 def parse_args(argv=None):
-    p=argparse.ArgumentParser(); d=create_study_dirs("longitudinal_graph"); p.add_argument("--integrated",type=Path,default=common.INTEGRATED_LONGITUDINAL_PARQUET); p.add_argument("--transitions",type=Path,default=d["analytic"]/"03_patient_temporal_transitions.parquet"); p.add_argument("--manifest",type=Path,default=d["tables"]/"01_longitudinal_feature_manifest.csv"); p.add_argument("--config",type=Path,default=Path(__file__).with_name("config.yaml")); p.add_argument("--dry-run",action="store_true"); return p.parse_args(argv)
+    p=argparse.ArgumentParser(); d=create_study_dirs("longitudinal_graph")
+    p.add_argument("--integrated", type=common.resolve_effective_longitudinal_input,
+                   default=str(common.EFFECTIVE_LONGITUDINAL_PARQUET))
+    p.add_argument("--transitions",type=Path,default=d["analytic"]/"03_patient_temporal_transitions.parquet"); p.add_argument("--manifest",type=Path,default=d["tables"]/"01_longitudinal_feature_manifest.csv"); p.add_argument("--config",type=Path,default=Path(__file__).with_name("config.yaml")); p.add_argument("--dry-run",action="store_true"); return p.parse_args(argv)
 
 def run(args):
     d=create_study_dirs("longitudinal_graph"); logging.basicConfig(filename=d["logs"]/"04_characterize.log",level=logging.INFO,force=True); cfg=load_config(args.config); master=load_parquet(args.integrated); contract=validate_integrated_dataset(master); transitions=pd.read_parquet(args.transitions); manifest=pd.read_csv(args.manifest)

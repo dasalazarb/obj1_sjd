@@ -824,9 +824,11 @@ def run(args: argparse.Namespace) -> None:
     selected = active_study_input()
     integrated, lab_profile = args.integrated, args.lab_profile
     if selected:
-        integrated = selected.select("integrated", integrated, default=common.INTEGRATED_LONGITUDINAL_PARQUET)
+        integrated = selected.select("integrated", integrated, default=common.EFFECTIVE_LONGITUDINAL_PARQUET)
         selected.select("pharma_profile", lab_profile, default=DEFAULT_LAB_PROFILE)
         lab_profile = selected.require("pharma_profile")
+    else:
+        integrated = common.resolve_effective_longitudinal_input(integrated)
     dirs = create_study_dirs(study_name("pharma/01_run_pharma_main", selected))
     logging.basicConfig(filename=dirs["logs"] / "01_run_pharma_main.log", level=logging.INFO, force=True)
     master, intervals = load_parquet(integrated), load_parquet(args.transitions)
@@ -904,7 +906,7 @@ def run(args: argparse.Namespace) -> None:
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--integrated", type=Path, default=common.INTEGRATED_LONGITUDINAL_PARQUET)
+    parser.add_argument("--integrated", type=Path, default=common.EFFECTIVE_LONGITUDINAL_PARQUET)
     parser.add_argument("--transitions", type=Path, default=common.POP_TRANSITION_INTERVALS_PARQUET)
     parser.add_argument("--config", type=Path, default=Path(__file__).with_name("config.yaml"))
     parser.add_argument("--lab-profile", type=Path, default=DEFAULT_LAB_PROFILE)

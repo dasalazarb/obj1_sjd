@@ -6,6 +6,8 @@ import subprocess
 import numpy as np
 import pandas as pd
 
+import common
+
 from src.block_A.secondary_trajectory_analysis import (
     ContractError, attach_context, fixed_groups, observations, read_table, sha256,
     validate_inputs, verified_manifest,
@@ -47,9 +49,10 @@ def load_inputs(args):
     manifest_root = args.patterns_manifest.resolve().parents[4]
     paths.update({f'step13_artifact_{i}': (manifest_root/entry['path']).resolve()
                   for i, entry in enumerate(manifest['artifacts'])})
+    sidecar_base = common.step10_sidecar_base(args.integrated)
     for role, explicit, default in (
-        ('context', args.context, args.integrated.with_name('10_integrated_longitudinal_context.parquet')),
-        ('source_registry', args.source_registry, args.integrated.with_name('10_variable_registry.csv')),
+        ('context', args.context, sidecar_base.with_name('10_integrated_longitudinal_context.parquet')),
+        ('source_registry', args.source_registry, sidecar_base.with_name('10_variable_registry.csv')),
     ):
         path = explicit or default
         if path.is_file():

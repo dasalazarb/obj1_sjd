@@ -10,6 +10,8 @@ import re
 import pandas as pd
 import yaml
 
+import common
+
 from .._pipeline import digest, output_lock, stage_destinations, stage_outputs, write_json
 from ..stage02.s02_contracts import MANIFEST, artifact_paths, safe_artifact, validate_release
 from . import s03_n3_exploratory as E
@@ -1088,7 +1090,8 @@ def run_audit(root, *, mode='secure-recompute', representation='all', graph02_re
             integrated = manifest.get('source_inputs', {}).get('integrated', {})
             if integrated.get('path') and Path(integrated['path']).resolve() != sources['step10']:
                 sources['step10'] = Path(integrated['path']).resolve()
-                sources['context'] = sources['step10'].with_name('10_integrated_longitudinal_context.parquet')
+                sources['context'] = common.step10_sidecar_base(sources['step10']).with_name(
+                    '10_integrated_longitudinal_context.parquet')
             _require(not any(_paths_overlap(target, Path(path).resolve()) for path in sources.values()),
                      'AUDIT_OUTPUT_OVERLAPS_INPUT')
             files = {*lineage_files.values(), *graph03_files.values(), *phasee_files.values(), *config_inputs}
