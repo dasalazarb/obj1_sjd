@@ -46,6 +46,8 @@ class Run:
         path = self.path(name, analytic=analytic)
         if path is None:
             return None
+        if path.suffix == ".csv" and path.with_suffix(".csv.schema.json").is_file():
+            path = path.with_suffix(".parquet")
         if path.suffix == ".csv":
             with path.open(newline="") as stream:
                 return list(csv.DictReader(stream))
@@ -186,7 +188,7 @@ def materialization(run, lines, mapping_variables, cfg):
                 for mapping in source_mappings[variable]:
                     written = [values[i] for i in indexes[mapping] if values[i] is not None]
                     if written:
-                        by_mapping[mapping].append(dict(name=name, kind="wide", observed=len(written),
+                        by_mapping[mapping].append(dict(name=name, kind="wide", semantic_field=entry["kind"], observed=len(written),
                                                         values=sorted({json.dumps(v, default=str) for v in written})))
     for entry in representation or ():
         variable = entry.get("source_variable")

@@ -10,13 +10,22 @@
 *{box-sizing:border-box}body{margin:0;color:var(--ink);font:15px/1.55 system-ui,sans-serif;background:#fbfdfc}header,main{max-width:1460px;margin:auto;padding:1.6rem clamp(1rem,4vw,4rem)}header{padding-top:2.4rem;border-bottom:1px solid var(--line)}h1,h2,h3{line-height:1.15}h1{font-size:clamp(2rem,6vw,3.8rem);margin:0 0 .5rem}h2{font-size:1.65rem;margin:.4rem 0 .8rem}h3{margin:1.4rem 0 .4rem}section{margin-bottom:2.6rem;scroll-margin-top:1rem}p{max-width:90ch}a{color:var(--accent)}nav{display:flex;gap:.5rem 1.1rem;flex-wrap:wrap;margin-top:1.1rem}.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:.7rem;margin:1rem 0}.metric{border:1px solid var(--line);background:var(--surface);padding:.85rem;border-radius:.4rem}.metric span{display:block;font-size:1.55rem;font-weight:700}.controls,.pager{display:flex;gap:.7rem;align-items:end;flex-wrap:wrap;margin:.75rem 0}.controls label{display:grid;gap:.25rem;font-weight:600}button,input,select{font:inherit;padding:.45rem .62rem;border:1px solid #708b90;border-radius:.3rem;color:var(--ink);background:white}button{cursor:pointer}button:disabled{opacity:.55;cursor:default}button:focus-visible,input:focus-visible,select:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.table-wrap{max-height:33rem;overflow:auto;border:1px solid var(--line);border-radius:.35rem}table{width:100%;border-collapse:separate;border-spacing:0;text-align:left;background:white}th,td{padding:.5rem .62rem;border-bottom:1px solid #e4eded;vertical-align:top;min-width:5rem;max-width:28rem;overflow-wrap:anywhere;white-space:pre-wrap}th{background:#e8f2f1;position:sticky;top:0;z-index:1}tbody tr:nth-child(even){background:#f8fbfa}.small{color:var(--secondary)}.bars{display:grid;grid-template-columns:minmax(8rem,19rem) minmax(7rem,30rem) 5rem;gap:.45rem;align-items:center}.track{background:#e4eeee;height:13px;border-radius:2px}.bar{height:100%;background:var(--accent);border-radius:2px}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--surface);padding:1rem;border-radius:.35rem}.linkbutton{border:0;background:transparent;padding:0;text-align:left;color:var(--accent);text-decoration:underline}details{margin:.65rem 0}@media(max-width:600px){.controls label{width:100%}nav{gap:.5rem}.bars{grid-template-columns:minmax(6rem,12rem) minmax(4rem,1fr) 3rem}}
 header{background:#eef6f5}.split>div{min-width:0}.controls label{min-width:0;max-width:100%;grid-template-columns:minmax(0,1fr)}.controls select,.controls input{min-width:0;max-width:100%}.chart-row code{overflow-wrap:anywhere}nav a{text-underline-offset:.24rem}.metrics button{text-align:left}.metrics button:hover{border-color:var(--accent);background:#e0efee}
 .study{font-size:.86rem;line-height:1.5;overflow-wrap:anywhere}.split{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(22rem,100%),1fr));gap:1.2rem}.stack{display:flex;gap:.2rem;flex-wrap:wrap;margin:.25rem 0 1rem}.stack button{background:#edf0f1}.stack .v1{background:#e5effa}.stack .v2{background:#ddf1ec}.stack .pending{border-bottom:3px solid #b77924}.section-note{margin:.35rem 0 .85rem}.selected{background:#dceeed;border-color:var(--accent)}.raw{white-space:pre-wrap;font-family:ui-monospace,monospace}.facts{margin:.1rem 0;padding-left:1.1rem}.facts li{margin:.25rem 0}mark{background:#f8e6c7;color:inherit}summary{cursor:pointer}.mapping-detail{min-width:12rem}.chart{display:grid;gap:.25rem}.chart-row{display:grid;grid-template-columns:minmax(6rem,2fr) minmax(5rem,3fr) 4rem;align-items:center;gap:.6rem}.chart-row .track{background:#edf0f1}.chart-row .bar{background:#789398}.tabs button[aria-pressed="true"]{background:#dceeed;border-color:var(--accent)}.wide-table{max-height:38rem}.muted{color:var(--secondary);font-size:.88rem}#provenance,#methodsTables{overflow-wrap:anywhere}
+
+th button{display:block;width:100%;text-align:left;border:0;padding:0;background:transparent;font-weight:inherit}
+.version-original{background:#F0F2F5}.version-v1{background:#E8EFF9}
+.version-before{background:#FFF1DA;color:#704C13}.version-final{background:#DDF3ED;color:#145B51}
+.change-added,.change-restored{color:#145B51;font-weight:650}
+.change-removed,.change-unexplained-removal{color:#792b30;text-decoration:underline}
+.legend{display:flex;flex-wrap:wrap;gap:.4rem}.legend span{padding:.22rem .55rem;border-radius:.25rem}
+#commentMetrics{margin:.75rem 0}
+@media print{nav,.controls,.pager{display:none}.table-wrap{max-height:none;overflow:visible}th{position:static}}
 </style>
 </head>
 <body>
 <header>
 <h1>SjD | Semantic harmonization progress</h1>
 <p class="study" id="run"></p>
-<nav aria-label="Sections"><a href="#summary">Summary</a><a href="#variables">Variable explorer</a><a href="#detail">Variable detail</a><a href="#backlog">Remaining work</a><a href="#impact">Strategy &amp; version impact</a><a href="#derived">Derived &amp; downstream</a><a href="#methods">Methods</a></nav>
+<nav aria-label="Sections"><a href="#summary">Summary</a><a href="#variables">Variable explorer</a><a href="#detail">Variable detail</a><a href="#backlog">Remaining work</a><a href="#comments">Comment recovery</a><a href="#impact">Strategy &amp; version impact</a><a href="#derived">Derived &amp; downstream</a><a href="#methods">Methods</a></nav>
 </header>
 <main>
 <section id="summary">
@@ -32,7 +41,8 @@ header{background:#eef6f5}.split>div{min-width:0}.controls label{min-width:0;max
 <label>Search<input id="search" type="search" placeholder="Variable, value, result or fragment"></label>
 <label>View<select id="state"></select></label><label>Family<select id="family"></select></label>
 <label>Namespace<select id="namespace"></select></label><label>Strategy<select id="strategy"></select></label>
-<label>Cause<select id="cause"></select></label><label>Sort<select id="sort">
+<label>Cause<select id="cause"></select></label>
+<label>Change<select id="change"></select></label><label>Temporal evidence<select id="temporal"></select></label><label>Sort<select id="sort">
 <option value="affected_occurrences">Affected occurrences</option><option value="progress">Progress</option><option value="variable">Name</option><option value="distinct">Raw cardinality</option>
 </select></label><button id="reset">Reset filters</button>
 </div><div id="variableTable"></div>
@@ -51,18 +61,35 @@ header{background:#eef6f5}.split>div{min-width:0}.controls label{min-width:0;max
 <label>Search<input id="pendingSearch" type="search"></label><label>Family<select id="pendingFamily"></select></label>
 <label>Cause<select id="pendingCause"></select></label><label>Type<select id="pendingType"></select></label>
 <label>State<select id="pendingState"></select></label>
-<button id="expand">Expand page</button><button id="collapse">Collapse page</button>
+<button id="expand">Expand all</button><button id="collapse">Collapse all</button>
 <button id="pendingCsv">Filtered backlog CSV</button><button id="pendingAll">Total backlog CSV</button><button id="pendingJson">Filtered backlog JSON</button>
 </div><div id="pendingTable"></div>
 <details><summary>Legitimate missing, administrative and reference values</summary><div id="legitimateTable"></div></details>
 </section>
+<section id="comments">
+<h2>Comment recovery</h2>
+<p id="commentMetrics" class="small"></p>
+<div class="controls">
+<label>Search<input id="commentSearch" type="search"></label>
+<label>Prefix<select id="commentPrefix"></select></label><label>Family<select id="commentFamily"></select></label>
+<label>Body disposition<select id="commentDisposition"></select></label>
+<button id="commentCsv">Filtered comments CSV</button><button id="commentJson">Filtered comments JSON</button>
+</div>
+<div id="commentTable"></div>
+<details><summary>Counts by variable and family</summary><div id="commentSummary"></div></details>
+</section>
 <section id="impact"><h2>Strategy &amp; version impact</h2><p id="increment" class="small"></p><div id="strategyTable"></div>
 <div class="controls"><label>Specialized view<select id="kind"><option value="numeric">Numeric and censored results</option><option value="ana">ANA titers and patterns</option><option value="immunofixation">Immunofixation</option><option value="cryoglobulin">Cryoglobulin</option><option value="hla">HLA</option><option value="urine">Urinalysis</option><option value="medication">Medication</option></select></label></div>
-<div id="specialTable"></div></section>
-<section id="derived"><h2>Derived &amp; downstream</h2><h3>Published derived transitions</h3><div id="derivedTable"></div><h3>Downstream compatibility</h3><p id="downStatus" class="small"></p><div id="downTable"></div></section>
+<div id="specialTable"></div><h3>Restorations and removals</h3><div id="regressionTable"></div>
+<details><summary>Frozen historical work units</summary><div id="frozenTable"></div></details></section>
+<section id="derived"><h2>Derived &amp; downstream</h2><h3>Published derived transitions</h3><div id="derivedTable"></div><h3>Downstream compatibility</h3><p id="downStatus" class="small"></p><div id="downTable"></div><h3>Feature readiness by study and analysis mode</h3><div id="readinessTable"></div>
+<h3>Observation links and wide fields</h3><div id="materializationTable"></div>
+<details><summary>Derived-rule audit</summary><div id="derivedRuleTable"></div></details></section>
 <section id="methods"><h2>Methods and reproducibility</h2>
 <p class="small">Mapping keys combine typed values and full context. Clinical coverage uses current or unspecified biological facts, excluding process metadata, medication context and explicitly unresolved HLA. Derived and analytical availability come from published candidate artifacts. Clinical free text may be sensitive. Keep this file in the authorized environment.</p>
-<div id="definitions"></div><h3>Run provenance and source hashes</h3><div id="provenance"></div>
+<div id="definitions"></div>
+<p class="small">Full tables are available in both formats when the HTML is kept with its companion files.</p>
+<ul id="artifactLinks"></ul><h3>Run provenance and source hashes</h3><div id="provenance"></div>
 <h3>Resources, missing artifacts and clinical evaluation</h3><div id="methodsTables"></div>
 <details><summary>Legacy V2 coverage and routing</summary><p class="small">The legacy partial count uses pre-inference M1 routing. The final backlog above uses post-M4 evidence.</p><div id="legacyTables"></div></details>
 </section>
@@ -79,7 +106,13 @@ const el = (tag, value = "") => {
 };
 const human = key => String(key).replaceAll("_", " ");
 const display = value => value == null ? "N/A" : typeof value === "number" ? value.toLocaleString() : String(value);
-const raw = row => row.raw_json == null ? "N/A" : row.raw_json === "null" ? "NULL" : row.raw_json;
+const raw = row => {
+  if (row.raw_json == null) return "N/A";
+  const value = JSON.parse(row.raw_json);
+  if (value === null) return "NULL";
+  if (value === "") return '""';
+  return typeof value === "string" ? value : row.raw_json;
+};
 const ratio = item => item?.percent == null ? "N/A" : `${item.percent}% (${display(item.numerator)}/${display(item.denominator)})`;
 const rowsBy = (rows, key) => {
   const groups = new Map();
@@ -147,21 +180,68 @@ function factView(items, absent = "Unavailable") {
   }
   return root;
 }
+const tableOrders = new WeakMap();
+const tableRows = new WeakMap();
+const sortCollator = new Intl.Collator(undefined, {numeric: true, sensitivity: "base"});
+function sortKey(value) {
+  if (value == null) return [4, null];
+  if (typeof value === "boolean") return [0, Number(value)];
+  if (typeof value === "number") return [1, value];
+  if (typeof value === "string") return [2, value];
+  return [3, value instanceof Node ? value.textContent : JSON.stringify(value)];
+}
 function table(root, rows, fields, requested = 0) {
   const size = data.page_size;
-  const pages = Math.max(1, Math.ceil(rows.length / size));
-  const page = Math.min(requested, pages - 1);
+  const order = tableOrders.get(root);
+  let sorted = rows;
+  const readCell = (row, [label, read]) => read ? read(row) : row[label];
+  if (order && fields[order.index]?.[0] === order.label) {
+    const column = fields[order.index];
+    const direction = order.descending ? -1 : 1;
+    sorted = rows.map((row, index) => ({
+      row, index, key: sortKey(column[2] ? column[2](row) : readCell(row, column)),
+    })).sort((a, b) => {
+      const [rankA, left] = a.key, [rankB, right] = b.key;
+      if (rankA === 4 || rankB === 4) return rankA - rankB || a.index - b.index;
+      let comparison;
+      if (rankA !== rankB) comparison = rankA - rankB;
+      else if (rankA < 2) comparison = left - right;
+      else if (/^\d{4}-\d{2}-\d{2}(?:T|$)/.test(left) && /^\d{4}-\d{2}-\d{2}(?:T|$)/.test(right)
+               && Number.isFinite(Date.parse(left)) && Number.isFinite(Date.parse(right)))
+        comparison = Date.parse(left) - Date.parse(right);
+      else comparison = sortCollator.compare(left, right);
+      return direction * comparison || a.index - b.index;
+    }).map(item => item.row);
+  }
+  tableRows.set(root, sorted);
+  const pages = Math.max(1, Math.ceil(sorted.length / size));
+  const page = Math.max(0, Math.min(requested, pages - 1));
   const wrap = el("div"); wrap.className = "table-wrap wide-table"; wrap.tabIndex = 0;
   const grid = el("table"), header = el("tr"), head = el("thead"), body = el("tbody");
-  for (const [label] of fields) {
-    const node = el("th", label); node.scope = "col"; header.append(node);
+  for (const [index, [label, , , version]] of fields.entries()) {
+    const node = el("th"); node.scope = "col";
+    if (version) node.className = version;
+    const active = order?.index === index && order.label === label;
+    node.setAttribute("aria-sort", active ? (order.descending ? "descending" : "ascending") : "none");
+    const button = btn(label, () => {
+      tableOrders.set(root, {index, label, descending: active && !order.descending});
+      table(root, rows, fields);
+      root.querySelectorAll(":scope > .table-wrap > table > thead button")[index].focus();
+    });
+    if (active) {
+      const symbol = el("span", order.descending ? " ▼" : " ▲");
+      symbol.setAttribute("aria-hidden", "true"); button.append(symbol);
+    }
+    node.append(button);
+    header.append(node);
   }
   head.append(header);
-  for (const row of rows.slice(page*size, (page+1)*size)) {
+  for (const row of sorted.slice(page*size, (page+1)*size)) {
     const tr = el("tr");
-    for (const [label, read] of fields) {
-      const value = read ? read(row) : row[label];
+    for (const column of fields) {
+      const value = readCell(row, column);
       const cell = el("td");
+      if (column[3]) cell.className = column[3];
       if (value instanceof Node) cell.append(value);
       else if (value && typeof value === "object") cell.append(format(value));
       else cell.textContent = display(value);
@@ -175,9 +255,11 @@ function table(root, rows, fields, requested = 0) {
   const prev = btn("Previous", () => table(root, rows, fields, page-1));
   const next = btn("Next", () => table(root, rows, fields, page+1));
   prev.disabled = page === 0; next.disabled = page+1 === pages;
-  const status = el("span", rows.length ? `Page ${page+1} of ${pages} · ${display(rows.length)} rows` : "No rows");
+  const resetSort = btn("Reset order", () => { tableOrders.delete(root); table(root, rows, fields); });
+  resetSort.disabled = !order;
+  const status = el("span", sorted.length ? `Page ${page+1} of ${pages} · ${display(sorted.length)} rows` : "No rows");
   status.setAttribute("role", "status");
-  nav.append(prev, next, status);
+  nav.append(prev, next, resetSort, status);
   root.replaceChildren(wrap, nav);
 }
 const fields = keys => keys.map(key => [human(key), row => row[key]]);
@@ -194,6 +276,8 @@ options("family", [...all,...familyOptions]);
 options("namespace", [...all,...opts(names.map(name => name.split("__")[0]))]);
 options("strategy", [...all,...opts(data.variables.map(row => row.strategies))]);
 options("cause", [...all,...opts(backlog.map(row => row.reason_code))]);
+options("change", [...all,...opts(data.variables.map(row => row.changes))]);
+options("temporal", [...all,["verified","Has verified as-of evidence"],["unknown","No verified as-of evidence"]]);
 options("which", names.map(name => [name,name]));
 for (const [id, values] of [["pendingFamily",familyOptions],["pendingCause",opts(backlog.map(r => r.reason_code))],
                            ["pendingType",opts(backlog.map(r => r.work_type))],["pendingState",opts(backlog.map(r => r.state_v2))]])
@@ -225,7 +309,14 @@ card("workMetrics","Cumulative progress",ratio(summary.cumulative),null,"Resolve
 card("workMetrics","Incremental V2 progress",ratio(summary.incremental),null,"V1 pending or partial work resolved in V2");
 get("scope").textContent = `${summary.comparison_reason}. ${display(summary.comparable_mappings)} paired mappings · ${display(summary.noncomparable_mappings)} unpaired mappings. ${display(summary.inventory_total)} input variables · ${display(summary.protected)} protected or structural.`;
 const info = r => r ? `${r.run_id} · schema ${r.schema_version} · ${r.completed_at || r.started_at || "date unavailable"}` : "Unavailable";
-get("run").textContent = `V1 ${info(data.provenance.v1)} | V2 ${info(data.provenance.v2)}`;
+get("run").textContent = `V1 ${info(data.provenance.v1)} | Previous V2 ${info(data.provenance.previous_v2)} | Final V2 ${info(data.provenance.v2)}`;
+if (summary.frozen_work) {
+  card("workMetrics","Frozen historical work units",display(summary.frozen_work.units));
+  card("workMetrics","Historical units resolved in final V2",display(summary.frozen_work.states.resolved ?? 0));
+}
+for (const [label,key] of [["Restored clinical facts","restored"],["Unexplained fact removals","unexplained_removal"]]) {
+  if (data.provenance.v1 || data.provenance.previous_v2) card("workMetrics",label,display(summary.regression_counts[key] ?? 0));
+}
 function stack(root, title, counts, version, family) {
   root.append(el("strong", title));
   const bar = el("div"); bar.className = "stack";
@@ -240,7 +331,7 @@ function stack(root, title, counts, version, family) {
 }
 if (summary.historical) {
   get("history").append(el("p", `${display(summary.historical_denominator)} comparable original work items`));
-  for (const [key,title] of [["original","Original"],["v1","V1"],["v2","V2"]]) stack(get("history"),title,summary.historical[key],key);
+  for (const [key,title] of [["original","Original"],["v1","V1"],["v2","Final V2"]]) stack(get("history"),title,summary.historical[key],key);
 } else {
   if (data.provenance.v1) {
     const prior = data.mappings.filter(row => row.v1_available);
@@ -256,11 +347,15 @@ const variableCols = [
   ["Variable",r => btn(r.variable,() => selectVariable(r.variable,true),"linkbutton")],["Status",r => labels[r.state]],
   ["Initial work",r => r.initial_work],["Resolved V1",r => r.resolved_v1],["Resolved V2",r => r.resolved_v2],
   ["Remaining",r => r.remaining],["Not assessable",r => r.not_assessable],["Affected episodes",r => r.affected_episodes],
-  ["V2 coverage",r => ratio(r.coverage_v2)],["Main strategies",r => r.strategies.map(human).join(", ")]
+  ["V2 coverage",r => ratio(r.coverage_v2),r => r.coverage_v2?.percent, "version-final"],
+  ["Original nonempty",r => ratio(r.coverage_original),r => r.coverage_original?.percent, "version-original"],
+  ["V1 coverage",r => ratio(r.coverage_v1),r => r.coverage_v1?.percent, "version-v1"],
+  ["Previous V2 coverage",r => ratio(r.coverage_previous_v2),r => r.coverage_previous_v2?.percent, "version-before"],
+  ["Main strategies",r => r.strategies.map(human).join(", ")]
 ];
 function refreshVariables() {
   const query = get("search").value.trim().toLocaleLowerCase();
-  const [state,family,ns,strategy,cause,sort] = ["state","family","namespace","strategy","cause","sort"].map(id => get(id).value);
+  const [state,family,ns,strategy,cause,sort,change,temporal] = ["state","family","namespace","strategy","cause","sort","change","temporal"].map(id => get(id).value);
   const selected = data.variables.filter(r =>
     (!workSelection || (workByName.get(r.variable) || []).some(item => item.comparable && item.confirmed_initial &&
       item[`state_${workSelection.version}`] === workSelection.state)) &&
@@ -268,6 +363,7 @@ function refreshVariables() {
     state === "changed" && r.changed || state === "unchanged" && r.unchanged) &&
     (family === "all" || r.family === family) && (ns === "all" || namespace(r) === ns) &&
     (strategy === "all" || r.strategies.includes(strategy)) && (cause === "all" || r.causes.includes(cause)) &&
+    (change === "all" || r.changes.includes(change)) && (temporal === "all" || r.has_as_of === (temporal === "verified")) &&
     (!query || matches(r,query) || (byName.get(r.variable) || []).some(x => matches(x,query)) ||
     (workByName.get(r.variable) || []).some(x => matches(x,query))));
   const sortVal = r => sort === "progress" ? r.initial_work ? r.resolved_v2/r.initial_work : -1 : r[sort] ?? -1;
@@ -279,11 +375,11 @@ function refreshVariables() {
 function reset() {
   workSelection = null;
   get("search").value = "";
-  for (const [id,value] of [["state","focus"],["family","all"],["namespace","all"],["strategy","all"],["cause","all"],["sort","affected_occurrences"]])
+  for (const [id,value] of [["state","focus"],["family","all"],["namespace","all"],["strategy","all"],["cause","all"],["change","all"],["temporal","all"],["sort","affected_occurrences"]])
     get(id).value = value;
 }
-get("reset").addEventListener("click", () => { reset(); refreshVariables(); });
-for (const id of ["search","state","family","namespace","strategy","cause","sort"]) get(id).addEventListener("input", () => { if (id === "state") workSelection = null; refreshVariables(); });
+get("reset").addEventListener("click", () => { reset(); tableOrders.delete(get("variableTable")); refreshVariables(); });
+for (const id of ["search","state","family","namespace","strategy","cause","sort","change","temporal"]) get(id).addEventListener("input", () => { if (id === "state") workSelection = null; refreshVariables(); });
 
 function csvCell(value) {
   let str = value == null ? "" : typeof value === "object" ? JSON.stringify(value) : String(value);
@@ -313,15 +409,23 @@ function mappingChange(row) {
               el("div",row.v2_fact_strategies.map(human).join(", ")));
   for (const [key,title] of [["facts_added","Added"],["facts_removed","Removed"],["facts_retained","Retained"]])
     if (row[key]?.length) root.append(block(title,factView(row[key])));
+  if (row.previous_v2_change !== "not_comparable") {
+    const change = el("div", `Previous V2 → Final · ${human(row.previous_v2_change)}`);
+    change.className = `change-${row.previous_v2_change}`;
+    root.append(change);
+  }
   root.append(block("Context and raw fields",format(JSON.parse(row.context_json))));
   return root;
 }
 const countFields = [["Episodes",r=>r.episodes],["BTRIS events",r=>r.source_events],["Patients",r=>r.patients],["Occurrences",r=>r.occurrences]];
+function previousV2(row) { return factView(row.previous_v2_typed_facts, "Previous V2 unavailable for this mapping"); }
 function mappingsTable(root, rows, version = "all") {
-  const columns = [["Original exact",rawNode]];
-  if (version !== "v2" && version !== "original") columns.push(["V1 structured",v1]);
-  if (version !== "v1" && version !== "original") columns.push(["V2 typed result",v2]);
-  table(root,rows,[...columns,...countFields,["Change and evidence",mappingChange]]);
+  const columns = [["Original exact",rawNode,r => JSON.parse(r.raw_json),"version-original"]];
+  if (version === "v1" || version === "all") columns.push(["V1 structured",v1,r => r.v1_canonical_facts,"version-v1"]);
+  if (version === "previous" || version === "all") columns.push(["Previous V2",previousV2,r => r.previous_v2_typed_facts,"version-before"]);
+  if (version !== "original") columns.push(["V2 typed result",v2,r => r.v2_typed_facts,"version-final"]);
+  table(root,rows,[...columns,...countFields,["Change and evidence",mappingChange,r => r.previous_v2_change],
+                  ...fields(["actual_application","materialized_features"])]);
 }
 function displayFragment(row) {
   const root = el("div");
@@ -419,16 +523,20 @@ function renderDetail() {
   if (activeTab === tabs[0]) {
     const controls = el("div"); controls.className = "controls";
     const choose = el("select"); choose.setAttribute("aria-label","Result version");
-    for (const [id,label] of [["all","Original / V1 / V2"],["original","Original"],["v1","V1"],["v2","V2"]]) {
+    for (const [id,label] of [["all","All versions"],["original","Original"],["v1","V1 vs Final"],["previous","Previous V2 vs Final"],["v2","Original vs Final"]]) {
       const option = el("option",label); option.value=id; choose.append(option);
     }
     const target = el("div");
     choose.addEventListener("change",() => mappingsTable(target, rows, choose.value));
-    controls.append(choose,btn("Variable CSV",() => download(rows,"variable","csv")),
-                    btn("Variable JSON",() => download(rows,"variable","json")),
+    controls.append(choose,btn("Variable CSV",() => download(tableRows.get(target) || rows,"variable","csv")),
+                    btn("Variable JSON",() => download(tableRows.get(target) || rows,"variable","json")),
                     btn("All mappings CSV",() => download(data.mappings,"mappings","csv")),
                     btn("All mappings JSON",() => download(data.mappings,"mappings","json")));
-    root.append(controls);
+    const legend = el("div"); legend.className = "legend";
+    for (const [label, name] of [["Original","original"],["V1","v1"],["Previous V2","before"],["Final V2","final"]]) {
+      const item = el("span",label); item.className = `version-${name}`; legend.append(item);
+    }
+    root.append(controls,legend);
     composition(root,rows);
     root.append(target); mappingsTable(target,rows);
   } else if (activeTab === tabs[1]) {
@@ -461,29 +569,84 @@ function filteredBacklog() {
     .every(([id,key]) => get(id).value === "all" || get(id).value === r[key]) &&
     (!query || matches(r,query) || (currentMaps.has(mappingKey(r)) && matches(currentMaps.get(mappingKey(r)),query))));
 }
+let expandBacklog = false;
+const backlogOrder = new Map();
 function showBacklog() {
   const records = [...rowsBy(filteredBacklog(),"variable")].map(([variable,items]) => ({variable,items}));
   records.sort((a,b) => (varByName.get(b.variable)?.affected_occurrences || 0)-(varByName.get(a.variable)?.affected_occurrences || 0) || a.variable.localeCompare(b.variable));
   table(get("pendingTable"),records,[["Variable",r => {
-    const list = el("div"), region = block(r.variable,list);
-    region.addEventListener("toggle",() => { if (region.open && !list.childElementCount) table(list,r.items,pendingCols); });
+    const list = el("div"), region = block(r.variable,list,expandBacklog);
+    const draw = () => {
+      if (region.open && !list.childElementCount) {
+        table(list,r.items,pendingCols);
+        backlogOrder.set(r.variable,list);
+      }
+    };
+    if (expandBacklog) draw();
+    region.addEventListener("toggle",draw);
     return region;
   }],["Confirmed remaining",r => r.items.filter(x => x.state_v2 === "pending" || x.state_v2 === "partial").length],
      ["Not assessable",r => r.items.filter(x => x.state_v2 === "not_assessable").length]]);
 }
 for (const id of ["pendingSearch","pendingFamily","pendingCause","pendingType","pendingState"]) get(id).addEventListener("input",showBacklog);
 for (const [id,open] of [["expand",true],["collapse",false]]) get(id).addEventListener("click",() => {
+  expandBacklog = open;
   for (const details of get("pendingTable").querySelectorAll(":scope > div > table > tbody > tr > td:first-child > details")) details.open = open;
 });
 function backlogExport(rows) {
   return rows.map(r => ({...r,current_structured_result:currentMaps.get(mappingKey(r))?.v2_typed_facts,
                          v1_structured_result:currentMaps.get(mappingKey(r))?.v1_canonical_facts}));
 }
-for (const [id,records,type] of [["pendingCsv",filteredBacklog,"csv"],["pendingJson",filteredBacklog,"json"],["pendingAll",()=>backlog,"csv"]])
+function orderedBacklog() {
+  const groups = tableRows.get(get("pendingTable")) || [];
+  return groups.flatMap(group => {
+    const ordered = tableRows.get(backlogOrder.get(group.variable));
+    if (!ordered || ordered.length !== group.items.length ||
+        ordered.some(row => !group.items.includes(row))) return group.items;
+    return ordered;
+  });
+}
+for (const [id,records,type] of [["pendingCsv",orderedBacklog,"csv"],["pendingJson",orderedBacklog,"json"],["pendingAll",()=>backlog,"csv"]])
   get(id).addEventListener("click",() => download(backlogExport(records()),id,type));
 table(get("legitimateTable"),data.mappings.filter(r => r.disposition_notes.length),[
   ...fields(["variable"]),["Original",rawNode],...countFields,...fields(["disposition_notes"])
 ]);
+const comments = data.comments || [];
+for (const [id,key] of [["commentPrefix","prefix_kind"],["commentFamily","family"],["commentDisposition","disposition"]])
+  options(id,[...all,...opts(comments.map(row => row[key]))]);
+function showComments() {
+  const query = get("commentSearch").value.trim().toLocaleLowerCase();
+  const rows = comments.filter(row => [["commentPrefix","prefix_kind"],["commentFamily","family"],["commentDisposition","disposition"]]
+    .every(([id,key]) => get(id).value === "all" || row[key] === get(id).value) && matches(row,query));
+  table(get("commentTable"),rows,[
+    ["Variable",r => btn(r.variable,() => selectVariable(r.variable,true),"linkbutton"),r => r.variable],
+    ...fields(["prefix","body","disposition","source_field","role","segment","start","end","m1_fields","m4_fields",
+               "strategies","residual","reason","evidence","occurrences","episodes","patients","source_events"]),
+    ["Previous V2",r => previousV2(currentMaps.get(mappingKey(r)) || {}),r => currentMaps.get(mappingKey(r))?.previous_v2_typed_facts,
+     "version-before"],
+    ["Final V2",r => v2(currentMaps.get(mappingKey(r)) || {}),r => currentMaps.get(mappingKey(r))?.v2_typed_facts,"version-final"],
+  ]);
+  get("commentMetrics").textContent = `${new Set(rows.map(r => r.mapping_id)).size.toLocaleString()} mappings · ${rows.length.toLocaleString()} audit rows`;
+}
+for (const id of ["commentSearch","commentPrefix","commentFamily","commentDisposition"])
+  get(id).addEventListener("input",showComments);
+for (const [id,type] of [["commentCsv","csv"],["commentJson","json"]])
+  get(id).addEventListener("click",() => download(tableRows.get(get("commentTable")) || [],"comments",type));
+showComments();
+show("commentSummary",data.comment_summary,["variable","family","prefix_kind","disposition","mappings","episodes","patients","source_events"]);
+show("regressionTable",data.regressions,["variable","reference_version","change","fact_type","reason","evidence","occurrences"]);
+show("frozenTable",data.historical_work,["variable","kind","state_v1","state_previous_v2","state_final_v2","reconciliation","evidence"]);
+for (const name of ["variable_progress","family_progress","mapping_comparison","pending_work","comment_prefix_audit",
+                    "comment_prefix_summary","semantic_materialization_audit","derived_rule_audit",
+                    "downstream_feature_readiness","downstream_impact","regression_comparison","historical_work_crosswalk"]) {
+  const item = el("li", human(name));
+  for (const type of ["csv","parquet"]) {
+    const link = el("a",type.toUpperCase());
+    link.href = `${name}.${type}`;
+    item.append(" · ",link);
+  }
+  get("artifactLinks").append(item);
+}
 show("strategyTable",data.strategies,["strategy","mappings","occurrences","facts","resolved_work"]);
 get("increment").textContent = summary.m4_over_m1 ?
   `M4 versus M1 · ${display(summary.m4_over_m1.facts_added)} canonical facts added in ${display(summary.m4_over_m1.mappings)} mappings · ${display(summary.m4_over_m1.facts_removed)} removed · ${display(summary.reopenings)} paired work items reopened.` :
@@ -497,6 +660,11 @@ get("kind").addEventListener("change",special);
 const decodedDerived = data.derived.map(r => ({...r,...Object.fromEntries(["before","after","transitions"].filter(k=>r[k]).map(k=>[k,JSON.parse(r[k])]))}));
 show("derivedTable",decodedDerived);
 show("downTable",data.downstream);
+show("readinessTable",data.readiness,["feature_name","study","mode","status","reason","observed_episodes","observed_patients",
+                                    "available_episodes","as_of_episodes","model_consumption"]);
+show("materializationTable",data.materialization_audit,["variable","fact_type","status","expected_observations",
+                                                       "linked_observations","as_of_observations","wide_fields","reason"]);
+show("derivedRuleTable",data.derived_audit,["variable","producer","disposition","rule","availability","evaluated_episodes"]);
 get("downStatus").textContent = data.downstream.length ? "Status and eligibility reported by the published compatibility checks." : "Downstream checks not recorded.";
 get("definitions").append(format(data.definitions),
   el("p", `Reporting rules ${data.rule_version}. V1 comparison uses ${summary.baseline_projection || "no available"} representation. Legacy projection cannot establish missing span coordinates. Confirmed initial work is reconstructed from source segments, recorded deterministic evidence and existing field contracts. Unknown scope stays outside the confirmed denominator.`),

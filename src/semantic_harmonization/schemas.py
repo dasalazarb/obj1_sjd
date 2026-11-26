@@ -21,6 +21,7 @@ class Finding(Strict):
     pattern: Literal["monoclonal", "oligoclonal", "polyclonal"] | None
     intensity_descriptor: Literal["faint", "trace"] | None
     incubation_hours: int | None
+    incubation_stage: Literal["preliminary", "final"] | None = None
     percentage: str | None
     comparator: Literal["EQ", "LT", "LE", "GT", "GE"] | None
     quote: str = Field(min_length=1)
@@ -233,6 +234,14 @@ Payload = (QualitativeResult | NumericResult | OrdinalResult | TiterResult | Ana
            Finding | SpikeResult | HlaResult | MorphologyResult | ObservationMetadata | Medication)
 
 
+class FactSourceSpan(Strict):
+    segment_id: str
+    source_field: SourceField
+    start: int = Field(ge=0)
+    end: int = Field(gt=0)
+    quote: str = Field(min_length=1)
+
+
 class SemanticFact(Strict):
     mapping_id: str
     fact_id: str
@@ -250,6 +259,7 @@ class SemanticFact(Strict):
     quote: str = Field(min_length=1)
     strategy: str
     rule_or_prompt_version: str
+    duplicate_source_spans: list[FactSourceSpan] = Field(default_factory=list)
     document_ids: list[str]
     schema_version: str
 
@@ -277,8 +287,11 @@ PAYLOAD_OVERRIDES = {
     "immunofixation_finding": {field.name: field.type for field in FINDING},
     "cryoglobulin_finding": {field.name: field.type for field in FINDING},
 }
+FACT_SOURCE_SPANS = pa.list_(pa.struct([(name, INT if name in {"start", "end"} else STR)
+                                        for name in FactSourceSpan.model_fields]))
 FACTS = pa.schema([
-    *[(name, INT if name in {"start", "end"} else pa.list_(STR) if name == "document_ids" else STR)
+    *[(name, INT if name in {"start", "end"} else pa.list_(STR) if name == "document_ids" else
+       FACT_SOURCE_SPANS if name == "duplicate_source_spans" else STR)
       for name in SemanticFact.model_fields if name != "payload"],
     *[(name, pa.struct([(field, PAYLOAD_OVERRIDES.get(name, {}).get(field, STR)) for field in model.model_fields]))
       for name, model in FACT_PAYLOADS.items()],

@@ -5,6 +5,7 @@ from collections import Counter, defaultdict
 from decimal import Decimal
 import json
 import math
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -12,6 +13,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from .schemas import ALLELE, CHILD_LINK, FEATURES, FINDING, MEDICATION, OBSERVATIONS, SEMANTIC
+from .semantic_facts import clinical
 from .settings import KEYS, serialize
 
 WIDE_FIELDS = {
@@ -54,14 +56,76 @@ def feature(name: str, source: str, field: str, dtype: pa.DataType, availability
                 analytic_eligibility_rule="Candidate field; requires study-specific admissibility")
 
 
+IMMUNOFIXATION_FIELDS = {
+    ("IgG", "kappa"): "igg_kappa_present", ("IgG", "lambda"): "igg_lambda_present",
+    ("IgM", "kappa"): "igm_kappa_present",
+}
+FINDING_WIDE_FIELDS = (*IMMUNOFIXATION_FIELDS.values(), "free_lambda_present", "polyclonal_pattern",
+                       "oligoclonal_pattern", "abnormal_band_present")
+
+
+def immunofixation_fields(findings: list[dict]) -> dict[str, bool]:
+    """Project explicit entities and documented absence within their stated scope."""
+    values = defaultdict(set)
+    for item in findings:
+        if item["temporality"] not in {"current", "unspecified"} or item["assertion"] == "uncertain":
+            continue
+        present = item["assertion"] == "present"
+        if field := IMMUNOFIXATION_FIELDS.get((item["immunoglobulin_class"], item["light_chain"])):
+            values[field].add(present)
+        if item["entity"] == "light_chain" and item["light_chain"] == "lambda" and re.search(r"\bfree\b", item["quote"], re.I):
+            values["free_lambda_present"].add(present)
+        if item["pattern"] in {"polyclonal", "oligoclonal"}:
+            values[f'{item["pattern"]}_pattern'].add(present)
+        if item["entity"] == "anomalous_immunoglobulins" or (
+            present and item["entity"] in {"immunoglobulin", "light_chain"} and (
+                item["pattern"] == "monoclonal" or re.search(r"\babnormal band\b", item["quote"], re.I)
+            )
+        ):
+            values["abnormal_band_present"].add(present)
+    return {field: next(iter(status)) for field, status in values.items() if len(status) == 1}
+
+
+def include_typed_projection(observation: dict, facts) -> None:
+    """Materialize profile enrichments where they preserve existing scalar evidence."""
+    profiles = defaultdict(list)
+    for fact in facts:
+        profiles[fact.fact_type].append(fact)
+    patterns = list(dict.fromkeys([*observation["pattern_terms"], *(
+        fact.payload.pattern for fact in profiles["ana_pattern"] if clinical(fact) and fact.payload.pattern
+    )]))
+    observation["pattern_terms"] = patterns
+    for fact in profiles["hla_result"]:
+        if fact.strategy != "llm_rag":
+            continue
+        payload = fact.payload
+        allele = dict(locus=payload.locus, reported=payload.token, allele=payload.allele,
+                      resolution_fields=payload.resolution, suffix=payload.suffix,
+                      source_order=payload.position, ipd_match=payload.ipd_match)
+        if allele not in observation["alleles"]:
+            observation["alleles"] = [*observation["alleles"], allele]
+    morph = profiles["morphology_result"]
+    if any(fact.strategy == "llm_rag" for fact in morph):
+        descriptors = {fact.payload.descriptor for fact in morph if fact.payload.descriptor is not None}
+        if len(descriptors) == 1 and observation["category"] is None and observation["descriptor"] is None:
+            observation["category"] = next(iter(descriptors))
+        intervals = {serialize(fact.payload.percentage.model_dump()) for fact in morph if fact.payload.percentage}
+        if len(intervals) == 1 and observation["comparator"] is None:
+            observation.update(json.loads(next(iter(intervals))))
+
+
+
 def apply(input_table: pa.Table, source: pa.Table | None, lineage: list[dict], dictionary: list[dict],
-          analytic: Path) -> tuple[pa.Table, list[dict], list[dict]]:
+          analytic: Path, facts=()) -> tuple[pa.Table, list[dict], list[dict]]:
     """Join every observation m:1 and materialize the Arrow outputs."""
     lookup = {row["mapping_id"]: row for row in dictionary}
     if len(lookup) != len(dictionary) or set(lookup) != {row["mapping_id"] for row in lineage}:
         raise ValueError("Semantic dictionary failed the m:1 mapping contract")
     if len({row["observation_id"] for row in lineage}) != len(lineage):
         raise ValueError("Observation lineage keys must be unique")
+    by_mapping = defaultdict(list)
+    for fact in facts:
+        by_mapping[fact.mapping_id].append(fact)
     observations, source_rows, episode_variables = [], [], defaultdict(list)
     children = {field: [] for field in ("findings", "alleles", "medications")}
     for line in lineage:
@@ -69,6 +133,9 @@ def apply(input_table: pa.Table, source: pa.Table | None, lineage: list[dict], d
         values = {name: mapping[name] for name in SEMANTIC.names}
         observation = dict(line, **values, **{name: mapping[name] for name in
                                              ("variable", "concept", "family", "raw_type", "raw_json", "context_json")})
+        include_typed_projection(observation, by_mapping[line["mapping_id"]])
+        if mapping["family"] == "immunofixation":
+            observation.update(immunofixation_fields(observation["findings"]))
         observations.append(observation)
         if line["source_grain"] == "btris_observation":
             source_rows.append(observation)
@@ -76,7 +143,7 @@ def apply(input_table: pa.Table, source: pa.Table | None, lineage: list[dict], d
             episode_variables[mapping["variable"]].append(observation)
         for field, output in children.items():
             output.extend(dict(observation_id=line["observation_id"], mapping_id=line["mapping_id"],
-                               ordinal=i, **item) for i, item in enumerate(values[field]))
+                               ordinal=i, **item) for i, item in enumerate(observation[field]))
     write_parquet(analytic / "harmonized_observations.parquet", observations, OBSERVATIONS)
     for field, filename, schema in (
         ("findings", "semantic_findings", FINDING), ("alleles", "hla_alleles", ALLELE),
@@ -98,10 +165,13 @@ def apply(input_table: pa.Table, source: pa.Table | None, lineage: list[dict], d
     for variable, rows in episode_variables.items():
         if [row["source_row"] for row in rows] != list(range(wide.num_rows)):
             raise ValueError(f"Episode inventory alignment failed for {variable}")
-        if rows and rows[0]["family"] in {"other", "derived"}:
+        if rows[0]["family"] in {"other", "derived"} or variable == "spine__interval_name":
             continue
-        for field, dtype in WIDE_FIELDS.items():
-            values = [row[field] for row in rows]
+        for field, dtype in {**WIDE_FIELDS, "pattern_terms": pa.list_(pa.string()),
+                             **dict.fromkeys(FINDING_WIDE_FIELDS, pa.bool_())}.items():
+            values = [row.get(field) for row in rows]
+            if field == "pattern_terms":
+                values = [value or None for value in values]
             if pa.types.is_floating(dtype):
                 values = [project_float(value) for value in values]
             if all(value is None for value in values):

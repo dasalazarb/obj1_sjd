@@ -7,6 +7,7 @@ import subprocess
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from openpyxl import Workbook
@@ -166,7 +167,11 @@ def synthetic(tmp_path, cfg):
         "pop__status": ["Pop1", "Pop2", "Pop3"], "essdai__total": [0, 5, 2], "esspri__total": [1, 2, 3],
         "lab__anti_ro60__text": [">1300", ">1300", " "],
         "lab__anti_ro60__value": pd.Series([1300.0, 1300.0, None], dtype="Float64"),
-        "lab__immunofixation__text": ["A faint lambda band was detected.", None, None],
+        "lab__immunofixation__text": ["A faint lambda band was detected.", "SEE NOTE | IgG(lambda) band detected.", None],
+        "lab__urinalysis_includes_microscopic__hyalin_casts_urinalysis__text": ["<1", None, None],
+        "lab__urinalysis_includes_microscopic__renal_epithelial_cells_urinalysis__text": ["<1", None, None],
+        "lab__urinalysis_includes_microscopic__unclassified_casts_urinalysis__text": ["0-2", "3-5", "6-10"],
+        "lab__urine_bacteria__text": [">10000", None, None],
         "lab__ana_status__text": ["Positive 1:640", "not performed", "negative"],
         "sero__ana_status__ever_positive_through_episode": pd.Series([True, True, None], dtype="boolean"),
         "lab__other__text": ['</script><img src=x onerror=alert(2)> &', "", None],
@@ -206,6 +211,29 @@ def test_pipeline_integration_cache_and_offline_report(tmp_path, cfg):
     pd.testing.assert_frame_equal(original, candidate[original.columns])
     assert candidate["harm__lab__anti_ro60__text__limit_value"].iloc[:2].tolist() == [1300.0, 1300.0]
     assert "harm__lab__anti_ro60__text__exact_value" not in candidate
+    microscopy = "harm__lab__urinalysis_includes_microscopic__"
+    for name in ("hyalin_casts", "renal_epithelial_cells"):
+        base = microscopy + name + "_urinalysis__text__"
+        assert candidate[base + "limit_value"].iloc[0] == 1
+        assert candidate[base + "comparator"].iloc[0] == "LT"
+        assert base + "exact_value" not in candidate
+    base = microscopy + "unclassified_casts_urinalysis__text__"
+    assert candidate[base + "range_low"].tolist() == [0, 3, 6]
+    assert candidate[base + "range_high"].tolist() == [2, 5, 10]
+    assert candidate["harm__lab__urine_bacteria__text__limit_value"].iloc[0] == 10000
+    assert candidate["harm__lab__immunofixation__text__igg_lambda_present"].iloc[1] == True
+    assert pd.isna(candidate["harm__lab__immunofixation__text__igg_lambda_present"].iloc[0])
+    assert not {"harm__lab__immunofixation__text__igg_kappa_present",
+                "harm__lab__immunofixation__text__abnormal_band_present"} & set(candidate)
+    for directory in (analytic, output):
+        for path in directory.glob("*.parquet"):
+            assert path.with_suffix(".csv").is_file()
+            assert path.with_suffix(".csv.schema.json").is_file()
+    comment = pq.read_table(output / "comment_prefix_audit.parquet").to_pylist()
+    assert comment[0]["disposition"] == "fully_structured"
+    assert len({r["mapping_id"] for r in comment}) == 1
+    audit = pq.read_table(output / "semantic_materialization_audit.parquet").to_pylist()
+    assert any(r["status"] == "linked" and r["wide_fields"] == ["harm__lab__immunofixation__text__igg_lambda_present"] for r in audit)
     assert candidate["harm__sero__ana_status__ever_positive_through_episode"].iloc[1] == True
     assert pd.isna(candidate["harm__sero__ana_status__ever_positive_through_episode"].iloc[0])
     assert candidate["harm__sero__ana_status__ever_positive_through_episode"].iloc[2] == False
@@ -287,6 +315,11 @@ def test_candidate_bundle_pairs_real_pharma_and_graph_inputs(tmp_path, cfg, monk
     assert json.loads((report / SOURCE_MANIFEST).read_text())["run_id"] == analytic.name
     assert selected.require("context").parent == analytic
     assert selected.require("pharma_candidates").is_relative_to(report)
+    assert selected.require("feature_temporal_coverage").parent == analytic
+    semantic = pq.read_table(selected.require("pharma_semantic_profile")).to_pylist()
+    assert {row["study"] for row in semantic} == {"Pharma", "Graph"}
+    assert any(row["encoding"] == "censored" for row in semantic if row["study"] == "Pharma")
+    assert all(row["encoding"] != "exact_numeric" for row in semantic if "__limit_value" in row["feature_name"])
     master = pd.read_parquet(selected.require("integrated"))
     _, graph_report = load_current_profile(master, selected.require("integrated"), selected.require("pharma_candidates"), "exploratory")
     assert graph_report["input_hash"] == selected.sha256["integrated"]
@@ -694,3 +727,132 @@ def test_historical_report_keeps_publications_and_disables_incompatible_deltas(t
         stream.write("\n")
     with pytest.raises(ValueError, match="checksums differ"):
         generate(cfg, dict(selection, baseline_run_id=changed_id), output)
+
+
+def test_closure_recovers_prefixed_clauses_with_literal_evidence(cfg):
+    from src.semantic_harmonization.closure_audit import comment_rows
+    from src.semantic_harmonization.semantic_facts import parse_mapping, verify_contract
+    from src.semantic_harmonization.inference import routing
+
+    row = v2_row(cfg, "ana_hep2_status",
+                 "sEe\u00a0BeLoW: | <1:80 (Negative); Method: Synthetic HEp-2")
+    semantic, parts, facts = parse_mapping(row, cfg, VOCAB)
+    verify_contract([row], parts, facts)
+    assert (semantic.titer_numerator, semantic.titer_denominator, semantic.titer_comparator) == (1, 80, "LT")
+    assert semantic.qualitative_result == "negative" and semantic.exact_value is None
+    assert not routing(row, semantic, parts, facts)["send"]
+
+    repeated = "SEE BELOW | <1:80 (Negative)"
+    copied = v2_row(cfg, "ana_hep2_status", repeated, observation_comment=repeated)
+    _, copied_parts, copied_facts = parse_mapping(copied, cfg, VOCAB)
+    verify_contract([copied], copied_parts, copied_facts)
+    titer, = [fact for fact in copied_facts if fact.fact_type == "titer_result"]
+    assert titer.source_field == "raw_text"
+    assert [span.source_field for span in titer.duplicate_source_spans] == ["context.observation_comment"]
+
+    pattern = "ana_hep_2_substrate_igg__antinuclear_antibody_ana_hep_2_substrate_comment_blood"
+    row = v2_row(cfg, pattern, "SEE BELOW | Cytoplasmic speckled staining pattern observed. May be associated with synthetic antibody.")
+    semantic, parts, facts = parse_mapping(row, cfg, VOCAB)
+    assert semantic.pattern_terms == ["cytoplasmic speckled"]
+    assert semantic.qualitative_result is None and not any(f.fact_type == "qualitative_result" for f in facts)
+    assert any(part.role == "general_interpretation" and "synthetic antibody" in part.text for part in parts)
+    for case in ("SEE NOTE | Cytoplasmic reticular/AMA", "SEE NOTE:", "This contains see notebook"):
+        row = v2_row(cfg, pattern, case, observation_comment="Cytoplasmic reticular/AMA" if case.endswith(":") else None)
+        semantic, parts, facts = parse_mapping(row, cfg, VOCAB)
+        verify_contract([row], parts, facts)
+        if case.startswith("SEE"):
+            assert semantic.pattern_terms == ["cytoplasmic reticular/ama"]
+            assert {p.source_field for p in parts if p.role == "patient_result"} == (
+                {"context.observation_comment"} if case.endswith(":") else {"raw_text"})
+        else:
+            assert not any(p.role_rule == "comment_marker" for p in parts)
+
+    for key, body in (("anti_ccp", "<20 Units Negative, 20-39 Weak Positive, >=40 Positive"),
+                      ("anti_dsdna", "<=30 Negative Measures only high avidity anti-ds DNA")):
+        row = v2_row(cfg, key, f"SEE COMMENT | {body}")
+        semantic, parts, facts = parse_mapping(row, cfg, VOCAB)
+        counts = dict(occurrences=1, episodes=1, patients=1, source_events=0)
+        records = comment_rows(row, parts, facts, facts, counts)
+        assert records and {r["disposition"] for r in records} == {"metadata_only"}
+        assert semantic.exact_value is None and semantic.qualitative_result is None
+        assert all(f.fact_type == "observation_metadata" for f in facts)
+
+    assert parsed(cfg, "lab__anti_sm__text", "Method: synthetic. Patient result: Negative").qualitative_result == "negative"
+    result = parsed(cfg, "lab__cryoglobulin__text", "SEE BELOW | Negative at 24 hours. Will be reviewed again at 7 days.")
+    assert [(f.assertion, f.temporality, f.incubation_hours, f.incubation_stage) for f in result.findings] == [
+        ("absent", "current", 24, None), ("uncertain", "planned", 168, None)]
+    final = parsed(cfg, "lab__cryoglobulin__text", "Final negative at 7 days").findings
+    assert len(final) == 1 and final[0].incubation_stage == "final"
+
+
+def test_closure_morphology_hla_and_mixed_immunofixation(cfg):
+    from src.semantic_harmonization.semantic_facts import parse_mapping
+    from src.semantic_harmonization.report_progress import required_components
+
+    for name, raw, bounds, grade in (
+        ("anisocytosis", "6-14% (Mild)", ("6", "14"), "mild"),
+        ("hypochromasia", "6-14% (Few)", ("6", "14"), "few"),
+        ("macrocytosis", "2-5% (Mild)", ("2", "5"), "mild"),
+        ("poikilocytosis", "1.5-2.4% (Mild)", ("1.5", "2.4"), "mild"),
+        ("polychromasia", "2-5% (Mild)", ("2", "5"), "mild"),
+    ):
+        _, _, facts = parse_mapping(v2_row(cfg, f"cbc_diff__{name}_blood", raw), cfg, VOCAB)
+        morph, = [f.payload for f in facts if f.fact_type == "morphology_result"]
+        assert (morph.percentage.range_low, morph.percentage.range_high) == bounds
+        assert morph.percentage.exact_value is None and morph.percentage.raw_unit == "%"
+        assert morph.descriptor == grade
+    for key in ("lab__hla_dpb__text", "sero__hla_dpb__asof_value"):
+        value = "03:01"
+        concept, family = route(key, cfg)
+        row = dict(v2_row(cfg, "hla_dpb", value), variable=key, concept=concept, family=family)
+        semantic, parts, facts = parse_mapping(row, cfg, VOCAB | {"ipd": {"allele": {"DPB*03:01"}}})
+        allele, = [f.payload for f in facts if f.fact_type == "hla_result"]
+        assert (allele.token, allele.locus, allele.resolution, allele.allele) == ("03:01", "DPB", 2, "DPB*03:01")
+        assert semantic.titer_denominator is None
+        assert not required_components(parts[0], facts, family)
+    result = parsed(cfg, "lab__immunofixation_serum_interpretation__text",
+                    "SEE NOTE | IgG(kappa) band detected + polyclonal increase + oligoclonal lambda light chains.")
+    assert [(f.immunoglobulin_class, f.light_chain, f.pattern) for f in result.findings] == [
+        ("IgG", "kappa", None), (None, None, "polyclonal"), (None, "lambda", "oligoclonal")]
+
+
+def test_closure_csv_roundtrip_distinguishes_blank_null_false_and_zero(tmp_path):
+    import csv
+    from src.semantic_harmonization.table_exports import export_csv, unescape
+
+    table = pa.table(dict(raw=["", None, "=formula", "'literal", r"\N"],
+                          flag=[False, True, None, None, False],
+                          value=[0, None, -1, 2, 4],
+                          nested=[[{"measurement": 0}], None, [], [None], []]))
+    path = tmp_path / "fixture.parquet"
+    pq.write_table(table, path)
+    export_csv(path)
+    with path.with_suffix(".csv").open(newline="") as stream:
+        reader = csv.reader(stream)
+        assert next(reader) == table.column_names
+        recovered = [[unescape(value, field.type) for field, value in zip(table.schema, row)] for row in reader]
+    assert recovered == [list(row.values()) for row in table.to_pylist()]
+    assert path.with_suffix(".csv.schema.json").is_file()
+    assert stat_mode(path.with_suffix(".csv")) == 0o600
+
+
+def test_closure_compares_explicit_previous_v2_and_frozen_work(tmp_path, cfg):
+    from src.semantic_harmonization.report_existing import generate
+    from src.semantic_harmonization.report_sources import file_manifest
+
+    _, resources = synthetic(tmp_path, cfg)
+    options = dict(encoder=Encoder(), model_factory=Model, resource_verify=lambda _: resources)
+    root = tmp_path / "comparisons"
+    _, previous = run(cfg, **options)
+    historical, _ = generate(cfg, {"target_run_id": previous.name}, root)
+    immutable = file_manifest(historical)
+    cfg["comparison"].update(previous_v2_run_id=previous.name, historical_report_id=historical.name)
+    cfg["prompts"]["version"] += "-final-fixture"
+    _, final = run(cfg, **options)
+    path, summary = generate(cfg, {"target_run_id": final.name, "previous_v2_run_id": previous.name}, root)
+    assert summary["previous_v2_scope"] == "paired" and summary["previous_v2_comparable_mappings"] > 0
+    frozen = pq.read_table(path / "historical_work_crosswalk.parquet").to_pylist()
+    assert frozen and summary["frozen_work"]["units"] == len(frozen)
+    assert {r["reconciliation"] for r in frozen} == {"matched"}
+    assert file_manifest(historical) == immutable
+    assert generate(cfg, {"target_run_id": final.name, "previous_v2_run_id": previous.name}, root)[0] == path

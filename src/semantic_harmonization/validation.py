@@ -135,9 +135,10 @@ profile_dir = report / "study_inputs/pharma"
 context = Path(context) if context and Path(context).is_file() else None
 candidate_context = Path(candidate_context) if candidate_context else None
 
-def profile(master, companion, folder, provenance=None):
+def profile(master, companion, folder, provenance=None, semantic_manifest=None):
     args = argparse.Namespace(integrated=Path(master), context=companion, no_context=companion is None,
-                              registry=Path(registry), output=folder / module.DEFAULT_OUTPUT.name)
+                              registry=Path(registry), output=folder / module.DEFAULT_OUTPUT.name,
+                              semantic_feature_manifest=semantic_manifest)
     profile = module.run_profile(args, provenance_paths=provenance)
     graph = pd.read_csv(folder / module.SELECTION_AUDIT_NAME)
     return profile, graph[["feature", "n_nonmissing_baseline", "included", "exclusion_reason"]]
@@ -152,7 +153,8 @@ with tempfile.TemporaryDirectory(dir=report, prefix=".original-pharma-") as temp
     before, graph_before = profile(original, context, Path(temporary))
 candidate = Path(candidate)
 provenance = {p: Path(analytic_final) / p.name for p in (candidate, candidate_context) if p is not None}
-after, graph_after = profile(candidate, candidate_context, profile_dir, provenance)
+after, graph_after = profile(candidate, candidate_context, profile_dir, provenance,
+                             candidate.parent / "feature_manifest.parquet")
 write_comparison(before, after, "lab", report / "pharma_eligibility.csv")
 write_comparison(graph_before, graph_after, "feature", report / "graph_eligibility.csv")
 """

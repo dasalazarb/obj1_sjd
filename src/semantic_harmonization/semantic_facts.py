@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from decimal import Decimal, InvalidOperation
 import json
 import re
 
 from .parsers import ALLELE, normalize, parse_segment
 from .schemas import (
-    AnaPattern, Finding, HlaResult, MorphologyResult, NumericResult, ObservationMetadata,
+    AnaPattern, FactSourceSpan, Finding, HlaResult, MorphologyResult, NumericResult, ObservationMetadata,
     OrdinalResult, QualitativeResult, Semantic, SemanticFact, SemanticSegment, SpikeResult, TiterResult,
 )
 from .segmentation import RESULT_LABEL, segment, sources
@@ -93,9 +94,11 @@ def part_facts(row: dict, part: SemanticSegment, parsed: Semantic, version: str)
     if family == "m_spike" and (parsed.category or numeric):
         add("m_spike_result", SpikeResult(detection=parsed.category, concentration=numeric),
             "category" if parsed.category else "comparator", quote=part.text)
-    if family in {"urine_microscopy", "cbc_morphology"} and (parsed.category or parsed.descriptor or numeric):
+    if family in {"urine_microscopy", "cbc_morphology"} and (
+        parsed.category or parsed.descriptor or numeric and family == "cbc_morphology"
+    ):
         add("morphology_result", MorphologyResult(entity=concept, descriptor=parsed.category or parsed.descriptor,
-                                                  percentage=numeric), "category")
+                                                  percentage=numeric if family == "cbc_morphology" else None), "category")
     for item in parsed.findings:
         add(f"{family}_finding", item, "findings", item.quote, item.temporality)
     for item in parsed.alleles:
@@ -175,12 +178,47 @@ def parse_mapping(row: dict, cfg: dict, vocab: dict) -> tuple[Semantic, list[Sem
                 parsed.evidence = [item for item in parsed.evidence if item.field not in {"alleles", "result_availability"}]
                 parsed.result_availability = None
         parsed_parts.append(parsed)
-    return merge_segments(parsed_parts), parts, list(typed.values())
+    return merge_segments(parsed_parts), parts, deduplicate_sources(row, typed.values())
+
+
+def deduplicate_sources(row, facts):
+    """Collapse the same fact copied into more than one literal evidence source."""
+    text = sources(row)
+    unique = {}
+    for fact in facts:
+        key = text[fact.source_field], fact.start, fact.end, canonical(fact)
+        prior = unique.get(key)
+        if prior is not None and fact.source_field != prior.source_field:
+            prior.duplicate_source_spans.append(FactSourceSpan(**{
+                name: getattr(fact, name) for name in FactSourceSpan.model_fields
+            }))
+        else:
+            unique[key] = fact
+    return list(unique.values())
+
+
+def fact_spans(fact):
+    """Expose every validated citation while keeping one canonical fact ID."""
+    yield fact
+    for span in fact.duplicate_source_spans:
+        yield fact.model_copy(update=span.model_dump(), deep=False)
 
 
 def canonical(fact: SemanticFact) -> str:
     """Compare meaning independently of citations, versions, offsets and lexical variants."""
     payload = fact.payload.model_dump(exclude={"quote", "document_ids"})
+    if payload.get("incubation_stage") is None:
+        payload.pop("incubation_stage", None)
+    for values in (payload, *(item for item in payload.values() if isinstance(item, dict))):
+        for field in ("exact_value", "limit_value", "range_low", "range_high", "percentage"):
+            if isinstance(values.get(field), str):
+                try:
+                    value = Decimal(values[field])
+                except InvalidOperation:
+                    continue
+                if value.is_finite() and abs(value.adjusted()) <= 100:
+                    text = format(value, "f")
+                    values[field] = text.rstrip("0").rstrip(".") if "." in text else text
     for field in ("descriptor", "pattern"):
         if isinstance(payload.get(field), str):
             payload[field] = normalize(payload[field])
@@ -208,7 +246,7 @@ def verify_contract(rows: list[dict], segments: list[SemanticSegment], facts: li
                 raise ValueError("Semantic segment lost source text")
     if source_count != len(by_source):
         raise ValueError("Semantic segment has no source")
-    for fact in facts:
+    for fact in (span for fact in facts for span in fact_spans(fact)):
         item = lookups[fact.segment_id]
         role_compatible = (item.role in METADATA_ROLES if fact.fact_type == "observation_metadata" else
                            item.role == "patient_result" or item.role == "historical_reference"
@@ -219,10 +257,49 @@ def verify_contract(rows: list[dict], segments: list[SemanticSegment], facts: li
             raise ValueError("Semantic fact failed evidence contract")
 
 
+
+NONCLINICAL_GAPS = re.compile(r"\b(?:and|or|a|an|the|result|current|currently|previously|historical|prior|at|was|is|now|patient)\b|[^\w]", re.I)
+FINDING_SUFFIX = re.compile(r"^\s*(?:band\s+)?(?:was |is )?(?:detected|identified|observed|seen|present)[.\s]*$", re.I)
+
+
+def coverage(parts, facts):
+    """Return exact unclaimed Unicode intervals for every eligible segment."""
+    by_segment = defaultdict(list)
+    for fact in facts:
+        if fact.fact_type == "observation_metadata" or fact.fact_type == "hla_result" and fact.payload.ambiguous:
+            continue
+        for span in fact_spans(fact):
+            by_segment[span.segment_id].append(span)
+    result = {}
+    for part in parts:
+        offset, gaps = part.start, []
+        supported = [fact for fact in by_segment[part.segment_id]
+                 if fact.mapping_id == part.mapping_id and fact.source_field == part.source_field
+                 and (fact.temporality == "historical") == (part.role == "historical_reference")
+                 and part.start <= fact.start < fact.end <= part.end
+                 and part.text[fact.start-part.start:fact.end-part.start] == fact.quote]
+        for start, end in sorted((fact.start, fact.end) for fact in supported):
+            if start > offset:
+                gaps.append((offset, start))
+            offset = max(offset, end)
+        if offset < part.end:
+            gaps.append((offset, part.end))
+        remaining = []
+        for start, end in gaps:
+            text = part.text[start-part.start:end-part.start]
+            # A positive narrative fact may cite only its entity span. A simple
+            # assertion suffix is already represented by the recorded polarity.
+            suffix_accounted = end == part.end and FINDING_SUFFIX.fullmatch(text) and any(
+                fact.end == start and getattr(fact.payload, "assertion", None) == "present" for fact in supported)
+            if NONCLINICAL_GAPS.sub("", text) and not suffix_accounted:
+                remaining.append(dict(start=start, end=end, text=text))
+        result[part.segment_id] = (bool(supported), remaining)
+    return result
+
 def from_storage(row: dict) -> SemanticFact:
     """Rehydrate the selected Arrow struct without coercing other arms."""
     from .schemas import FACT_PAYLOADS
 
     return SemanticFact.model_validate(
-        {key: row[key] for key in SemanticFact.model_fields if key != "payload"} |
+        {key: row[key] for key in SemanticFact.model_fields if key != "payload" and key in row and (key != "duplicate_source_spans" or row[key] is not None)} |
         {"payload": FACT_PAYLOADS[row["fact_type"]].model_validate(row[row["fact_type"]])})

@@ -20,6 +20,17 @@ async function main() {
     assert.match(await variables.getByRole("status").textContent(), /Page 1 of \d+/);
     await variables.getByRole("button", {name: "Next"}).click();
     assert.match(await variables.getByRole("status").textContent(), /Page 2 of/);
+    const coverage = variables.getByRole("columnheader", {name:"V2 coverage", exact:true});
+    await coverage.getByRole("button").click();
+    assert.equal(await coverage.getAttribute("aria-sort"), "ascending");
+    assert.match(await variables.getByRole("status").textContent(), /Page 1 of/);
+    const ascending = await variables.locator("tbody tr td:nth-child(9)").textContent();
+    await coverage.getByRole("button").click();
+    assert.equal(await coverage.getAttribute("aria-sort"), "descending");
+    const descending = await variables.locator("tbody tr td:nth-child(9)").textContent();
+    assert.ok(parseFloat(ascending) <= parseFloat(descending));
+    await variables.getByRole("button", {name:"Reset order"}).click();
+    assert.equal(await coverage.getAttribute("aria-sort"), "none");
     await page.locator("#state").selectOption("pending");
     await page.getByRole("button", {name: "Reset filters"}).click();
     await page.locator("#search").fill("1300");
@@ -43,8 +54,20 @@ async function main() {
     await page.locator("#kind").selectOption("ana");
     assert.match(await page.locator("#specialTable [role=status]").textContent(), /Page 1 of/);
 
+    const comments = page.locator("#comments");
+    await comments.getByLabel("Prefix").selectOption("see note");
+    assert.match(await comments.locator("#commentTable tbody").textContent(), /IgG\(lambda\)/);
+    assert.match(await comments.locator("#commentMetrics").textContent(), /1 mappings/);
+    const commentOffset = comments.getByRole("columnheader", {name:"start", exact:true});
+    await commentOffset.getByRole("button").click();
+    assert.equal(await commentOffset.getAttribute("aria-sort"), "ascending");
+    for (const columns of await page.locator("table thead").all()) {
+      assert.equal(await columns.locator("th").count(), await columns.locator("th > button").count());
+    }
+    assert.equal(await comments.locator("td.version-before").count(), 1);
+    assert.equal(await comments.locator("td.version-final").count(), 1);
     await page.locator("#pendingSearch").fill("</script>");
-    await page.getByRole("button",{name:"Expand page"}).click();
+    await page.getByRole("button",{name:"Expand all"}).click();
     await page.locator("#pendingTable mark").first().waitFor();
     assert.match(await page.locator("#pendingTable mark").first().textContent(), /<\/script>/);
     assert.equal(await page.locator("img").count(), 0);
