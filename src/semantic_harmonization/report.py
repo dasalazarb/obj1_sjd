@@ -1,6 +1,7 @@
 """Write private reporting tables and render their offline explorer."""
 from pathlib import Path
 import os
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -11,6 +12,7 @@ from .application import write_parquet
 from .analytic_representation import READINESS
 from .closure_audit import COMMENT, COMMENT_SUMMARY, DERIVED, HISTORICAL_WORK, MATERIALIZATION, REGRESSION
 from .effective_values import AUDIT as EFFECTIVE_AUDIT, SUMMARY as EFFECTIVE_SUMMARY
+from .inference_audit import SMOKE_AUDIT, SMOKE_SUMMARY
 from .report_progress import compare_runs
 from .schemas import FACTS, SEMANTIC, STR, INT, BOOL
 from .settings import MODULE, serialize, write_json
@@ -46,7 +48,7 @@ WORK = pa.schema([
     ("current_structured_result", FACT_LIST), ("document_ids", pa.list_(STR)),
 ])
 ROUTES = pa.schema([
-    *[(k, STR) for k in ("mapping_id", "profile", "reason", "final_disposition", "extraction_status", "contribution_status")],
+    *[(k, STR) for k in ("mapping_id", "profile", "reason", "final_disposition", "extraction_status", "contribution_status", "extraction_reason_code")],
     ("send", BOOL), *[(k, INT) for k in ("relevant_segments", "resolved_segments", "residual_segments")],
     ("pending_reason_codes", pa.list_(STR)), ("residual_segment_ids", pa.list_(STR)),
     *[(k, INT) for k in ("residual_segments_m4", "facts_added_m4", "facts_removed_m4")],
@@ -137,6 +139,20 @@ def report(output: Path, cfg: dict, manifest: dict, *, target, baseline=None, ro
         path = output / f"{name}.parquet"
         pq.write_table(table, path)
         export_csv(path)
+    if model["profile_summary"] is not None:
+        archive = output / "inference_smoke_qc.zip"
+        with ZipFile(archive, "w", compression=ZIP_DEFLATED) as qc:
+            for key, name, schema in (
+                ("smoke_audit", "inference_smoke_audit", SMOKE_AUDIT),
+                ("profile_summary", "inference_profile_summary", SMOKE_SUMMARY),
+            ):
+                path = output / f"{name}.parquet"
+                if target.qc != output:
+                    write_parquet(path, model[key], schema)
+                    export_csv(path)
+                for artifact in (path, path.with_suffix(".csv"), path.with_suffix(".csv.schema.json")):
+                    qc.write(artifact, artifact.name)
+        archive.chmod(0o600)
     write_json(output / "progress_summary.json", model["summary"])
     render(output, model)
     return model

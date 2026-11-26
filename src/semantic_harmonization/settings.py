@@ -58,6 +58,18 @@ def merge(base: dict, overrides: dict) -> dict:
     return base
 
 
+def inference_mode(cfg: dict) -> str:
+    mode = cfg["model"].get("inference_mode", "auto")
+    if mode not in ("auto", "disabled"):
+        raise ValueError("model.inference_mode must be auto or disabled")
+    return mode
+
+
+def inference_contract(cfg: dict) -> dict:
+    """Keep proposal compatibility independent of the decision to run inference."""
+    return {key: value for key, value in cfg["model"].items() if key != "inference_mode"}
+
+
 def pipeline_config(root: Path = ROOT) -> dict:
     """Load repository-owned YAML and resolve paths independently of the caller."""
     root = Path(os.path.abspath(root))
@@ -68,6 +80,7 @@ def pipeline_config(root: Path = ROOT) -> dict:
     local = dirs / "local.yaml"
     if local.is_file():
         merge(cfg, read_yaml(local))
+    inference_mode(cfg)
     paths = cfg["paths"]
     obj1 = Path(os.path.abspath(root / paths["obj1_root"])) if paths["obj1_root"] else root
     if not (obj1 / "src" / "block_A" / "10_build_integrated_longitudinal_dataset.py").is_file():

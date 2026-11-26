@@ -5,7 +5,7 @@ from collections import defaultdict
 
 from .report_sources import INPUTS, grain
 from .semantic_facts import canonical
-from .settings import digest
+from .settings import digest, inference_contract
 
 
 def incoming_reuse(references, inputs, rows, lines, cfg, resources, knowledge, retrieval):
@@ -20,14 +20,14 @@ def incoming_reuse(references, inputs, rows, lines, cfg, resources, knowledge, r
             occurrence[line["mapping_id"]].append(line)
     identity_fields = ("variable", "concept", "family", "raw_type", "raw_json", "context_json")
     document_fields = ("doc_id", "rank", "snippet", "source", "source_version", "lexical_rank", "dense_rank", "exact")
-    historical_cfg = {**cfg, "comparison": {key: value for key, value in cfg["comparison"].items()
+    historical_cfg = {**cfg, "model": inference_contract(cfg), "comparison": {key: value for key, value in cfg["comparison"].items()
                                            if key not in {"recent_v2_run_id", "recent_report_id"}}}
     for reference in references:
         if not reference:
             continue
         manifest = reference.manifest
         prior_identity = manifest.get("identity", {})
-        same_profile = (prior_identity.get("inference_profile") == digest(cfg["model"])
+        same_profile = (prior_identity.get("inference_profile") == digest(inference_contract(cfg))
                         or prior_identity.get("inference_profile") is None
                         and prior_identity.get("config") == digest(historical_cfg))
         if (any(manifest["inputs"].get(key) != inputs.get(key) for key in INPUTS)

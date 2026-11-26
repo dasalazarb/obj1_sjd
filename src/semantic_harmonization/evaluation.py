@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import random
 
-from .inference import extract_batch
+from .inference import EvidenceError, InferenceUnavailable, extract_batch, profile
 from .schemas import Extraction, Semantic, SemanticFact
 from .semantic_facts import canonical
 
@@ -17,7 +17,7 @@ def facts(model: Semantic) -> dict:
 
 
 def evaluate(path: Path | None, rows: list[dict], m1: dict, m4: dict, retrieved: dict, model, cfg: dict,
-             *, vocab=None, routes=None, segments=(), typed_m1=(), typed_m4=()) -> dict:
+             *, vocab=None, routes=None, segments=(), typed_m1=(), typed_m4=(), enabled_profiles=None) -> dict:
     """Evaluate held-out grouped annotations only when independently available."""
     if path is None:
         return {"status": "not performed", "reason": "No independent annotations configured"}
@@ -51,6 +51,11 @@ def evaluate(path: Path | None, rows: list[dict], m1: dict, m4: dict, retrieved:
 
     m3 = {item["mapping_id"]: m1[item["mapping_id"]].model_copy(deep=True) for item in holdout}
     query = [index[k] for k in m3 if (routes[k]["send"] if routes is not None else needs_extraction(index[k], m3[k]))]
+    unavailable = sorted({profile(row) for row in query
+                          if model is None or enabled_profiles is not None and profile(row) not in enabled_profiles})
+    if unavailable:
+        return {"status": "not performed", "reason": "Holdout requires unavailable inference",
+                "unavailable_profiles": unavailable}
     typed = {name: defaultdict(list) for name in ("M1", "M3", "M4")}
     for fact in typed_m1:
         typed["M1"][fact.mapping_id].append(fact)
@@ -63,12 +68,19 @@ def evaluate(path: Path | None, rows: list[dict], m1: dict, m4: dict, retrieved:
     no_context = {row["mapping_id"]: [] for row in query}
     batch = cfg["model"]["batch_size"]
     for start in range(0, len(query), batch):
-        for row in extract_batch(model, query[start:start + batch], no_context, cfg["model"]["max_validation_retries"], cfg=cfg, vocab=vocab):
+        try:
+            results = extract_batch(model, query[start:start + batch], no_context,
+                                    cfg["model"]["max_validation_retries"], cfg=cfg, vocab=vocab)
+        except InferenceUnavailable:
+            return {"status": "not performed", "reason": "Inference unavailable during holdout", "engine_failed": True}
+        if any(row["status"] == "timeout" for row in results):
+            return {"status": "not performed", "reason": "Inference unavailable during holdout"}
+        for row in results:
             k = row["mapping_id"]
             try:
                 additions = apply_extraction(m3[k], Extraction.model_validate({"findings": row["findings"]}),
                                              index[k], cfg["prompts"]["version"])
-            except ValueError:
+            except EvidenceError:
                 continue
             typed["M3"][k].extend(additions)
             typed["M3"][k].extend(SemanticFact.model_validate(fact) for fact in row["facts"])

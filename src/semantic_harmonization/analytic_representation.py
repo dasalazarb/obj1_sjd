@@ -104,7 +104,7 @@ def related_observations(observations):
             representatives[key] = next(row for row in rows if row["variable"].endswith("__text"))
     return representatives
 
-def materialize(analytic, out, master, observations, facts, features, variables, wide=None) -> dict:
+def materialize(analytic, out, master, observations, facts, features, variables, wide=None):
     """Write analysis-ready links without spreading facts to different visits."""
     by_mapping, profiles, observation_groups = defaultdict(list), defaultdict(list), defaultdict(list)
     for fact in facts:
@@ -227,6 +227,14 @@ def materialize(analytic, out, master, observations, facts, features, variables,
     write_parquet(analytic / "analytical_representation_manifest.parquet", entries, MANIFEST)
     write_parquet(out / "feature_role_coverage.parquet", entries, MANIFEST)
     write_parquet(analytic / "feature_temporal_coverage.parquet", temporal, TEMPORAL)
+    summary = dict(observations=len(view), roles=dict(Counter(row["role"] for row in entries)),
+                observation_status=dict(Counter(row["observation_status"] for row in view)),
+                as_of_observations=sum(bool(row["as_of_fact_ids"]) for row in view))
+    return summary, entries, temporal, baseline
+
+
+def write_readiness(out, entries, temporal, baseline):
+    """Attach downstream profile evidence to already validated candidate features."""
     entry_by_name = {entry["feature_name"]: entry for entry in entries}
     readiness = []
     profile = out / "study_inputs/pharma/00_pharma_semantic_feature_profile.parquet"
@@ -248,6 +256,3 @@ def materialize(analytic, out, master, observations, facts, features, variables,
                     encoding=evidence.get("encoding"), reason=reason, model_consumption="not run", baseline_episodes=baseline[timing["feature_name"]],
                     distinct_values=entry["distinct_values"]))
     write_parquet(out / "downstream_feature_readiness.parquet", readiness, READINESS)
-    return dict(observations=len(view), roles=dict(Counter(row["role"] for row in entries)),
-                observation_status=dict(Counter(row["observation_status"] for row in view)),
-                as_of_observations=sum(bool(row["as_of_fact_ids"]) for row in view))

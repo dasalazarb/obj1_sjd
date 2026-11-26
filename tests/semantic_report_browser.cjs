@@ -82,6 +82,19 @@ async function main() {
     const commentOffset = comments.getByRole("columnheader", {name:"start", exact:true});
     await commentOffset.getByRole("button").click();
     assert.equal(await commentOffset.getAttribute("aria-sort"), "ascending");
+    const inference = page.locator("#inference");
+    assert.ok(await inference.isVisible());
+    assert.match(await inference.locator("#inferenceProfiles tbody").textContent(), /PASS/);
+    await inference.getByLabel("Profile").selectOption("finding");
+    await inference.getByLabel("Search smoke attempts").fill("timed");
+    const smoke = inference.locator("#smokeAttempts");
+    assert.match(await smoke.getByRole("status").textContent(), /1 rows/);
+    assert.match(await smoke.locator("tbody").textContent(), /cryoglobulin_timed/);
+    const attempt = smoke.getByRole("columnheader", {name:"attempt", exact:true});
+    await attempt.getByRole("button").click();
+    assert.equal(await attempt.getAttribute("aria-sort"), "ascending");
+    await attempt.getByRole("button").click();
+    assert.equal(await attempt.getAttribute("aria-sort"), "descending");
     for (const columns of await page.locator("table thead").all()) {
       assert.equal(await columns.locator("th").count(), await columns.locator("th > button").count());
     }

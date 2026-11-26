@@ -336,4 +336,6 @@ class MorphologyExtraction(Strict):
     candidates: list[MorphologyProposal]
 
 
-EXTRACTIONS = EXTRACTIONS.append(pa.field("contribution_status", STR)).append(pa.field("facts", pa.list_(pa.struct(FACTS))))
+EXTRACTIONS = (EXTRACTIONS.append(pa.field("contribution_status", STR))
+               .append(pa.field("facts", pa.list_(pa.struct(FACTS))))
+               .append(pa.field("reason_code", STR)))

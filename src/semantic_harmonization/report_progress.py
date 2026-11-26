@@ -35,6 +35,9 @@ REASONS = {
     "hla_resolution_unavailable": ("inventory/metadata", "Check whether higher resolution was actually reported.", "The HLA source supplies a placeholder or the allele could not be verified."),
     "context_limit": ("inference", "Review the recorded prompt context budget for this source.", "The LLM extraction reached its recorded context limit."),
     "invalid_schema": ("inference", "Review the recorded extraction schema and prompt.", "The LLM extraction failed recorded schema validation."),
+    "profile_disabled": ("inference", "Review the profile smoke audit.", "The profile failed a required smoke case."),
+    "model_unavailable": ("inference", "Check the local inference engine.", "The inference engine was unavailable."),
+    "not_run": ("inference", "Review the configured inference mode.", "This mapping was eligible for model inference and was not submitted."),
     "unsupported_evidence": ("inference", "Review the extraction citations against the source segment.", "The LLM response failed recorded evidence validation."),
     "conflict": ("inference", "Review the recorded conflicting extraction against the source.", "The validated proposal was not incorporated because it conflicted with existing facts."),
     "insufficient_artifacts": ("comparison", "Recover the missing published reporting artifacts.", "Evidence needed to evaluate this work was unavailable."),
@@ -42,7 +45,8 @@ REASONS = {
     "not_materialized": ("materialization", "Review observation linkage in analytic_representation.py.", "Final facts have eligible episode-linked observations but the candidate is missing some expected fact links."),
     "reason_not_recorded": ("unknown", "Review the original and the final evidence for this field.", "No individual cause was recorded."),
 }
-FAILED_LLM = {"context_limit", "invalid_schema", "unsupported_evidence", "conflict", "timeout", "empty_response"}
+FAILED_LLM = {"context_limit", "invalid_schema", "unsupported_evidence", "conflict", "timeout", "empty_response",
+              "profile_disabled", "model_unavailable", "not_run"}
 COVERAGE_ROLES = {"patient_result", "historical_reference"}
 MEANING_FIELDS = tuple(name for name in Semantic.model_fields if name not in {"strategy", "evidence", "interpretation_note"})
 IDENTITY_COLUMNS = ("mapping_id", "variable", "concept", "family", "raw_type", "raw_json", "context_json")
@@ -418,6 +422,26 @@ def study_impact(target, baseline, previous, cfg, baseline_scope, previous_scope
     return sorted(rows, key=lambda row: (("Original", "V1", "Previous V2", "Final V2").index(row["version"]),
                                          row.get("study") or "", row.get("feature") or ""))
 
+def selector_blockers(summary):
+    """Gate production selection on complete comparison and validated materialization."""
+    blockers = []
+    losses = summary["regression_counts"].get("unexplained_removal", 0)
+    if losses:
+        blockers.append(f"{losses} unexplained clinical fact removals")
+    unavailable = [name for name, status in summary["assessment"].items() if status != "paired"]
+    if unavailable:
+        blockers.append("comparison unavailable for " + ", ".join(unavailable))
+    if summary.get("missing_materialization_links"):
+        blockers.append(f'{summary["missing_materialization_links"]} facts with missing observation links')
+    if summary.get("frozen_work") is None:
+        blockers.append("frozen historical work unavailable")
+    effective = summary.get("effective_values") or {}
+    if not effective or effective.get("integrity_failures") or effective.get("new_nulls"):
+        blockers.append("effective value integrity unavailable")
+    return blockers
+
+
+
 def compare_runs(target, baseline, cfg, *, routes=None, previous=None, recent=None, frozen=None):
     """Build the shared report model from staged or verified published runs."""
     inventory_v2 = target.rows("variable_inventory.csv")
@@ -434,7 +458,7 @@ def compare_runs(target, baseline, cfg, *, routes=None, previous=None, recent=No
     if routes is None:
         routes = {r["mapping_id"]: r for r in target.rows("mapping_routing.parquet") or ()}
     extractions = {r["mapping_id"]: r for r in target.rows("llm_extractions.parquet", ("mapping_id", "status"),
-                                                         optional_columns=("contribution_status",)) or ()}
+                                                         optional_columns=("contribution_status", "reason_code"),) or ()}
     retrieval = grouped(target.rows("retrieval_trace.parquet", ("mapping_id", "doc_id"),
                                    optional_columns=("source", "source_version", "rank")), new)
     new_features, current_features, new_candidate, new_links, new_wide_known = materialization(
@@ -480,6 +504,8 @@ def compare_runs(target, baseline, cfg, *, routes=None, previous=None, recent=No
     previous_pairs, previous_facts, previous_scope = reference_mappings(previous)
     recent_pairs, recent_facts, recent_scope = reference_mappings(recent)
     effective_audit = target.rows("effective_value_audit.parquet")
+    smoke_audit = target.rows("inference_smoke_audit.parquet")
+    profile_summary = target.rows("inference_profile_summary.parquet")
     effective_variables = target.rows("effective_variable_summary.parquet")
     effective_families = target.rows("effective_family_summary.parquet")
     effective_by_mapping = grouped(effective_audit, new)
@@ -608,6 +634,7 @@ def compare_runs(target, baseline, cfg, *, routes=None, previous=None, recent=No
                 "profile", "reason", "send", "relevant_segments", "resolved_segments", "residual_segments")},
                                      final_disposition=result["final_disposition"], pending_reason_codes=result["pending_reason_codes"],
                                      extraction_status=extraction.get("status"), contribution_status=extraction.get("contribution_status"),
+                                     extraction_reason_code=extraction.get("reason_code"),
                                      residual_segment_ids=route.get("residual_segment_ids"),
                                      residual_segments_m4=sum(not supported or bool(gaps) for supported, gaps in after_spans.values())
                                      if segments is not None and typed_final is not None else None,
@@ -686,6 +713,12 @@ def compare_runs(target, baseline, cfg, *, routes=None, previous=None, recent=No
         "Previous V2": previous_scope,
         "Recent V2": recent_scope,
     }
+    summary["technical_integrity"] = validation.get("technical_integrity")
+    remaining = sum(summary["work_states"][state] for state in ("partial", "pending", "not_assessable"))
+    summary["semantic_completeness"] = {"status": "incomplete" if remaining else "complete_for_assessed_work",
+                                        "remaining_work_items": remaining}
+    blockers = selector_blockers(summary)
+    summary["downstream_activation"] = {"status": "retained" if blockers else "eligible", "blockers": blockers}
     resources = (target.json("resources_manifest.json") or {}).get("resources", {})
     legacy_counts = {name: [r for r in target.rows(f"{name}.csv") or ()
                             if not r.get("variable") or allowed(r["variable"], cfg)]
@@ -693,7 +726,7 @@ def compare_runs(target, baseline, cfg, *, routes=None, previous=None, recent=No
     provenance = {key: {k: run.manifest.get(k) for k in ("run_id", "started_at", "completed_at", "commit", "schema_version",
                                                          "inputs", "model", "prompt")} if run else None
                   for key, run in (("v1", baseline), ("previous_v2", previous), ("recent_v2", recent), ("v2", target))}
-    return clean(dict(effective_audit=effective_audit, effective_variables=effective_variables,
+    return clean(dict(smoke_audit=smoke_audit, profile_summary=profile_summary, effective_audit=effective_audit, effective_variables=effective_variables,
                       effective_families=effective_families, mappings=maps, work=work, variables=variables, families=families, summary=summary, routes=stage_routes,
                       strategies=[dict(strategy=k, **v) for k,v in sorted(strategy_counts.items())], derived=derived,
                       comments=comments, comment_summary=comment_summary(comments, new_lines),

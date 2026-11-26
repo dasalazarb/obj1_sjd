@@ -14,7 +14,7 @@ import pyarrow.parquet as pq
 import pytest
 from openpyxl import Workbook
 
-from src.semantic_harmonization.inference import supports, validate_extraction
+from src.semantic_harmonization.inference import LocalModel, profile, supports, validate_extraction
 from src.semantic_harmonization.inventory import CONTEXT_FIELDS, route
 from src.semantic_harmonization.parsers import new_finding, parse
 from src.semantic_harmonization.rag import CODEBOOK_FIELDS
@@ -137,8 +137,9 @@ class Model:
     def __init__(self, cfg):
         self.cfg = cfg
 
-    def smoke(self):
+    def smoke(self, fixtures=None):
         self.__class__.calls += 1
+        return SmokeModel(self.cfg).smoke(fixtures)
 
     def messages(self, row, retrieved, retry):
         return row, retrieved
@@ -1059,8 +1060,11 @@ def test_compatible_sealed_residual_can_be_revalidated_on_cpu(tmp_path, cfg):
     new_analytic, new_qc = run(cfg, encoder=Encoder(), model_factory=no_inference, resource_verify=lambda _: resources)
     assert new_analytic != analytic
     summary = json.loads((new_qc / "validation_summary.json").read_text())
-    assert summary["inference"] == dict(model_initialized=False, revalidated_historical_mappings=1,
-                                        accepted_historical_facts=1, fresh_residual_mappings=0)
+    inference = summary["inference"]
+    assert not inference["model_initialized"]
+    assert inference["status"] == "not_run"
+    assert inference["revalidated_historical_mappings"] == inference["accepted_historical_facts"] == 1
+    assert inference["fresh_residual_mappings"] == 0
     audit = pq.read_table(new_qc / "effective_value_audit.parquet").to_pylist()
     assert any(ev["reference_run_id"] == qc.name for row in audit for ev in row["evidence"])
 
@@ -1091,3 +1095,394 @@ def test_model_failures_leave_literal_effective_value(cfg, answer, status):
     result = choose_effective(pa.scalar(raw), pa.string(), row | semantic.model_dump(), parts, facts, {},
                               cfg["normalization"])
     assert result.origin in {"original_fallback", "original_partial"} and result.value is None
+
+
+class SmokeModel(LocalModel):
+    """Exercise the production smoke validators with a synthetic engine."""
+
+    def __init__(self, cfg, faults=None, *, fatal_on_batch=False):
+        self.cfg = cfg
+        self.faults = faults or {}
+        self.fatal_on_batch = fatal_on_batch
+        self.submitted = []
+        self.attempted = []
+
+    def messages(self, row, retrieved, retry=False):
+        return row, retrieved, retry
+
+    def chat(self, messages, active="finding"):
+        from src.semantic_harmonization.inference import InferenceUnavailable
+
+        self.submitted.append(active)
+        if self.fatal_on_batch:
+            raise InferenceUnavailable("synthetic engine failure")
+        return super().chat(messages, active)
+
+    def chat_completions(self, messages, active):
+        from src.semantic_harmonization.inference import (
+            Completion, EvidenceError, PROFILES, eligible_segments, literal_profile_value, validate_profile,
+        )
+        from src.semantic_harmonization.parsers import narrative, parse_segment
+        from src.semantic_harmonization.semantic_facts import part_facts
+
+        completions = []
+        for row, retrieved, retry in messages:
+            raw = json.loads(row["raw_json"])
+            parts = eligible_segments(row)
+            if active == "finding":
+                values = [item.model_dump() for part in parts for item in narrative(part.text, row["family"])]
+                if raw == "A faint lambda band was detected.":
+                    values = [new_finding("light_chain", "faint lambda", light_chain="lambda",
+                                          intensity_descriptor="faint").model_dump()]
+                field = "findings"
+            else:
+                values = []
+                field = "candidates"
+                for part in parts:
+                    parsed = parse_segment(row, self.cfg, VOCAB, literal_profile_value(part.text.strip()),
+                                           part.source_field, part.role)
+                    for fact in part_facts(row, part, parsed, self.cfg["normalization"]["version"]):
+                        if fact.fact_type != PROFILES[active][1]:
+                            continue
+                        payload = fact.payload.model_dump()
+                        if active == "hla":
+                            for name in ("lookup_locus", "normalized_report", "group", "ipd_match", "allele"):
+                                payload[name] = None
+                        candidate = dict(segment_id=part.segment_id, start=part.start, end=part.end, quote=part.text,
+                                         document_ids=[], payload=payload)
+                        try:
+                            validate_profile(serialize({field: [candidate]}), row, retrieved, self.cfg, VOCAB)
+                        except EvidenceError:
+                            continue
+                        values.append(candidate)
+            if "mapping_id" not in row:
+                self.attempted.append((active, raw, retry))
+                fault = self.faults.get((active, raw), self.faults.get(active))
+                if fault:
+                    changed = fault(field, values, retry)
+                    if changed is not None:
+                        completions.append(changed)
+                        continue
+            completions.append(Completion(serialize({field: values}), "stop", True))
+        return completions
+
+
+def empty_smoke(field, values, retry):
+    from src.semantic_harmonization.inference import Completion
+
+    return Completion("", "stop", False)
+
+
+def test_all_smoke_cases_pass_with_literal_hla_and_abstention(cfg):
+    model = SmokeModel(cfg)
+    result = model.smoke()
+    assert result.model_available
+    assert {row.status for row in result.profiles.values()} == {"passed"}
+    assert len(result.audit) == 11
+    assert all(row["fixture_valid"] and row["attempt"] == 1 for row in result.audit)
+    assert sum(row["abstention_passed"] is True for row in result.audit) == 5
+    assert any(row["case_id"] == "hla_literal" and row["accepted_count"] == 1 for row in result.audit)
+
+
+@pytest.mark.parametrize("failure,case,attempts", [
+    ("invalid_schema", "positive", 2), ("unsupported_evidence", "positive", 2),
+    ("missing_expected_fact", "positive", 2), ("unexpected_fact", "positive", 2),
+    ("failed_abstention", "abstention", 2), ("truncated_response", "positive", 2),
+    ("inference_runtime_error", "positive", 2), ("empty_response", "positive", 1),
+])
+def test_smoke_attempt_categories_and_bounded_retry(cfg, failure, case, attempts):
+    from src.semantic_harmonization.inference import Completion
+
+    def fault(field, values, retry):
+        if failure == "inference_runtime_error":
+            raise TimeoutError
+        if failure == "empty_response":
+            return None if retry else empty_smoke(field, values, retry)
+        if failure == "invalid_schema":
+            return Completion("{", "stop", True)
+        if failure == "truncated_response":
+            return Completion(serialize({field: values}), "length", True)
+        if failure == "unsupported_evidence":
+            values[0]["quote"] = "Unsupported synthetic citation"
+        elif failure == "missing_expected_fact":
+            values.pop()
+        elif failure == "unexpected_fact":
+            values.append(values[0])
+        else:
+            values = [new_finding("cryoglobulin", "not performed").model_dump()]
+        return Completion(serialize({field: values}), "stop", True)
+
+    raw, case_id = (("not performed", "cryoglobulin_not_performed") if case == "abstention" else
+                    ("negative at 24h, positive at 7d", "cryoglobulin_timed"))
+    result = SmokeModel(cfg, {("finding", raw): fault}).smoke()
+    bad = [row for row in result.audit if row["reason_code"]]
+    assert len(bad) == attempts
+    assert [(row["case_id"], row["attempt"], row["reason_code"]) for row in bad] == [
+        (case_id, i, failure) for i in range(1, attempts + 1)]
+    assert {row.status for name, row in result.profiles.items() if name != "finding"} == {"passed"}
+    assert result.profiles["finding"].status == ("disabled" if attempts == 2 else "passed")
+    if failure == "truncated_response":
+        assert all(row["finish_reason"] == "length" and row["has_final_channel"] and row["accepted_count"] == 0
+                   for row in bad)
+    if case == "abstention":
+        assert all(row["abstention_passed"] is False for row in bad)
+
+
+ANA_NARRATIVE = "lab__ana_hep_2_substrate_igg__antinuclear_antibody_ana_hep_2_substrate_comment_blood__text"
+CBC_MORPHOLOGY = "lab__cbc_diff__anisocytosis_blood__text"
+
+
+def with_profile_residuals(tmp_path, cfg):
+    master, resources = synthetic(tmp_path, cfg)
+    master[ANA_NARRATIVE] = ["  SEE BELOW | IgG abnormal  ", "", None]
+    master[CBC_MORPHOLOGY] = ["Morphology: few", None, "   "]
+    master["lab__hla_a__text"] = ["99", "A*99", None]
+    master["lab__cryoglobulins__text"] = ["negative at 24h, positive at 7d | currently indeterminate", None, None]
+    master.to_parquet(cfg["paths"]["integrated"], index=False)
+    return resources
+
+
+@pytest.mark.parametrize("failed", [(), ("ana_narrative",), ("hla",), ("finding",),
+                                     ("finding", "ana", "ana_narrative", "hla", "cbc_morphology")])
+def test_profile_gating_seals_lossless_candidate_and_audit(tmp_path, cfg, failed):
+    from zipfile import ZipFile
+
+    from src.semantic_harmonization.effective_values import EFFECTIVE
+    from src.semantic_harmonization.report_existing import generate
+    from src.semantic_harmonization.run_pipeline import comparative_root
+
+    resources = with_profile_residuals(tmp_path, cfg)
+    def timeout(*args):
+        raise TimeoutError
+
+    faults = {name: timeout if name == "ana_narrative" else empty_smoke for name in failed if name != "finding"}
+    if "finding" in failed:
+        faults["finding", "negative at 24h, positive at 7d"] = empty_smoke
+    model = SmokeModel(cfg, faults)
+    analytic, qc = run(cfg, encoder=Encoder(), model_factory=lambda _: model, resource_verify=lambda _: resources)
+    original, effective = map(pq.read_table, (cfg["paths"]["integrated"], analytic / EFFECTIVE))
+    assert original.schema.equals(effective.schema, check_metadata=True)
+    for name in [*KEYS, ANA_NARRATIVE, CBC_MORPHOLOGY, "lab__hla_a__text", "lab__cryoglobulins__text",
+                 "lab__immunofixation__text", "lab__anti_ro60__text", "spine__sjogrens_class_patient_values"]:
+        assert effective[name].equals(original[name])
+    assert not set(model.submitted) & set(failed)
+    assert set(model.submitted) == {"finding", "ana_narrative", "cbc_morphology"} - set(failed)
+    extractions = pq.read_table(qc / "llm_extractions.parquet").to_pylist()
+    mappings = {row["mapping_id"]: row for row in pq.read_table(qc / "unique_values.parquet").to_pylist()}
+    assert len(extractions) == len({row["mapping_id"] for row in extractions})
+    for item in extractions:
+        active = profile(mappings[item["mapping_id"]])
+        if active in failed:
+            assert item["status"] == "profile_disabled"
+            assert item["reason_code"] == ("inference_runtime_error" if active == "ana_narrative" else "empty_response")
+            assert not (item["findings"] or item["facts"])
+    facts = pq.read_table(qc / "semantic_facts.parquet").to_pylist()
+    hla = [f["hla_result"] for f in facts if f["fact_type"] == "hla_result"]
+    assert {item["token"] for item in hla} == {"99", "A*99"}
+    assert all(item["allele"] is None and item["ipd_match"] == "resource_unavailable" for item in hla)
+    assert {f["cryoglobulin_finding"]["incubation_hours"] for f in facts if f["fact_type"] == "cryoglobulin_finding"} == {24, 168}
+    assert any(f["fact_type"] == "morphology_result" and f["strategy"] == "llm_rag"
+               for f in facts) == ("cbc_morphology" not in failed)
+    assert any(f["fact_type"] == "immunofixation_finding" and f["strategy"] == "llm_rag"
+               for f in facts) == ("finding" not in failed)
+    validation = json.loads((qc / "validation_summary.json").read_text())
+    assert validation["technical_integrity"] == "passed"
+    assert validation["semantic_completeness"]["status"] == "incomplete"
+    assert validation["downstream_activation"]["status"] == "retained"
+    assert validation["inference"]["status"] == ("degraded" if failed else "available")
+    assert validation["effective_values"]["new_nulls"] == 0
+    assert set(validation["inference"]["profile_summary"]) == {"finding", "ana", "ana_narrative", "hla", "cbc_morphology"}
+    for name in failed:
+        assert validation["inference"]["profile_summary"][name]["status"] == "disabled"
+        assert validation["inference"]["profile_summary"][name]["sent_to_model_mappings"] == 0
+    report_dir, _ = generate(cfg, {"target_run_id": qc.name}, comparative_root(cfg))
+    names = ["inference_smoke_audit", "inference_profile_summary"]
+    for directory in (qc, report_dir):
+        with ZipFile(directory / "inference_smoke_qc.zip") as archive:
+            assert set(archive.namelist()) == {name + suffix for name in names
+                                              for suffix in (".parquet", ".csv", ".csv.schema.json")}
+            for name in names:
+                schema = json.loads(archive.read(name + ".csv.schema.json"))
+                assert schema["sha256"] == {file: file_hash(directory / file) for file in schema["sha256"]}
+    assert not (comparative_root(cfg) / "current_v2.json").exists()
+    if failed and len(failed) == 5:
+        healthy = SmokeModel(cfg)
+        next_analytic, next_qc = run(cfg, encoder=Encoder(), model_factory=lambda _: healthy,
+                                    resource_verify=lambda _: resources)
+        assert healthy.submitted and next_analytic != analytic and next_qc != qc
+        assert verify_source(qc.name, analytic_root=analytic.parent, report_root=qc.parent).require("effective_integrated").is_file()
+
+
+@pytest.mark.parametrize("where", ["initialization", "smoke", "extraction"])
+def test_fatal_optional_inference_leaves_effective_and_is_never_reused(tmp_path, cfg, where):
+    from src.semantic_harmonization.inference import InferenceUnavailable
+
+    resources = with_profile_residuals(tmp_path, cfg)
+
+    def fatal(*args):
+        raise InferenceUnavailable("synthetic engine failure")
+
+    model = SmokeModel(cfg, {"finding": fatal} if where == "smoke" else {}, fatal_on_batch=where == "extraction")
+    factory = fatal if where == "initialization" else lambda _: model
+    _, qc = run(cfg, encoder=Encoder(), model_factory=factory, resource_verify=lambda _: resources)
+    assert len(model.submitted) == (1 if where == "extraction" else 0)
+    assert len(model.attempted) == {"initialization": 0, "smoke": 1, "extraction": 11}[where]
+    rows = pq.read_table(qc / "llm_extractions.parquet").to_pylist()
+    assert rows and all(row["status"] == "model_unavailable" and not (row["findings"] or row["facts"]) for row in rows)
+
+
+def test_fixture_or_unclassified_runtime_error_aborts_publication(tmp_path, cfg, monkeypatch, capsys):
+    from src.semantic_harmonization import inference
+
+    resources = with_profile_residuals(tmp_path, cfg)
+    model = SmokeModel(cfg)
+    monkeypatch.setattr(inference, "narrative", lambda *args: [])
+    with pytest.raises(ValueError, match="fixture_invalid"):
+        run(cfg, encoder=Encoder(), model_factory=lambda _: model, resource_verify=lambda _: resources)
+    assert '"case_id":"immunofixation_negation"' in capsys.readouterr().out
+    assert not model.attempted
+    monkeypatch.undo()
+
+    def fail(_):
+        raise RuntimeError("unclassified fault")
+
+    with pytest.raises(RuntimeError, match="unclassified fault"):
+        run(cfg, encoder=Encoder(), model_factory=fail, resource_verify=lambda _: resources)
+    assert not list(Path(cfg["paths"]["analytic"]).iterdir())
+
+
+def test_disabled_inference_withholds_model_dependent_holdout_and_rejects_tampered_history(tmp_path, cfg):
+    from src.semantic_harmonization.run_pipeline import build_identity, inputs_for
+
+    _, resources = synthetic(tmp_path, cfg)
+    auto_identity = build_identity(cfg, resources, inputs_for(cfg))
+    options = dict(encoder=Encoder(), resource_verify=lambda _: resources)
+    _, old = run(cfg, model_factory=Model, **options)
+    dictionary = pq.read_table(old / "unique_values.parquet").to_pylist()
+    annotated = [row for row in dictionary if row["family"] == "immunofixation" and row["raw_json"] != "null"]
+    gold = tmp_path / "gold.jsonl"
+    gold.write_text("".join(serialize(dict(mapping_id=row["mapping_id"], group=str(i), family="immunofixation",
+                                           expected={})) + "\n" for i, row in enumerate(annotated)))
+    cfg["paths"]["gold"] = str(gold)
+    cfg["model"]["inference_mode"] = "disabled"
+    disabled_identity = build_identity(cfg, resources, inputs_for(cfg))
+    assert auto_identity["inference_profile"] == disabled_identity["inference_profile"]
+    assert auto_identity["inference_mode"] != disabled_identity["inference_mode"]
+
+    def no_model(_):
+        pytest.fail("disabled inference instantiated a model")
+
+    cfg["comparison"]["recent_v2_run_id"] = old.name
+    cfg["comparison"]["recent_report_id"] = None
+    _, qc = run(cfg, model_factory=no_model, **options)
+    summary = json.loads((qc / "validation_summary.json").read_text())
+    assert summary["clinical_evaluation"]["status"] == "not performed"
+    assert summary["clinical_evaluation"]["unavailable_profiles"] == ["finding"]
+    assert {p["status"] for p in summary["inference"]["profile_summary"].values()} == {"not_run"}
+    assert summary["inference"]["revalidated_historical_mappings"] == 1
+    with (old / "llm_extractions.parquet").open("ab") as stream:
+        stream.write(b"synthetic corruption")
+    with pytest.raises(ValueError, match="checksums differ"):
+        run(cfg, model_factory=no_model, **options)
+
+
+def test_preflight_checks_resource_hashes_without_gpu(tmp_path, cfg, monkeypatch, capsys):
+    from src.semantic_harmonization import preflight, resources as local_resources
+
+    synthetic(tmp_path, cfg)
+    paths = cfg["paths"]
+    for name in ("gpt_oss", "embedding_model"):
+        path = tmp_path / name
+        path.write_text("synthetic resource fingerprint fixture")
+        paths[name] = str(path)
+    harmony = Path(paths["knowledge_dir"]) / "harmony" / "o200k_base.tiktoken"
+    harmony.parent.mkdir(parents=True)
+    harmony.write_text("synthetic tokenizer fingerprint fixture")
+    cfg["resources"]["harmony"]["sha256"] = file_hash(harmony)
+    manifest = {}
+    for resource, name in (("gpt_oss", "gpt_oss"), ("sapbert", "embedding_model"),
+                           ("codebook", "codebook"), ("pharma_registry", "pharma_registry")):
+        manifest[resource] = dict(status="available", path=paths[name],
+                                  sha256=local_resources.fingerprint(Path(paths[name]))["sha256"])
+    for name, spec in cfg["resources"]["optional"].items():
+        manifest[name] = dict(status="unavailable", path=spec["path"], version=spec["version"])
+    (harmony.parent.parent / "resources_manifest.json").write_text(serialize({"resources": manifest}))
+    monkeypatch.setattr(preflight, "load_config", lambda: cfg)
+    preflight.main()
+    assert "Semantic preflight passed." in capsys.readouterr().out
+    Path(paths["gpt_oss"]).write_text("changed fixture")
+    with pytest.raises(SystemExit, match="preflight failed"):
+        preflight.main()
+
+
+def test_incompatible_historical_proposal_stays_rejected_in_disabled_mode(tmp_path, cfg, monkeypatch):
+    from src.semantic_harmonization import run_pipeline as pipeline
+
+    _, resources = synthetic(tmp_path, cfg)
+
+    def bad_candidates(references, inputs, pending, *args):
+        bad = new_finding("anomalous_immunoglobulins", "Unrelated synthetic evidence").model_dump()
+        return {row["mapping_id"]: [("historic", dict(mapping_id=row["mapping_id"], status="validated",
+                                                    findings=[bad], facts=[]))] for row in pending}
+
+    def no_model(_):
+        pytest.fail("disabled inference instantiated a model")
+
+    cfg["model"]["inference_mode"] = "disabled"
+    monkeypatch.setattr(pipeline, "incoming_reuse", bad_candidates)
+    _, qc = run(cfg, encoder=Encoder(), model_factory=no_model, resource_verify=lambda _: resources)
+    extraction, = pq.read_table(qc / "llm_extractions.parquet").to_pylist()
+    assert extraction["status"] == "not_run" and not extraction["findings"]
+    assert extraction["reason_code"] == "inference_disabled"
+    summary = json.loads((qc / "validation_summary.json").read_text())
+    assert summary["inference"]["revalidated_historical_mappings"] == 0
+
+
+@pytest.mark.parametrize("failure", ["writing", "new_null"])
+def test_effective_write_failure_or_changed_original_blocks_publication(tmp_path, cfg, monkeypatch, failure):
+    from src.semantic_harmonization.effective_values import EFFECTIVE
+
+    resources = with_profile_residuals(tmp_path, cfg)
+    write_table = pq.write_table
+
+    def write(table, path, *args, **kwargs):
+        if Path(path).name == EFFECTIVE:
+            if failure == "writing":
+                raise OSError("synthetic write failure")
+            field = table.schema.get_field_index("lab__hla_a__text")
+            table = table.set_column(field, table.schema.field(field), pa.nulls(len(table), pa.string()))
+        write_table(table, path, *args, **kwargs)
+
+    monkeypatch.setattr(pq, "write_table", write)
+    model = SmokeModel(cfg, {"finding": empty_smoke})
+    error, match = (OSError, "synthetic write failure") if failure == "writing" else (
+        ValueError, "Effective wide changed after Parquet round-trip")
+    with pytest.raises(error, match=match):
+        run(cfg, encoder=Encoder(), model_factory=lambda _: model, resource_verify=lambda _: resources)
+    assert not list(Path(cfg["paths"]["analytic"]).iterdir())
+    assert not list(Path(cfg["paths"]["output"]).glob("*/run_manifest.json"))
+
+
+def test_cli_retains_selector_and_reports_new_run_and_report_ids(tmp_path, cfg, monkeypatch, capsys):
+    from src.semantic_harmonization import run_pipeline as pipeline
+
+    resources = with_profile_residuals(tmp_path, cfg)
+    reference = pipeline.comparative_root(cfg)
+    reference.mkdir(parents=True)
+    pointer = reference / "current_v2.json"
+    prior = serialize({"target_run_id": "a" * 64, "report_id": "b" * 64})
+    pointer.write_text(prior)
+    model = SmokeModel(cfg, {"finding": empty_smoke})
+    monkeypatch.setattr(pipeline, "load_config", lambda: cfg)
+    monkeypatch.setattr(pipeline.sys, "argv", ["run_pipeline"])
+    monkeypatch.setattr(pipeline, "run", lambda cfg: run(
+        cfg, encoder=Encoder(), model_factory=lambda _: model, resource_verify=lambda _: resources))
+    pipeline.main()
+    output = capsys.readouterr().out
+    assert pointer.read_text() == prior
+    assert "V2 selector retained (comparison unavailable" in output
+    analytic, = Path(cfg["paths"]["analytic"]).iterdir()
+    report_dir, = (p for p in reference.iterdir() if p.is_dir())
+    assert f"V2 run ID: {analytic.name}" in output
+    assert f"Comparative report ID: {report_dir.name}" in output
+    assert "Effective Parquet:" in output and "Effective CSV:" in output

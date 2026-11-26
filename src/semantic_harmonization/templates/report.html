@@ -27,7 +27,7 @@ th button{display:block;width:100%;text-align:left;border:0;padding:0;background
 <header>
 <h1>SjD | Semantic harmonization progress</h1>
 <p class="study" id="run"></p>
-<nav aria-label="Sections"><a href="#summary">Summary</a><a href="#variables">Variable explorer</a><a href="#detail">Variable detail</a><a href="#backlog">Remaining work</a><a href="#comments">Comment recovery</a><a href="#impact">Strategy &amp; version impact</a><a href="#derived">Derived &amp; downstream</a><a href="#methods">Methods</a></nav>
+<nav aria-label="Sections"><a href="#summary">Summary</a><a href="#variables">Variable explorer</a><a href="#detail">Variable detail</a><a href="#backlog">Remaining work</a><a href="#comments">Comment recovery</a><a href="#inference" id="inferenceLink" hidden>Inference</a><a href="#impact">Strategy &amp; version impact</a><a href="#derived">Derived &amp; downstream</a><a href="#methods">Methods</a></nav>
 </header>
 <main>
 <section id="summary">
@@ -81,6 +81,21 @@ th button{display:block;width:100%;text-align:left;border:0;padding:0;background
 </div>
 <div id="commentTable"></div>
 <details><summary>Counts by variable and family</summary><div id="commentSummary"></div></details>
+</section>
+<section id="inference" hidden>
+<h2>Inference smoke tests</h2>
+<div id="publicationStates" class="metrics"></div>
+<p id="activationBlockers" class="small"></p>
+<p class="small">Retained cells preserve the original value. Accepted mappings contributed verified facts. Occurrence counts are weighted by mapping frequency. Patient counts are distinct within each profile.</p>
+<div id="inferenceProfiles"></div>
+<div class="controls">
+<label>Search smoke attempts<input id="smokeSearch" type="search"></label>
+<label>Profile<select id="smokeProfile"></select></label>
+<label>Result<select id="smokeStatus"></select></label>
+<label>Reason<select id="smokeReason"></select></label>
+</div>
+<div id="smokeAttempts"></div>
+<p><a href="inference_smoke_qc.zip">Download smoke QC tables and schemas</a></p>
 </section>
 <section id="impact"><h2>Strategy &amp; version impact</h2><p id="increment" class="small"></p><div id="strategyTable"></div>
 <div class="controls"><label>Specialized view<select id="kind"><option value="numeric">Numeric and censored results</option><option value="ana">ANA titers and patterns</option><option value="immunofixation">Immunofixation</option><option value="cryoglobulin">Cryoglobulin</option><option value="hla">HLA</option><option value="urine">Urinalysis</option><option value="medication">Medication</option></select></label></div>
@@ -743,9 +758,45 @@ table(get("regressionTable"),data.regressions,[...fields(["variable","reference_
   ["change",r => human(r.change),r => r.change,r => `change-${r.change.replaceAll("_","-")}`],
   ...fields(["fact_type","canonical_fact","current_fact","reason","reference_evidence","evidence","materialization_effect","occurrences"])]);
 show("frozenTable",data.historical_work,["variable","kind","state_v1","state_previous_v2","state_final_v2","reconciliation","evidence"]);
+if (data.profile_summary) {
+  get("inferenceLink").hidden = false;
+  get("inference").hidden = false;
+  card("publicationStates","Inference",human(summary.inference.status));
+  card("publicationStates","Technical integrity",human(summary.technical_integrity));
+  card("publicationStates","Semantic completeness",human(summary.semantic_completeness.status));
+  card("publicationStates","Downstream activation",human(summary.downstream_activation.status));
+  get("activationBlockers").textContent = summary.downstream_activation.blockers.join(" · ");
+  const smokeLabel = {passed:"PASS",disabled:"DISABLED",not_run:"NOT RUN",failed:"FAIL"};
+  table(get("inferenceProfiles"),data.profile_summary,[
+    ...fields(["profile"]),["Smoke",r => smokeLabel[r.status],r => r.status],
+    ...fields(["reason_code","cases_passed","cases_total","eligible_mappings","reused_mappings",
+               "sent_to_model_mappings","disabled_mappings","model_unavailable_mappings","not_run_mappings",
+               "accepted_mappings","fallback_mappings","retained_episode_cells","retained_source_event_cells",
+               "added_facts","eligible_patients","fallback_patients","eligible_occurrences","reused_occurrences",
+               "sent_to_model_occurrences","disabled_occurrences","model_unavailable_occurrences",
+               "not_run_occurrences","accepted_occurrences","fallback_occurrences"])
+  ]);
+  const attempts = data.smoke_audit || [];
+  const filters = [["smokeProfile","profile"],["smokeStatus","status"],["smokeReason","reason_code"]];
+  for (const [id,key] of filters)
+    options(id,[...all,...opts(attempts.map(row => row[key]).filter(Boolean))]);
+  function showSmoke() {
+    const query = get("smokeSearch").value.trim().toLocaleLowerCase();
+    const rows = attempts.filter(row => filters.every(([id,key]) => get(id).value === "all" ||
+      row[key] === get(id).value) && matches(row,query));
+    table(get("smokeAttempts"),rows,[
+      ...fields(["profile","case_id","attempt","phase"]),["Result",r => smokeLabel[r.status],r => r.status],
+      ...fields(["reason_code","expected_count","accepted_count","abstention_passed","fixture_valid",
+                 "finish_reason","has_final_channel"])
+    ]);
+  }
+  for (const id of ["smokeSearch",...filters.map(([id]) => id)]) get(id).addEventListener("input",showSmoke);
+  showSmoke();
+}
 for (const name of ["variable_progress","family_progress","mapping_comparison","pending_work","comment_prefix_audit",
                     "comment_prefix_summary","semantic_materialization_audit","derived_rule_audit",
                     "downstream_feature_readiness","downstream_impact","regression_comparison","historical_work_crosswalk",
+                    ...(data.profile_summary ? ["inference_smoke_audit","inference_profile_summary"] : []),
                     ...(summary.effective_values ? ["effective_value_audit","effective_variable_summary","effective_family_summary"] : [])]) {
   const item = el("li", human(name));
   for (const type of ["csv","parquet"]) {

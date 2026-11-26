@@ -91,7 +91,9 @@ container=(apptainer exec --cleanenv --home "$BASE/cache/container-home:/home/sa
 "${container[@]}" -m src.semantic_harmonization.audit_cpu
 ```
 
-Tras el preflight, usa el launcher existente desde la raíz canónica y comprueba el estado final del job con `sacct`. El smoke de producción incluye el conjunto completo de hallazgos de crioglobulinas, la negación de inmunofijación, la abstención para ensayos no realizados y validación de los esquemas por perfil. El candidato requiere revisión científica antes de seleccionarlo para los estudios downstream.
+Tras el preflight, usa el launcher existente desde la raíz canónica y comprueba el estado final del job con `sacct`. El smoke de producción valida de forma independiente `finding`, ANA, ANA narrativa, HLA y morfología CBC. Cada caso que falla admite un reintento. Un perfil que falla una prueba requerida queda deshabilitado para nuevas propuestas. `finding` es compartido por inmunofijación y crioglobulinas.
+
+El reporte comparativo y `inference_smoke_qc.zip` incluyen el resultado de cada intento y los conteos por perfil. El candidato efectivo puede sellarse con cobertura incompleta si supera los controles de integridad. El reporte distingue esa integridad de la cobertura semántica y muestra los motivos que retienen `current_v2.json`. El launcher imprime el ID del run, el ID del reporte y las rutas del Parquet y CSV efectivos.
 
 ### Reporte comparativo a partir de runs publicados
 
@@ -127,6 +129,15 @@ sbatch src/semantic_harmonization/run_harmonization.sbatch
 ```
 
 El pipeline revalida propuestas selladas contra las huellas de fuente, modelo, perfil, prompt, contexto de recuperación y linaje. La revalidación de hallazgos históricos también requiere citas literales y compatibilidad con los hechos presentes. En un entorno Python compatible, `python -m src.semantic_harmonization.run_pipeline` ejecuta la misma materialización y omite GPT-OSS si las reglas y las extracciones compatibles cubren el residual. La ruta con Slurm cubre los casos en que la inferencia local sigue siendo necesaria. El log queda en `work/semantic_harmonization/job-<job_id>.log`.
+
+Con los recursos locales ya preparados, puedes ejecutar en CPU con esta opción en `configs/local.yaml` y el entorno Python compatible.
+
+```yaml
+model:
+  inference_mode: disabled
+```
+
+Ejecuta `python -m src.semantic_harmonization.preflight` y `python -m src.semantic_harmonization.run_pipeline` desde la raíz. Ese modo conserva las reglas determinísticas y vuelve a validar las propuestas históricas compatibles. El modo predeterminado `auto` intenta recuperar la inferencia en una nueva ejecución tras degradación transitoria.
 
 El reporte compara Original, V1, V2 anterior, V2 reciente y V2 final por identidad de mapping, huellas clínicas y linaje. Los IDs se fijan en `configs/pipeline.yaml`. `historical_work_crosswalk` conserva los IDs del trabajo congelado cuando se puede autenticar el reporte de referencia. Las fuentes ausentes o con distinto linaje se muestran como comparaciones no evaluables. `regression_comparison` registra ambas citas, equivalencias, restauraciones, retiros respaldados y pérdidas sin explicación. HLA distingue el token reportado, el locus de búsqueda, los grupos G/P y el grado de verificación IPD. Un prefijo compatible de IPD conserva la resolución reportada.
 

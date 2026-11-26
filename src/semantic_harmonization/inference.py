@@ -1,7 +1,10 @@
 """Offline structured GPT-OSS extraction with source-span verification."""
 from __future__ import annotations
 
+from collections import Counter
+from dataclasses import dataclass
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -21,6 +24,7 @@ PROFILES = {
     "hla": (HlaExtraction, "hla_result"),
     "cbc_morphology": (MorphologyExtraction, "morphology_result"),
 }
+HLA_COMPUTED = {"lookup_locus", "normalized_report", "group", "ipd_match", "allele"}
 ELIGIBLE_ROLES = {"patient_result", "historical_reference"}
 OBSERVED = re.compile(r"\b(?:detected|identified|observed|present|seen|demonstrated|revealed|absent|negative for)\b", re.I)
 NONRESULT = re.compile(r"\b(?:if|such as|for example|recommend|may occur|would|should|expected|will be|rule out|control)\b", re.I)
@@ -28,6 +32,49 @@ TEMPORAL_QUAL = re.compile(r"\b(previously|formerly|historical)\s+(positive|nega
 ENTITY_SPAN = re.compile(r"\b(?:(?P<intensity>faint|trace)\s+)?(?:(?P<pattern>monoclonal|oligoclonal|polyclonal)\s+)?(?:(?:free)\s+)?(?:(?P<ig>ig[gmade])(?:\s+(?P<chain>kappa|lambda))?|(?P<light>kappa|lambda))\b", re.I)
 NEGATION = re.compile(r"\b(?:no|not|without|absent|negative for)\b", re.I)
 UNCERTAINTY = re.compile(r"\b(?:possible|suspected|questionable|cannot exclude|may represent)\b", re.I)
+
+
+class EvidenceError(ValueError):
+    """An extraction claim failed source or consistency verification."""
+
+
+class InferenceUnavailable(RuntimeError):
+    """The optional engine cannot safely be used again in the current run."""
+
+
+@dataclass(frozen=True)
+class Completion:
+    answer: str | None
+    finish_reason: str | None = None
+    has_final_channel: bool | None = None
+
+
+@dataclass(frozen=True)
+class ProfileSmokeResult:
+    profile: str
+    status: str
+    reason_code: str | None
+    attempts: int
+    cases_passed: int
+    cases_total: int
+
+
+@dataclass(frozen=True)
+class SmokeResult:
+    profiles: dict[str, ProfileSmokeResult]
+    audit: list[dict]
+    model_available: bool
+
+
+def skipped_smoke(reason: str, *, status: str = "not_run") -> SmokeResult:
+    return SmokeResult({
+        name: ProfileSmokeResult(name, status, reason, 0, 0, count)
+        for name, count in (("finding", 3), *((name, 2) for name in PROFILES))
+    }, [], False)
+
+
+def empty_extraction(row, status, reason=None):
+    return dict(mapping_id=row["mapping_id"], findings=[], facts=[], status=status, reason_code=reason)
 
 
 def force_offline() -> None:
@@ -148,9 +195,9 @@ def validate_extraction(payload: str, row: dict, snippets: list[dict]) -> Extrac
     allowed = {item["doc_id"] for item in snippets}
     for finding in extracted.findings:
         if not set(finding.document_ids).issubset(allowed):
-            raise ValueError("Unknown evidence document")
+            raise EvidenceError("Unknown evidence document")
         if len(finding_segments(finding, row)) != 1:
-            raise ValueError("Finding lacked supported assertion, temporal scope or source span")
+            raise EvidenceError("Finding lacked supported assertion, temporal scope or source span")
     return extracted
 
 
@@ -166,7 +213,7 @@ def apply_extraction(semantic: Semantic, extracted: Extraction, row: dict, versi
     additions = []
     for finding in extracted.findings:
         if not finding_segments(finding, row):
-            raise ValueError("Proposed finding has no supported segment")
+            raise EvidenceError("Proposed finding has no supported segment")
         clinical = finding.model_dump(exclude={"quote", "document_ids"})
         if any(item.model_dump(exclude={"quote", "document_ids"}) == clinical for item in [*semantic.findings, *additions]):
             continue
@@ -178,7 +225,7 @@ def apply_extraction(semantic: Semantic, extracted: Extraction, row: dict, versi
                 attributes = ("assertion", "pattern", "intensity_descriptor", "percentage", "comparator")
                 if any(getattr(item, key) is not None and getattr(finding, key) is not None
                        and getattr(item, key) != getattr(finding, key) for key in attributes):
-                    raise ValueError("Proposed finding conflicts with existing evidence")
+                    raise EvidenceError("Proposed finding conflicts with existing evidence")
         additions.append(finding)
     facts = []
     for finding in additions:
@@ -207,24 +254,111 @@ def validate_profile(answer: str, row: dict, retrieved: list, cfg: dict, vocab: 
         if (part is None or not part.start <= candidate.start < candidate.end <= part.end
                 or part.text[candidate.start-part.start:candidate.end-part.start] != candidate.quote
                 or not set(candidate.document_ids) <= allowed_docs or NONRESULT.search(part.text)):
-            raise ValueError("Invalid profile evidence span")
+            raise EvidenceError("Invalid profile evidence span")
         # A bounded result label can delimit a literal value. Reparse it and
         # independently verify every asserted attribute before accepting it.
         clause = part.text.strip()
-        value = re.sub(r"^(?:current |patient )?(?:result|observed pattern|morphology|hla typing)\s*:\s*", "", clause, flags=re.I)
+        value = literal_profile_value(clause)
         if candidate.quote.strip() not in {value, clause}:
-            raise ValueError("Profile proposal omits assertion context")
+            raise EvidenceError("Profile proposal omits assertion context")
         parsed = parse_segment(row, cfg, vocab, value, part.source_field, part.role)
-        computed = {"lookup_locus", "normalized_report", "group", "ipd_match", "allele"} if kind == "hla_result" else set()
+        computed = HLA_COMPUTED if kind == "hla_result" else set()
         verified = next((item for item in part_facts(row, part, parsed, cfg["normalization"]["version"])
                          if item.fact_type == kind
                          and item.payload.model_dump(exclude=computed) == candidate.payload.model_dump(exclude=computed)
                          and all(getattr(candidate.payload, field) in (None, getattr(item.payload, field)) for field in computed)), None)
         if not verified:
-            raise ValueError("Profile proposal is unsupported")
+            raise EvidenceError("Profile proposal is unsupported")
         fact = make_fact(row, part, kind, verified.payload, "llm_rag", cfg["prompts"]["profile_version"], candidate.quote)
         accepted.append(fact.model_copy(update={"document_ids": candidate.document_ids}))
     return accepted
+
+
+def literal_profile_value(clause: str) -> str:
+    return re.sub(r"^(?:current |patient )?(?:result|observed pattern|morphology|hla typing)\s*:\s*",
+                  "", clause, flags=re.I)
+
+
+@dataclass(frozen=True)
+class SmokeCase:
+    case_id: str
+    row: dict
+    expected: list[str]
+
+
+def finding_meaning(item: Finding) -> str:
+    return serialize(item.model_dump(exclude={"quote", "document_ids"}))
+
+
+def smoke_cases(cfg):
+    """Check the deterministic side of every synthetic fixture before using the model."""
+    def row(family, concept, raw):
+        return dict(concept=concept, family=family, variable=f"lab__{concept}__text",
+                    raw_json=serialize(raw), context_json="{}")
+
+    def require(condition, active, case_id):
+        if not condition:
+            details = dict(profile=active, case_id=case_id, phase="fixture", reason_code="fixture_invalid",
+                           status="failed", attempt=0, expected_count=None, accepted_count=0, fixture_valid=False,
+                           finish_reason=None, has_final_channel=None, abstention_passed=None)
+            print("GPT-OSS smoke " + serialize(details), flush=True)
+            raise ValueError(f"GPT-OSS fixture_invalid: {case_id}")
+
+    cases = {"finding": []}
+    for case_id, family, raw, contract in (
+        ("immunofixation_negation", "immunofixation", "No anomalous immunoglobulins.",
+         [("anomalous_immunoglobulins", "absent", "unspecified", None)]),
+        ("cryoglobulin_timed", "cryoglobulin", "negative at 24h, positive at 7d",
+         [("cryoglobulin", "absent", "current", 24), ("cryoglobulin", "present", "current", 168)]),
+        ("cryoglobulin_not_performed", "cryoglobulin", "not performed", []),
+    ):
+        sample = row(family, family, raw)
+        findings = narrative(raw, family)
+        require(Counter((f.entity, f.assertion, f.temporality, f.incubation_hours) for f in findings) == Counter(contract)
+                and all(len(finding_segments(f, sample)) == 1 for f in findings)
+                and (bool(contract) or not eligible_segments(sample)), "finding", case_id)
+        cases["finding"].append(SmokeCase(case_id, sample, sorted(map(finding_meaning, findings))))
+
+    vocab = {"ucum": set(), "ipd": {}, "rxnorm": {}}
+    for active, (concept, raw, contract) in {
+        "ana": ("ana_hep2_cytoplasmic_pattern", "Positive",
+                {"compartment": "cytoplasmic", "state": "positive"}),
+        "ana_narrative": ("ana_pattern_comment", "Observed pattern: reticular",
+                          {"compartment": "cytoplasmic", "pattern": "reticular"}),
+        "hla": ("hla_a", "99", {"locus": "A", "token": "99", "nomenclature": "group", "resolution": 1,
+                                "allele": None, "group": None, "ipd_match": "resource_unavailable"}),
+        "cbc_morphology": ("cbc_diff__anisocytosis_blood", "few",
+                           {"entity": "cbc_diff__anisocytosis_blood", "descriptor": "few", "percentage": None}),
+    }.items():
+        sample = row(active, concept, raw)
+        positive, negative = f"{active}_literal", f"{active}_method_only"
+        parts = eligible_segments(sample)
+        require(len(parts) == 1, active, positive)
+        part, = parts
+        # Independently parse the fixture as written. The validator normalizes
+        # the bounded label in the source clause before verifying the answer.
+        parsed = parse_segment(sample, cfg, vocab, raw, part.source_field, part.role)
+        _, kind = PROFILES[active]
+        facts = [f for f in part_facts(sample, part, parsed, cfg["normalization"]["version"]) if f.fact_type == kind]
+        require(len(facts) == 1 and all(getattr(facts[0].payload, field) == value
+                                        for field, value in contract.items()), active, positive)
+        fact, = facts
+        payload = fact.payload.model_dump()
+        if active == "hla":
+            for field in HLA_COMPUTED:
+                payload[field] = None
+        candidate = dict(segment_id=part.segment_id, start=part.start, end=part.end, quote=part.text,
+                         document_ids=[], payload=payload)
+        try:
+            proposed = validate_profile(serialize({"candidates": [candidate]}), sample, [], cfg, vocab)
+        except (ValidationError, EvidenceError):
+            require(False, active, positive)
+        expected = sorted(map(canonical, facts))
+        require(sorted(map(canonical, proposed)) == expected, active, positive)
+        abstain = sample | {"raw_json": serialize("Method: synthetic reference only")}
+        require(not eligible_segments(abstain), active, negative)
+        cases[active] = [SmokeCase(positive, sample, expected), SmokeCase(negative, abstain, [])]
+    return cases, vocab
 
 
 class LocalModel:
@@ -234,9 +368,15 @@ class LocalModel:
         force_offline()
         os.environ["TIKTOKEN_ENCODINGS_BASE"] = str(Path(cfg["paths"]["knowledge_dir"]) / "harmony")
         from openai_harmony import HarmonyEncodingName, Role, load_harmony_encoding
+        from torch.cuda import OutOfMemoryError
         from transformers import AutoTokenizer
         from vllm import LLM, SamplingParams
         from vllm.sampling_params import StructuredOutputsParams
+        from vllm.v1.engine.exceptions import EngineDeadError
+
+        self.engine_errors = (EngineDeadError, OutOfMemoryError)
+        # The deployed engine runs in-process. Its crash dump can include scheduler token IDs.
+        logging.getLogger("vllm.logging_utils.dump_input").disabled = True
 
         self.cfg = cfg
         self.encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
@@ -244,14 +384,17 @@ class LocalModel:
         path = cfg["paths"]["gpt_oss"]
         model = cfg["model"]
         self.tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
-        self.engine = LLM(model=path, tokenizer=path, max_model_len=model["max_context_tokens"],
-                          gpu_memory_utilization=model["gpu_memory_utilization"], trust_remote_code=False,
-                          seed=model["seed"], disable_log_stats=True,
-                          dtype="bfloat16",
-                          load_format="safetensors",
-                          enforce_eager=True,
-                          tensor_parallel_size=1,
-                          disable_custom_all_reduce=True)
+        try:
+            self.engine = LLM(model=path, tokenizer=path, max_model_len=model["max_context_tokens"],
+                              gpu_memory_utilization=model["gpu_memory_utilization"], trust_remote_code=False,
+                              seed=model["seed"], disable_log_stats=True,
+                              dtype="bfloat16",
+                              load_format="safetensors",
+                              enforce_eager=True,
+                              tensor_parallel_size=1,
+                              disable_custom_all_reduce=True)
+        except (EngineDeadError, OutOfMemoryError, TimeoutError) as error:
+            raise InferenceUnavailable("Local inference engine is unavailable") from error
         schemas = {"finding": Extraction} | {family: contract[0] for family, contract in PROFILES.items()}
         self.params = {
             name: SamplingParams(temperature=model["temperature"], max_tokens=model["max_output_tokens"],
@@ -327,80 +470,106 @@ class LocalModel:
         ]
 
     def chat(self, messages: list[list[dict]], active: str = "finding") -> list[str | None]:
-        """Pass only fitted dialogues to Harmony and preserve batch alignment."""
+        """Keep the extraction interface and discard unfinished completions."""
+        return [reply.answer for reply in self.chat_completions(messages, active)]
+
+    def chat_completions(self, messages: list[list[dict]], active: str) -> list[Completion]:
+        """Pass fitted dialogues to Harmony and preserve batch alignment."""
         model = self.cfg["model"]
         available = model["max_context_tokens"] - model["max_output_tokens"]
         fitting = [i for i, prompt in enumerate(messages)
                    if len(self.tokenizer.apply_chat_template(prompt, tokenize=True, add_generation_prompt=True, return_dict=False)) <= available]
-        result = [None] * len(messages)
+        result = [Completion(None)] * len(messages)
         if not fitting:
             return result
         try:
             outputs = self.engine.chat([messages[i] for i in fitting], sampling_params=self.params[active], use_tqdm=False)
-        except RuntimeError as error:
-            if "out of memory" not in str(error).lower() or len(messages) == 1:
-                raise
-            print(f"Reducing local GPT-OSS batch after GPU memory exhaustion ({len(messages)} items).")
-            split = len(messages) // 2
-            return self.chat(messages[:split], active) + self.chat(messages[split:], active)
+        except self.engine_errors as error:
+            raise InferenceUnavailable("Local inference engine is unavailable") from error
         for i, output in zip(fitting, outputs, strict=True):
-            final = output.outputs[0]
-            if final.finish_reason != "stop":
-                result[i] = ""
-                continue
-            result[i] = self.final_channel(final.token_ids)
+            completion, = output.outputs
+            answer = self.final_channel(completion.token_ids)
+            final_answer = (answer or "") if completion.finish_reason == "stop" else ""
+            result[i] = Completion(final_answer, completion.finish_reason, answer is not None)
         return result
 
-    def final_channel(self, ids: list[int]) -> str:
-        """Use the official Harmony parser and retain only one assistant final."""
+    def final_channel(self, ids: list[int]) -> str | None:
+        """Return only a single assistant final from the official Harmony parser."""
         from openai_harmony import HarmonyError
 
         try:
             messages = self.encoding.parse_messages_from_completion_tokens(ids, self.role, strict=False)
         except HarmonyError:
-            return ""
+            return None
         final = [message for message in messages if message.channel == "final"]
         if len(final) != 1:
-            return ""
+            return None
         return "".join(part.text for part in final[0].content if hasattr(part, "text"))
 
-    def smoke(self) -> None:
-        """Exercise actual GPU inference, schema, negation and timed readings."""
-        examples = [
-            ("immunofixation", "No anomalous immunoglobulins."),
-            ("cryoglobulin", "negative at 24h, positive at 7d"),
-            ("cryoglobulin", "not performed"),
-        ]
-        rows = [dict(concept=family, variable="lab__" + family + "__text", family=family,
-                     raw_json=serialize(raw), context_json="{}") for family, raw in examples]
-        reply = self.chat([self.messages(row, []) for row in rows])
-        for row, (_, raw), answer in zip(rows, examples, reply, strict=True):
-            extracted = validate_extraction(answer or "", row, [])
-            meaning = lambda item: serialize(item.model_dump(exclude={"quote", "document_ids"}))
-            expected = sorted(meaning(item) for item in narrative(raw, row["family"]))
-            if sorted(meaning(item) for item in extracted.findings) != expected:
-                raise RuntimeError("GPT-OSS GPU smoke failed complete finding comparison")
-        examples = {
-            "ana": ("ana_hep2_cytoplasmic_pattern", "Positive"),
-            "ana_narrative": ("ana_pattern_comment", "Observed pattern: reticular"),
-            "hla": ("hla_a", "99"),
-            "cbc_morphology": ("cbc_diff__anisocytosis_blood", "few"),
-        }
-        vocab = {"ucum": set(), "ipd": {}, "rxnorm": {}}
-        for active, (concept, raw) in examples.items():
-            schema, kind = PROFILES[active]
-            row = dict(concept=concept, variable=f"lab__{concept}__text", family=active, raw_json=serialize(raw),
-                       context_json="{}")
-            negative = row | {"raw_json": serialize("Method: synthetic reference only")}
-            answer, abstain = self.chat([self.messages(row, []), self.messages(negative, [])], active)
-            proposed = validate_profile(answer or "", row, [], self.cfg, vocab)
-            part, = segment(row)
-            expected = [fact for fact in part_facts(row, part, parse_segment(row, self.cfg, vocab, raw, part.source_field,
-                                                                            part.role), self.cfg["normalization"]["version"])
-                        if fact.fact_type == kind]
-            if (not expected or sorted(map(canonical, proposed)) != sorted(map(canonical, expected))
-                    or schema.model_validate_json(abstain or "").candidates):
-                raise RuntimeError("GPT-OSS GPU smoke failed complete profile comparison")
+    def smoke(self, fixtures=None) -> SmokeResult:
+        """Run all required synthetic cases independently with one bounded retry."""
+        cases, vocab = smoke_cases(self.cfg) if fixtures is None else fixtures
+        profiles, audit = {}, []
+        model_available = True
+        for active, fixtures in cases.items():
+            passed, attempts, reason = 0, 0, None
+            for case in fixtures:
+                if not model_available:
+                    reason = reason or "inference_runtime_error"
+                    break
+                for attempt in (1, 2):
+                    completion, accepted = Completion(None), []
+                    try:
+                        completion, = self.chat_completions([self.messages(case.row, [], attempt == 2)], active)
+                    except InferenceUnavailable:
+                        model_available = False
+                        failure = "inference_runtime_error"
+                    except TimeoutError:
+                        failure = "inference_runtime_error"
+                    else:
+                        failure, accepted = self.check_smoke_answer(active, case, completion, vocab)
+                    details = dict(profile=active, case_id=case.case_id, attempt=attempt,
+                                   status="passed" if failure is None else "failed", reason_code=failure,
+                                   phase="generation" if failure in {"inference_runtime_error", "context_limit",
+                                                                      "truncated_response", "empty_response"} else "validation",
+                                   expected_count=len(case.expected), accepted_count=len(accepted),
+                                   abstention_passed=None if case.expected else failure is None, fixture_valid=True,
+                                   finish_reason=completion.finish_reason, has_final_channel=completion.has_final_channel)
+                    audit.append(details)
+                    attempts += 1
+                    print("GPT-OSS smoke " + serialize(details), flush=True)
+                    if failure is None or not model_available:
+                        break
+                passed += failure is None
+                if failure is not None:
+                    reason = reason or failure
+            profiles[active] = ProfileSmokeResult(active, "passed" if passed == len(fixtures) else "disabled",
+                                                  reason, attempts, passed, len(fixtures))
+        return SmokeResult(profiles, audit, model_available)
+
+    def check_smoke_answer(self, active, case, reply, vocab):
+        if reply.finish_reason == "length":
+            return "truncated_response", []
+        if reply.answer is None:
+            return "context_limit", []
+        if not reply.answer.strip():
+            return "empty_response", []
+        try:
+            if not case.expected:
+                schema, field = (Extraction, "findings") if active == "finding" else (PROFILES[active][0], "candidates")
+                return ("failed_abstention" if getattr(schema.model_validate_json(reply.answer), field) else None), []
+            if active == "finding":
+                accepted = [finding_meaning(item) for item in validate_extraction(reply.answer, case.row, []).findings]
+            else:
+                accepted = [canonical(item) for item in validate_profile(reply.answer, case.row, [], self.cfg, vocab)]
+        except ValidationError:
+            return "invalid_schema", []
+        except EvidenceError:
+            return "unsupported_evidence", []
+        expected, proposed = Counter(case.expected), Counter(accepted)
+        if proposed - expected:
+            return "unexpected_fact", accepted
+        return ("missing_expected_fact" if expected - proposed else None), accepted
 
 
 def extract_batch(model: LocalModel, rows: list[dict], retrieved: dict, retries: int, *, cfg=None, vocab=None) -> list[dict]:
@@ -418,11 +587,11 @@ def extract_batch(model: LocalModel, rows: list[dict], retrieved: dict, retries:
             except TimeoutError:
                 for row in pending:
                     key = row["mapping_id"]
-                    output[key] = dict(mapping_id=key, findings=[], facts=[], status="timeout")
+                    output[key] = empty_extraction(row, "timeout", "inference_runtime_error")
                 continue
             for row, answer in zip(pending, answers, strict=True):
                 key = row["mapping_id"]
-                result = dict(mapping_id=key, findings=[], facts=[], status="context_limit")
+                result = empty_extraction(row, "context_limit")
                 if answer is not None and not answer.strip():
                     result["status"] = "empty_response"
                     next_pending.append(row)
@@ -436,11 +605,13 @@ def extract_batch(model: LocalModel, rows: list[dict], retrieved: dict, retries:
                     except ValidationError:
                         result["status"] = "invalid_schema"
                         next_pending.append(row)
-                    except ValueError:
+                    except EvidenceError:
                         result["status"] = "unsupported_evidence"
                         next_pending.append(row)
                     else:
                         result["status"] = "validated"
+                if result["status"] != "validated":
+                    result["reason_code"] = result["status"]
                 output[key] = result
             pending = next_pending
             if not pending:

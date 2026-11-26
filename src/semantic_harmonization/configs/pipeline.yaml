@@ -21,6 +21,7 @@ comparison:
   recent_report_id: 38032dcdf7ece38fe12e5f3ab0c2d9a1d428e93816215d479e42717101a6f326
   historical_report_id: 7f49887e02a57544c02307a6aa26fe0b31e720e0cefa2f26017c8a72f15e5cf8
 model:
+  inference_mode: auto
   seed: 42
   temperature: 0.0
   max_context_tokens: 8192
