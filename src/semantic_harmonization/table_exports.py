@@ -1,4 +1,4 @@
-"""Write paired private exports with a reversible CSV representation of Arrow cells."""
+"""Write and verify private CSV exports alongside canonical Parquet tables."""
 from __future__ import annotations
 
 import csv
@@ -17,7 +17,12 @@ import pyarrow.parquet as pq
 from .settings import file_hash, write_json
 
 csv.field_size_limit(sys.maxsize)
-NULL = r"\N"
+NULL = ""
+CSV_ENCODING = (
+    "UTF-8; null and empty string = empty cell; "
+    "string escape = leading apostrophe; non-text = JSON; "
+    "dates = ISO; binary = hex; Parquet is canonical"
+)
 FORMULA = re.compile(r"^(?:\s*[=+\-@＝＋－＠]|[\t\r\n])")
 
 
@@ -68,6 +73,13 @@ def unescape(value, dtype):
     return json.loads(value)
 
 
+def csv_cell_matches(value, expected, dtype):
+    """Accept the shared CSV representation for nulls and empty strings."""
+    if value == NULL:
+        return expected is None or (isinstance(expected, str) and expected == "")
+    return json_cell(unescape(value, dtype)) == json_cell(structured(expected))
+
+
 def export_csv(path: Path) -> None:
     """Stream rows from Parquet, then verify every cell and record both hashes."""
     csv_path = path.with_suffix(".csv")
@@ -86,7 +98,7 @@ def export_csv(path: Path) -> None:
             for expected in batch.to_pylist():
                 row = next(reader, ())
                 if len(row) != len(schema) or any(
-                    json_cell(unescape(value, field.type)) != json_cell(structured(expected[field.name]))
+                    not csv_cell_matches(value, expected[field.name], field.type)
                     for field, value in zip(schema, row)
                 ):
                     raise ValueError(f"CSV roundtrip mismatch: {csv_path.name}")
@@ -95,7 +107,7 @@ def export_csv(path: Path) -> None:
     write_json(path.with_suffix(".csv.schema.json"), {
         "columns": [{"name": field.name, "type": str(field.type), "nullable": field.nullable} for field in schema],
         "rows": parquet.metadata.num_rows,
-        "encoding": "UTF-8; null = unescaped \\N; string escape = leading apostrophe; non-text = JSON; dates = ISO; binary = hex",
+        "encoding": CSV_ENCODING,
         "sha256": {artifact.name: file_hash(artifact) for artifact in (csv_path, path)},
     })
     csv_path.chmod(0o600)
@@ -111,9 +123,13 @@ def pair_directory(root: Path) -> None:
             table = arrow_csv.read_csv(path, convert_options=arrow_csv.ConvertOptions(strings_can_be_null=True))
             pq.write_table(table, parquet)
     for path in sorted(root.glob("*.parquet")):
+        csv_path = path.with_suffix(".csv")
         sidecar = path.with_suffix(".csv.schema.json")
-        if sidecar.is_file() and path.with_suffix(".csv").is_file():
-            sha = json.loads(sidecar.read_text())["sha256"]
-            if sha == {item.name: file_hash(item) for item in (path, path.with_suffix(".csv"))}:
+        if sidecar.is_file() and csv_path.is_file():
+            metadata = json.loads(sidecar.read_text())
+            if (
+                metadata.get("encoding") == CSV_ENCODING
+                and metadata.get("sha256") == {item.name: file_hash(item) for item in (path, csv_path)}
+            ):
                 continue
         export_csv(path)
