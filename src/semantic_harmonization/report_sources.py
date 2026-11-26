@@ -9,6 +9,7 @@ import re
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+from .effective_values import typed_equal
 from .inventory import protected
 from .settings import KEYS, digest, file_hash
 
@@ -232,7 +233,7 @@ def same_original(before, after, original=None):
             lhs, rhs = first.read(columns=columns), new.read(columns=columns)
             if lorder is not None:
                 lhs, rhs = lhs.take(lorder), rhs.take(rorder)
-            if not lhs.equals(rhs):
+            if any(lhs[name].type != rhs[name].type or not typed_equal(lhs[name], rhs[name]) for name in columns):
                 return False
     return True
 

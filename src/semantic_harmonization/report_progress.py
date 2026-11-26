@@ -42,7 +42,7 @@ REASONS = {
     "not_materialized": ("materialization", "Review observation linkage in analytic_representation.py.", "Final facts have eligible episode-linked observations but the candidate is missing some expected fact links."),
     "reason_not_recorded": ("unknown", "Review the original and the final evidence for this field.", "No individual cause was recorded."),
 }
-FAILED_LLM = {"context_limit", "invalid_schema", "unsupported_evidence", "conflict"}
+FAILED_LLM = {"context_limit", "invalid_schema", "unsupported_evidence", "conflict", "timeout", "empty_response"}
 COVERAGE_ROLES = {"patient_result", "historical_reference"}
 MEANING_FIELDS = tuple(name for name in Semantic.model_fields if name not in {"strategy", "evidence", "interpretation_note"})
 IDENTITY_COLUMNS = ("mapping_id", "variable", "concept", "family", "raw_type", "raw_json", "context_json")
@@ -418,7 +418,7 @@ def study_impact(target, baseline, previous, cfg, baseline_scope, previous_scope
     return sorted(rows, key=lambda row: (("Original", "V1", "Previous V2", "Final V2").index(row["version"]),
                                          row.get("study") or "", row.get("feature") or ""))
 
-def compare_runs(target, baseline, cfg, *, routes=None, previous=None, frozen=None):
+def compare_runs(target, baseline, cfg, *, routes=None, previous=None, recent=None, frozen=None):
     """Build the shared report model from staged or verified published runs."""
     inventory_v2 = target.rows("variable_inventory.csv")
     inventory_v1 = baseline.rows("variable_inventory.csv") if baseline else None
@@ -457,23 +457,32 @@ def compare_runs(target, baseline, cfg, *, routes=None, previous=None, frozen=No
                     scope, reason = "separate_scenarios", "Candidate keys or preserved source values differ"
     feature_changes = feature_transitions(old_candidate, new_candidate, previous_features, current_features) if (
         scope == "paired" and originals and old_wide_known and new_wide_known) else []
-    previous_pairs, previous_facts = {}, None
-    previous_scope = "unavailable"
-    if previous:
-        prior_policy = inventory_policy(previous.rows("variable_inventory.csv"))
-        prior_inventory, _ = mapping_inventory(previous, cfg, prior_policy)
-        prior_lines = lineage(previous, prior_inventory)
-        previous_facts = grouped(previous.rows("semantic_facts.parquet"), prior_inventory)
-        compatible = (all(previous.manifest["inputs"].get(key) == target.manifest["inputs"].get(key) for key in INPUTS)
-                      and prior_policy is not None and policy_v2 is not None and
-                      all(prior_policy[key] == policy_v2[key] for key in prior_policy.keys() & policy_v2.keys()))
-        previous_scope = "paired" if compatible else "separate_scenarios"
-        for prior, after in pairs(prior_inventory, new, compatible):
-            if prior and after:
-                old_line = (prior_lines or {}).get(prior["mapping_id"])
+    def reference_mappings(reference):
+        if reference is None:
+            return {}, None, "unavailable"
+        reference_policy = inventory_policy(reference.rows("variable_inventory.csv"))
+        reference_inventory, _ = mapping_inventory(reference, cfg, reference_policy)
+        reference_lines = lineage(reference, reference_inventory)
+        reference_facts = grouped(reference.rows("semantic_facts.parquet"), reference_inventory)
+        compatible = (all(reference.manifest["inputs"].get(key) == target.manifest["inputs"].get(key) for key in INPUTS)
+                      and reference_policy is not None and policy_v2 is not None and
+                      all(reference_policy[key] == policy_v2[key] for key in reference_policy.keys() & policy_v2.keys()))
+        paired = {}
+        for before, after in pairs(reference_inventory, new, compatible):
+            if before and after:
+                old_line = (reference_lines or {}).get(before["mapping_id"])
                 new_line = (new_lines or {}).get(after["mapping_id"])
                 if old_line and new_line and grain(old_line) == grain(new_line):
-                    previous_pairs[after["mapping_id"]] = prior["mapping_id"]
+                    paired[after["mapping_id"]] = before["mapping_id"]
+        reference_scope = "paired" if compatible and reference_facts is not None and paired else "not_assessable"
+        return paired, reference_facts, reference_scope
+
+    previous_pairs, previous_facts, previous_scope = reference_mappings(previous)
+    recent_pairs, recent_facts, recent_scope = reference_mappings(recent)
+    effective_audit = target.rows("effective_value_audit.parquet")
+    effective_variables = target.rows("effective_variable_summary.parquet")
+    effective_families = target.rows("effective_family_summary.parquet")
+    effective_by_mapping = grouped(effective_audit, new)
     comments, regressions, applications = [], [], []
     current_segments, historical_mappings = {}, {}
     maps, work = [], []
@@ -515,6 +524,8 @@ def compare_runs(target, baseline, cfg, *, routes=None, previous=None, frozen=No
                 counts[field] = row.get(alias)
         last_v2_key = previous_pairs.get(key) if after else None
         last_v2 = typed(previous_facts.get(last_v2_key, [])) if last_v2_key and previous_facts is not None else None
+        recent_key = recent_pairs.get(key) if after else None
+        recent_typed = typed(recent_facts.get(recent_key, [])) if recent_key and recent_facts is not None else None
         last_canonical = canonical_storage(last_v2) if last_v2 is not None else None
         extraction = extractions.get(key, {}) if after else {}
         outcome = extraction.get("contribution_status") or extraction.get("status")
@@ -548,6 +559,7 @@ def compare_runs(target, baseline, cfg, *, routes=None, previous=None, frozen=No
             v1_legacy_fields=legacy_before, v2_legacy_fields=legacy_after,
             v1_canonical_facts=list(old_meanings.values()) if old_projected is not None else None,
             previous_v2_mapping_id=last_v2_key, previous_v2_typed_facts=storage(last_v2),
+            recent_v2_mapping_id=recent_key, recent_v2_typed_facts=storage(recent_typed),
             previous_v2_change=("added_and_removed" if last_canonical.keys() - current.keys() and current.keys() - last_canonical.keys()
                                 else "removed" if last_canonical.keys() - current.keys() else
                                 "added" if current.keys() - last_canonical.keys() else "unchanged")
@@ -556,6 +568,7 @@ def compare_runs(target, baseline, cfg, *, routes=None, previous=None, frozen=No
             v2_fact_strategies=sorted({f.strategy for f in typed_final or ()}), facts_added=[current[k] for k in added] if changes_assessable else None,
             facts_removed=[old_meanings[k] for k in removed] if changes_assessable else None,
             facts_retained=[current[k] for k in retained] if changes_assessable else None,
+            effective_values=(effective_by_mapping or {}).get(key) if after else None,
             change_kind=change, actual_application=actual, materialized_features=v2_features,
             baseline_features=v1_features, clinical_v1=bool(old_clinical) if old_clinical is not None else None,
             clinical_v2=any(clinical(f) for f in typed_final) if typed_final is not None else None,
@@ -571,12 +584,16 @@ def compare_runs(target, baseline, cfg, *, routes=None, previous=None, frozen=No
             m1_m4_removed=len(deterministic.keys()-current.keys()) if typed_m1 is not None and typed_final is not None else None)
         if after:
             current_segments[key] = segments or []
-            if last_v2_key:
-                historical_mappings[last_v2_key] = result
+            for reference_key in (last_v2_key, recent_key):
+                if reference_key:
+                    historical_mappings[reference_key] = result
             comments.extend(comment_rows(row, segments or (), typed_m1 or (), typed_final or (), counts))
             if typed_final is not None:
                 regressions.extend(regression_rows(result, current, old_meanings if changes_assessable else None,
-                                                    last_canonical, segments or ()))
+                                                    last_canonical, segments or (),
+                                                    recent=canonical_storage(recent_typed) if recent_typed is not None else None,
+                                                    current_facts=typed_final, reference_facts={
+                                                        "V1": prior_spans, "Previous V2": last_v2, "Recent V2": recent_typed}))
                 applications.extend(materialization_rows(row, typed_final, this_line,
                                     (new_links or {}).get(key, ()) if new_links is not None else None, v2_features))
         if result["v2_available"]:
@@ -631,6 +648,12 @@ def compare_runs(target, baseline, cfg, *, routes=None, previous=None, frozen=No
     historical = historical_crosswalk(frozen, work, historical_mappings, current_segments)
     summary["previous_v2_scope"] = previous_scope
     summary["previous_v2_comparable_mappings"] = len(previous_pairs) if previous else None
+    summary["recent_v2_scope"] = recent_scope
+    summary["recent_v2_comparable_mappings"] = len(recent_pairs) if recent else None
+    summary["regression_counts_by_reference"] = {
+        version: dict(Counter(row["change"] for row in regressions if row["reference_version"] == version))
+        for version in ("V1", "Previous V2", "Recent V2")}
+    summary["regression_unique_facts"] = len({(row["mapping_id"], row["canonical_fact"]) for row in regressions})
     summary["regression_counts"] = dict(Counter(row["change"] for row in regressions))
     summary["frozen_work"] = (dict(units=len(historical), states=dict(Counter(
         row["state_final_v2"] or "unverified" for row in historical)), reconciliation=dict(
@@ -655,14 +678,23 @@ def compare_runs(target, baseline, cfg, *, routes=None, previous=None, frozen=No
         var["has_as_of"] = any(r.get("as_of_observations", 0) for r in var["materialization"]["v2"])
     downstream = study_impact(target, baseline, previous, cfg, scope, previous_scope)
     validation = target.json("validation_summary.json") or {}
+    summary["missing_materialization_links"] = sum(row["status"] == "missing_links" for row in applications)
+    summary["effective_values"] = validation.get("effective_values")
+    summary["inference"] = validation.get("inference")
+    summary["assessment"] = {
+        "V1": "paired" if scope == "paired" and summary["comparable_mappings"] else "not assessable",
+        "Previous V2": previous_scope,
+        "Recent V2": recent_scope,
+    }
     resources = (target.json("resources_manifest.json") or {}).get("resources", {})
     legacy_counts = {name: [r for r in target.rows(f"{name}.csv") or ()
                             if not r.get("variable") or allowed(r["variable"], cfg)]
                      for name in ("semantic_coverage_by_family", "extraction_routing_summary")}
     provenance = {key: {k: run.manifest.get(k) for k in ("run_id", "started_at", "completed_at", "commit", "schema_version",
                                                          "inputs", "model", "prompt")} if run else None
-                  for key, run in (("v1", baseline), ("previous_v2", previous), ("v2", target))}
-    return clean(dict(mappings=maps, work=work, variables=variables, families=families, summary=summary, routes=stage_routes,
+                  for key, run in (("v1", baseline), ("previous_v2", previous), ("recent_v2", recent), ("v2", target))}
+    return clean(dict(effective_audit=effective_audit, effective_variables=effective_variables,
+                      effective_families=effective_families, mappings=maps, work=work, variables=variables, families=families, summary=summary, routes=stage_routes,
                       strategies=[dict(strategy=k, **v) for k,v in sorted(strategy_counts.items())], derived=derived,
                       comments=comments, comment_summary=comment_summary(comments, new_lines),
                       regressions=regressions, historical_work=historical, materialization_audit=applications,
@@ -671,5 +703,5 @@ def compare_runs(target, baseline, cfg, *, routes=None, previous=None, frozen=No
                       downstream=downstream, validation=validation.get("clinical_evaluation"), resources={
                           name: {k: r.get(k) for k in ("status", "version", "revision", "sha256", "license")}
                           for name,r in resources.items()}, provenance=provenance, legacy=legacy_counts,
-                      missing={"v1": sorted(baseline.missing) if baseline else None, "previous_v2": sorted(previous.missing) if previous else None, "v2": sorted(target.missing)},
+                      missing={"v1": sorted(baseline.missing) if baseline else None, "previous_v2": sorted(previous.missing) if previous else None, "recent_v2": sorted(recent.missing) if recent else None, "v2": sorted(target.missing)},
                       rule_version=VERSION, definitions=DEFINITIONS, page_size=cfg["report"]["page_size"]))

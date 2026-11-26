@@ -12,6 +12,8 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from .effective_values import typed_equal
+from .inventory import clean
 from .schemas import ALLELE, CHILD_LINK, FEATURES, FINDING, MEDICATION, OBSERVATIONS, SEMANTIC
 from .semantic_facts import clinical
 from .settings import KEYS, serialize
@@ -101,7 +103,8 @@ def include_typed_projection(observation: dict, facts) -> None:
         payload = fact.payload
         allele = dict(locus=payload.locus, reported=payload.token, allele=payload.allele,
                       resolution_fields=payload.resolution, suffix=payload.suffix,
-                      source_order=payload.position, ipd_match=payload.ipd_match)
+                      source_order=payload.position, ipd_match=payload.ipd_match, lookup_locus=payload.lookup_locus,
+                      normalized_report=payload.normalized_report, group=payload.group)
         if allele not in observation["alleles"]:
             observation["alleles"] = [*observation["alleles"], allele]
     morph = profiles["morphology_result"]
@@ -188,16 +191,11 @@ def validate_original(before: pa.Table, after: pa.Table) -> None:
     if before.num_rows != after.num_rows or after.column_names[:len(names)] != names:
         raise ValueError("Original column order or row count changed")
     after_original = after.select(names)
-    if before.schema != after_original.schema or before.schema.metadata != after_original.schema.metadata:
+    if not before.schema.equals(after_original.schema, check_metadata=True):
         raise ValueError("Original Arrow schema or metadata changed")
-    # Arrow equality treats NaN as unequal. Keep NaN comparisons and other types exact.
     for name in names:
-        a, b = before[name], after_original[name]
-        if a.equals(b):
-            continue
-        if not a.is_null().equals(b.is_null()):
-            raise ValueError(f"Original null positions changed for {name}")
-        pd.testing.assert_series_equal(a.to_pandas(), b.to_pandas(), check_exact=True, obj=name)
+        if not typed_equal(before[name], after_original[name]):
+            raise ValueError(f"Original Arrow values or null positions changed for {name}")
 
 
 def timestamp(value):
@@ -258,14 +256,20 @@ def rebuild(master: pd.DataFrame, wide: pa.Table, observations: list[dict],
                 rule = scope + " through each anchor using verified result availability."
                 features.append(feature(name, col, "derived_recompute", dtype, "verified_result_date"))
         candidate = before if after is None else after
-        states = lambda values: ["null" if pd.isna(value) else "true" if value is True or str(value) == "True"
-                                 else "false" if value is False or str(value) == "False" else "observed" for value in values]
-        a, b = states(before), states(candidate)
+        source_values = [clean(value) for value in before]
+        candidate_values = source_values if after is None else [clean(value) for value in candidate]
+
+        def states(values):
+            return ["null" if value is None else "true" if value is True or value == "True"
+                    else "false" if value is False or value == "False" else "observed" for value in values]
+
+        a, b = states(source_values), states(candidate_values)
         transitions = {f"{left} → {right}": n for (left, right), n in Counter(zip(a, b)).items()}
         output.append(dict(variable=col, recomputed=after is not None, evaluated_episodes=evaluated,
                            before=serialize(dict(Counter(a))), after=serialize(dict(Counter(b))),
-                           transitions=serialize(transitions), rule=rule, before_distinct=int(before.nunique()),
-                           after_distinct=int(candidate.nunique())))
+                           transitions=serialize(transitions), rule=rule,
+                           before_distinct=len({serialize(value) for value in source_values if value is not None}),
+                           after_distinct=len({serialize(value) for value in candidate_values if value is not None})))
     return wide, output
 
 

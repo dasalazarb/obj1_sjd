@@ -11,7 +11,7 @@ from .schemas import (
     AnaPattern, FactSourceSpan, Finding, HlaResult, MorphologyResult, NumericResult, ObservationMetadata,
     OrdinalResult, QualitativeResult, Semantic, SemanticFact, SemanticSegment, SpikeResult, TiterResult,
 )
-from .segmentation import RESULT_LABEL, segment, sources
+from .segmentation import HLA_LABEL, RESULT_LABEL, segment, sources
 from .settings import digest, serialize
 
 VERSION = "semantic-facts-v2"
@@ -48,12 +48,13 @@ def hla_payload(allele) -> HlaResult:
         alternatives = []
     explicit = ALLELE.fullmatch(token.upper())
     reported_locus = explicit["locus"] if explicit and explicit["locus"] else locus
-    kind = ("alternatives" if alternatives else "group" if allele.ipd_match in {"g_group", "p_group"}
-            or allele.resolution_fields == 1 else "allele" if allele.allele else "unresolved")
+    kind = ("alternatives" if alternatives else "group" if allele.suffix in {"G", "P"}
+            or allele.resolution_fields == 1 else "allele" if allele.allele or allele.ipd_match == "compatible_resolution" else "unresolved")
     return HlaResult(locus=reported_locus, token=token, nomenclature=kind, allele=allele.allele,
                      resolution=allele.resolution_fields, ipd_match=allele.ipd_match, suffix=allele.suffix,
-                     alternatives=alternatives, ambiguous=kind in {"alternatives", "unresolved"},
-                     position=allele.source_order)
+                     alternatives=alternatives, ambiguous=kind in {"alternatives", "unresolved"} or allele.ipd_match == "ambiguous_locus",
+                     position=allele.source_order, lookup_locus=allele.lookup_locus,
+                     normalized_report=allele.normalized_report, group=allele.group)
 
 
 def part_facts(row: dict, part: SemanticSegment, parsed: Semantic, version: str) -> list[SemanticFact]:
@@ -113,7 +114,9 @@ def clinical(fact: SemanticFact) -> bool:
     """Distinguish biological observations from transport and unresolved tokens."""
     return (fact.fact_type not in {"observation_metadata", "medication_context"}
             and fact.temporality in {"current", "unspecified"}
-            and (fact.fact_type != "hla_result" or fact.payload.nomenclature != "unresolved"))
+            and (fact.fact_type != "hla_result" or
+                 (not fact.payload.ambiguous and (fact.payload.nomenclature == "allele"
+                  or fact.payload.nomenclature == "group" and fact.payload.ipd_match in {"g_group", "p_group"}))))
 
 
 def merge_segments(parts: list[Semantic]) -> Semantic:
@@ -168,15 +171,11 @@ def parse_mapping(row: dict, cfg: dict, vocab: dict) -> tuple[Semantic, list[Sem
         if part.role == "unresolved":
             continue
         clean = RESULT_LABEL.sub("", part.text).strip() if part.role == "patient_result" else part.text
+        if row["family"] == "hla" and part.role == "patient_result":
+            clean = HLA_LABEL.sub("", clean)
         parsed = parse_segment(row, cfg, vocab, clean, part.source_field, part.role)
         for fact in part_facts(row, part, parsed, cfg["normalization"]["version"]):
             typed[fact.fact_id] = fact
-        if row["family"] == "hla" and row["concept"] in {"hla_drb", "hla_dpb"}:
-            parsed.alleles = [item for item in parsed.alleles
-                              if not ("*" in item.reported and item.reported != "*" and not item.allele)]
-            if not parsed.alleles:
-                parsed.evidence = [item for item in parsed.evidence if item.field not in {"alleles", "result_availability"}]
-                parsed.result_availability = None
         parsed_parts.append(parsed)
     return merge_segments(parsed_parts), parts, deduplicate_sources(row, typed.values())
 

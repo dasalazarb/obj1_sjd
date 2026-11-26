@@ -25,19 +25,21 @@ import pyarrow.parquet as pq
 from .analytic_representation import materialize
 from .compare_runs import baseline_identity, review
 from .application import apply, rebuild, validate_original, write_candidate, write_parquet
+from .effective_values import EFFECTIVE, RULE as EFFECTIVE_CONTRACT, build_effective
 from .evaluation import evaluate
 from .inference import LocalModel, apply_extraction, extract_batch, force_offline, profile, routing, validate_extraction, validate_profile
 from .inventory import inventory
 from .semantic_facts import canonical, from_storage, parse_mapping, verify_contract
 from .rag import KnowledgeIndex, documents
+from .recovery import historical_narratives, incoming_reuse, proposal_meanings, reconcile_narratives
 from .report import report
-from .report_existing import baseline_run, frozen_work, generate, previous_run, update_report_pointer
+from .report_existing import baseline_run, frozen_references, generate, previous_run, update_report_pointer
 from .report_sources import Run, file_manifest
 from .resources import verify, vocabularies
 from .schemas import (DICTIONARY, EXTRACTIONS, FACTS, IDENTITY, INVENTORY, LINEAGE, SEGMENTS, SEMANTIC, TRACE,
                       Extraction, Semantic, SemanticFact, SemanticSegment)
 from .settings import MODULE, digest, file_hash, load_config, serialize, write_json
-from .study_input import write_source_manifest
+from .study_input import verify_source, write_source_manifest
 from .table_exports import pair_directory
 from .validation import comparison, downstream, summarize, validate_mappings
 
@@ -54,6 +56,18 @@ def comparative_root(cfg: dict) -> Path:
 def now() -> str:
     """Return an ISO UTC provenance timestamp."""
     return datetime.now(timezone.utc).isoformat()
+
+
+def comparison_identity(cfg):
+    """Bind the configured frozen comparisons to their sealed manifests."""
+    refs = cfg.get("comparison", {})
+    comparison_paths = {
+        "previous_v2": Path(cfg["paths"]["output"]) / str(refs.get("previous_v2_run_id")) / "run_manifest.json",
+        "recent_v2": Path(cfg["paths"]["output"]) / str(refs.get("recent_v2_run_id")) / "run_manifest.json",
+        "historical_work": comparative_root(cfg) / str(refs.get("historical_report_id")) / "report_manifest.json",
+        "recent_report": comparative_root(cfg) / str(refs.get("recent_report_id")) / "report_manifest.json",
+    }
+    return {name: file_hash(path) if path.is_file() else None for name, path in comparison_paths.items()}
 
 
 def build_identity(cfg: dict, resources: dict, inputs: dict) -> dict:
@@ -75,13 +89,8 @@ def build_identity(cfg: dict, resources: dict, inputs: dict) -> dict:
             packages[name] = None
     resource_identity = {name: {k: item.get(k) for k in ("revision", "version", "sha256", "status")}
                          for name, item in resources["resources"].items()}
-    previous_id = cfg.get("comparison", {}).get("previous_v2_run_id")
-    historical_id = cfg.get("comparison", {}).get("historical_report_id")
-    previous_manifest = Path(cfg["paths"]["output"]) / str(previous_id) / "run_manifest.json"
-    historical_manifest = comparative_root(cfg) / str(historical_id) / "report_manifest.json"
-    comparison = {name: file_hash(path) if path.is_file() else None
-                  for name, path in (("previous_v2", previous_manifest), ("historical_work", historical_manifest))}
-    return dict(comparison=comparison, inputs=inputs, source=digest(source), obj1_contracts=external, config=digest(cfg),
+    return dict(effective_contract=EFFECTIVE_CONTRACT, inference_profile=digest(cfg["model"]),
+                comparison=comparison_identity(cfg), inputs=inputs, source=digest(source), obj1_contracts=external, config=digest(cfg),
                 resources=resource_identity, dependencies=packages, baseline=baseline_identity(cfg),
                 execution_environment={
                     "container_sha256": os.environ.get("SJD_CONTAINER_SHA256"),
@@ -172,6 +181,14 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=ve
             def stage(name: str) -> None:
                 log.write(f"{now()} {name}\n")
 
+            baseline = baseline_run(cfg)
+            previous = previous_run(cfg)
+            recent = previous_run(cfg, reference="recent_v2_run_id")
+            frozen, historical_hash, recent_report_hash = frozen_references(cfg, comparative_root(cfg), previous, recent, baseline)
+            for reference, expected in (("historical_work", historical_hash), ("recent_report", recent_report_hash)):
+                if expected is not None and expected != identity["comparison"][reference]:
+                    raise ValueError("Pinned report changed before harmonization")
+
             stage("01 inventory")
             original = pq.read_table(paths["integrated"])
             master = original.to_pandas()
@@ -184,7 +201,9 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=ve
                 lineage = pq.read_table(inventory_paths[1], schema=LINEAGE).to_pylist()
                 variables = pd.read_csv(inventory_paths[2]).astype(object).where(lambda df: df.notna(), None).to_dict("records")
             else:
-                pairs, lineage, variables = inventory(master, context, source.to_pandas() if source is not None else None, hashes, cfg)
+                pairs, lineage, variables = inventory(
+                    master, context, source.to_pandas() if source is not None else None, hashes, cfg,
+                    arrow_episode=original, arrow_source=source)
                 write_parquet(inventory_paths[0], pairs, INVENTORY)
                 write_parquet(inventory_paths[1], lineage, LINEAGE)
                 pd.DataFrame(variables).to_csv(inventory_paths[2], index=False)
@@ -192,7 +211,6 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=ve
 
             stage("02 knowledge")
             docs = documents(cfg, resources)
-            index = KnowledgeIndex(cfg, resources, docs, Path(paths["knowledge_dir"]) / "knowledge_index", encoder)
             stage("03 deterministic parsing")
             parsed_schema = pa.schema([*IDENTITY, *SEMANTIC])
             deterministic_path = resume / "deterministic_results.parquet"
@@ -234,39 +252,66 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=ve
             pending_by_id = {row["mapping_id"]: row for row in pending}
             stage(f"03 deterministic counts mappings={len(pairs)} segments={len(segments)} facts={len(m1_facts)} residual={len(pending)}")
             stage("04 compatible retrieval")
-            index.measure([row["concept"].replace("_", " ") for row in pending])
-            retrieved = {row["mapping_id"]: index.retrieve(row) for row in pending}
-
-            stage("05 GPT-OSS GPU smoke and extraction")
-            model = model_factory(cfg)
-            model.smoke()
+            retrieved, knowledge = {}, {"status": "no eligible residual retrieval"}
+            if pending:
+                index = KnowledgeIndex(cfg, resources, docs, Path(paths["knowledge_dir"]) / "knowledge_index", encoder)
+                index.measure([row["concept"].replace("_", " ") for row in pending])
+                retrieved = {row["mapping_id"]: index.retrieve(row) for row in pending}
+                knowledge = json.loads((index.path / "manifest.json").read_text())
+            stage("05 residual extraction and revalidation")
             cache = resume / "extractions"
             cache.mkdir(exist_ok=True)
-            outputs, missing = {}, []
+            reusable = incoming_reuse((recent, previous, baseline), hashes, pending, lineage, cfg,
+                                      identity["resources"], knowledge, retrieved)
+            outputs, missing, reused = {}, [], {}
+
+            def revalidate(item, row, *, published_cache=False):
+                key = row["mapping_id"]
+                if item["mapping_id"] != key or item["status"] not in {
+                        "validated", "context_limit", "unsupported_evidence", "invalid_schema", "timeout", "empty_response"}:
+                    raise ValueError("Invalid extraction cache record")
+                records = item["facts"] or []
+                item = dict(item, facts=[])
+                if item["status"] == "validated":
+                    if profile(row) == "finding":
+                        validate_extraction(serialize({"findings": item["findings"]}), row, retrieved[key])
+                    else:
+                        facts = [from_storage(fact) if published_cache else SemanticFact.model_validate(fact)
+                                 for fact in records]
+                        proposals = [{field: getattr(fact, field) if field != "payload" else fact.payload.model_dump()
+                                      for field in ("segment_id", "start", "end", "quote", "payload", "document_ids")}
+                                     for fact in facts]
+                        item["facts"] = validate_profile(serialize({"candidates": proposals}), row, retrieved[key], cfg, vocab)
+                elif item["findings"] or records:
+                    raise ValueError("Rejected cache record contains proposals")
+                return item
 
             for row in pending:
                 key = row["mapping_id"]
                 target = cache / (key + ".json")
                 if target.is_file():
                     cached = json.loads(target.read_text())
-                    if cached["mapping_id"] != key or cached["status"] not in {
-                        "validated", "context_limit", "unsupported_evidence", "invalid_schema"
-                    }:
-                        raise ValueError("Invalid extraction cache record")
-                    if cached["status"] == "validated":
-                        if profile(row) == "finding":
-                            validate_extraction(serialize({"findings": cached["findings"]}), row, retrieved[key])
-                        else:
-                            candidates = [{field: fact[field] for field in (
-                                "segment_id", "start", "end", "quote", "payload", "document_ids")} for fact in cached["facts"]]
-                            regenerated = validate_profile(serialize({"candidates": candidates}), row, retrieved[key], cfg, vocab)
-                            if [fact.model_dump() for fact in regenerated] != cached["facts"]:
-                                raise ValueError("Cached proposals failed regeneration")
-                    elif cached["findings"] or cached["facts"]:
-                        raise ValueError("Rejected cache record contains proposals")
-                    outputs[key] = cached
+                    validated = revalidate(cached, row)
+                    outputs[key] = dict(validated, facts=[f.model_dump() for f in validated["facts"]])
+                    continue
+                candidates = []
+                for source_id, item in reusable.get(key, ()):
+                    try:
+                        candidates.append((source_id, revalidate(item, row, published_cache=True)))
+                    except (KeyError, ValueError):
+                        continue
+                if candidates and all(proposal_meanings(item) == proposal_meanings(candidates[0][1])
+                                      for _, item in candidates):
+                    source_id, item = candidates[0]
+                    outputs[key] = dict(item, facts=[f.model_dump() for f in item["facts"]])
+                    reused[key] = source_id
                 else:
                     missing.append(row)
+            model = None
+            if missing or pending and "gold" in hashes:
+                stage("05 GPT-OSS GPU smoke and extraction")
+                model = model_factory(cfg)
+                model.smoke()
             size = cfg["model"]["batch_size"]
             for first in range(0, len(missing), size):
                 for result in extract_batch(model, missing[first:first + size], retrieved, cfg["model"]["max_validation_retries"], cfg=cfg, vocab=vocab):
@@ -274,11 +319,13 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=ve
                     write_json(cache / (key + ".json"), result)
                     outputs[key] = result
             stage("06 mapping validation")
+            prior_findings = historical_narratives((recent, previous, baseline), hashes, pairs, lineage, segments)
             final = {key: value.model_copy(deep=True) for key, value in deterministic.items()}
-            dictionary, final_facts = [], list(m1_facts)
+            dictionary, final_facts, historical_facts = [], list(m1_facts), {}
             for row in pairs:
                 key = row["mapping_id"]
                 semantic = final[key]
+                added = []
                 if key in outputs:
                     item = outputs[key]
                     item["contribution_status"] = item["status"]
@@ -296,14 +343,22 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=ve
                                         existing.add(meaning)
                                         added.append(candidate)
                         except ValueError:
+                            added = []
                             item["contribution_status"] = "conflict"
                         else:
                             final_facts.extend(added)
+                            if key in reused:
+                                historical_facts.update((fact.fact_id, reused[key]) for fact in added)
                             item["contribution_status"] = ("added" if added else "duplicate"
                                                            if item["findings"] or item["facts"] else "empty")
                     elif semantic.strategy == "unchanged":
                         semantic.interpretation_note = ("Full narrative exceeds the model context budget." if item["status"] == "context_limit"
                                                         else "Model extraction did not pass evidence or schema validation.")
+                recovered, provenance = reconcile_narratives(
+                    row, semantic, [*facts_by_mapping[key], *added], prior_findings.get(key),
+                    retrieved.get(key, []), cfg["prompts"]["version"])
+                final_facts.extend(recovered)
+                historical_facts.update(provenance)
                 dictionary.append(dict(row, **semantic.model_dump(), knowledge_doc_ids=[item["doc_id"] for item in retrieved.get(key, [])]))
             validate_mappings(dictionary, lineage, variables, len(master))
             verify_contract(pairs, segments, final_facts)
@@ -314,7 +369,7 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=ve
                 for artifact in (*inventory_paths, *artifacts):
                     shutil.copyfile(artifact, out / artifact.name)
                 (out / "knowledge_documents.jsonl").write_text("".join(serialize(row) + "\n" for row in docs))
-                write_json(out / "knowledge_index_manifest.json", json.loads((index.path / "manifest.json").read_text()))
+                write_json(out / "knowledge_index_manifest.json", knowledge)
                 write_json(out / "resources_manifest.json", resources)
                 trace = [dict(item, mapping_id=key) for key, items in retrieved.items() for item in items]
                 write_parquet(out / "retrieval_trace.parquet", trace, TRACE)
@@ -360,6 +415,14 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=ve
                                        outputs, variables, identity["baseline"])
                 summary["v2"]["analytic_representation"] = materialize(analytic, out, master, observations,
                                                                        final_facts, features, variables, wide)
+                stage("09a effective values and Arrow validation")
+                summary["inference"] = {"model_initialized": model is not None,
+                                        "revalidated_historical_mappings": len(reused),
+                                        "accepted_historical_facts": len(historical_facts),
+                                        "fresh_residual_mappings": len(missing)}
+                summary["effective_values"] = build_effective(
+                    original, source, lineage, dictionary, final_facts, segments, cfg, run_id, analytic, out,
+                    historical=historical_facts, outputs=outputs, routes=routes)
                 summary["audit_reference"] = audit_reference(Path(paths["audit"])) if "audit" in hashes else {"status": "unavailable"}
                 summary["source_events"] = "Read-only measurement input profiled alongside the Step 10 candidate" if source is not None else "Step 10 episode-variable adapter"
                 write_json(out / "validation_summary.json", summary)
@@ -373,23 +436,20 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=ve
                                 input_paths={name: paths[name] for name in hashes}, model=identity["resources"]["gpt_oss"],
                                 prompt={"version": cfg["prompts"]["version"], "sha256": digest(cfg["prompts"])},
                                 identity=identity, patients=summary["patients"], episodes=len(master), columns=len(master.columns))
-                baseline = baseline_run(cfg)
-                previous = previous_run(cfg)
-                frozen, historical_hash = frozen_work(cfg, comparative_root(cfg), previous, baseline)
-                if historical_hash != identity["comparison"]["historical_work"] and previous:
-                    raise ValueError("Historical comparison changed during harmonization")
-                if previous and file_hash(previous.qc / "run_manifest.json") != identity["comparison"]["previous_v2"]:
-                    raise ValueError("Previous V2 publication changed during harmonization")
                 report(out, cfg, manifest, target=Run(out, analytic, manifest),
-                       baseline=baseline, previous=previous, frozen=frozen, routes=routes)
+                       baseline=baseline, previous=previous, recent=recent, frozen=frozen, routes=routes)
                 pair_directory(analytic)
                 pair_directory(out)
-                if previous:
-                    verified_previous = previous_run(cfg)
-                    if not verified_previous or verified_previous.manifest != previous.manifest:
-                        raise ValueError("Previous V2 publication changed before publication")
-                if inputs_for(cfg) != hashes or baseline_identity(cfg) != identity["baseline"]:
+                if (inputs_for(cfg) != hashes or baseline_identity(cfg) != identity["baseline"]
+                        or comparison_identity(cfg) != identity["comparison"]):
                     raise ValueError("Inputs changed after validation")
+                for key, config_key, reference in (("previous_v2", "previous_v2_run_id", previous),
+                                                   ("recent_v2", "recent_v2_run_id", recent)):
+                    if reference:
+                        verified = previous_run(cfg, reference=config_key)
+                        if (not verified or verified.manifest != reference.manifest
+                                or file_hash(verified.qc / "run_manifest.json") != identity["comparison"][key]):
+                            raise ValueError("A pinned V2 publication changed before publication")
                 write_source_manifest(out, analytic, run_id, hashes)
                 stage("validated and ready to publish")
                 (out / "logs").mkdir()
@@ -414,6 +474,24 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=ve
     return analytic_final, out_final
 
 
+def selector_blockers(summary):
+    """Gate production selection on complete comparison and validated materialization."""
+    blockers = []
+    losses = summary["regression_counts"].get("unexplained_removal", 0)
+    if losses:
+        blockers.append(f"{losses} unexplained clinical fact removals")
+    unavailable = [name for name, status in summary["assessment"].items() if status != "paired"]
+    if unavailable:
+        blockers.append("comparison unavailable for " + ", ".join(unavailable))
+    if summary.get("missing_materialization_links"):
+        blockers.append(f'{summary["missing_materialization_links"]} facts with missing observation links')
+    if summary.get("frozen_work") is None:
+        blockers.append("frozen historical work unavailable")
+    if not summary.get("effective_values") or summary["effective_values"].get("integrity_failures"):
+        blockers.append("effective value integrity unavailable")
+    return blockers
+
+
 def main() -> None:
     """Run using YAML and surface safe error types in scheduler output."""
     if len(sys.argv) != 1:
@@ -421,25 +499,18 @@ def main() -> None:
     try:
         cfg = load_config()
     except (ValueError, RuntimeError) as error:
-        import traceback
-
-        print(f"ERROR TYPE: {type(error).__name__}", file=sys.stderr)
-
-        for frame in traceback.extract_tb(error.__traceback__):
-            print(
-                f"{frame.filename}:{frame.lineno} "
-                f"in {frame.name}",
-                file=sys.stderr
-            )
-
-        raise SystemExit(1) from None
+        # Configuration is resolved before reading clinical inputs.
+        raise SystemExit(f"Harmonization configuration is incomplete ({error}).") from None
     try:
-        _, out = run(cfg)
+        analytic, out = run(cfg)
         report_dir, summary = generate(cfg, {"target_run_id": out.name}, comparative_root(cfg))
-        if summary["regression_counts"].get("unexplained_removal"):
-            print("V2 report generated. Current selector kept because the comparison has unexplained clinical fact removals.")
+        verify_source(out.name, analytic_root=analytic.parent, report_root=out.parent)
+        blockers = selector_blockers(summary)
+        if blockers:
+            print("V2 selector retained (" + "; ".join(blockers) + ").")
         else:
             update_report_pointer(comparative_root(cfg), out.name, report_dir.name)
+            print("V2 selector updated.")
     except PermissionError as error:
         raise SystemExit(f"Harmonization stopped because an input or staging path is inaccessible ({error.filename}).") from None
     except FileNotFoundError as error:
@@ -460,7 +531,9 @@ def main() -> None:
         ) from None
     print(f"V2 run ID: {out.name}")
     print(f"Comparative report ID: {report_dir.name}")
-    print(report_dir.resolve() / "semantic_harmonization_final.html")
+    print(f"Effective Parquet: {analytic.resolve() / EFFECTIVE}")
+    print(f"Effective CSV: {(analytic.resolve() / EFFECTIVE).with_suffix('.csv')}")
+    print(f"Comparative HTML: {report_dir.resolve() / 'semantic_harmonization_final.html'}")
 
 
 if __name__ == "__main__":

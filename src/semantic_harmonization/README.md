@@ -1,6 +1,6 @@
 # Armonización semántica clínica SjD
 
-Este módulo de `obj1_sjd` prepara un candidato independiente después de Step 10. Conserva las columnas, valores, tipos, orden y claves originales. Añade campos `harm__` y tablas largas con resultados exactos, límites y rangos, serología, hallazgos, alelos y medicamentos. El diccionario conserva originales, evidencia, contexto del ensayo y frecuencias. El reporte HTML funciona sin conexión y el directorio de cada ejecución tiene permisos restrictivos.
+La V2 de `obj1_sjd` publica la tabla clínica efectiva y el candidato armonizado después de Step 10. Ambos conservan el esquema, las claves y el orden del original. La tabla efectiva aplica correcciones validadas celda por celda y conserva el original literal cuando la corrección es parcial, insegura o incompatible con el tipo fuente. El candidato armonizado conserva todos los valores originales. Añade campos `harm__` y tablas largas con resultados exactos, límites y rangos, serología, hallazgos, alelos y medicamentos. El diccionario conserva originales, evidencia, contexto del ensayo y frecuencias. El reporte HTML funciona sin conexión y el directorio de cada ejecución tiene permisos restrictivos.
 
 ## Entradas y productores
 
@@ -40,7 +40,7 @@ Los defaults en `configs/pipeline.yaml` incluyen GPT-OSS en `/data/salazarda/dat
 
 Los protocolos que declaren un umbral o una escala ordinal necesitan coincidencia exacta de ensayo, método y `protocol_version`. Para un `positive_threshold` se declaran además `units`, el `operator` (`GT`, `GE`, `LT` o `LE`), el `value` decimal y, si el protocolo lo respalda, `otherwise: negative`. Una concentración censurada solo adquiere categoría si el intervalo completo satisface la regla. `ordinal_scale` contiene los grados documentados y sus valores enteros.
 
-El job clínico trabaja sin acceso remoto de inferencia y pasa un smoke de GPT-OSS y Harmony antes de procesar textos narrativos. Los textos que exceden la ventana permanecen íntegros en la procedencia con una abstención de inferencia. RAG recupera documentos del codebook, del registro y de los protocolos locales por coincidencias compatibles. Las representaciones SapBERT se calculan sobre conceptos y aliases. Las tablas de coincidencia UCUM, IPD y RxNorm respaldan solamente sus campos correspondientes.
+El job clínico trabaja con recursos locales verificados. Inicializa GPT-OSS y ejecuta su smoke cuando quedan propuestas residuales por evaluar o el gold requiere inferencia. Los textos que exceden la ventana permanecen íntegros en la procedencia con una abstención de inferencia. RAG recupera documentos del codebook, del registro y de los protocolos locales por coincidencias compatibles. Las representaciones SapBERT se calculan sobre conceptos y aliases. Las tablas de coincidencia UCUM, IPD y RxNorm respaldan solamente sus campos correspondientes.
 
 ## Fuente común de Pharma, Economic y Graph
 
@@ -51,7 +51,7 @@ mode: candidate
 run_id: <sha256 completo del run validado>
 ```
 
-El resolver verifica el run completado, el Parquet y sus sidecars contra `candidate_source_manifest.json` y `run_manifest.json`. El run incorpora el perfil de Pharma 00 y las tablas de selección de Graph producidos sobre el mismo candidato. Pharma 01 y Graph 01/02 los consumen desde ese paquete. Graph 03 valida también la procedencia de Graph 02. Las etapas posteriores de Pharma comprueban los hashes de sus productos intermedios en los directorios del candidato. El adaptador `src.studies.economic.resolve_inputs` expone la misma versión a un futuro productor. Economic sigue planificado.
+El resolver verifica el run completado, cada Parquet y sus sidecars contra `candidate_source_manifest.json` y `run_manifest.json`. Los roles `integrated`, `effective_integrated`, `effective_observations`, `effective_feature_manifest`, `typed_observations` y `semantic_facts` están disponibles en la misma selección. Para explorar texto y categorías literales, usa `effective_integrated`. Para codificar predictores, consulta los manifiestos tipados y los enlaces a hechos aceptados y aplica la elegibilidad del estudio. El run incorpora el perfil de Pharma 00 y las tablas de selección de Graph producidos sobre el mismo candidato. Pharma 01 y Graph 01/02 los consumen desde ese paquete. Graph 03 valida también la procedencia de Graph 02. Las etapas posteriores de Pharma comprueban los hashes de sus productos intermedios en los directorios del candidato. El adaptador `src.studies.economic.resolve_inputs` expone la misma versión a un futuro productor. Economic sigue planificado.
 
 Los outputs de los estudios activados se escriben en subdirectorios del run. Para volver a los defaults, elimina el override local o usa `mode: original` y `run_id: null`. La selección de un candidato exige su publicación técnica completa. Las políticas de cobertura y aprobación clínica siguen en los estudios.
 
@@ -101,7 +101,7 @@ Desde la raíz del repositorio, en el entorno Python del módulo:
 python -m src.semantic_harmonization.report_existing
 ```
 
-El comando verifica los manifiestos de QC y de datos analíticos. Lee los artefactos publicados con dependencias de CPU y genera un HTML offline junto con tablas de progreso, comparación y pendientes. Guarda la salida en `outputs/tables/qc/semantic_harmonization_reports/<report_id>/`. El directorio y sus archivos son privados. Los runs fuente conservan sus hashes.
+El comando verifica los manifiestos de QC y de datos analíticos. Su alcance es regenerar el reporte y sus tablas a partir de un run sellado. Lee los artefactos publicados con dependencias de CPU y genera un HTML offline junto con tablas de progreso, comparación y pendientes. Guarda la salida en `outputs/tables/qc/semantic_harmonization_reports/<report_id>/`. El directorio y sus archivos son privados. Los runs fuente conservan sus hashes.
 
 Si hay más de un V2 elegible, configura la selección en `src/semantic_harmonization/configs/report_selection.local.yaml`. El archivo es local y está excluido de Git.
 
@@ -120,9 +120,26 @@ El progreso usa unidades de trabajo reproducibles a partir de los segmentos orig
 
 ### Cierre operativo V2
 
-El reporte compara Original, V1, V2 anterior y el candidato V2 por identidad de mapping, huellas clínicas y linaje. Cuando están disponibles, lee la V2 anterior fijada en `comparison.previous_v2_run_id` y verifica la referencia histórica de `comparison.historical_report_id`. El reporte histórico autenticado aporta los IDs y estados originales a `historical_work_crosswalk`. El cálculo actualizado usa sus propias reglas y denominadores. Si faltan las fuentes publicadas, el reporte registra la comparación como no disponible. Los focos de navegación incluyen recuperación de comentarios, diferencias de hechos, auditoría de los enlaces analíticos y elegibilidad por estudio.
+Desde la raíz del repositorio autorizado en Biowulf, con recursos ya preparados, ejecuta:
 
-El launcher imprime el ID V2, el ID del reporte y la ruta absoluta del HTML. El selector local `current_v2.json` se escribe de forma atómica junto a los reportes, después de verificar la publicación comparativa y comprobar que no registra pérdidas clínicas sin explicación. La reconstrucción de CPU usa ese selector si el YAML local omite `target_run_id`. Una selección explícita por ID permite volver a un reporte anterior. La activación de estudios sigue usando el selector opt-in del candidato.
+```bash
+sbatch src/semantic_harmonization/run_harmonization.sbatch
+```
+
+El pipeline revalida propuestas selladas contra las huellas de fuente, modelo, perfil, prompt, contexto de recuperación y linaje. La revalidación de hallazgos históricos también requiere citas literales y compatibilidad con los hechos presentes. En un entorno Python compatible, `python -m src.semantic_harmonization.run_pipeline` ejecuta la misma materialización y omite GPT-OSS si las reglas y las extracciones compatibles cubren el residual. La ruta con Slurm cubre los casos en que la inferencia local sigue siendo necesaria. El log queda en `work/semantic_harmonization/job-<job_id>.log`.
+
+El reporte compara Original, V1, V2 anterior, V2 reciente y V2 final por identidad de mapping, huellas clínicas y linaje. Los IDs se fijan en `configs/pipeline.yaml`. `historical_work_crosswalk` conserva los IDs del trabajo congelado cuando se puede autenticar el reporte de referencia. Las fuentes ausentes o con distinto linaje se muestran como comparaciones no evaluables. `regression_comparison` registra ambas citas, equivalencias, restauraciones, retiros respaldados y pérdidas sin explicación. HLA distingue el token reportado, el locus de búsqueda, los grupos G/P y el grado de verificación IPD. Un prefijo compatible de IPD conserva la resolución reportada.
+
+El launcher imprime los IDs del run y del reporte, las rutas del Parquet efectivo, del CSV efectivo y del HTML, y el estado del selector. `current_v2.json` se actualiza de forma atómica cuando los tres cruces son evaluables, el trabajo histórico está autenticado, los enlaces de materialización están completos y las comparaciones carecen de pérdidas clínicas sin explicación. El reporte indica qué comprobación impidió el cambio cuando conserva el selector anterior. `report_existing` usa ese selector cuando el YAML local omite `target_run_id`. Un ID explícito permite consultar una publicación anterior. La activación de estudios sigue usando `input_selection.local.yaml`.
+
+| Asset en el run analítico | Uso |
+| --- | --- |
+| `10_integrated_longitudinal_clinical_episode_effective.parquet` | Tabla clínica efectiva lista para consulta. Mantiene el esquema completo de Step 10 y una fila por episodio. |
+| `10_integrated_longitudinal_clinical_episode_harmonized.parquet` | Candidato con las columnas originales intactas y las proyecciones tipadas `harm__`. |
+| `effective_observations.parquet` | Una fila por celda elegible de episodio y una por observación BTRIS configurada. Incluye original, efectivo, decisión, hechos, evidencia y disponibilidad. |
+| `effective_feature_manifest.parquet` | Campos originales, roles, tipos Arrow, cobertura y uso permitido. |
+
+Los artefactos QC `effective_value_audit`, `effective_variable_summary` y `effective_family_summary` cuentan decisiones por grano y mantienen por separado conservación, transformación, hechos tipados y disponibilidad. El HTML muestra el efectivo publicado junto al original y a los resultados estructurados. La retención del original deja pendiente la interpretación del residuo. Los campos estructurados sin evidencia conservan sus nulos.
 
 Cada tabla de armonización se publica en Parquet y CSV, con `*.csv.schema.json` para tipos, número de filas y SHA-256. Parquet define los tipos canónicos. El CSV UTF-8 usa `\N` para null, conserva el texto vacío y agrega un apóstrofo a texto con prefijo activo en hojas de cálculo, apóstrofo inicial o barra invertida inicial. Quita ese primer apóstrofo para recuperar el texto original. Las demás celdas usan JSON canónico, con texto ISO para fechas y hexadecimal para bytes. El pipeline coteja las filas CSV con el Parquet antes de publicar. Los exports filtrados del HTML usan una presentación independiente para la hoja de cálculo.
 

@@ -40,6 +40,9 @@ class Allele(Strict):
     suffix: str | None
     source_order: int
     ipd_match: str | None
+    lookup_locus: str | None = None
+    normalized_report: str | None = None
+    group: str | None = None
 
 
 class Medication(Strict):
@@ -203,6 +206,9 @@ class HlaResult(Strict):
     resolution: int | None = None
     ipd_match: str | None = None
     suffix: str | None = None
+    lookup_locus: str | None = None
+    normalized_report: str | None = None
+    group: str | None = None
     ambiguous: bool = False
     alternatives: list[str] = Field(default_factory=list)
     position: int = Field(ge=0)

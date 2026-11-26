@@ -1,5 +1,7 @@
 """Synthetic regression tests for the semantic candidate and local report."""
+from decimal import Decimal
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -90,9 +92,12 @@ def test_narratives_hla_and_medications(cfg):
     assert carried.findings[0].light_chain == "lambda"
     assert any(e.source == "context.observation_comment" for e in carried.evidence)
     result = parsed(cfg, "lab__hla_drb1__text", "04:01:01G, *")
-    assert [(a.allele, a.suffix, a.ipd_match) for a in result.alleles] == [("DRB1*04:01:01G", "G", "g_group"), (None, None, None)]
+    assert [(a.group, a.allele, a.suffix, a.ipd_match) for a in result.alleles] == [
+        ("DRB1*04:01:01G", None, "G", "g_group"), (None, None, None, None)]
     assert len(parsed(cfg, "lab__hla_a__text", "*,*").alleles) == 2
-    assert parsed(cfg, "lab__hla_drb__text", "DRB1*04:01:01G").alleles == []
+    ambiguous, = parsed(cfg, "lab__hla_drb__text", "DRB1*04:01:01G").alleles
+    assert ambiguous.reported == "DRB1*04:01:01G" and ambiguous.allele is None
+    assert ambiguous.ipd_match == "ambiguous_locus"
     assert parsed(cfg, "lab__hla_a__text", "07,17").alleles[0].allele is None
     result = parsed(cfg, "medication__btris_order_nearby_1y_names", "drug a / drug b; drug c 10 mg PO daily")
     assert [m.name for m in result.medications] == ["drug a / drug b", "drug c"]
@@ -174,6 +179,7 @@ def synthetic(tmp_path, cfg):
         "lab__urine_bacteria__text": [">10000", None, None],
         "lab__ana_status__text": ["Positive 1:640", "not performed", "negative"],
         "sero__ana_status__ever_positive_through_episode": pd.Series([True, True, None], dtype="boolean"),
+        "lab__anti_sm__text": ["NEG", "POSITIVE", "  Unknown  "],
         "lab__other__text": ['</script><img src=x onerror=alert(2)> &', "", None],
         "spine__sjogrens_class_patient_values": ["4; 2", "1; 4", "2; 1"],
         "demo__name": ["private-synthetic-a", "private-synthetic-a", "private-synthetic-b"],
@@ -856,3 +862,232 @@ def test_closure_compares_explicit_previous_v2_and_frozen_work(tmp_path, cfg):
     assert {r["reconciliation"] for r in frozen} == {"matched"}
     assert file_manifest(historical) == immutable
     assert generate(cfg, {"target_run_id": final.name, "previous_v2_run_id": previous.name}, root)[0] == path
+
+
+@pytest.mark.parametrize("value,dtype", [
+    (None, pa.string()), ("", pa.string()), ("  Unknown  ", pa.string()),
+    ("\t Ñội\n原文 '\\N", pa.string()), ("*,*", pa.large_string()),
+    (False, pa.bool_()), (0, pa.int64()), (2**63 - 1, pa.int64()),
+    (float("nan"), pa.float64()), (-0.0, pa.float32()), (float("inf"), pa.float64()),
+    (Decimal("103.545"), pa.decimal128(10, 3)), (1730419200000000123, pa.timestamp("ns", "UTC")),
+    (17, pa.date32()), (24735, pa.time64("ns")),
+    (["x", "", None], pa.list_(pa.string())),
+    ([300, None, 400], pa.list_(pa.timestamp("ns"))),
+    ({"x": Decimal("2.30"), "b": b"\xff"}, pa.struct([("x", pa.decimal128(10, 2)), ("b", pa.binary())])),
+    ([("x", 1), ("x", 2)], pa.map_(pa.string(), pa.int64())),
+    ("observed", pa.dictionary(pa.int32(), pa.string())),
+])
+def test_effective_arrow_scalar_codec(value, dtype):
+    from src.semantic_harmonization.effective_values import decode_value, encode_value
+
+    raw = pa.scalar(value, type=dtype)
+    encoded = encode_value(raw, dtype)
+    restored = decode_value(encoded, dtype)
+    assert restored.type == raw.type and restored.is_valid == raw.is_valid
+    assert encode_value(restored, dtype) == encoded
+    if not (isinstance(value, float) and math.isnan(value)):
+        assert raw.equals(restored)
+
+
+@pytest.mark.parametrize("concept,value,after,origin", [
+    ("anti_sm", "NEG", "negative", "current_validated"),
+    ("anti_sm", "POSITIVE", "positive", "current_validated"),
+    ("anti_sm", "negative", "negative", "original_unchanged"),
+    ("anti_sm", "  Unknown  ", "  Unknown  ", "original_fallback"),
+    ("anti_sm", "", "", "original_fallback"),
+    ("anti_sm", None, None, "original_null"),
+    ("anti_sm", "NEG. Unknown clause", "NEG. Unknown clause", "original_fallback"),
+    ("anti_sm", "NEG | Positive", "NEG | Positive", "original_fallback"),
+    ("anti_sm", "SEE BELOW | Complex finding", "SEE BELOW | Complex finding", "original_fallback"),
+    ("anti_sm", "SEE NOTE | Negative; unresolved statement", "SEE NOTE | Negative; unresolved statement", "original_partial"),
+    ("anti_sm", "SEE BELOW | Reference range: Negative", "SEE BELOW | Reference range: Negative", "original_fallback"),
+    ("hla_dpb", "04:01:01", "04:01:01", "original_fallback"),
+    ("hla_a", "*,*", "*,*", "original_fallback"),
+    ("anti_ro60", "<0.2", "<0.2", "original_fallback"),
+    ("ana_hep2_status", "<1:80 (Negative) ADDITIONAL INFORMATION: Synthetic associations",
+     "<1:80 (Negative) ADDITIONAL INFORMATION: Synthetic associations", "original_fallback"),
+    ("cryoglobulins", "SEE BELOW | Negative at 24 hours. Reviewed again at 7 days.",
+     "SEE BELOW | Negative at 24 hours. Reviewed again at 7 days.", "original_fallback"),
+])
+def test_effective_decision_keeps_every_unrendered_component(cfg, concept, value, after, origin):
+    from src.semantic_harmonization.effective_values import choose_effective
+    from src.semantic_harmonization.semantic_facts import parse_mapping
+
+    row = v2_row(cfg, concept, value)
+    parsed, parts, facts = parse_mapping(row, cfg, VOCAB)
+    dtype = pa.string()
+    choice = choose_effective(pa.scalar(value, type=dtype), dtype, row | parsed.model_dump(),
+                              parts, facts, {}, cfg["normalization"])
+    assert choice.origin == origin
+    assert (choice.value if choice.fact_id else value) == after
+    if choice.fact_id:
+        assert choice.fact_id in {fact.fact_id for fact in facts}
+
+
+def test_effective_wide_and_long_are_verified_together_without_inference(tmp_path, cfg):
+    from src.semantic_harmonization.effective_values import EFFECTIVE
+    from src.semantic_harmonization.study_input import verify_source
+
+    _, resources = synthetic(tmp_path, cfg)
+    path = Path(cfg["paths"]["integrated"])
+    original = pq.read_table(path)
+    original = original.set_column(original.schema.get_field_index("lab__immunofixation__text"),
+                                   "lab__immunofixation__text",
+                                   pa.array(["IgG kappa band detected", None, None]))
+    original = original.append_column("ext__physical_float", pa.array([float("nan"), None, -0.0]))
+    original = original.append_column("ext__big", pa.array([2**63 - 1, None, 0], type=pa.int64()))
+    original = original.append_column("ext__list", pa.array([["a", "", None], None, []], type=pa.list_(pa.string())))
+    original = original.append_column("ext__boolean", pa.array([False, None, True]))
+    pq.write_table(original, path)
+
+    def no_inference(_):
+        pytest.fail("deterministic publication initialized GPT-OSS")
+
+    analytic, qc = run(cfg, encoder=object(), model_factory=no_inference, resource_verify=lambda _: resources)
+    effective = pq.read_table(analytic / EFFECTIVE)
+    assert effective.schema.equals(pq.read_schema(path), check_metadata=True)
+    assert effective["lab__anti_sm__text"].to_pylist() == ["negative", "positive", "  Unknown  "]
+    assert effective["ext__big"].to_pylist() == [2**63 - 1, None, 0]
+    assert effective["ext__boolean"].to_pylist() == [False, None, True]
+    assert effective["ext__list"].to_pylist() == [["a", "", None], None, []]
+    assert effective["ext__physical_float"].is_null().to_pylist() == [False, True, False]
+    rows = pq.read_table(analytic / "effective_observations.parquet").to_pylist()
+    decisions = {row["variable"]: [item for item in rows if item["variable"] == row["variable"]
+                                  and item["source_grain"] == "episode_variable"] for row in rows}
+    assert len(rows) == 3 * len(decisions) + 3
+    assert [r["raw_json"] for r in decisions["ext__physical_float"]] == ['"nan"', "null", "-0.0"]
+    assert len({r["mapping_id"] for r in decisions["ext__physical_float"]}) == 3
+    assert all(r["temporal_availability"] == "unverified" for r in decisions["lab__anti_sm__text"])
+    assert all(r["effective_json"] == r["raw_json"] for r in rows if r["effective_origin"].startswith("original_"))
+    assert all(r["decision_fact_id"] in r["accepted_fact_ids"] for r in rows if r["decision_fact_id"])
+    summary = json.loads((qc / "validation_summary.json").read_text())
+    assert summary["inference"]["model_initialized"] is False
+    assert summary["effective_values"]["current_validated"] == 2
+    assert summary["effective_values"]["new_nulls"] == 0
+    selected = verify_source(analytic.name, analytic_root=analytic.parent, report_root=qc.parent)
+    assert selected.require("effective_integrated") == analytic / EFFECTIVE
+    assert selected.require("effective_integrated_csv_schema").is_file()
+    payload = json.loads((qc / "semantic_harmonization_final.html").read_text().split(
+        '<script id="payload" type="application/json">', 1)[1].split("</script>", 1)[0])
+    assert any(item["effective_json"] == '"negative"' and item["effective_origin"] == "current_validated"
+               for row in payload["mappings"] for item in row.get("effective_values") or [])
+
+
+def test_hla_resolution_verifies_without_extending_the_reported_allele(cfg):
+    from src.semantic_harmonization.semantic_facts import parse_mapping
+
+    vocab = VOCAB | {"ipd": {"allele": {"DPB1*04:01:01", "DPB1*04:01:02", "DPB1*04:10"},
+                             "g_group": {"DPB1*04:01:01G"}, "p_group": {"DPB1*04:01P"}}}
+    value = "SEE BELOW | HLA typing: 04:01, 04:01:01, 04:01:01G, 04:01P, *"
+    semantic, parts, facts = parse_mapping(v2_row(cfg, "hla_dpb", value), cfg, vocab)
+    assert [(a.reported, a.allele, a.ipd_match, a.group) for a in semantic.alleles] == [
+        ("04:01", None, "compatible_resolution", None),
+        ("04:01:01", "DPB1*04:01:01", "allele", None),
+        ("04:01:01G", None, "g_group", "DPB1*04:01:01G"),
+        ("04:01P", None, "p_group", "DPB1*04:01P"),
+        ("*", None, None, None),
+    ]
+    assert all(value[f.start:f.end] == f.quote for f in facts)
+    incompatible, _, _ = parse_mapping(v2_row(cfg, "hla_dpb", "04:1:01"), cfg, vocab)
+    assert not incompatible.alleles
+    partial, _, _ = parse_mapping(v2_row(cfg, "hla_dpb", "04:11"), cfg, vocab)
+    assert partial.alleles[0].ipd_match == "no_match"
+
+
+@pytest.mark.parametrize("operator,unit,status", [("LT", "g/dL", "equivalent"),
+                                                  ("EQ", "g/dL", "unexplained_removal"),
+                                                  ("LT", "mg/dL", "unexplained_removal")])
+def test_regression_checks_semantics_and_evidence_for_m_spike(cfg, operator, unit, status):
+    from src.semantic_harmonization.closure_audit import regression_rows
+    from src.semantic_harmonization.report_progress import canonical_storage
+    from src.semantic_harmonization.schemas import NumericResult
+    from src.semantic_harmonization.semantic_facts import make_fact, parse_mapping
+
+    row = v2_row(cfg, "m_spike", "<0.2 g/dL")
+    _, parts, current = parse_mapping(row, cfg, VOCAB)
+    old = make_fact(row, parts[0], "numeric_result",
+                    NumericResult(comparator=operator, raw_unit=unit,
+                                  **({"exact_value": "0.20"} if operator == "EQ" else {"limit_value": "0.20"})),
+                    "numeric_parser", "legacy")
+    audit, = regression_rows(row | {"occurrences": 1}, canonical_storage(current), canonical_storage([old]),
+                            None, parts, current_facts=current, reference_facts={"V1": [old]})
+    assert audit["change"] == status
+    assert audit["reference_evidence"] == "<0.2 g/dL"
+
+
+def test_historical_value_uses_a_revalidated_fact_and_refuses_conflict(cfg):
+    from src.semantic_harmonization.effective_values import choose_effective
+    from src.semantic_harmonization.schemas import QualitativeResult
+    from src.semantic_harmonization.semantic_facts import make_fact, parse_mapping
+
+    row = v2_row(cfg, "anti_sm", "NEG")
+    parsed, parts, facts = parse_mapping(row, cfg, VOCAB)
+    prior, = facts
+    source = pa.scalar("NEG")
+    historical = {prior.fact_id: "sealed-reference"}
+    selected = choose_effective(source, source.type, row | parsed.model_dump(), parts, [prior],
+                                historical, cfg["normalization"])
+    assert (selected.origin, selected.value) == ("previous_validated", "negative")
+    conflict = make_fact(row, parts[0], "qualitative_result", QualitativeResult(category="positive"),
+                         "fixture", "fixture")
+    selected = choose_effective(source, source.type, row | parsed.model_dump(), parts, [prior, conflict],
+                                historical, cfg["normalization"])
+    assert selected.origin not in {"current_validated", "previous_validated"} and selected.value is None
+
+
+def test_selector_requires_comparable_history_and_complete_effective_assets():
+    from src.semantic_harmonization.run_pipeline import selector_blockers
+
+    valid = dict(regression_counts={}, assessment={"V1": "paired", "Previous V2": "paired", "Recent V2": "paired"},
+                 frozen_work={"units": 10}, effective_values={"integrity_failures": 0})
+    assert selector_blockers(valid) == []
+    assert selector_blockers(valid | {"regression_counts": {"unexplained_removal": 2}})
+    assert selector_blockers(valid | {"assessment": {"Recent V2": "unavailable"}})
+    assert selector_blockers(valid | {"missing_materialization_links": 1})
+    assert selector_blockers(valid | {"effective_values": None})
+
+
+def test_compatible_sealed_residual_can_be_revalidated_on_cpu(tmp_path, cfg):
+    _, resources = synthetic(tmp_path, cfg)
+    analytic, qc = run(cfg, encoder=Encoder(), model_factory=Model, resource_verify=lambda _: resources)
+    cfg["comparison"]["recent_v2_run_id"] = qc.name
+    cfg["comparison"]["recent_report_id"] = None
+
+    def no_inference(_):
+        pytest.fail("compatible sealed residual initialized GPT-OSS")
+
+    new_analytic, new_qc = run(cfg, encoder=Encoder(), model_factory=no_inference, resource_verify=lambda _: resources)
+    assert new_analytic != analytic
+    summary = json.loads((new_qc / "validation_summary.json").read_text())
+    assert summary["inference"] == dict(model_initialized=False, revalidated_historical_mappings=1,
+                                        accepted_historical_facts=1, fresh_residual_mappings=0)
+    audit = pq.read_table(new_qc / "effective_value_audit.parquet").to_pylist()
+    assert any(ev["reference_run_id"] == qc.name for row in audit for ev in row["evidence"])
+
+
+@pytest.mark.parametrize("answer,status", [
+    (None, "context_limit"), ("", "empty_response"), ("{}", "invalid_schema"),
+    ('{"findings":[]}', "validated"), (TimeoutError(), "timeout"),
+])
+def test_model_failures_leave_literal_effective_value(cfg, answer, status):
+    from src.semantic_harmonization.effective_values import choose_effective
+    from src.semantic_harmonization.inference import extract_batch
+    from src.semantic_harmonization.semantic_facts import parse_mapping
+
+    class Residual:
+        def messages(self, *_):
+            return None
+
+        def chat(self, *_):
+            if isinstance(answer, BaseException):
+                raise answer
+            return [answer]
+
+    raw = "SEE BELOW | A synthetic, unresolved kappa result."
+    row = v2_row(cfg, "immunofixation", raw)
+    semantic, parts, facts = parse_mapping(row, cfg, VOCAB)
+    outcome, = extract_batch(Residual(), [row], {row["mapping_id"]: []}, 0, cfg=cfg, vocab=VOCAB)
+    assert outcome["status"] == status and not outcome["findings"]
+    result = choose_effective(pa.scalar(raw), pa.string(), row | semantic.model_dump(), parts, facts, {},
+                              cfg["normalization"])
+    assert result.origin in {"original_fallback", "original_partial"} and result.value is None

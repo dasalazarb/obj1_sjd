@@ -233,6 +233,7 @@ def vocabularies(manifest: dict) -> dict:
         root = Path(resources["ipd"]["path"])
         vocab["ipd"]["allele"] = {line.split(",")[1].strip() for line in (root / "Allelelist.txt").read_text().splitlines()
                                   if line and not line.startswith("#") and "," in line}
+        vocab["ipd"]["sorted_alleles"] = sorted(vocab["ipd"]["allele"])
         for suffix in ("g", "p"):
             elements = [line.split(";") for line in (root / "wmda" / f"hla_nom_{suffix}.txt").read_text().splitlines()
                         if line and not line.startswith("#")]

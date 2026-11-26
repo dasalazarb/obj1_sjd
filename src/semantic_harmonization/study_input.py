@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import re
 
+from .effective_values import EFFECTIVE, RULE as EFFECTIVE_CONTRACT
 from .settings import MODULE, ROOT, digest, file_hash, merge, pipeline_config, read_yaml, write_json
 
 SOURCE_MANIFEST = "candidate_source_manifest.json"
@@ -15,6 +16,16 @@ ANALYTIC_FILES = {
     "context": "10_integrated_longitudinal_context_harmonized.parquet",
     "feature_manifest": "feature_manifest.parquet",
 }
+EFFECTIVE_ANALYTIC = {
+    "effective_integrated": EFFECTIVE,
+    "effective_observations": "effective_observations.parquet",
+    "effective_feature_manifest": "effective_feature_manifest.parquet",
+}
+EFFECTIVE_ANALYTIC.update({
+    role + suffix: Path(path).with_suffix(extension).name
+    for role, path in tuple(EFFECTIVE_ANALYTIC.items()) if path.endswith(".parquet")
+    for suffix, extension in (("_csv", ".csv"), ("_csv_schema", ".csv.schema.json"))
+})
 TYPED_ANALYTIC = {
     "harmonized_observations": "harmonized_observations.parquet",
     "typed_observations": "patient_visit_semantic_observations.parquet",
@@ -67,8 +78,11 @@ class StudyInput:
 
     def provenance(self) -> dict:
         """Supply the candidate version and Step 10 hash for study provenance."""
-        return {"run_id": self.run_id, "manifest": str(self.manifest),
-                "integrated_sha256": self.sha256["integrated"]}
+        provenance = {"run_id": self.run_id, "manifest": str(self.manifest),
+                      "integrated_sha256": self.sha256["integrated"]}
+        if "effective_integrated" in self.sha256:
+            provenance["effective_integrated_sha256"] = self.sha256["effective_integrated"]
+        return provenance
 
 
 def selection_id(dirs: Path = MODULE / "configs") -> str | None:
@@ -89,7 +103,7 @@ def write_source_manifest(out: Path, analytic: Path, run_id: str, original: dict
     """Describe the validated files relative to their matched run directories."""
     assets = {}
     for group, root, names in (
-        ("analytic", analytic, ANALYTIC_FILES | TYPED_ANALYTIC),
+        ("analytic", analytic, ANALYTIC_FILES | TYPED_ANALYTIC | EFFECTIVE_ANALYTIC),
         ("report", out, TYPED_REPORT | {role: (PROFILE_DIR / name).as_posix() for role, name in (PROFILE_FILES | OPTIONAL_PROFILE_FILES).items()}),
     ):
         for role, relative in names.items():
@@ -104,6 +118,8 @@ def write_source_manifest(out: Path, analytic: Path, run_id: str, original: dict
         raise ValueError("Candidate has an incomplete Pharma/Graph input bundle")
     if not (TYPED_ANALYTIC.keys() | TYPED_REPORT.keys()) <= assets.keys():
         raise ValueError("Validated candidate is missing typed analytical assets")
+    if not EFFECTIVE_ANALYTIC.keys() <= assets.keys():
+        raise ValueError("Validated candidate is missing effective analytical assets")
     write_json(out / SOURCE_MANIFEST, {"schema": "sjd_semantic_source_v2", "run_id": run_id,
                                      "original_step10_sha256": original["integrated"], "assets": assets})
 
@@ -137,7 +153,7 @@ def verify_source(run_id: str, *, analytic_root: Path, report_root: Path) -> Stu
             or manifest.get("original_step10_sha256") != original.get("integrated")):
         raise ValueError("Semantic source manifest identity mismatch")
     exact_assets = {
-        **{role: ("analytic", name) for role, name in (ANALYTIC_FILES | TYPED_ANALYTIC).items()},
+        **{role: ("analytic", name) for role, name in (ANALYTIC_FILES | TYPED_ANALYTIC | EFFECTIVE_ANALYTIC).items()},
         **{role: ("report", name) for role, name in TYPED_REPORT.items()},
         **{role: ("report", (PROFILE_DIR / name).as_posix()) for role, name in (PROFILE_FILES | OPTIONAL_PROFILE_FILES).items()},
     }
@@ -148,6 +164,9 @@ def verify_source(run_id: str, *, analytic_root: Path, report_root: Path) -> Stu
         raise ValueError("Semantic source manifest lacks typed analytical assets")
     if set(assets) & PROFILE_FILES.keys() and not PROFILE_FILES.keys() <= assets.keys():
         raise ValueError("Semantic source manifest has an incomplete Pharma/Graph bundle")
+    effective = identity.get("effective_contract") == EFFECTIVE_CONTRACT or bool(set(assets) & EFFECTIVE_ANALYTIC.keys())
+    if effective and (not run.get("completed_at") or not EFFECTIVE_ANALYTIC.keys() <= assets.keys()):
+        raise ValueError("Semantic source manifest lacks effective analytical assets")
     files, hashes = {}, {}
     for role, asset in assets.items():
         group, relative = asset["group"], asset["path"]

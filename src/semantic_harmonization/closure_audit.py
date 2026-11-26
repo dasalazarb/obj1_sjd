@@ -9,7 +9,7 @@ import pyarrow as pa
 
 from .report_sources import unique_counts
 from .schemas import INT, STR
-from .semantic_facts import METADATA_ROLES, clinical, coverage, fact_spans
+from .semantic_facts import METADATA_ROLES, canonical, clinical, coverage, fact_spans
 
 COMMENT = pa.schema([
     *[(key, STR) for key in ("mapping_id", "variable", "family", "prefix", "prefix_kind", "prefix_source", "raw",
@@ -122,20 +122,21 @@ def materialization_rows(row, facts, lines, links, features):
     """Account for each clinical fact and its verified observation links."""
     if links is None:
         return []
-    expected = [line for line in lines or () if line["patient_id"] is not None and line["clinical_episode_id"] is not None]
+    eligible = row["family"] not in {"derived", "other", "protected"}
+    expected = [line for line in lines or () if eligible and line["patient_id"] is not None
+                and line["clinical_episode_id"] is not None]
     linked = Counter(fact_id for link in links for fact_id in link["fact_ids"])
     as_of = Counter(fact_id for link in links for fact_id in link["as_of_fact_ids"])
     out = []
     for fact in facts:
-        if not clinical(fact) and fact.fact_type != "medication_context":
-            continue
         n = linked[fact.fact_id]
         names = sorted(feature["name"] for feature in features if wide_field(fact, feature.get("semantic_field")))
         status = ("linked" if n and n == len(expected) else "missing_links" if expected else
                   "source_observation_only")
         out.append(dict(mapping_id=row["mapping_id"], fact_id=fact.fact_id, variable=row["variable"],
                         family=row["family"], fact_type=fact.fact_type, status=status,
-                        reason="Source observation has no linked episode" if not expected else
+                        reason=("Outside the episode analytical profile" if not eligible else "Source observation has no linked episode")
+                        if not expected else
                         "Semantics retained at observation grain" if not names else None, wide_fields=names,
                         expected_observations=len(expected), linked_observations=n, as_of_observations=as_of[fact.fact_id]))
     return out
@@ -160,7 +161,8 @@ def wide_field(fact, field):
 
 REGRESSION = pa.schema([
     *[(key, STR) for key in ("mapping_id", "variable", "family", "reference_version", "change", "fact_type",
-                            "canonical_fact", "reason", "evidence")],
+                            "canonical_fact", "current_fact", "reason", "evidence", "reference_evidence",
+                            "materialization_effect")],
     ("occurrences", INT),
 ])
 HISTORICAL_WORK = pa.schema([
@@ -181,38 +183,140 @@ def clinical_meanings(facts):
             and not (row["fact_type"] == "hla_result" and row["hla_result"]["ambiguous"])}
 
 
-def regression_rows(mapping, final, v1, previous, parts):
-    """Expose removals, restorations and the exact evidence for scoped corrections."""
+def comparable_numeric(left, right):
+    """Compare values after canonical decimal formatting, at one matching assay grain."""
+    def component(row):
+        kind = row["fact_type"]
+        if kind == "numeric_result":
+            return row[kind]
+        if kind == "m_spike_result":
+            return row[kind].get("concentration")
+        return None
+
+    a, b = component(left), component(right)
+    if not a or not b or left["temporality"] != right["temporality"]:
+        return False
+    units_match = ((a.get("ucum_unit") or a.get("raw_unit")) == (b.get("ucum_unit") or b.get("raw_unit")))
+    return units_match and all(a.get(k) == b.get(k) for k in (
+        "comparator", "exact_value", "limit_value", "range_low", "range_high"))
+
+
+def matching_citations(left, right):
+    """Require literal, overlapping evidence in the same original source field."""
+    return any(a.source_field == b.source_field and max(a.start, b.start) < min(a.end, b.end)
+               and (a.quote in b.quote or b.quote in a.quote)
+               for l in left for r in right for a in fact_spans(l) for b in fact_spans(r))
+
+
+def hla_token(payload):
+    """Normalize the known locus alias while retaining reported resolution and suffix."""
+    from .parsers import ALLELE, HLA_LOCUS_ALIASES
+
+    match = ALLELE.fullmatch(payload["token"].upper())
+    if not match:
+        return None
+    locus = match["locus"] or payload["locus"]
+    return HLA_LOCUS_ALIASES.get(locus, locus), match["fields"], match["suffix"]
+
+
+def equivalent(old, new, family, old_spans, new_spans):
+    """Detect a change in schema or verification without silently losing meaning."""
+    if old["temporality"] != new["temporality"] or not matching_citations(old_spans, new_spans):
+        return None
+    if family == "m_spike" and {old["fact_type"], new["fact_type"]} == {"numeric_result", "m_spike_result"}:
+        if comparable_numeric(old, new):
+            return "equivalent", "Same M-spike concentration, comparator, unit and source evidence"
+    if old["fact_type"] == new["fact_type"] == "cryoglobulin_finding":
+        prior, current = old["cryoglobulin_finding"], new["cryoglobulin_finding"]
+        if (prior.get("incubation_hours") and prior.get("incubation_stage") is None
+                and current.get("incubation_stage") is not None
+                and prior == {k: v for k, v in current.items() if k != "incubation_stage"}):
+            return "equivalent", "Same timed cryoglobulin reading with additional source-supported stage"
+    if old["fact_type"] == new["fact_type"] == "hla_result":
+        prior, current = old["hla_result"], new["hla_result"]
+        token = hla_token(prior)
+        if token is None or token != hla_token(current) or prior["position"] != current["position"]:
+            return None
+        group = token[2] in {"G", "P"}
+        if group:
+            if prior.get("ipd_match") in {"g_group", "p_group"} and current.get("ipd_match") != prior["ipd_match"]:
+                return "unexplained_removal", "Group token retained; prior IPD group verification absent"
+            return "equivalent", "Same reported HLA group and locus; group identity is separate from allele identity"
+        if prior.get("allele") and not current.get("allele"):
+            if current.get("ipd_match") == "ambiguous_locus":
+                return "justified_removal", "Reported token retained. Source evidence leaves the historical locus assignment ambiguous"
+            if prior.get("ipd_match") != "allele":
+                if current.get("ipd_match") == "compatible_resolution":
+                    return "equivalent", "Reported token preserved with IPD compatibility at its original resolution"
+                return "justified_removal", "Reported token preserved. The historical allele field had no verified IPD match"
+            return "unexplained_removal", "Reported allele token retained. Prior exact IPD verification absent"
+        if prior.get("ipd_match") == "compatible_resolution" and not (
+            current.get("allele") or current.get("ipd_match") == "compatible_resolution"
+        ):
+            return "unexplained_removal", "Reported allele token retained; prior IPD resolution compatibility absent"
+        if not prior.get("allele") and current.get("allele"):
+            return "restored", "Reported HLA token now has an exact verified IPD identity"
+        return "equivalent", "Same reported HLA token, locus and resolution"
+    return None
+
+
+def regression_rows(mapping, final, v1, previous, parts, *, recent=None, current_facts=(), reference_facts=None):
+    """Compare facts against each verified reference and retain both evidence spans."""
     current = clinical_meanings(final)
-    legacy = clinical_meanings(v1) if v1 is not None else None
-    prior = clinical_meanings(previous) if previous is not None else None
-    records = []
+    refs = {"V1": v1, "Previous V2": previous, "Recent V2": recent}
+    clinical_refs = {k: clinical_meanings(v) for k, v in refs.items() if v is not None}
+    spans, historical = defaultdict(list), defaultdict(lambda: defaultdict(list))
+    for fact in current_facts:
+        spans[canonical(fact)].append(fact)
+    for version, facts in (reference_facts or {}).items():
+        for fact in facts or ():
+            historical[version][canonical(fact)].append(fact)
+    records, retained_legacy = [], set()
     common = {key: mapping[key] for key in ("mapping_id", "variable", "family", "occurrences")}
-    for version, before in (("V1", legacy), ("Previous V2", prior)):
-        if before is None:
-            continue
+
+    def emit(version, meaning, old, current_meaning, change, reason, evidence=None):
+        after = [fact.quote for fact in spans.get(current_meaning, ())]
+        before = [fact.quote for fact in historical[version].get(meaning, ())]
+        records.append(common | dict(reference_version=version, fact_type=old["fact_type"], canonical_fact=meaning,
+                                     current_fact=current_meaning, change=change, reason=reason,
+                                     evidence=evidence or (" | ".join(dict.fromkeys(after)) or None),
+                                     reference_evidence=" | ".join(dict.fromkeys(before)) or None,
+                                     materialization_effect=("typed observation retained" if current_meaning else
+                                                             "prior fact has no matching typed observation")))
+
+    for version, before in clinical_refs.items():
+        if version == "V1":
+            retained_legacy.update(before.keys() & current.keys())
         for meaning in sorted(before.keys() - current.keys()):
             original = before[meaning]
-            category = original["fact_type"]
-            reason = None
-            evidence = None
-            if category == "titer_result" and mapping["family"] == "hla":
+            matches = [(key, result) for key, new in final.items()
+                       if (result := equivalent(original, new, mapping["family"],
+                                                historical[version][meaning], spans[key]))]
+            if len(matches) == 1:
+                key, (change, reason) = matches[0]
+                emit(version, meaning, original, key, change, reason)
+                if version == "V1" and change in {"equivalent", "restored"}:
+                    retained_legacy.add(key)
+                continue
+            if original["fact_type"] == "titer_result" and mapping["family"] == "hla":
                 token = next((part for part in parts if part.role == "patient_result" and
                               re.fullmatch(r"\s*\d{2,3}:\d{2,3}\s*", part.text)), None)
                 if token:
-                    reason, evidence = "HLA locus grammar identifies a reported allele token", token.text
-            records.append(common | dict(reference_version=version, fact_type=category, canonical_fact=meaning,
-                                         change="justified_removal" if reason else "unexplained_removal",
-                                         reason=reason or "Review supporting evidence and field equivalence",
-                                         evidence=evidence))
-    if legacy is not None and prior is not None:
-        for meaning in sorted((legacy.keys() & current.keys()) - prior.keys()):
-            records.append(common | dict(reference_version="Previous V2", change="restored",
-                                         fact_type=current[meaning]["fact_type"], canonical_fact=meaning,
-                                         reason="Equivalent supported fact is present in V1 and final V2",
-                                         evidence=mapping["raw_json"]))
-    return records
+                    emit(version, meaning, original, None, "justified_removal",
+                         "HLA locus grammar identifies a reported allele token", token.text)
+                    continue
+            emit(version, meaning, original, None, "unexplained_removal",
+                 "Review source evidence and any competing or absent typed representation")
 
+        if version == "V1":
+            continue
+        for meaning in sorted(retained_legacy - before.keys()):
+            if not any(equivalent(old, current[meaning], mapping["family"],
+                                  historical[version][key], spans[meaning])
+                       for key, old in before.items()):
+                emit(version, meaning, current[meaning], meaning, "restored",
+                     "Supported fact present in V1 and final V2", mapping["raw_json"])
+    return records
 
 def historical_crosswalk(frozen, work, mappings, segment_index):
     """Preserve original work IDs and reconcile only when source evidence is comparable."""
@@ -228,7 +332,7 @@ def historical_crosswalk(frozen, work, mappings, segment_index):
             continue
         mapping = mappings.get(item["mapping_id"])
         target_id = mapping["mapping_id"] if mapping else None
-        current = by_id.get(item["work_id"]) if mapping else None
+        current = (by_id.get(item["work_id"]) or by_id.get(item.get("recent_work_id"))) if mapping else None
         if current is None and mapping:
             start, end = item.get("segment_start"), item.get("segment_end")
             candidates = [peer for peer in by_mapping[target_id] if peer["problem_kind"] == item["problem_kind"]
@@ -253,6 +357,15 @@ def historical_crosswalk(frozen, work, mappings, segment_index):
                     if re.fullmatch(r"\s*\d{2,3}:\d{2,3}\s*", part.text):
                         reconciliation, state, evidence = "reclassified_hla_grammar", "no_correction_required", part.text
                         break
+        if mapping and not current and reconciliation == "unmatched" and item.get("frozen_evidence"):
+            prior_class = item.get("frozen_reconciliation")
+            literal = item["frozen_evidence"]
+            if any(part.text == literal and (
+                prior_class == "reclassified_reference_rule" and part.role == "reference_rule"
+                or prior_class == "reclassified_hla_grammar" and mapping["family"] == "hla"
+                and part.role == "patient_result" and re.fullmatch(r"\s*\d{2,3}:\d{2,3}\s*", literal)
+            ) for part in segment_index.get(target_id, ())):
+                reconciliation, state, evidence = prior_class, "no_correction_required", literal
         result.append(dict(work_id=item["work_id"], current_work_id=current["work_id"] if current else None,
                            mapping_id=item["mapping_id"], variable=item["variable"], kind=item["problem_kind"],
                            state_v1=item.get("state_v1"), state_previous_v2=item.get("state_v2"),

@@ -78,6 +78,8 @@ def routing(row: dict, semantic: Semantic, parts=None, facts=None) -> dict:
         reason = "no_result_segments"
     elif semantic.result_availability in {"not_performed", "pending", "not_interpretable"}:
         reason = "assay_unavailable"
+    elif uncovered and row["family"] == "hla":
+        reason = "hla_requires_literal_resource_verification"
     elif uncovered:
         reason = "partial_result" if resolved else "unparsed_result"
     else:
@@ -213,10 +215,14 @@ def validate_profile(answer: str, row: dict, retrieved: list, cfg: dict, vocab: 
         if candidate.quote.strip() not in {value, clause}:
             raise ValueError("Profile proposal omits assertion context")
         parsed = parse_segment(row, cfg, vocab, value, part.source_field, part.role)
-        if not any(item.fact_type == kind and item.payload == candidate.payload
-                   for item in part_facts(row, part, parsed, cfg["normalization"]["version"])):
+        computed = {"lookup_locus", "normalized_report", "group", "ipd_match", "allele"} if kind == "hla_result" else set()
+        verified = next((item for item in part_facts(row, part, parsed, cfg["normalization"]["version"])
+                         if item.fact_type == kind
+                         and item.payload.model_dump(exclude=computed) == candidate.payload.model_dump(exclude=computed)
+                         and all(getattr(candidate.payload, field) in (None, getattr(item.payload, field)) for field in computed)), None)
+        if not verified:
             raise ValueError("Profile proposal is unsupported")
-        fact = make_fact(row, part, kind, candidate.payload, "llm_rag", cfg["prompts"]["profile_version"], candidate.quote)
+        fact = make_fact(row, part, kind, verified.payload, "llm_rag", cfg["prompts"]["profile_version"], candidate.quote)
         accepted.append(fact.model_copy(update={"document_ids": candidate.document_ids}))
     return accepted
 
@@ -407,11 +413,20 @@ def extract_batch(model: LocalModel, rows: list[dict], retrieved: dict, retries:
         for round_number in range(retries + 1):
             next_pending = []
             messages = [model.messages(row, retrieved[row["mapping_id"]], bool(round_number)) for row in pending]
-            answers = model.chat(messages) if active == "finding" else model.chat(messages, active)
+            try:
+                answers = model.chat(messages) if active == "finding" else model.chat(messages, active)
+            except TimeoutError:
+                for row in pending:
+                    key = row["mapping_id"]
+                    output[key] = dict(mapping_id=key, findings=[], facts=[], status="timeout")
+                continue
             for row, answer in zip(pending, answers, strict=True):
                 key = row["mapping_id"]
                 result = dict(mapping_id=key, findings=[], facts=[], status="context_limit")
-                if answer is not None:
+                if answer is not None and not answer.strip():
+                    result["status"] = "empty_response"
+                    next_pending.append(row)
+                elif answer is not None:
                     try:
                         if active == "finding":
                             extracted = validate_extraction(answer, row, retrieved[key])
