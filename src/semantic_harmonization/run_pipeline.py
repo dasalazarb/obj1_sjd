@@ -31,6 +31,8 @@ from .inventory import inventory
 from .semantic_facts import canonical, from_storage, parse_mapping, verify_contract
 from .rag import KnowledgeIndex, documents
 from .report import report
+from .report_existing import baseline_run
+from .report_sources import Run, file_manifest
 from .resources import verify, vocabularies
 from .schemas import (DICTIONARY, EXTRACTIONS, FACTS, IDENTITY, INVENTORY, LINEAGE, SEGMENTS, SEMANTIC, TRACE,
                       Extraction, Semantic, SemanticFact, SemanticSegment)
@@ -90,12 +92,6 @@ def inputs_for(cfg: dict) -> dict:
         elif path is not None and name in {"gold", "audit", "source_events"}:
             raise FileNotFoundError(f"Configured input missing: {path}")
     return hashes
-
-
-def file_manifest(directory: Path, *, skip=()) -> dict:
-    """Record all staged files by relative path and checksum."""
-    return {path.relative_to(directory).as_posix(): file_hash(path)
-            for path in sorted(directory.rglob("*")) if path.is_file() and path.name not in skip}
 
 
 def completed(out: Path, analytic: Path, identity: dict) -> bool:
@@ -364,7 +360,8 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=ve
                                 input_paths={name: paths[name] for name in hashes}, model=identity["resources"]["gpt_oss"],
                                 prompt={"version": cfg["prompts"]["version"], "sha256": digest(cfg["prompts"])},
                                 identity=identity, patients=summary["patients"], episodes=len(master), columns=len(master.columns))
-                report(out, cfg, manifest)
+                report(out, cfg, manifest, target=Run(out, analytic, manifest),
+                       baseline=baseline_run(cfg), routes=routes)
                 if inputs_for(cfg) != hashes or baseline_identity(cfg) != identity["baseline"]:
                     raise ValueError("Inputs changed after validation")
                 write_source_manifest(out, analytic, run_id, hashes)

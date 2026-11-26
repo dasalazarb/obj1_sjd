@@ -572,7 +572,7 @@ def test_v2_publication_reuses_checkpoints_and_compares_published_baseline(tmp_p
     options = dict(encoder=Encoder(), model_factory=Model, resource_verify=lambda cfg: manifest)
     original_report = pipeline.report
 
-    def stop(*args):
+    def stop(*args, **kwargs):
         raise RuntimeError("synthetic stop before publication")
 
     with monkeypatch.context() as patch:
@@ -607,3 +607,90 @@ def test_v2_measurement_counts_are_nullable_and_integral():
     assert measurement_count(3.0) == 3
     with pytest.raises(ValueError):
         measurement_count(1.5)
+
+
+def test_report_reconciles_final_evidence_and_does_not_repeat_a_citation(cfg):
+    from src.semantic_harmonization.parsers import narrative
+    from src.semantic_harmonization.report_progress import coverage, work_for
+    from src.semantic_harmonization.segmentation import segment
+    from src.semantic_harmonization.semantic_facts import make_fact
+
+    row = dict(mapping_id="mapping", variable="lab__immunofixation__text", family="immunofixation",
+               concept="immunofixation", context_json="{}", raw_type="string",
+               raw_json=json.dumps("IgG kappa detected; IgM lambda detected"))
+    parts = segment(row)
+    first, last = (part for part in parts if part.role == "patient_result")
+    facts = []
+    for part in (first, last):
+        finding, = narrative(part.text, row["family"])
+        facts.append(make_fact(row, part, "immunofixation_finding", finding, "llm_rag", "test", finding.quote))
+    route = dict(reason="unparsed_result", residual_segments=2)
+    full, _ = work_for(row, parts, [], facts, None, False, cfg, route, "added", False)
+    assert len(full) == 2 and all(item["state_v2"] == "resolved" for item in full)
+    assert all(item["state_m1"] == "pending" for item in full)
+    partial, _ = work_for(row, parts, [], facts[:1], None, False, cfg, route, "added", False)
+    assert [item["state_v2"] for item in partial] == ["resolved", "pending"]
+    assert "IgM lambda" in partial[1]["remaining_fragment"]
+    assert coverage(parts, [facts[0], facts[0]]) == coverage(parts, facts[:1])
+    historical = facts[0].model_copy(update={"temporality": "historical"})
+    assert not coverage([first], [historical])[first.segment_id][0]
+    for raw, family, note in (("not performed", "immunofixation", "legitimate missing / administrative only"),
+                              ("*", "hla", "hla_resolution_unavailable")):
+        example = dict(row, raw_json=json.dumps(raw), family=family)
+        work, notes = work_for(example, segment(example), [], [], None, False, cfg, {}, None, False)
+        assert not work and note in notes
+
+
+def test_historical_report_keeps_publications_and_disables_incompatible_deltas(tmp_path, cfg):
+    from src.semantic_harmonization.report_existing import generate
+    from src.semantic_harmonization.report_sources import file_manifest
+    from src.semantic_harmonization.settings import digest, write_json
+
+    _, resources = synthetic(tmp_path, cfg)
+    options = dict(encoder=Encoder(), model_factory=Model, resource_verify=lambda _: resources)
+    analytic, target = run(cfg, **options)
+    original_qc = file_manifest(target)
+    original_analytic = file_manifest(analytic)
+    output = tmp_path / "historical"
+    first, summary = generate(cfg, {}, output)
+    assert summary["scope"] == "original_v2" and summary["cumulative"] is None
+    assert stat_mode(first) == 0o700 and all(stat_mode(f) == 0o600 for f in first.iterdir())
+    assert generate(cfg, {}, output)[0] == first
+    mapping = pq.read_table(first / "mapping_comparison.parquet").to_pylist()
+    assert any(r["raw_json"] == "0" for r in mapping)
+    assert any(r["raw_json"] == "null" for r in mapping)
+    assert any(r["raw_json"] == '""' for r in mapping)
+    assert any(r["raw_json"] == '" "' for r in mapping)
+    assert all(not r["v1_available"] and r["facts_added"] is None for r in mapping)
+    raw = json.loads((target / "run_manifest.json").read_text())
+    legacy_identity = dict(raw["identity"], source="synthetic-v1")
+    old_id = digest(legacy_identity)
+    old_qc, old_analytic = target.parent / old_id, analytic.parent / old_id
+    shutil.copytree(target, old_qc)
+    shutil.copytree(analytic, old_analytic)
+    for name in ("semantic_facts.parquet", "deterministic_facts.parquet", "semantic_segments.parquet"):
+        (old_qc / name).unlink()
+    legacy_manifest = dict(raw, identity=legacy_identity, run_id=old_id, schema_version="1.0",
+                           outputs=dict(report=file_manifest(old_qc, skip={"run_manifest.json"}), analytic=file_manifest(old_analytic)))
+    write_json(old_qc / "run_manifest.json", legacy_manifest)
+    selection = dict(target_run_id=target.name, baseline_run_id=old_id)
+    second, paired = generate(cfg, selection, output)
+    assert paired["scope"] == "paired" and paired["baseline_projection"] == "legacy"
+    paired_rows = pq.read_table(second / "mapping_comparison.parquet").to_pylist()
+    assert len(paired_rows) == len(mapping) and all(r["comparable"] for r in paired_rows)
+    assert paired["affected"]["patients"] <= 2
+    changed_identity = dict(legacy_identity, inputs=dict(legacy_identity["inputs"], source_events="changed"))
+    changed_id = digest(changed_identity)
+    changed_qc = old_qc.rename(old_qc.with_name(changed_id))
+    old_analytic.rename(old_analytic.with_name(changed_id))
+    write_json(changed_qc / "run_manifest.json", dict(legacy_manifest, run_id=changed_id, identity=changed_identity,
+                                                    inputs=changed_identity["inputs"]))
+    third, unpaired = generate(cfg, dict(selection, baseline_run_id=changed_id), output)
+    assert unpaired["scope"] == "separate_scenarios" and unpaired["historical"] is None
+    assert unpaired["cumulative"] is None and unpaired["incremental"] is None
+    assert pq.read_table(third / "mapping_comparison.parquet").num_rows == 2 * len(mapping)
+    assert file_manifest(target) == original_qc and file_manifest(analytic) == original_analytic
+    with (changed_qc / "variable_inventory.csv").open("a") as stream:
+        stream.write("\n")
+    with pytest.raises(ValueError, match="checksums differ"):
+        generate(cfg, dict(selection, baseline_run_id=changed_id), output)

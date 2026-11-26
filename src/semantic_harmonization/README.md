@@ -92,3 +92,26 @@ container=(apptainer exec --cleanenv --home "$BASE/cache/container-home:/home/sa
 ```
 
 Tras el preflight, usa el launcher existente desde la raíz canónica y comprueba el estado final del job con `sacct`. El smoke de producción incluye el conjunto completo de hallazgos de crioglobulinas, la negación de inmunofijación, la abstención para ensayos no realizados y validación de los esquemas por perfil. El candidato requiere revisión científica antes de seleccionarlo para los estudios downstream.
+
+### Reporte comparativo a partir de runs publicados
+
+Desde la raíz del repositorio, en el entorno Python del módulo:
+
+```bash
+python -m src.semantic_harmonization.report_existing
+```
+
+El comando verifica los manifiestos de QC y de datos analíticos. Lee los artefactos publicados con dependencias de CPU y genera un HTML offline junto con tablas de progreso, comparación y pendientes. Guarda la salida en `outputs/tables/qc/semantic_harmonization_reports/<report_id>/`. El directorio y sus archivos son privados. Los runs fuente conservan sus hashes.
+
+Si hay más de un V2 elegible, configura la selección en `src/semantic_harmonization/configs/report_selection.local.yaml`. El archivo es local y está excluido de Git.
+
+```yaml
+report_selection:
+  target_run_id: null
+  baseline_run_id: null
+  output_root: outputs/tables/qc/semantic_harmonization_reports
+```
+
+Usa el ID completo del V2 publicado en `target_run_id`. Con `baseline_run_id: null`, el comando usa `paths.baseline` o `comparison.baseline_run_id`. Un reporte sin V1 presenta Original y V2. Si difieren las huellas clínicas o la política de las variables compartidas, el explorador muestra escenarios separados. Los deltas pareados requieren además el mismo grano de ocurrencias. La proyección V1 se basa en su diccionario publicado cuando no existen hechos tipados.
+
+El progreso usa unidades de trabajo reproducibles a partir de los segmentos originales, los contratos de campos y la evidencia determinística. El backlog coteja la cobertura con los hechos finales M4. La extracción semántica y los vínculos escritos en el candidato se pueden consultar en el detalle de cada variable. La sección Methods documenta los denominadores y los artefactos que faltan.
