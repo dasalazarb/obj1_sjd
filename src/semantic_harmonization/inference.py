@@ -11,7 +11,7 @@ from pydantic import ValidationError
 from .parsers import narrative, new_finding, normalize, parse_segment
 from .schemas import AnaExtraction, Evidence, Extraction, Finding, HlaExtraction, MorphologyExtraction, Semantic
 from .segmentation import segment
-from .semantic_facts import canonical, make_fact, part_facts
+from .semantic_facts import canonical, coverage, make_fact, part_facts
 from .settings import serialize
 
 NARRATIVE = {"cryoglobulin", "immunofixation"}
@@ -45,7 +45,9 @@ def profile(row: dict) -> str | None:
 def eligible_segments(row: dict):
     """Keep only source-separated results or explicitly historical evidence."""
     roles = ELIGIBLE_ROLES if row["family"] in NARRATIVE else {"patient_result"}
-    return [part for part in segment(row) if part.role in roles]
+    selected = row.get("_residual_segment_ids")
+    return [part for part in segment(row) if part.role in roles
+            and (selected is None or part.segment_id in selected)]
 
 
 def routing(row: dict, semantic: Semantic, parts=None, facts=None) -> dict:
@@ -57,22 +59,13 @@ def routing(row: dict, semantic: Semantic, parts=None, facts=None) -> dict:
         resolved = {part.segment_id for part in parts if any(
             ev.source == part.source_field and ev.quote in part.text and ev.field != "result_availability"
             for ev in semantic.evidence)}
+        uncovered = [part for part in parts if part.segment_id not in resolved]
     else:
-        resolved = {item.segment_id for item in facts if item.fact_type != "observation_metadata"
-                    and not (item.fact_type == "hla_result" and item.payload.ambiguous)}
-    uncovered = []
-    for part in parts:
-        residual = part.text
-        evidence = [ev.quote for ev in semantic.evidence if ev.source == part.source_field and
-                    ev.field != "result_availability" and ev.quote in part.text]
-        if row["family"] in NARRATIVE:
-            evidence = [item.quote for item in semantic.findings if item.quote in part.text] + [
-                item for item in evidence if item == part.text.strip() and not semantic.findings]
-        for quote in evidence:
-            residual = residual.replace(quote, " ", 1)
-        residual = re.sub(r"\b(?:and|or|result|current)\b|[^\w]", "", residual, flags=re.I)
-        if part.segment_id not in resolved or residual or semantic.interpretation_note == "Incomplete concentration expression retained.":
-            uncovered.append(part)
+        spans = coverage(parts, facts)
+        resolved = {key for key, (supported, gaps) in spans.items() if supported and not gaps}
+        uncovered = [part for part in parts if part.segment_id not in resolved]
+    if semantic.interpretation_note == "Incomplete concentration expression retained.":
+        uncovered = parts
     eligible = profile(row)
     raw = json.loads(row["raw_json"])
     if raw is None or not isinstance(raw, str) or not raw.strip():
@@ -91,7 +84,8 @@ def routing(row: dict, semantic: Semantic, parts=None, facts=None) -> dict:
         reason = "deterministic_complete"
     send = reason in {"partial_result", "unparsed_result"}
     return dict(profile=eligible, reason=reason, send=send, relevant_segments=len(parts),
-                resolved_segments=len(resolved), residual_segments=len(uncovered))
+                resolved_segments=len(resolved), residual_segments=len(uncovered),
+                residual_segment_ids=[part.segment_id for part in uncovered])
 
 
 def needs_extraction(row: dict, semantic: Semantic) -> bool:

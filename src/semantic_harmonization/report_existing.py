@@ -1,4 +1,6 @@
 """Generate a private, CPU-only report from immutable published runs."""
+import pyarrow.parquet as pq
+
 from datetime import datetime, timezone
 import fcntl
 import json
@@ -28,6 +30,55 @@ def baseline_run(cfg, override=None):
     if folder and folder.exists():
         return published(folder, Path(paths["analytic"]), expected)
     return None
+
+
+def previous_run(cfg, override=None):
+    """Load the explicitly pinned previous V2 when it is available."""
+    previous_id = override or cfg.get("comparison", {}).get("previous_v2_run_id")
+    if previous_id is None:
+        return None
+    if not isinstance(previous_id, str) or not RUN_ID.fullmatch(previous_id):
+        raise ValueError("previous_v2_run_id must be a full run ID")
+    root = Path(cfg["paths"]["output"]) / previous_id
+    if not root.is_dir() and override is None:
+        return None
+    run = published(root, Path(cfg["paths"]["analytic"]), previous_id)
+    if str(run.manifest["schema_version"]) != "2.0":
+        raise ValueError("Previous run does not have V2 schema")
+    return run
+
+
+def frozen_work(cfg, output_root, previous, baseline=None):
+    """Authenticate the historical report and read its original work identities."""
+    reference = cfg.get("comparison", {}).get("historical_report_id")
+    if previous is None or reference is None:
+        return None, None
+    if not isinstance(reference, str) or not RUN_ID.fullmatch(reference):
+        raise ValueError("historical_report_id must be a full report ID")
+    path = output_root / reference
+    if not path.is_dir():
+        return None, None
+    manifest = json.loads((path / "report_manifest.json").read_text())
+    sources = manifest.get("sources", {})
+    source = sources.get("v2") or {}
+    v1 = sources.get("v1") or {}
+    if (manifest.get("report_id") != reference or digest(manifest.get("identity")) != reference or
+            source.get("run_id") != previous.manifest["run_id"] or
+            source.get("manifest_sha256") != file_hash(previous.qc / "run_manifest.json") or
+            baseline and (v1.get("run_id") != baseline.manifest["run_id"] or
+                          v1.get("manifest_sha256") != file_hash(baseline.qc / "run_manifest.json")) or
+            manifest.get("outputs") != file_manifest(path, skip={"report_manifest.json"})):
+        raise ValueError("Frozen historical work failed report source or content verification")
+    snapshot = path / "work_snapshot.parquet"
+    if snapshot.is_file():
+        rows = pq.read_table(snapshot).to_pylist()
+    else:
+        html = (path / "semantic_harmonization_final.html").read_text(encoding="utf-8")
+        literal = html.split('<script id="payload" type="application/json">', 1)[1].split("</script>", 1)[0]
+        rows = json.loads(literal)["work"]
+    if len({row["work_id"] for row in rows}) != len(rows):
+        raise ValueError("Frozen report contains duplicate work IDs")
+    return rows, file_hash(path / "report_manifest.json")
 
 
 def target_run(cfg, baseline, selection):
@@ -74,7 +125,7 @@ def target_run(cfg, baseline, selection):
 
 def generate(cfg, selection, output_root):
     """Build and seal a report alongside the original publication trees."""
-    for name in ("target_run_id", "baseline_run_id"):
+    for name in ("target_run_id", "baseline_run_id", "previous_v2_run_id"):
         value = selection.get(name)
         if value is not None and (not isinstance(value, str) or not RUN_ID.fullmatch(value)):
             raise ValueError(f"report_selection.{name} must be a full run ID")
@@ -83,12 +134,18 @@ def generate(cfg, selection, output_root):
             raise ValueError("Historical report output must be outside published run directories")
     baseline = baseline_run(cfg, selection.get("baseline_run_id"))
     target = target_run(cfg, baseline, selection.get("target_run_id"))
+    previous = previous_run(cfg, selection.get("previous_v2_run_id"))
+    if previous and previous.manifest["run_id"] == target.manifest["run_id"]:
+        if selection.get("previous_v2_run_id"):
+            raise ValueError("Previous and target V2 publications must differ")
+        previous = None
+    frozen, historical_hash = frozen_work(cfg, output_root, previous, baseline)
     sources = {key: dict(run_id=run.manifest["run_id"], manifest_sha256=file_hash(run.qc / "run_manifest.json"),
                          outputs=run.manifest["outputs"], inputs=run.manifest["inputs"]) if run else None
-               for key, run in (("v1", baseline), ("v2", target))}
+               for key, run in (("v1", baseline), ("previous_v2", previous), ("v2", target))}
     code = {path.relative_to(MODULE).as_posix(): file_hash(path) for path in sorted(MODULE.rglob("*"))
             if path.is_file() and path.suffix in {".py", ".html", ".yaml"} and not path.name.endswith("local.yaml")}
-    identity = dict(sources=sources, code=code, rules=VERSION, selection=selection,
+    identity = dict(sources=sources, frozen_work_sha256=historical_hash, code=code, rules=VERSION, selection=selection,
                     protection=cfg["concepts"], normalization=cfg["normalization"], report=cfg["report"])
     report_id = digest(identity)
     output_root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -104,11 +161,13 @@ def generate(cfg, selection, output_root):
             return final, json.loads((final / "progress_summary.json").read_text())
         with tempfile.TemporaryDirectory(dir=output_root, prefix=".report-") as staging:
             staged = Path(staging)
-            model = report(staged, cfg, target.manifest, target=target, baseline=baseline)
-            for key, run in (("v1", baseline), ("v2", target)):
+            model = report(staged, cfg, target.manifest, target=target, baseline=baseline, previous=previous, frozen=frozen)
+            for key, run in (("v1", baseline), ("previous_v2", previous), ("v2", target)):
                 if run and (file_hash(run.qc / "run_manifest.json") != sources[key]["manifest_sha256"]
                             or published(run.qc, run.analytic.parent).manifest != run.manifest):
                     raise ValueError("A published input changed during report generation")
+            if historical_hash and frozen_work(cfg, output_root, previous, baseline)[1] != historical_hash:
+                raise ValueError("Frozen historical work changed during report generation")
             for path in staged.iterdir():
                 path.chmod(0o600)
             write_json(staged / "report_manifest.json", dict(report_id=report_id, identity=identity, sources=sources,
@@ -117,6 +176,17 @@ def generate(cfg, selection, output_root):
                        version=VERSION, completed_at=datetime.now(timezone.utc).isoformat(), outputs=file_manifest(staged)))
             staged.rename(final)
     return final, model["summary"]
+
+
+def update_report_pointer(output_root, run_id, report_id):
+    """Publish the convenience selector atomically outside all sealed run trees."""
+    pointer = output_root / "current_v2.json"
+    with tempfile.TemporaryDirectory(dir=output_root, prefix=".current-") as directory:
+        staged = Path(directory) / pointer.name
+        write_json(staged, {"target_run_id": run_id, "report_id": report_id,
+                            "html": f"{report_id}/semantic_harmonization_final.html"})
+        staged.chmod(0o600)
+        staged.replace(pointer)
 
 
 def main():
@@ -130,6 +200,9 @@ def main():
             raise ValueError("report_selection must be a YAML mapping.")
         output_root = Path(cfg["paths"]["obj1_root"]) / (selection.get("output_root") or
                           "outputs/tables/qc/semantic_harmonization_reports")
+        pointer = output_root / "current_v2.json"
+        if not selection.get("target_run_id") and pointer.is_file():
+            selection["target_run_id"] = json.loads(pointer.read_text())["target_run_id"]
         out, summary = generate(cfg, selection, output_root)
     except (ValueError, OSError) as error:
         raise SystemExit(str(error)) from None

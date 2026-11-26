@@ -15,6 +15,20 @@ ANALYTIC_FILES = {
     "context": "10_integrated_longitudinal_context_harmonized.parquet",
     "feature_manifest": "feature_manifest.parquet",
 }
+TYPED_ANALYTIC = {
+    "harmonized_observations": "harmonized_observations.parquet",
+    "typed_observations": "patient_visit_semantic_observations.parquet",
+    "semantic_findings": "semantic_findings.parquet",
+    "hla_alleles": "hla_alleles.parquet",
+    "medication_entities": "medication_entities.parquet",
+    "analytical_representation": "analytical_representation_manifest.parquet",
+    "feature_temporal_coverage": "feature_temporal_coverage.parquet",
+}
+TYPED_REPORT = {
+    "semantic_facts": "semantic_facts.parquet",
+    "mapping_routing": "mapping_routing.parquet",
+    "downstream_feature_readiness": "downstream_feature_readiness.parquet",
+}
 PROFILE_DIR = Path("study_inputs/pharma")
 PROFILE_FILES = {
     "pharma_profile": "00_pharma_lab_profile.csv",
@@ -24,6 +38,7 @@ PROFILE_FILES = {
     "pharma_expected": "00_pharma_expected_lab_audit.csv",
     "pharma_impact": "00_pharma_downstream_impact.csv",
 }
+OPTIONAL_PROFILE_FILES = {"pharma_semantic_profile": "00_pharma_semantic_feature_profile.parquet"}
 HEX = re.compile(r"[a-f0-9]{64}")
 
 
@@ -74,8 +89,8 @@ def write_source_manifest(out: Path, analytic: Path, run_id: str, original: dict
     """Describe the validated files relative to their matched run directories."""
     assets = {}
     for group, root, names in (
-        ("analytic", analytic, ANALYTIC_FILES),
-        ("report", out, {role: (PROFILE_DIR / name).as_posix() for role, name in PROFILE_FILES.items()}),
+        ("analytic", analytic, ANALYTIC_FILES | TYPED_ANALYTIC),
+        ("report", out, TYPED_REPORT | {role: (PROFILE_DIR / name).as_posix() for role, name in (PROFILE_FILES | OPTIONAL_PROFILE_FILES).items()}),
     ):
         for role, relative in names.items():
             path = root / relative
@@ -87,7 +102,9 @@ def write_source_manifest(out: Path, analytic: Path, run_id: str, original: dict
         raise ValueError("Candidate context disagrees with Step 10 context availability")
     if set(assets) & PROFILE_FILES.keys() and not PROFILE_FILES.keys() <= assets.keys():
         raise ValueError("Candidate has an incomplete Pharma/Graph input bundle")
-    write_json(out / SOURCE_MANIFEST, {"schema": "sjd_semantic_source_v1", "run_id": run_id,
+    if not (TYPED_ANALYTIC.keys() | TYPED_REPORT.keys()) <= assets.keys():
+        raise ValueError("Validated candidate is missing typed analytical assets")
+    write_json(out / SOURCE_MANIFEST, {"schema": "sjd_semantic_source_v2", "run_id": run_id,
                                      "original_step10_sha256": original["integrated"], "assets": assets})
 
 
@@ -115,16 +132,20 @@ def verify_source(run_id: str, *, analytic_root: Path, report_root: Path) -> Stu
         raise ValueError("Semantic source manifest does not belong to the selected completed run")
     manifest = json.loads(manifest_path.read_text())
     original = run.get("inputs", {})
-    if (manifest.get("schema") != "sjd_semantic_source_v1" or manifest.get("run_id") != run_id
+    manifest_version = manifest.get("schema")
+    if (manifest_version not in {"sjd_semantic_source_v1", "sjd_semantic_source_v2"} or manifest.get("run_id") != run_id
             or manifest.get("original_step10_sha256") != original.get("integrated")):
         raise ValueError("Semantic source manifest identity mismatch")
     exact_assets = {
-        **{role: ("analytic", name) for role, name in ANALYTIC_FILES.items()},
-        **{role: ("report", (PROFILE_DIR / name).as_posix()) for role, name in PROFILE_FILES.items()},
+        **{role: ("analytic", name) for role, name in (ANALYTIC_FILES | TYPED_ANALYTIC).items()},
+        **{role: ("report", name) for role, name in TYPED_REPORT.items()},
+        **{role: ("report", (PROFILE_DIR / name).as_posix()) for role, name in (PROFILE_FILES | OPTIONAL_PROFILE_FILES).items()},
     }
     assets = manifest.get("assets", {})
     if not {"integrated", "feature_manifest"} <= assets.keys() or ("context" in original) != ("context" in assets):
         raise ValueError("Semantic source manifest lacks required assets")
+    if manifest_version == "sjd_semantic_source_v2" and not (TYPED_ANALYTIC.keys() | TYPED_REPORT.keys()) <= assets.keys():
+        raise ValueError("Semantic source manifest lacks typed analytical assets")
     if set(assets) & PROFILE_FILES.keys() and not PROFILE_FILES.keys() <= assets.keys():
         raise ValueError("Semantic source manifest has an incomplete Pharma/Graph bundle")
     files, hashes = {}, {}

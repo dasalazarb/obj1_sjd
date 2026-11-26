@@ -36,6 +36,7 @@ microscopy:
   occassional: occasional
   occasional: occasional
   mod: moderate
+  mild: mild
   moderate: moderate
   few: few
   rare: rare
@@ -55,4 +56,4 @@ nominal:
   urine_appearance: [clear, hazy, cloudy, turbid, slightly cloudy]
   urinalysis_includes_microscopic__clarity_urinalysis: [clear, hazy, cloudy, turbid, slightly cloudy]
 descriptors: [small, moderate, large, rare, few, many, occasional]
-cytoplasmic_patterns: [reticular, reticular/ama, cytoplasmic reticular, cytoplasmic reticular/ama]
+cytoplasmic_patterns: [cytoplasmic speckled, reticular, reticular/ama, cytoplasmic reticular, cytoplasmic reticular/ama]

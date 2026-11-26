@@ -3,6 +3,8 @@ from collections import Counter, defaultdict
 import json
 import re
 
+from .closure_audit import (comment_rows, comment_summary, derived_rows, historical_crosswalk, materialization_rows,
+                            regression_rows)
 from .compare_runs import baseline_meaning
 from .inventory import clean
 from .parsers import GRADE, TITER, normalize
@@ -10,10 +12,10 @@ from .report_sources import (INPUTS, allowed, feature_transitions, grain, groupe
                              materialization, same_original, unique_counts)
 from .schemas import Semantic, SemanticSegment
 from .segmentation import GENERIC_UNCERTAINTY, NARRATIVE, NARRATIVE_SIGNAL, PROCESS, RESULT_LABEL, SPECIMEN, segment, sources
-from .semantic_facts import METADATA_ROLES, canonical, clinical, from_storage, part_facts
+from .semantic_facts import METADATA_ROLES, canonical, clinical, coverage, from_storage, part_facts
 from .settings import digest, serialize
 
-VERSION = "report-progress-1"
+VERSION = "report-progress-2"
 STATES = ("resolved", "partial", "pending", "not_assessable", "no_correction_required")
 DEFINITIONS = {
     "lexical": "A result with edge whitespace or a recognized qualitative alias requires a structured result with source evidence.",
@@ -44,9 +46,7 @@ FAILED_LLM = {"context_limit", "invalid_schema", "unsupported_evidence", "confli
 COVERAGE_ROLES = {"patient_result", "historical_reference"}
 MEANING_FIELDS = tuple(name for name in Semantic.model_fields if name not in {"strategy", "evidence", "interpretation_note"})
 IDENTITY_COLUMNS = ("mapping_id", "variable", "concept", "family", "raw_type", "raw_json", "context_json")
-NONCLINICAL_GAPS = re.compile(r"\b(?:and|or|a|an|the|result|current|currently|previously|historical|prior|at|was|is|now|patient)\b|[^\w]", re.I)
 CLINICAL_STATEMENT = re.compile(r"\b(?:detected|identified|observed|present|seen|demonstrated|revealed|absent|negative|positive|reactive)\b", re.I)
-FINDING_SUFFIX = re.compile(r"^\s*(?:band\s+)?(?:was |is )?(?:detected|identified|observed|seen|present)[.\s]*$", re.I)
 BOUND = re.compile(r"^\s*(?:[<>≤≥]=?\s*[+-]?(?:\d|\.\d)|[+-]?\d+(?:\.\d+)?\s*[-–]\s*[+-]?\d)")
 
 def raw_key(row):
@@ -74,40 +74,6 @@ def pairs(old, new, paired):
         yield match, after
     for key in sorted(old.keys() - consumed):
         yield old[key], None
-
-
-def coverage(parts, facts):
-    """Return exact unclaimed Unicode intervals for every eligible segment."""
-    by_segment = defaultdict(list)
-    for fact in facts:
-        if fact.fact_type == "observation_metadata" or fact.fact_type == "hla_result" and fact.payload.ambiguous:
-            continue
-        by_segment[fact.segment_id].append(fact)
-    result = {}
-    for part in parts:
-        offset, gaps = part.start, []
-        supported = [fact for fact in by_segment[part.segment_id]
-                 if fact.mapping_id == part.mapping_id and fact.source_field == part.source_field
-                 and (fact.temporality == "historical") == (part.role == "historical_reference")
-                 and part.start <= fact.start < fact.end <= part.end
-                 and part.text[fact.start-part.start:fact.end-part.start] == fact.quote]
-        for start, end in sorted((fact.start, fact.end) for fact in supported):
-            if start > offset:
-                gaps.append((offset, start))
-            offset = max(offset, end)
-        if offset < part.end:
-            gaps.append((offset, part.end))
-        remaining = []
-        for start, end in gaps:
-            text = part.text[start-part.start:end-part.start]
-            # A positive narrative fact may cite only its entity span. A simple
-            # assertion suffix is already represented by the recorded polarity.
-            suffix_accounted = end == part.end and FINDING_SUFFIX.fullmatch(text) and any(
-                fact.end == start and getattr(fact.payload, "assertion", None) == "present" for fact in supported)
-            if NONCLINICAL_GAPS.sub("", text) and not suffix_accounted:
-                remaining.append(dict(start=start, end=end, text=text))
-        result[part.segment_id] = (bool(supported), remaining)
-    return result
 
 
 def legacy(row):
@@ -158,14 +124,17 @@ def component_state(required, facts):
     return "resolved" if best == len(names) else "partial" if best else "pending"
 
 
-def required_components(part, m1):
+def required_components(part, m1, family=None):
+    if family == "hla":
+        return {}
     text = part.text.strip()
     kinds = {fact.fact_type: fact.payload for fact in (m1 or ()) if fact.segment_id == part.segment_id}
     if titer := kinds.get("titer_result"):
         return {name: getattr(titer, name) for name in ("numerator", "denominator", "comparator")}
     if titer := TITER.fullmatch(normalize(text)):
         return {"numerator": int(titer["num"]), "denominator": int(titer["den"]), "comparator": None}
-    number = kinds.get("numeric_result") or getattr(kinds.get("m_spike_result"), "concentration", None)
+    number = (kinds.get("numeric_result") or getattr(kinds.get("m_spike_result"), "concentration", None)
+              or getattr(kinds.get("morphology_result"), "percentage", None))
     if number and number.comparator != "EQ":
         return {name: getattr(number, name) for name in ("comparator", "limit_value", "range_low", "range_high")
                 if getattr(number, name) is not None}
@@ -228,15 +197,15 @@ def work_for(row, parts, m1, final, old_facts, comparable, cfg, route, outcome, 
     result_parts = [p for p in parts if p.role == "patient_result" or
                     p.role == "historical_reference" and row["family"] in {"cryoglobulin", "immunofixation"}
                     and NARRATIVE_SIGNAL.search(p.text)]
-    texts = sources(row)
-    marker = next((p for p in parts if p.role_rule == "comment_marker"), None)
-    if marker and not result_parts and len(texts) == 1 and not any(
-            p.role == "unresolved" and p.role_rule != "transport" and p.text.strip() for p in parts):
+    markers = [p for p in parts if p.role_rule == "comment_marker"]
+    body = [p for p in parts if p.role_rule not in {"comment_marker", "transport"} and p.text.strip()]
+    if markers and not body:
+        marker = markers[0]
         add("verification", "referenced_comment", marker, confirmed=False, reason="missing_referenced_comment",
             gaps=[dict(start=marker.start, end=marker.end, text=marker.text)])
     for part in parts:
         text = part.text.strip()
-        if not text or part.role_rule == "transport" or part == marker:
+        if not text or part.role_rule in {"transport", "comment_marker"}:
             continue
         component = f"{part.source_field}:{part.start}:{part.end}"
         if PROCESS.fullmatch(text) or SPECIMEN.fullmatch(text):
@@ -249,7 +218,7 @@ def work_for(row, parts, m1, final, old_facts, comparable, cfg, route, outcome, 
                 add("verification", component, part, confirmed=False, reason="ambiguous_semantics",
                     gaps=[dict(start=part.start, end=part.end, text=part.text)])
             continue
-        if row["family"] == "hla" and text == "*":
+        if row["family"] == "hla" and all(token.strip() == "*" for token in re.split(r"[,/;|]", text)):
             notes.add("hla_resolution_unavailable")
             continue
         present, gaps = final_coverage[part.segment_id]
@@ -265,7 +234,7 @@ def work_for(row, parts, m1, final, old_facts, comparable, cfg, route, outcome, 
         actual = text.casefold().rstrip(".")
         qual = cfg["normalization"]["qualitative"].get(normalize(text).rstrip("."))
         lex = part.source_field == "raw_text" and isinstance(raw, str) and (raw != raw.strip() or qual and actual != qual)
-        required = required_components(part, m1)
+        required = required_components(part, m1, row["family"])
         if lex:
             add("lexical", component, part, "resolved" if present else state, "resolved" if legacy_in_part else before,
                 "resolved" if m1_in_part else m1_state, gaps=gaps if not present else None)
@@ -426,7 +395,30 @@ def summarize(mappings, work, new_lines, new_policy, names, scope):
     return variables, family_rows, summary
 
 
-def compare_runs(target, baseline, cfg, *, routes=None):
+
+def study_impact(target, baseline, previous, cfg, baseline_scope, previous_scope):
+    """Present observed downstream profile outputs from each publication."""
+    rows = []
+    for version, run, scope in (("V1", baseline, baseline_scope), ("Previous V2", previous, previous_scope),
+                                ("Final V2", target, "target")):
+        if not run:
+            continue
+        current = [row for row in run.rows("downstream_impact.csv") or ()
+                   if row.get("version") in (None, "", "Final V2")
+                   and (not row.get("feature") or allowed(row["feature"].removeprefix("harm__"), cfg))]
+        if not current:
+            rows.append(dict(version=version, study="Downstream profile", status="not assessable", scope=scope))
+        for row in current:
+            row = {**row, "version": version, "scope": scope}
+            rows.append(row)
+            if version == "Final V2" and row.get("feature") and row.get("status") != "new candidate":
+                rows.append(row | dict(version="Original", scope="target source",
+                                       observed_after=row.get("observed_before"), observed_before=None,
+                                       eligibility_after=row.get("eligibility_before"), eligibility_before=None))
+    return sorted(rows, key=lambda row: (("Original", "V1", "Previous V2", "Final V2").index(row["version"]),
+                                         row.get("study") or "", row.get("feature") or ""))
+
+def compare_runs(target, baseline, cfg, *, routes=None, previous=None, frozen=None):
     """Build the shared report model from staged or verified published runs."""
     inventory_v2 = target.rows("variable_inventory.csv")
     inventory_v1 = baseline.rows("variable_inventory.csv") if baseline else None
@@ -465,6 +457,25 @@ def compare_runs(target, baseline, cfg, *, routes=None):
                     scope, reason = "separate_scenarios", "Candidate keys or preserved source values differ"
     feature_changes = feature_transitions(old_candidate, new_candidate, previous_features, current_features) if (
         scope == "paired" and originals and old_wide_known and new_wide_known) else []
+    previous_pairs, previous_facts = {}, None
+    previous_scope = "unavailable"
+    if previous:
+        prior_policy = inventory_policy(previous.rows("variable_inventory.csv"))
+        prior_inventory, _ = mapping_inventory(previous, cfg, prior_policy)
+        prior_lines = lineage(previous, prior_inventory)
+        previous_facts = grouped(previous.rows("semantic_facts.parquet"), prior_inventory)
+        compatible = (all(previous.manifest["inputs"].get(key) == target.manifest["inputs"].get(key) for key in INPUTS)
+                      and prior_policy is not None and policy_v2 is not None and
+                      all(prior_policy[key] == policy_v2[key] for key in prior_policy.keys() & policy_v2.keys()))
+        previous_scope = "paired" if compatible else "separate_scenarios"
+        for prior, after in pairs(prior_inventory, new, compatible):
+            if prior and after:
+                old_line = (prior_lines or {}).get(prior["mapping_id"])
+                new_line = (new_lines or {}).get(after["mapping_id"])
+                if old_line and new_line and grain(old_line) == grain(new_line):
+                    previous_pairs[after["mapping_id"]] = prior["mapping_id"]
+    comments, regressions, applications = [], [], []
+    current_segments, historical_mappings = {}, {}
     maps, work = [], []
     stage_routes = []
     strategy_counts = defaultdict(Counter)
@@ -486,11 +497,11 @@ def compare_runs(target, baseline, cfg, *, routes=None):
         typed_final = typed(final.get(key, [])) if after and final is not None else None
         typed_m1 = typed(m1.get(key, [])) if after and m1 is not None else None
         segments = [SemanticSegment.model_validate(p) for p in parts.get(key, ())] if after and parts is not None else None
-        previous, current, deterministic = map(canonical_storage, (old_projected, typed_final, typed_m1))
+        old_meanings, current, deterministic = map(canonical_storage, (old_projected, typed_final, typed_m1))
         changes_assessable = comparable and old_projected is not None and typed_final is not None
-        removed = sorted(previous.keys() - current.keys()) if changes_assessable else []
-        added = sorted(current.keys() - previous.keys()) if changes_assessable else []
-        retained = sorted(current.keys() & previous.keys()) if changes_assessable else []
+        removed = sorted(old_meanings.keys() - current.keys()) if changes_assessable else []
+        added = sorted(current.keys() - old_meanings.keys()) if changes_assessable else []
+        retained = sorted(current.keys() & old_meanings.keys()) if changes_assessable else []
         legacy_before = old_sem.model_dump() if old_sem else None
         legacy_after = {k: current_sem.get(k) for k in Semantic.model_fields} if current_sem else None
         representation_changed = legacy_before is not None and legacy_after is not None and any(
@@ -502,6 +513,9 @@ def compare_runs(target, baseline, cfg, *, routes=None):
                              ("source_events","laboratory_source_events"),("baseline_episodes","baseline")):
             if counts[field] is None:
                 counts[field] = row.get(alias)
+        last_v2_key = previous_pairs.get(key) if after else None
+        last_v2 = typed(previous_facts.get(last_v2_key, [])) if last_v2_key and previous_facts is not None else None
+        last_canonical = canonical_storage(last_v2) if last_v2 is not None else None
         extraction = extractions.get(key, {}) if after else {}
         outcome = extraction.get("contribution_status") or extraction.get("status")
         route = routes.get(key, {}) if after else {}
@@ -532,10 +546,15 @@ def compare_runs(target, baseline, cfg, *, routes=None):
             comparable=comparable, comparison_reason=comparison_reason, baseline_mapping_id=prior_key,
             v1_strategy=old_sem.strategy if old_sem else None, v2_strategy=current_sem.get("strategy") if current_sem else None,
             v1_legacy_fields=legacy_before, v2_legacy_fields=legacy_after,
-            v1_canonical_facts=list(previous.values()) if old_projected is not None else None,
+            v1_canonical_facts=list(old_meanings.values()) if old_projected is not None else None,
+            previous_v2_mapping_id=last_v2_key, previous_v2_typed_facts=storage(last_v2),
+            previous_v2_change=("added_and_removed" if last_canonical.keys() - current.keys() and current.keys() - last_canonical.keys()
+                                else "removed" if last_canonical.keys() - current.keys() else
+                                "added" if current.keys() - last_canonical.keys() else "unchanged")
+                               if last_canonical is not None and typed_final is not None else "not_comparable",
             v2_typed_facts=storage(typed_final), m1_canonical_facts=list(deterministic.values()) if typed_m1 is not None else None,
             v2_fact_strategies=sorted({f.strategy for f in typed_final or ()}), facts_added=[current[k] for k in added] if changes_assessable else None,
-            facts_removed=[previous[k] for k in removed] if changes_assessable else None,
+            facts_removed=[old_meanings[k] for k in removed] if changes_assessable else None,
             facts_retained=[current[k] for k in retained] if changes_assessable else None,
             change_kind=change, actual_application=actual, materialized_features=v2_features,
             baseline_features=v1_features, clinical_v1=bool(old_clinical) if old_clinical is not None else None,
@@ -550,7 +569,20 @@ def compare_runs(target, baseline, cfg, *, routes=None):
             retrieval=(retrieval or {}).get(key, []) if after else [], llm_outcome=outcome or "not recorded",
             m1_m4_added=len(current.keys()-deterministic.keys()) if typed_m1 is not None and typed_final is not None else None,
             m1_m4_removed=len(deterministic.keys()-current.keys()) if typed_m1 is not None and typed_final is not None else None)
+        if after:
+            current_segments[key] = segments or []
+            if last_v2_key:
+                historical_mappings[last_v2_key] = result
+            comments.extend(comment_rows(row, segments or (), typed_m1 or (), typed_final or (), counts))
+            if typed_final is not None:
+                regressions.extend(regression_rows(result, current, old_meanings if changes_assessable else None,
+                                                    last_canonical, segments or ()))
+                applications.extend(materialization_rows(row, typed_final, this_line,
+                                    (new_links or {}).get(key, ()) if new_links is not None else None, v2_features))
         if result["v2_available"]:
+            after_spans = coverage([part for part in segments or () if part.role in COVERAGE_ROLES], typed_final or ())
+            residuals = [dict(segment_id=segment_id, start=gap["start"], end=gap["end"], text=gap["text"])
+                         for segment_id, (_, gaps) in after_spans.items() for gap in gaps]
             methods = result["v2_fact_strategies"]
             strategy = "mixed" if len(methods) > 1 else methods[0] if methods else result["v2_strategy"] or "not recorded"
             strategy_counts[strategy].update(mappings=1, occurrences=counts["occurrences"] or 0,
@@ -558,7 +590,12 @@ def compare_runs(target, baseline, cfg, *, routes=None):
             stage_routes.append(dict(mapping_id=key, **{name: route.get(name) for name in (
                 "profile", "reason", "send", "relevant_segments", "resolved_segments", "residual_segments")},
                                      final_disposition=result["final_disposition"], pending_reason_codes=result["pending_reason_codes"],
-                                     extraction_status=extraction.get("status"), contribution_status=extraction.get("contribution_status")))
+                                     extraction_status=extraction.get("status"), contribution_status=extraction.get("contribution_status"),
+                                     residual_segment_ids=route.get("residual_segment_ids"),
+                                     residual_segments_m4=sum(not supported or bool(gaps) for supported, gaps in after_spans.values())
+                                     if segments is not None and typed_final is not None else None,
+                                     residual_m4=residuals if segments is not None and typed_final is not None else None,
+                                     facts_added_m4=result["m1_m4_added"], facts_removed_m4=result["m1_m4_removed"]))
         for item in items:
             work.append(item | {k: result[k] for k in ("mapping_id", "variable", "family", "raw_type", "raw_json",
                                                         "v2_available", "comparable")} |
@@ -591,14 +628,32 @@ def compare_runs(target, baseline, cfg, *, routes=None):
                    m4_over_m1=dict(mappings=sum(bool(r["m1_m4_added"]) for r in maps),
                                    facts_added=sum(r["m1_m4_added"] or 0 for r in maps),
                                    facts_removed=sum(r["m1_m4_removed"] or 0 for r in maps)) if m1 is not None and final is not None else None)
+    historical = historical_crosswalk(frozen, work, historical_mappings, current_segments)
+    summary["previous_v2_scope"] = previous_scope
+    summary["previous_v2_comparable_mappings"] = len(previous_pairs) if previous else None
+    summary["regression_counts"] = dict(Counter(row["change"] for row in regressions))
+    summary["frozen_work"] = (dict(units=len(historical), states=dict(Counter(
+        row["state_final_v2"] or "unverified" for row in historical)), reconciliation=dict(
+        Counter(row["reconciliation"] for row in historical))) if frozen is not None else None)
+    summary["comment_dispositions"] = dict(Counter({r["mapping_id"]: r["disposition"] for r in comments}.values()))
+    by_variable = defaultdict(list)
+    for mapping in maps:
+        by_variable[mapping["variable"]].append(mapping)
     for var in variables:
         name = var["variable"]
+        selected = [row for row in by_variable[name] if row["v2_available"]]
+        paired_previous = [row for row in selected if row["previous_v2_typed_facts"] is not None and row["nonempty"]]
+        var["coverage_original"] = percent(sum(row["nonempty"] for row in selected), len(selected))
+        var["coverage_previous_v2"] = percent(sum(any(clinical(from_storage(fact)) for fact in
+            row["previous_v2_typed_facts"]) for row in paired_previous), len(paired_previous))
+        var["changes"] = sorted({row["previous_v2_change"] if row["previous_v2_change"] != "not_comparable" else
+                                 row["change_kind"] for row in selected})
         var["materialization"] = {key: [r for r in rows if r["source_variable"] == name] for key, rows in
                                   (("v1", previous_features), ("v2", current_features))}
         feature_names = {r["feature_name"] for rows in var["materialization"].values() for r in rows}
         var["candidate_transitions"] = [r for r in feature_changes if r["feature_name"] in feature_names]
-    downstream = [r for r in target.rows("downstream_impact.csv") or ()
-                  if not r.get("feature") or allowed(r["feature"].removeprefix("harm__"), cfg)]
+        var["has_as_of"] = any(r.get("as_of_observations", 0) for r in var["materialization"]["v2"])
+    downstream = study_impact(target, baseline, previous, cfg, scope, previous_scope)
     validation = target.json("validation_summary.json") or {}
     resources = (target.json("resources_manifest.json") or {}).get("resources", {})
     legacy_counts = {name: [r for r in target.rows(f"{name}.csv") or ()
@@ -606,11 +661,15 @@ def compare_runs(target, baseline, cfg, *, routes=None):
                      for name in ("semantic_coverage_by_family", "extraction_routing_summary")}
     provenance = {key: {k: run.manifest.get(k) for k in ("run_id", "started_at", "completed_at", "commit", "schema_version",
                                                          "inputs", "model", "prompt")} if run else None
-                  for key, run in (("v1", baseline), ("v2", target))}
+                  for key, run in (("v1", baseline), ("previous_v2", previous), ("v2", target))}
     return clean(dict(mappings=maps, work=work, variables=variables, families=families, summary=summary, routes=stage_routes,
                       strategies=[dict(strategy=k, **v) for k,v in sorted(strategy_counts.items())], derived=derived,
+                      comments=comments, comment_summary=comment_summary(comments, new_lines),
+                      regressions=regressions, historical_work=historical, materialization_audit=applications,
+                      derived_audit=derived_rows(derived, inventory_v2 or []),
+                      readiness=target.rows("downstream_feature_readiness.parquet") or [],
                       downstream=downstream, validation=validation.get("clinical_evaluation"), resources={
                           name: {k: r.get(k) for k in ("status", "version", "revision", "sha256", "license")}
                           for name,r in resources.items()}, provenance=provenance, legacy=legacy_counts,
-                      missing={"v1": sorted(baseline.missing) if baseline else None, "v2": sorted(target.missing)},
+                      missing={"v1": sorted(baseline.missing) if baseline else None, "previous_v2": sorted(previous.missing) if previous else None, "v2": sorted(target.missing)},
                       rule_version=VERSION, definitions=DEFINITIONS, page_size=cfg["report"]["page_size"]))

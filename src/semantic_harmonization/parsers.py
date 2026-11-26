@@ -16,12 +16,16 @@ OPERATORS = {"=": "EQ", "<": "LT", "<=": "LE", "≤": "LE", ">": "GT", ">=": "GE
 SINGLE = re.compile(rf"(?P<operator>{OP})?\s*(?P<number>{NUMBER})\s*(?P<unit>{UNIT})?")
 RANGE = re.compile(rf"(?P<low>{NUMBER})\s*(?:-|–|—|\bto\b)\s*(?P<high>{NUMBER})\s*(?P<unit>{UNIT})?")
 TITER = re.compile(rf"(?:(?P<left>positive|negative)\s+)?\(?\s*(?P<op>{OP})?\s*(?P<num>\d{{1,9}})\s*:\s*(?P<den>\d{{1,9}})(?:\s*\(?(?P<right>positive|negative))?\s*\)?")
+MORPHOLOGY_RANGE = re.compile(rf"(?P<amount>{NUMBER}\s*(?:-|–|—|\bto\b)\s*{NUMBER}\s*%)\s*\((?P<descriptor>[A-Za-z -]+)\)")
 GRADE = re.compile(rf"(?:(?P<descriptor>non[- ]hemolyzed|hemolyzed)\s+)?(?P<grade>trace|[1-4]\+|\+[1-4])\s*(?:\((?P<amount>[^()]*)?(?P<close>\))?)?")
 ALLELE = re.compile(r"(?:(?P<locus>[A-Z][A-Z0-9]*)\*)?(?P<fields>\d{2,3}(?::\d{2,3}){0,3})(?P<suffix>[GPNLSQCA])?")
-READING = re.compile(r"(?P<status>negative|positive)\s+at\s+(?P<duration>\d{1,4})\s*(?P<unit>days?|d\b|hours?|hrs?|h\b)", re.I)
-PLANNED = re.compile(r"(?:reviewed again|recheck|repeat)\s+(?:at|in)\s+(\d{1,4})\s*(days?|d\b|hours?|hrs?|h\b)", re.I)
+READING = re.compile(
+    r"(?:(?P<stage>preliminary|final)\s+(?:result\s*:\s*)?)?"
+    r"(?P<status>negative|positive)\s+at\s+(?P<duration>\d{1,4})\s*(?P<unit>days?|d\b|hours?|hrs?|h\b)"
+    r"(?:\s*\((?P<suffix>preliminary|final)\))?", re.I)
+PLANNED = re.compile(r"(?:(?:will be|to be)\s+)?(?:reviewed again|recheck|repeat)\s+(?:at|in)\s+(\d{1,4})\s*(days?|d\b|hours?|hrs?|h\b)", re.I)
 PERCENT = re.compile(rf"(?P<op>{OP})?\s*(?P<value>{NUMBER})\s*%\s+of\s+cryoprecipitate", re.I)
-NARRATIVE_PARTS = re.compile(r"[,;\n]+|\s+\+\s+|\s+and\s+", re.I)
+NARRATIVE_PARTS = re.compile(r"[,;\n]+|\.(?=\s|$)|\s+\+\s+|\s+and\s+", re.I)
 CHAIN = re.compile(r"\b(kappa|lambda)\b", re.I)
 IG = re.compile(r"\bIg([GMADE])\b", re.I)
 
@@ -129,7 +133,11 @@ def narrative(text: str, family: str) -> list[Finding]:
                 continue
             duration = int(match["duration"]) * (24 if match["unit"].lower().startswith("d") else 1)
             historical = re.search(r"\bpreviously\b[^.;,]*$", prefix, re.I)
+            if match["stage"] and match["suffix"] and match["stage"].lower() != match["suffix"].lower():
+                continue
+            stage = match["stage"] or match["suffix"]
             results.append(new_finding("cryoglobulin", match[0], incubation_hours=duration,
+                                       incubation_stage=stage.lower() if stage else None,
                                        assertion="present" if match["status"].lower() == "positive" else "absent",
                                        temporality="historical" if historical else "current"))
         for match in PLANNED.finditer(text):
@@ -159,13 +167,18 @@ def narrative(text: str, family: str) -> list[Finding]:
             blocked_scope = False
         if re.search(r"\b(?:no|not|without|cannot exclude|possible|suspected)\b", norm):
             blocked_scope = True
+        if family == "immunofixation" and not blocked_scope and re.fullmatch(
+            r"(?:polyclonal (?:increase|gammopathy)|increase in polyclonal immunoglobulins)[.]?", norm
+        ):
+            results.append(new_finding("immunoglobulin", text if historical else clause, pattern="polyclonal",
+                                       temporality="historical" if historical else "unspecified"))
         # The grammar is deliberately closed. Negation and speculation outside it
         # require surrounding context and are handled by the evidence verifier.
         explicit = re.fullmatch(
             r"(?:(?:previously(?: identified as)?|currently|now)\s+)?"
             r"(?:(?:faint|trace)\s+)?(?:(?:increased|increase in)\s+)?"
             r"(?:(?:monoclonal|oligoclonal|polyclonal)\s+)?(?:(?:free)\s+)?"
-            r"(?:ig[gmade](?:\s+(?:kappa|lambda|\((?:kappa|lambda)\)))?|kappa|lambda)"
+            r"(?:ig[gmade](?:\s+(?:kappa|lambda)|\s*\((?:kappa|lambda)\))?|kappa|lambda)"
             r"(?:\s+(?:light chains?|band))?(?:\s+(?:was )?detected)?[.]?",
             norm,
         )
@@ -277,7 +290,10 @@ def parse_segment(row: dict, cfg: dict, vocab: dict, text: str, source_field: st
                 if (qual := titer["left"] or titer["right"]) and not (titer["left"] and titer["right"] and titer["left"] != titer["right"]):
                     add({"qualitative_result": qual}, "titer_parser")
         patterns = [item.strip() for item in re.split(r"[,;/]", norm)]
-        pattern_text = re.sub(r"^(?:observed (?:pattern|cytoplasmic pattern)|cytoplasmic pattern|pattern)\s*:\s*", "", norm).rstrip(" ,;.")
+        pattern_text = re.sub(
+            r"^(?:observed (?:pattern|cytoplasmic pattern)|cytoplasmic pattern|pattern)\s*:\s*", "", norm
+        ).rstrip(" ,;.")
+        pattern_text = re.sub(r"\s+(?:staining\s+)?pattern(?:\s+(?:was\s+)?observed)?$", "", pattern_text)
         if pattern_text in rules["cytoplasmic_patterns"] and (concept.endswith("_pattern") or family == "ana_narrative"):
             add({"pattern_terms": [pattern_text]}, "exact_dictionary")
         elif (concept.endswith("_pattern") or family == "ana_narrative") and set(patterns).issubset(rules["ana_patterns"]):
@@ -297,6 +313,11 @@ def parse_segment(row: dict, cfg: dict, vocab: dict, text: str, source_field: st
         elif descriptor in {"occ", "present", "absent", "normal", "abnormal"}:
             add({"descriptor": descriptor}, "exact_dictionary")
         if family == "cbc_morphology":
+            if interval := MORPHOLOGY_RANGE.fullmatch(text.rstrip(".")):
+                label = normalize(interval["descriptor"])
+                if label in rules["microscopy"] and (amount := numeric(interval["amount"], ucum)):
+                    add({"category": rules["microscopy"][label]}, "exact_dictionary", interval["descriptor"])
+                    add(amount, "numeric_parser", interval["amount"])
             if percentage := re.fullmatch(rf"(?:(?P<label>[A-Za-z -]+)\s+)?(?P<amount>{NUMBER}\s*%)", text):
                 label = normalize(percentage["label"] or "")
                 if not label or label in rules["microscopy"] or label in concept.replace("_", " "):
@@ -329,7 +350,7 @@ def parse_segment(row: dict, cfg: dict, vocab: dict, text: str, source_field: st
             add(numeric(original, ucum), "numeric_parser", original)
         elif grade["amount"]:
             result.interpretation_note = "Incomplete concentration expression retained."
-    if lab_family and family not in {"hla", "cbc_morphology", "urine_nominal", "urine_microscopy"} and result.strategy == "unchanged":
+    if lab_family and family not in {"hla", "cbc_morphology", "urine_nominal"} and not result.comparator:
         add(numeric(text, ucum), "numeric_parser")
     if lab_family and family != "hla" and result.comparator and not result.raw_unit and context.get("unit"):
         unit = str(context.get("unit"))

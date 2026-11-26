@@ -143,6 +143,53 @@ def policy_reason(column: str, policy: str, spec: dict) -> tuple[str, str]:
     return "", "baseline"
 
 
+
+def semantic_baseline_smoke(baseline: pd.DataFrame, entries: list[dict], minimum_coverage: float = .70) -> list[dict]:
+    """Profile the supported encodings of manifest-declared semantic fields."""
+    if baseline.patient_id.duplicated().any():
+        raise ValueError("Semantic baseline requires one row per patient")
+    rows = []
+    for entry in entries:
+        name, field, source = (entry[key] for key in ("name", "kind", "source"))
+        raw = baseline[name]
+        values = raw.dropna()
+        encoded = None
+        encoding = None
+        reason = "encoding_not_supported"
+        if field == "exact_value":
+            comparator = name.removesuffix("__exact_value") + "__comparator"
+            unit = name.removesuffix("__exact_value") + "__raw_unit"
+            if comparator in baseline and unit in baseline and not baseline.loc[raw.notna(), unit].isna().any() and (
+                baseline.loc[raw.notna(), unit].nunique() == 1
+            ):
+                encoded = pd.to_numeric(raw.where(baseline[comparator].eq("EQ")), errors="coerce")
+                encoding, reason = "exact_numeric", None
+            else:
+                reason = "explicit_comparable_units_required"
+        elif field == "ordinal_score" or pd.api.types.is_bool_dtype(raw):
+            encoded = raw.astype("Float64")
+            encoding, reason = ("documented_ordinal" if field == "ordinal_score" else "documented_entity"), None
+        elif field == "qualitative_result":
+            encoded = raw.map(BINARY)
+            encoding, reason = "binary_category", None
+        duplicate = False
+        if encoded is not None and source in baseline:
+            original = (pd.to_numeric(baseline[source], errors="coerce") if encoding == "exact_numeric" else
+                        baseline[source].map(BINARY) if encoding == "binary_category" else None)
+            if original is not None:
+                duplicate = encoded.astype("Float64").equals(original.astype("Float64"))
+        observed = int(encoded.notna().sum()) if encoded is not None else None
+        unique = int(encoded.nunique()) if encoded is not None else None
+        fraction = observed / len(baseline) if observed is not None and len(baseline) else None
+        reason = (reason or ("duplicate_of_source" if duplicate else None) or
+                  ("no_baseline_variability" if unique is not None and unique < 2 else None) or
+                  ("below_minimum_baseline_coverage" if fraction is not None and fraction < minimum_coverage else None))
+        rows.append(dict(feature_name=name, study="Graph", encoding=encoding, baseline_episodes=len(values),
+                         encoded_baseline_episodes=observed, encoded_distinct=unique, baseline_fraction=fraction,
+                         smoke_eligible=bool(len(baseline)) and reason is None,
+                         reason=reason or ("no_baseline" if baseline.empty else "baseline_encoding_smoke_passed")))
+    return rows
+
 def build_catalog(baseline: pd.DataFrame, candidates: pd.DataFrame, minimum_coverage: float = .70,
                   *, feature_policy: str = "phenotype_independent", analysis_mode: str = "exploratory",
                   metadata: dict | None = None, source_hash: str = ""

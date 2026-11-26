@@ -109,9 +109,21 @@ Si hay más de un V2 elegible, configura la selección en `src/semantic_harmoniz
 report_selection:
   target_run_id: null
   baseline_run_id: null
+  previous_v2_run_id: null
   output_root: outputs/tables/qc/semantic_harmonization_reports
 ```
 
 Usa el ID completo del V2 publicado en `target_run_id`. Con `baseline_run_id: null`, el comando usa `paths.baseline` o `comparison.baseline_run_id`. Un reporte sin V1 presenta Original y V2. Si difieren las huellas clínicas o la política de las variables compartidas, el explorador muestra escenarios separados. Los deltas pareados requieren además el mismo grano de ocurrencias. La proyección V1 se basa en su diccionario publicado cuando no existen hechos tipados.
 
 El progreso usa unidades de trabajo reproducibles a partir de los segmentos originales, los contratos de campos y la evidencia determinística. El backlog coteja la cobertura con los hechos finales M4. La extracción semántica y los vínculos escritos en el candidato se pueden consultar en el detalle de cada variable. La sección Methods documenta los denominadores y los artefactos que faltan.
+
+
+### Cierre operativo V2
+
+El reporte compara Original, V1, V2 anterior y el candidato V2 por identidad de mapping, huellas clínicas y linaje. Cuando están disponibles, lee la V2 anterior fijada en `comparison.previous_v2_run_id` y verifica la referencia histórica de `comparison.historical_report_id`. El reporte histórico autenticado aporta los IDs y estados originales a `historical_work_crosswalk`. El cálculo actualizado usa sus propias reglas y denominadores. Si faltan las fuentes publicadas, el reporte registra la comparación como no disponible. Los focos de navegación incluyen recuperación de comentarios, diferencias de hechos, auditoría de los enlaces analíticos y elegibilidad por estudio.
+
+El launcher imprime el ID V2, el ID del reporte y la ruta absoluta del HTML. El selector local `current_v2.json` se escribe de forma atómica junto a los reportes, después de verificar la publicación comparativa y comprobar que no registra pérdidas clínicas sin explicación. La reconstrucción de CPU usa ese selector si el YAML local omite `target_run_id`. Una selección explícita por ID permite volver a un reporte anterior. La activación de estudios sigue usando el selector opt-in del candidato.
+
+Cada tabla de armonización se publica en Parquet y CSV, con `*.csv.schema.json` para tipos, número de filas y SHA-256. Parquet define los tipos canónicos. El CSV UTF-8 usa `\N` para null, conserva el texto vacío y agrega un apóstrofo a texto con prefijo activo en hojas de cálculo, apóstrofo inicial o barra invertida inicial. Quita ese primer apóstrofo para recuperar el texto original. Las demás celdas usan JSON canónico, con texto ISO para fechas y hexadecimal para bytes. El pipeline coteja las filas CSV con el Parquet antes de publicar. Los exports filtrados del HTML usan una presentación independiente para la hoja de cálculo.
+
+Los hechos clínicos tipados van por identificador desde M4 hasta `patient_visit_semantic_observations`. Los enlaces `as_of_fact_ids` requieren disponibilidad asociada a la observación y anterior o igual al ancla. La cobertura por feature distingue representación descriptiva y evidencia temporal. Pharma 00 lee el manifiesto de features del candidato y publica un perfil separado. El catálogo Graph ejecuta un smoke de codificación de baseline con sus reglas de soporte. `downstream_feature_readiness` registra esas comprobaciones, los motivos de exclusión y el estado de consumo por modelo. Las ejecuciones de modelos se registran como `not run`. Los límites, rangos, comentarios, CSV clínicos, reportes y tablas de linaje permanecen en el entorno autorizado.

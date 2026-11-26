@@ -16,6 +16,8 @@ paths:
   baseline: null
 comparison:
   baseline_run_id: a344cb394907e6e2821307dd47ab19e532fc879f57c5af087bf66d8acb5f5bd4
+  previous_v2_run_id: d3403b159dce815aee6d15d97637ba62e1a880481ea753b41b7a93cbf8429ec6
+  historical_report_id: 7f49887e02a57544c02307a6aa26fe0b31e720e0cefa2f26017c8a72f15e5cf8
 model:
   seed: 42
   temperature: 0.0

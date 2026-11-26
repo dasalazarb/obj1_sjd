@@ -26,7 +26,7 @@ import yaml
 import common
 from src.studies._shared import load_parquet, validate_integrated_dataset
 from src.studies.graph._feature_catalog import (CONTRACT_VERSION as FEATURE_CONTRACT_VERSION,
-    build_catalog, namespace_audit)
+    build_catalog, namespace_audit, semantic_baseline_smoke)
 from src.studies.graph._pipeline import stage_outputs
 
 SCRIPT_NAME = Path(__file__).stem
@@ -40,6 +40,7 @@ TEXT_AUDIT_NAME = "00_pharma_text_code_audit.csv"
 IMPACT_NAME = "00_pharma_downstream_impact.csv"
 SUMMARY_NAME = "00_pharma_profile_summary.json"
 SELECTION_AUDIT_NAME = "00_pharma_graph_lab_selection_audit.csv"
+SEMANTIC_PROFILE_NAME = "00_pharma_semantic_feature_profile.parquet"
 NAMESPACE_AUDIT_NAME = "00_pharma_feature_namespace_audit.csv"
 FAILURE_NAME = "00_pharma_failure.json"
 CONTRACT_VERSION = "pharma_lab_profile_v2"
@@ -625,6 +626,56 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+
+def profile_semantic_features(master, manifest, registry):
+    """Audit typed candidate coverage and compatibility through the manifest contract."""
+    import pyarrow as pa
+    from src.semantic_harmonization.settings import serialize
+
+    entries = pd.read_parquet(manifest).to_dict("records")
+    names = [entry["name"] for entry in entries]
+    if len(set(names)) != len(names) or any(
+        name not in master or entry["source"] not in master or not name.startswith("harm__" + entry["source"])
+        for entry, name in zip(entries, names, strict=True)
+    ):
+        raise ValueError("Semantic feature manifest disagrees with the candidate")
+    baseline_mask = master.is_clinical_baseline.fillna(False).astype(bool)
+    baseline = master.loc[baseline_mask]
+    graph = semantic_baseline_smoke(baseline, [
+        entry for entry in entries if lab_stem(entry["source"])
+    ])
+    rows = []
+    for entry in entries:
+        name, field = entry["name"], entry["kind"]
+        assay = registry["assays"].get(lab_stem(entry["source"]), {})
+        raw = master[name]
+        observed = raw.notna()
+        representation = ("numeric" if field == "exact_value" else "categorical" if field == "qualitative_result" else
+                          "censored" if field in {"limit_value", "range_low", "range_high"} else
+                          "ordinal" if field in {"ordinal_grade", "ordinal_score"} else
+                          "multilabel" if field == "pattern_terms" else "entity_indicator" if
+                          pd.api.types.is_bool_dtype(raw) else "other")
+        support = _coverage(master, observed, baseline_mask)
+        distinct = int(raw[observed].map(lambda value: serialize(value.tolist() if isinstance(value, np.ndarray) else value)).nunique())
+        approved = (assay.get("approval_status") == "approved" and all(assay.get(key) for key in
+                    ("decision_id", "reviewer", "evidence")))
+        reason = ("no_variability" if distinct < 2 else
+                  "consumer_encoding_unavailable" if representation not in {"numeric", "categorical"} else
+                  "insufficient_representation_support" if not _support(support, registry["thresholds"], representation) else
+                  "assay_approval_unavailable" if not approved or not assay.get(
+                      "numeric_approved" if representation == "numeric" else "binary_approved") else
+                  "requires_verified_time_and_consumer_selection")
+        rows.append(dict(feature_name=name, study="Pharma", encoding=representation,
+                         baseline_episodes=int((observed & baseline_mask).sum()), encoded_baseline_episodes=None,
+                         encoded_distinct=distinct, baseline_fraction=(float((observed & baseline_mask).sum()) /
+                             len(baseline) if len(baseline) else None), smoke_eligible=False, reason=reason))
+    schema = pa.schema([
+        ("feature_name", pa.string()), ("study", pa.string()), ("encoding", pa.string()),
+        ("baseline_episodes", pa.int64()), ("encoded_baseline_episodes", pa.int64()), ("encoded_distinct", pa.int64()),
+        ("baseline_fraction", pa.float64()), ("smoke_eligible", pa.bool_()), ("reason", pa.string()),
+    ])
+    return pa.Table.from_pylist([*rows, *graph], schema=schema)
+
 def run(args: argparse.Namespace) -> pd.DataFrame:
     from src.semantic_harmonization.study_input import active_study_input
 
@@ -638,6 +689,7 @@ def run(args: argparse.Namespace) -> pd.DataFrame:
     if getattr(args, "no_context", False) and args.context:
         raise ValueError("The selected semantic candidate includes a verified context")
     args.no_context = args.context is None
+    args.semantic_feature_manifest = selected.require("feature_manifest")
     if Path(args.output) == DEFAULT_OUTPUT:
         args.output = DEFAULT_OUTPUT.parent / "semantic_harmonization" / selected.run_id / DEFAULT_OUTPUT.name
     if Path(args.output).resolve().is_relative_to(selected.manifest.parent):
@@ -673,6 +725,15 @@ def run_profile(args: argparse.Namespace, *, provenance_paths: dict[Path, Path] 
         raise ValueError("--output must be a distinct profile CSV path")
     if any(out.resolve() == inp.resolve() for out in destinations for inp in inputs):
         raise ValueError("Profiling outputs must not overwrite any input")
+    semantic_manifest = getattr(args, "semantic_feature_manifest", None)
+    if semantic_manifest:
+        semantic_manifest = Path(semantic_manifest)
+        inputs.append(semantic_manifest)
+        destinations.extend(output.parent / name for name in (
+            SEMANTIC_PROFILE_NAME, SEMANTIC_PROFILE_NAME.replace(".parquet", ".csv"),
+            SEMANTIC_PROFILE_NAME.replace(".parquet", ".csv.schema.json")))
+        if any(out.resolve() == semantic_manifest.resolve() for out in destinations):
+            raise ValueError("Semantic profiling outputs must not overwrite input")
     hashes = {path: _sha256(path) for path in inputs}
     registry = load_registry(registry_path)
     master = load_parquet(integrated)
@@ -693,7 +754,7 @@ def run_profile(args: argparse.Namespace, *, provenance_paths: dict[Path, Path] 
     summary = {"profile_contract_version": CONTRACT_VERSION, "feature_contract_version": FEATURE_CONTRACT_VERSION,
                "graph_use_mode": "exploratory", "analysis_mode": "exploratory", "profile_output_name": output.name, "clinical_validation": "not_established", "registry_version": registry["registry_version"],
                "thresholds": registry["thresholds"], "dataset_contract": contract,
-               "input_hashes": [{"role": "integrated" if p == integrated else "registry" if p == registry_path else "previous_profile" if previous_path and p == Path(previous_path) else "context", "sha256": sha, **({"path": str(provenance_paths[p])} if p in provenance_paths else {})}
+               "input_hashes": [{"role": "integrated" if p == integrated else "registry" if p == registry_path else "previous_profile" if previous_path and p == Path(previous_path) else "semantic_feature_manifest" if p == semantic_manifest else "context", "sha256": sha, **({"path": str(provenance_paths[p])} if p in provenance_paths else {})}
                                 for p, sha in hashes.items()],
                "context_mode": mode, "context_audit": profile.attrs["context_audit"],
                "schema": schema, "reference_schema": expected_schema,
@@ -718,6 +779,12 @@ def run_profile(args: argparse.Namespace, *, provenance_paths: dict[Path, Path] 
               (candidates, GRAPH_CANDIDATES_NAME), (serology, SEROLOGY_NAME),
               (text_code_audit(master), TEXT_AUDIT_NAME), (impact, IMPACT_NAME),
               (selection, SELECTION_AUDIT_NAME), (namespace_audit(master), NAMESPACE_AUDIT_NAME)]
+    semantic = profile_semantic_features(master, semantic_manifest, registry) if semantic_manifest else None
+    if semantic is not None:
+        summary["semantic_feature_profile"] = {
+            "manifest_sha256": hashes[semantic_manifest], "rows": semantic.num_rows,
+            "model_consumption": "not run",
+        }
     owned = {path.name for path in destinations}
     with stage_outputs({"pharma": output.parent}, lambda _, name: name in owned,
                        failure=("pharma", FAILURE_NAME), completion=output.parent / SUMMARY_NAME) as staging:
@@ -725,6 +792,15 @@ def run_profile(args: argparse.Namespace, *, provenance_paths: dict[Path, Path] 
         for table, name in tables:
             table.to_csv(folder / name, index=False)
         summary["output_hashes"] = {name: _sha256(folder / name) for _, name in tables}
+        if semantic is not None:
+            import pyarrow.parquet as pq
+            from src.semantic_harmonization.table_exports import export_csv
+
+            path = folder / SEMANTIC_PROFILE_NAME
+            pq.write_table(semantic, path)
+            export_csv(path)
+            summary["output_hashes"].update({asset.name: _sha256(asset) for asset in (
+                path, path.with_suffix(".csv"), path.with_suffix(".csv.schema.json"))})
         (folder / SUMMARY_NAME).write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
         for path, digest in hashes.items():
             if _sha256(path) != digest:

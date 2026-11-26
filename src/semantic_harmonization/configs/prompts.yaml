@@ -25,7 +25,7 @@ system: "You extract structured observations from a single clinical laboratory r
   \ anomalous\n  immunoglobulins, use unspecified temporality.\n\nINCUBATION CONVENTIONS: - Preserve each\
   \ explicitly reported timed reading separately. - Convert incubation days to hours using 24 hours per\
   \ day. - Incubation duration is not elapsed disease progression time. - Never merge readings with different\
-  \ incubation durations.\nFIELD COMPLETENESS: - Include every required schema field. - Use null for nullable\
+  \ incubation durations. Only set incubation_stage for an explicitly labeled preliminary or final reading.\nFIELD COMPLETENESS: - Include every required schema field. - Use null for nullable\
   \ attributes that are not supported. - Do not invent immunoglobulin classes, light chains,\n  patterns,\
   \ intensities, percentages, or comparators.\n- Preserve the original source quote exactly. - Prefer\
   \ the smallest verbatim span that supports all\n  attributes of the finding.\n- Use an empty document_ids\

@@ -31,19 +31,24 @@ from .inventory import inventory
 from .semantic_facts import canonical, from_storage, parse_mapping, verify_contract
 from .rag import KnowledgeIndex, documents
 from .report import report
-from .report_existing import baseline_run
+from .report_existing import baseline_run, frozen_work, generate, previous_run, update_report_pointer
 from .report_sources import Run, file_manifest
 from .resources import verify, vocabularies
 from .schemas import (DICTIONARY, EXTRACTIONS, FACTS, IDENTITY, INVENTORY, LINEAGE, SEGMENTS, SEMANTIC, TRACE,
                       Extraction, Semantic, SemanticFact, SemanticSegment)
 from .settings import MODULE, digest, file_hash, load_config, serialize, write_json
 from .study_input import write_source_manifest
+from .table_exports import pair_directory
 from .validation import comparison, downstream, summarize, validate_mappings
 
 DERIVED_SCHEMA = pa.schema([("variable", pa.string()), ("recomputed", pa.bool_()), ("evaluated_episodes", pa.int64()),
                             *[(name, pa.string()) for name in ("before", "after", "transitions", "rule")],
                             ("before_distinct", pa.int64()), ("after_distinct", pa.int64())])
 IMPACT_COLUMNS = ["study", "feature", "observed_before", "observed_after", "eligibility_before", "eligibility_after", "status"]
+
+
+def comparative_root(cfg: dict) -> Path:
+    return Path(cfg["paths"]["obj1_root"]) / "outputs/tables/qc/semantic_harmonization_reports"
 
 
 def now() -> str:
@@ -70,7 +75,13 @@ def build_identity(cfg: dict, resources: dict, inputs: dict) -> dict:
             packages[name] = None
     resource_identity = {name: {k: item.get(k) for k in ("revision", "version", "sha256", "status")}
                          for name, item in resources["resources"].items()}
-    return dict(inputs=inputs, source=digest(source), obj1_contracts=external, config=digest(cfg),
+    previous_id = cfg.get("comparison", {}).get("previous_v2_run_id")
+    historical_id = cfg.get("comparison", {}).get("historical_report_id")
+    previous_manifest = Path(cfg["paths"]["output"]) / str(previous_id) / "run_manifest.json"
+    historical_manifest = comparative_root(cfg) / str(historical_id) / "report_manifest.json"
+    comparison = {name: file_hash(path) if path.is_file() else None
+                  for name, path in (("previous_v2", previous_manifest), ("historical_work", historical_manifest))}
+    return dict(comparison=comparison, inputs=inputs, source=digest(source), obj1_contracts=external, config=digest(cfg),
                 resources=resource_identity, dependencies=packages, baseline=baseline_identity(cfg),
                 execution_environment={
                     "container_sha256": os.environ.get("SJD_CONTAINER_SHA256"),
@@ -218,7 +229,9 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=ve
             for row in pairs:
                 key = row["mapping_id"]
                 routes[key] = routing(row, deterministic[key], parts_by_mapping[key], facts_by_mapping[key])
-            pending = [row for row in pairs if routes[row["mapping_id"]]["send"]]
+            pending = [dict(row, _residual_segment_ids=routes[row["mapping_id"]]["residual_segment_ids"])
+                       for row in pairs if routes[row["mapping_id"]]["send"]]
+            pending_by_id = {row["mapping_id"]: row for row in pending}
             stage(f"03 deterministic counts mappings={len(pairs)} segments={len(segments)} facts={len(m1_facts)} residual={len(pending)}")
             stage("04 compatible retrieval")
             index.measure([row["concept"].replace("_", " ") for row in pending])
@@ -273,7 +286,7 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=ve
                         try:
                             if profile(row) == "finding":
                                 added = apply_extraction(semantic, Extraction.model_validate({"findings": item["findings"]}),
-                                                         row, cfg["prompts"]["version"])
+                                                         pending_by_id[key], cfg["prompts"]["version"])
                             else:
                                 existing = {canonical(fact) for fact in facts_by_mapping[key]}
                                 added = []
@@ -315,7 +328,7 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=ve
                         stream.write(serialize(row) + "\n")
 
                 stage("07 apply")
-                wide, features, observations = apply(original, source, lineage, dictionary, analytic)
+                wide, features, observations = apply(original, source, lineage, dictionary, analytic, final_facts)
                 context_candidate = None
                 if context is not None:
                     context_table = pq.read_table(paths["context"])
@@ -346,7 +359,7 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=ve
                 summary["v2"] = review(out, cfg, hashes, pairs, segments, m1_facts, final_facts, routes,
                                        outputs, variables, identity["baseline"])
                 summary["v2"]["analytic_representation"] = materialize(analytic, out, master, observations,
-                                                                       final_facts, features, variables)
+                                                                       final_facts, features, variables, wide)
                 summary["audit_reference"] = audit_reference(Path(paths["audit"])) if "audit" in hashes else {"status": "unavailable"}
                 summary["source_events"] = "Read-only measurement input profiled alongside the Step 10 candidate" if source is not None else "Step 10 episode-variable adapter"
                 write_json(out / "validation_summary.json", summary)
@@ -360,8 +373,21 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=ve
                                 input_paths={name: paths[name] for name in hashes}, model=identity["resources"]["gpt_oss"],
                                 prompt={"version": cfg["prompts"]["version"], "sha256": digest(cfg["prompts"])},
                                 identity=identity, patients=summary["patients"], episodes=len(master), columns=len(master.columns))
+                baseline = baseline_run(cfg)
+                previous = previous_run(cfg)
+                frozen, historical_hash = frozen_work(cfg, comparative_root(cfg), previous, baseline)
+                if historical_hash != identity["comparison"]["historical_work"] and previous:
+                    raise ValueError("Historical comparison changed during harmonization")
+                if previous and file_hash(previous.qc / "run_manifest.json") != identity["comparison"]["previous_v2"]:
+                    raise ValueError("Previous V2 publication changed during harmonization")
                 report(out, cfg, manifest, target=Run(out, analytic, manifest),
-                       baseline=baseline_run(cfg), routes=routes)
+                       baseline=baseline, previous=previous, frozen=frozen, routes=routes)
+                pair_directory(analytic)
+                pair_directory(out)
+                if previous:
+                    verified_previous = previous_run(cfg)
+                    if not verified_previous or verified_previous.manifest != previous.manifest:
+                        raise ValueError("Previous V2 publication changed before publication")
                 if inputs_for(cfg) != hashes or baseline_identity(cfg) != identity["baseline"]:
                     raise ValueError("Inputs changed after validation")
                 write_source_manifest(out, analytic, run_id, hashes)
@@ -409,6 +435,11 @@ def main() -> None:
         raise SystemExit(1) from None
     try:
         _, out = run(cfg)
+        report_dir, summary = generate(cfg, {"target_run_id": out.name}, comparative_root(cfg))
+        if summary["regression_counts"].get("unexplained_removal"):
+            print("V2 report generated. Current selector kept because the comparison has unexplained clinical fact removals.")
+        else:
+            update_report_pointer(comparative_root(cfg), out.name, report_dir.name)
     except PermissionError as error:
         raise SystemExit(f"Harmonization stopped because an input or staging path is inaccessible ({error.filename}).") from None
     except FileNotFoundError as error:
@@ -427,7 +458,9 @@ def main() -> None:
         raise SystemExit(
             "Harmonization stopped before publication."
         ) from None
-    print(f"Validated staging run: {out}")
+    print(f"V2 run ID: {out.name}")
+    print(f"Comparative report ID: {report_dir.name}")
+    print(report_dir.resolve() / "semantic_harmonization_final.html")
 
 
 if __name__ == "__main__":

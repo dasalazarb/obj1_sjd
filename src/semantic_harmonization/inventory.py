@@ -94,6 +94,8 @@ def route(variable: str, cfg: dict) -> tuple[str, str]:
     hla = HLA.fullmatch(variable)
     if protected(variable, cfg):
         return variable, "protected"
+    if variable == "spine__interval_name":
+        return variable, "administrative"
     if hla and hla[1].upper() in rules["hla_loci"]:
         return f"hla_{hla[1]}", "hla"
     if variable in rules["medications"]:
@@ -198,6 +200,7 @@ def inventory(master: pd.DataFrame, context: pd.DataFrame | None, source: pd.Dat
         context_cols = {key: side(prefix + suffix).tolist() for key, suffix in WIDE_CONTEXT.items()} if prefix else {}
         measurement = side(prefix + "measurement_date").map(clean).tolist() if prefix else [None] * len(master)
         availability = side(prefix + "result_available_date").map(clean).tolist() if prefix else [None] * len(master)
+        source_ids = side(prefix + "source_observation_id").map(clean).tolist() if prefix else [None] * len(master)
         measurements = [measurement_count(value) for value in side(prefix + "n_measurements")] if prefix else [None] * len(master)
         paired = side(prefix + "value").tolist() if lab and lab[2] == "text" else [None] * len(master)
         nonnull = nonempty = 0
@@ -212,7 +215,8 @@ def inventory(master: pd.DataFrame, context: pd.DataFrame | None, source: pd.Dat
             record(variable, value, metadata, dict(
                 observation_id=digest(["episode", hashes["integrated"], i, variable]), patient_id=str(key[0]),
                 clinical_episode_id=str(key[1]), source_grain="episode_variable", source_row=i,
-                source_observation_id=None, source_hash=hashes["integrated"], measurement_date=measurement[i],
+                source_observation_id=str(source_ids[i]) if source_ids[i] is not None else None,
+                source_hash=hashes["integrated"], measurement_date=measurement[i],
                 result_available_date=availability[i], paired_numeric_json=serialize(clean(paired[i])),
                 n_measurements=measurements[i], source_reference_status=metadata["reference_status"],
                 result_valid=None, baseline=base[i]), str(types.field(variable).type))
@@ -230,10 +234,11 @@ def inventory(master: pd.DataFrame, context: pd.DataFrame | None, source: pd.Dat
                         for key, field in SOURCE_CONTEXT.items()}
             metadata["source_system"] = "BTRIS"
             pid, episode = clean(row["patient_id"]), clean(row["matched_clinical_episode_id"])
+            source_id = clean(row.get("observation_identifier"))
             record(variable, row["result_raw"], metadata, dict(
                 observation_id=digest(["btris", hashes["source_events"], i]), patient_id=None if pid is None else str(pid),
                 clinical_episode_id=None if episode is None else str(episode), source_grain="btris_observation",
-                source_row=i, source_observation_id=clean(row.get("observation_identifier")),
+                source_row=i, source_observation_id=str(source_id) if source_id is not None else None,
                 source_hash=hashes["source_events"], measurement_date=clean(row["lab_date"]),
                 result_available_date=clean(row.get("result_available_date")),
                 paired_numeric_json=serialize(clean(row.get("result_numeric_exact"))), n_measurements=1,
