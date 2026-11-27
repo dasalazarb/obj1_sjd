@@ -507,13 +507,19 @@ class LocalModel:
         """Pass fitted dialogues to Harmony and preserve batch alignment."""
         model = self.cfg["model"]
         available = model["max_context_tokens"] - model["max_output_tokens"]
+        template_kwargs = {"reasoning_effort": "low"} if active == "compact" else {}
         fitting = [i for i, prompt in enumerate(messages)
-                   if len(self.tokenizer.apply_chat_template(prompt, tokenize=True, add_generation_prompt=True, return_dict=False)) <= available]
+                   if len(self.tokenizer.apply_chat_template(
+                       prompt, tokenize=True, add_generation_prompt=True, return_dict=False,
+                       **template_kwargs)) <= available]
         result = [Completion(None)] * len(messages)
         if not fitting:
             return result
         try:
-            outputs = self.engine.chat([messages[i] for i in fitting], sampling_params=self.params[active], use_tqdm=False)
+            chat_kwargs = {"chat_template_kwargs": template_kwargs} if template_kwargs else {}
+            outputs = self.engine.chat(
+                [messages[i] for i in fitting], sampling_params=self.params[active],
+                use_tqdm=False, **chat_kwargs)
         except self.engine_errors as error:
             raise InferenceUnavailable("Local inference engine is unavailable") from error
         for i, output in zip(fitting, outputs, strict=True):
@@ -537,29 +543,64 @@ class LocalModel:
         return "".join(part.text for part in final[0].content if hasattr(part, "text"))
 
     def extract_compact(self, rows: list[dict], index, ipd: dict) -> list[str]:
-        """Resolve narrative results with the existing batch and retry limits."""
+        """Retry only unfinished requests; keep the clinical source intact."""
         settings = self.cfg["model"]
         batch_size = settings["batch_size"]
+        retries = settings["max_validation_retries"]
+        logger = logging.getLogger(__name__)
         outcomes = []
         for start in range(0, len(rows), batch_size):
             batch = rows[start:start + batch_size]
-            messages = [self.compact_messages(row, index.retrieve(row), ipd) for row in batch]
+            retrieved = [index.retrieve(row) for row in batch]
             remaining = list(range(len(batch)))
             answers = {}
-            for _ in range(settings["max_validation_retries"] + 1):
-                replies = self.chat_completions([messages[i] for i in remaining], "compact")
-                for i, reply in zip(remaining, replies, strict=True):
-                    if reply.finish_reason != "stop" or not reply.has_final_channel or not reply.answer:
-                        continue
-                    try:
-                        answers[i] = CompactResult.model_validate_json(reply.answer).result
-                    except ValidationError:
-                        continue
+            failures = {}
+            for attempt in range(retries + 1):
+                # Trim only retrieved documents, never the clinical text or assay context.
+                # The last retry is individual and uses literal source evidence alone.
+                last_retry = attempt > 0 and attempt == retries
+                groups = [[i] for i in remaining] if last_retry else [remaining]
+                for group in groups:
+                    prompts = []
+                    for i in group:
+                        docs = retrieved[i]
+                        if last_retry:
+                            docs = []
+                        elif attempt:
+                            docs = docs[:max(1, len(docs) // (2 ** attempt))]
+                        prompts.append(self.compact_messages(batch[i], docs, ipd))
+                    replies = self.chat_completions(prompts, "compact")
+                    for i, reply in zip(group, replies, strict=True):
+                        if reply.finish_reason is None:
+                            failures[i] = "prompt_exceeds_context_budget"
+                        elif reply.finish_reason == "length":
+                            failures[i] = "output_token_limit"
+                        elif reply.finish_reason != "stop":
+                            failures[i] = "unfinished_generation"
+                        elif not reply.has_final_channel:
+                            failures[i] = "missing_harmony_final"
+                        elif not reply.answer:
+                            failures[i] = "empty_final_payload"
+                        else:
+                            try:
+                                # A JSON object containing result="" is a valid extraction.
+                                answers[i] = CompactResult.model_validate_json(reply.answer).result
+                            except ValidationError:
+                                failures[i] = "invalid_compact_json"
+                        if i in answers:
+                            failures.pop(i, None)
                 remaining = [i for i in remaining if i not in answers]
                 if not remaining:
                     break
+                counts = dict(Counter(failures[i] for i in remaining))
+                logger.warning(
+                    "Compact extraction batch_offset=%d attempt=%d/%d remaining=%d reasons=%s",
+                    start, attempt + 1, retries + 1, len(remaining), counts)
             if remaining:
-                raise InferenceUnavailable("Compact clinical extraction did not return a complete result")
+                counts = dict(Counter(failures[i] for i in remaining))
+                raise InferenceUnavailable(
+                    f"Compact clinical extraction did not return a complete result "
+                    f"(batch_offset={start}, remaining={len(remaining)}, reasons={counts})")
             outcomes.extend(answers[i] for i in range(len(batch)))
         return outcomes
 
