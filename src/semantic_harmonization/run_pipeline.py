@@ -465,6 +465,180 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=No
     return analytic_final, out_final
 
 
+def _active_review(original, wide, cfg):
+    """Summarize the final episode table against its immutable source, not prior runs."""
+    from .effective_values import encode_value
+    from .inventory import protected, route
+
+    audit, variables = [], []
+    families = defaultdict(Counter)
+    measures = ("cells", "source_null", "source_nonnull", "effective_cells",
+                "effective_null", "effective_nonnull", "effective_empty",
+                "changed_cells", "retained_exact_cells", "removed_cells",
+                "new_nulls", "newly_empty_cells")
+    for field in original.schema:
+        name = field.name
+        if protected(name, cfg):
+            continue
+        _, family = route(name, cfg)
+        source_col = original[name]
+        retained = name in wide.column_names
+        final_col = wide[name] if retained else None
+        counts = Counter(cells=len(source_col), source_null=source_col.null_count,
+                         source_nonnull=len(source_col) - source_col.null_count)
+        pairs = Counter()
+        for i, raw in enumerate(source_col):
+            raw_json = encode_value(raw, field.type)
+            if not retained:
+                counts["removed_cells"] += 1
+                pairs[(raw_json, None, "dropped_column")] += 1
+                continue
+            effective = final_col[i]
+            effective_json = encode_value(effective, final_col.type)
+            counts["effective_cells"] += 1
+            counts["effective_null"] += not effective.is_valid
+            counts["effective_nonnull"] += effective.is_valid
+            counts["effective_empty"] += effective_json == '""'
+            counts["new_nulls"] += raw.is_valid and not effective.is_valid
+            counts["newly_empty_cells"] += effective_json == '""' and raw_json != '""'
+            same = raw_json == effective_json
+            counts["retained_exact_cells" if same else "changed_cells"] += 1
+            decision = ("original_null" if not raw.is_valid else "original_unchanged") if same else (
+                "derived_recomputed" if name.startswith("sero__") else "text_harmonized")
+            pairs[(raw_json, effective_json, decision)] += 1
+        for (raw_json, effective_json, decision), n in pairs.items():
+            audit.append(dict(variable=name, family=family, source_grain="episode_variable",
+                              raw_type=str(field.type), raw_json=raw_json,
+                              effective_type=str(final_col.type) if retained else None,
+                              effective_json=effective_json, effective_origin=decision, occurrences=n))
+        variables.append(dict(variable=name, family=family, source_grain="episode_variable",
+                              **{key: counts[key] for key in measures}))
+        families[family].update(counts)
+        families[family]["variables"] += 1
+        families[family]["retained_variables"] += retained
+    family_rows = [dict(family=family, source_grain="episode_variable",
+                        variables=counts["variables"], retained_variables=counts["retained_variables"],
+                        **{key: counts[key] for key in measures})
+                   for family, counts in sorted(families.items())]
+    strings = ("variable", "family", "source_grain", "raw_type", "raw_json",
+               "effective_type", "effective_json", "effective_origin")
+    audit_schema = pa.schema([(key, pa.string()) for key in strings] + [("occurrences", pa.int64())])
+    summary_schema = pa.schema([(key, pa.string()) for key in ("variable", "family", "source_grain")]
+                               + [(key, pa.int64()) for key in measures])
+    family_schema = pa.schema([(key, pa.string()) for key in ("family", "source_grain")]
+                              + [(key, pa.int64()) for key in ("variables", "retained_variables", *measures)])
+    return {
+        "effective_value_audit": pa.Table.from_pylist(audit, schema=audit_schema),
+        "effective_variable_summary": pa.Table.from_pylist(variables, schema=summary_schema),
+        "effective_family_summary": pa.Table.from_pylist(family_rows, schema=family_schema),
+    }
+
+
+def _write_active_csv(table, path):
+    """Write the current CSV without the legacy sealed-export hash machinery."""
+    import csv
+    from .table_exports import cell, CSV_ENCODING
+
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(table.column_names)
+        for batch in table.to_batches(max_chunksize=2048):
+            writer.writerows([cell(row[name]) for name in table.column_names] for row in batch.to_pylist())
+    write_json(path.with_suffix(".csv.schema.json"), {
+        "columns": [{"name": f.name, "type": str(f.type), "nullable": f.nullable} for f in table.schema],
+        "rows": table.num_rows, "encoding": CSV_ENCODING,
+    })
+
+
+def _write_active_html(path, original, wide, tables):
+    """Render an offline, searchable review of the active output only."""
+    from html import escape
+
+    audit = tables["effective_value_audit"].to_pylist()
+    variables = tables["effective_variable_summary"].to_pylist()
+    families = tables["effective_family_summary"].to_pylist()
+    changed = sum(row["changed_cells"] for row in variables)
+    emptied = sum(row["newly_empty_cells"] for row in variables)
+    dropped = original.num_columns - wide.num_columns
+
+    def render_table(title, rows, columns):
+        head = "".join("<th>" + escape(key.replace("_", " ")) + "</th>" for key in columns)
+        body = []
+        for row in rows:
+            body.append("<tr>" + "".join("<td>" + escape(
+                "—" if row.get(key) is None else str(row[key])) + "</td>" for key in columns) + "</tr>")
+        return ("<section><h2>" + escape(title) + "</h2><div class='scroll'><table><thead><tr>"
+                + head + "</tr></thead><tbody>" + "".join(body) + "</tbody></table></div></section>")
+
+    cards = "".join("<div><small>" + label + "</small><strong>" + f"{value:,}" + "</strong></div>"
+                    for label, value in (("Episodes", wide.num_rows), ("Final columns", wide.num_columns),
+                                         ("Removed columns", dropped), ("Changed retained cells", changed),
+                                         ("New empty strings", emptied)))
+    summary_fields = ("cells", "effective_cells", "effective_nonnull", "effective_empty",
+                      "changed_cells", "removed_cells", "new_nulls", "newly_empty_cells")
+    sections = render_table("Clinical families", families, ("family", "variables", "retained_variables", *summary_fields))
+    sections += render_table("Variable summary", variables, ("variable", "family", *summary_fields))
+    sections += render_table("Value inventory", audit, ("variable", "family", "raw_json", "effective_json",
+                                                         "effective_origin", "occurrences"))
+    doc = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; base-uri 'none'">
+<title>SjD | Effective clinical dataset</title><style>
+*{box-sizing:border-box}body{font:14px system-ui,sans-serif;background:#f5f7fa;color:#172b3a;margin:0}
+main{max-width:1600px;margin:auto;padding:32px}h1{font-size:30px;margin:0 0 8px}h2{font-size:19px}
+p{line-height:1.6;color:#526475}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.cards div,section{background:white;border:1px solid #dbe3eb;border-radius:10px;padding:20px;margin-bottom:16px}
+small{display:block;color:#536879}strong{display:block;font-size:28px;color:#176c65;margin-top:8px}
+input{width:min(600px,100%);font:inherit;padding:12px;border:1px solid #8ea3b4;border-radius:7px;margin:12px 0 24px}
+.scroll{overflow:auto;max-height:540px}table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{text-align:left;padding:9px 12px;border-bottom:1px solid #e3e9ed;vertical-align:top;overflow-wrap:anywhere}
+th{position:sticky;top:0;background:#eaf1f5;white-space:nowrap}td{white-space:pre-wrap;min-width:80px}
+td:first-child{min-width:170px}tr:nth-child(even){background:#f7fafb}a{color:#176c65;margin-right:12px}
+[hidden]{display:none!important}</style></head><body><main>
+<h1>Effective clinical dataset</h1>
+<p>Current episode-level output after cases 1–8. Original values refer only to Step 10, not a previous harmonization run. Counts exclude protected and identifier columns. Removed columns have no effective value. JSON strings distinguish empty strings from nulls. These counts describe transformations, not independent clinical validation or LLM attribution.</p>
+<div class="cards">""" + cards + """</div>
+<p><a href="effective_variable_summary.csv">Variable CSV</a><a href="effective_family_summary.csv">Family CSV</a><a href="effective_value_audit.csv">Value CSV</a></p>
+<label for="search">Search variables, families and results</label><br><input id="search" type="search" placeholder="Filter all tables..." autocomplete="off">
+""" + sections + """<script>
+const search=document.getElementById('search');
+search.addEventListener('input',()=>{const q=search.value.trim().toLowerCase();
+document.querySelectorAll('tbody tr').forEach(row=>{row.hidden=!row.textContent.toLowerCase().includes(q)});});
+</script></main></body></html>"""
+    path.write_text(doc, encoding="utf-8")
+
+
+def _refresh_active_outputs(original, wide, cfg, target):
+    """Stage and replace only the active wide table and its current review outputs."""
+    qc = Path(cfg["paths"]["output"]) / target.parent.name
+    qc.mkdir(mode=0o700, parents=True, exist_ok=True)
+    tables = _active_review(original, wide, cfg)
+    with tempfile.TemporaryDirectory(dir=target.parent, prefix=".effective-") as analytic_tmp, \
+         tempfile.TemporaryDirectory(dir=qc, prefix=".review-") as qc_tmp:
+        analytic = Path(analytic_tmp)
+        review = Path(qc_tmp)
+        pq.write_table(wide, analytic / target.name)
+        _write_active_csv(wide, (analytic / target.name).with_suffix(".csv"))
+        for name, table in tables.items():
+            pq.write_table(table, review / f"{name}.parquet")
+            _write_active_csv(table, review / f"{name}.csv")
+        _write_active_html(review / "semantic_harmonization_final.html", original, wide, tables)
+
+        # All artifacts are prepared before the active parquet is replaced.
+        for folder, destination in ((analytic, target.parent), (review, qc)):
+            for staged in sorted(folder.iterdir()):
+                if staged.name == target.name:
+                    continue
+                staged.chmod(0o600)
+                staged.replace(destination / staged.name)
+        staged = analytic / target.name
+        staged.chmod(stat.S_IMODE(target.stat().st_mode))
+        staged.replace(target)
+    print(f"Effective CSV: {target.with_suffix('.csv')}", flush=True)
+    print(f"Effective QC: {qc}", flush=True)
+    print(f"Effective HTML: {qc / 'semantic_harmonization_final.html'}", flush=True)
+
+
 def refresh_active(cfg: dict) -> Path:
     """Refresh the parquet selected by the downstream consumers in place."""
     paths = cfg["paths"]
@@ -500,17 +674,7 @@ def refresh_active(cfg: dict) -> Path:
             eda_spine_path=common.EDA_SJD_CLINICAL_EPISODE_SPINE,
             all_spine_path=root / common.EPISODE_SPINE_PARQUET.relative_to(common.PROJECT_ROOT),
         )
-        # Replace the active file only after all transformations have finished.
-        with tempfile.NamedTemporaryFile(dir=target.parent, prefix=".effective-", delete=False) as staging:
-            staged = Path(staging.name)
-            try:
-                pq.write_table(wide, staging)
-                staging.flush()
-                os.fchmod(staging.fileno(), stat.S_IMODE(target.stat().st_mode))
-                os.fsync(staging.fileno())
-                staged.replace(target)
-            finally:
-                staged.unlink(missing_ok=True)
+        _refresh_active_outputs(original, wide, cfg, target)
     finally:
         os.close(directory)
     return target
