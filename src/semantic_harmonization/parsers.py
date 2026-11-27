@@ -69,7 +69,8 @@ def format_urine_result(text: str, aliases: dict) -> str:
         return canonical
     if not (SINGLE.fullmatch(amount) or RANGE.fullmatch(amount)):
         return text
-    return f"{canonical}({re.sub(r'\s+', '', amount)})"
+    clean_amount = re.sub(r"\s+", "", amount)
+    return f"{canonical}({clean_amount})"
 
 
 def format_hla_result(text: str) -> str | None:
