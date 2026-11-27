@@ -195,7 +195,7 @@ def test_all_new_outputs_private_no_phi_free_text_or_master_changes(tmp_path):
     data.to_parquet(args.btris_11d)
     protected = [ROOT / 'src/block_A/audit/08_medications/legacy/08_treatment_audit.py', ROOT / 'common.py']
     protected += list((ROOT / 'src').rglob('10_*.py')) + list((ROOT / 'src').rglob('14_*.py')) + list((ROOT / 'src').rglob('15_*.py'))
-    protected += list((ROOT / 'src/studies').rglob('*.py')) + list((ROOT / 'src/block_B').rglob('*.py'))
+    protected += list((ROOT / 'src/studies').rglob('*.py'))
     before = {p: audit.v1.file_hash(p) for p in protected}
     audit.run(args)
     private = args.output_dir / 'restricted'

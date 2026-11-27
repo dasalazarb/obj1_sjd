@@ -53,12 +53,6 @@ DEFAULT_CODEBOOK = METADATA_DIR / "Consolidated_Codebook_all_columns.xlsx"
 # Block A outputs.
 BLOCKA_TABLES_DIR = OUTPUTS_DIR / "tables" / "blockA"
 BLOCKA_QC_DIR = OUTPUTS_DIR / "qc" / "blockA"
-# Block B observation-process outputs.  Defining paths is deliberately free of
-# filesystem side effects; ``ensure_output_dirs`` performs creation explicitly.
-BLOCKB_TABLES_DIR = OUTPUTS_DIR / "tables" / "blockB"
-BLOCKB_FIGURES_DIR = OUTPUTS_DIR / "figures" / "blockB"
-BLOCKB_QC_DIR = OUTPUTS_DIR / "qc" / "blockB"
-BLOCKB_LOGS_DIR = OUTPUTS_DIR / "logs"
 VISIT_SPINE_PARQUET = INTERMEDIATE_DATA_DIR / "00_patient_visit_spine.parquet"
 VISIT_SPINE_CSV = INTERMEDIATE_DATA_DIR / "00_patient_visit_spine.csv"
 # Episode-based Step 00 outputs.  The legacy VISIT_SPINE_* paths above remain
@@ -90,8 +84,6 @@ DISEASE_ACTIVITY_PROGRESSION_DIR = ANALYTIC_DATA_DIR / "blockA" / "13_disease_ac
 DISEASE_ACTIVITY_PROGRESSION_PARQUET = DISEASE_ACTIVITY_PROGRESSION_DIR / "13_progression_episode_level.parquet"
 RISK_FACTORS_PROGRESSION_DIR = ANALYTIC_DATA_DIR / "blockA" / "14_risk_factors_progression"
 RISK_FACTORS_PROGRESSION_PARQUET = RISK_FACTORS_PROGRESSION_DIR / "14_lagged_interval_dataset.parquet"
-TRANSITION_EPISODE_PARQUET = INTERMEDIATE_DATA_DIR / "23_build_transition_episode_dataset" / "23_transition_episode_dataset.parquet"
-TRANSITION_EPISODE_CSV = INTERMEDIATE_DATA_DIR / "23_build_transition_episode_dataset" / "23_transition_episode_dataset.csv"
 
 
 def script_output_dir(root: Path, script_name: str) -> Path:
@@ -106,7 +98,7 @@ def ensure_output_dirs() -> None:
     for path in (
         INTERMEDIATE_DATA_DIR, BLOCKA_INTERMEDIATE_DATA_DIR, ANALYTIC_DATA_DIR,
         BLOCKA_TABLES_DIR, BLOCKA_QC_DIR,
-        BLOCKB_TABLES_DIR, BLOCKB_FIGURES_DIR, BLOCKB_QC_DIR, BLOCKB_LOGS_DIR,
+        OUTPUTS_DIR / "logs",
         STUDIES_ANALYTIC_DIR, STUDIES_TABLES_DIR, STUDIES_FIGURES_DIR,
         STUDIES_QC_DIR, STUDIES_LOGS_DIR,
     ):
