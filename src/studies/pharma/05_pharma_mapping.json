@@ -1,0 +1,506 @@
+{
+  "age": {
+    "group": "clinical",
+    "type": "continuous",
+    "temporal_source": "episode",
+    "columns": [],
+    "unit": "years",
+    "direction": "not_applicable",
+    "shared_concept": "age_at_visit",
+    "required": false
+  },
+  "essdai_total": {
+    "group": "clinical",
+    "type": "continuous",
+    "temporal_source": "episode",
+    "columns": [],
+    "unit": "points",
+    "direction": "higher_worse",
+    "shared_concept": "essdai_total",
+    "required": true
+  },
+  "esspri_total": {
+    "group": "clinical",
+    "type": "continuous",
+    "temporal_source": "episode",
+    "columns": [],
+    "unit": "points",
+    "direction": "higher_worse",
+    "shared_concept": "esspri_total",
+    "required": true
+  },
+  "dryness": {
+    "group": "clinical",
+    "type": "continuous",
+    "temporal_source": "episode",
+    "columns": [],
+    "unit": "points",
+    "direction": "higher_worse",
+    "shared_concept": "esspri_dryness",
+    "required": false
+  },
+  "pain": {
+    "group": "clinical",
+    "type": "continuous",
+    "temporal_source": "episode",
+    "columns": [],
+    "unit": "points",
+    "direction": "higher_worse",
+    "shared_concept": "esspri_pain",
+    "required": false
+  },
+  "fatigue": {
+    "group": "clinical",
+    "type": "continuous",
+    "temporal_source": "episode",
+    "columns": [],
+    "unit": "points",
+    "direction": "higher_worse",
+    "shared_concept": "esspri_fatigue",
+    "required": false
+  },
+  "sex": {
+    "group": "clinical",
+    "type": "categorical",
+    "temporal_source": "episode",
+    "columns": [],
+    "unit": "",
+    "direction": "not_applicable",
+    "shared_concept": "sex",
+    "required": false
+  },
+  "protocol": {
+    "group": "clinical",
+    "type": "categorical",
+    "temporal_source": "episode",
+    "columns": [],
+    "unit": "",
+    "direction": "not_applicable",
+    "shared_concept": "protocol",
+    "required": false,
+    "context_column": "source_protocol"
+  },
+  "disease_duration": {
+    "group": "clinical",
+    "type": "continuous",
+    "temporal_source": "episode",
+    "columns": [
+      "time_since_diagnosis_years",
+      "disease_duration_years"
+    ],
+    "unit": "years",
+    "direction": "not_applicable"
+  },
+  "focus_score_asof": {
+    "group": "clinical",
+    "type": "continuous",
+    "temporal_source": "unavailable",
+    "columns": [],
+    "unit": "",
+    "direction": "not_applicable",
+    "reason": "No verified dated as-of histology contract in Step 10"
+  },
+  "focus_score_ever": {
+    "group": "clinical",
+    "type": "continuous",
+    "temporal_source": "unavailable",
+    "columns": [],
+    "unit": "",
+    "direction": "not_applicable",
+    "reason": "No verified dated longitudinal histology contract in Step 10"
+  },
+  "comorbidities": {
+    "group": "clinical",
+    "type": "categorical",
+    "temporal_source": "unavailable",
+    "columns": [],
+    "unit": "",
+    "direction": "not_applicable",
+    "reason": "No preselected comorbidity mapping with as-of semantics"
+  },
+  "constitutional": {
+    "group": "domain",
+    "type": "ordinal",
+    "temporal_source": "episode",
+    "columns": [
+      "essdai__constitutional_ordinal_score",
+      "eg_constitutional_ordinal_score"
+    ],
+    "unit": "ordinal level",
+    "direction": "higher_worse",
+    "levels": [
+      0,
+      1,
+      2,
+      3
+    ]
+  },
+  "lymphadenopathy": {
+    "group": "domain",
+    "type": "ordinal",
+    "temporal_source": "episode",
+    "columns": [
+      "essdai__lymphadenopathy_ordinal_score",
+      "eg_lymphadenopathy_ordinal_score"
+    ],
+    "unit": "ordinal level",
+    "direction": "higher_worse",
+    "levels": [
+      0,
+      1,
+      2,
+      3
+    ]
+  },
+  "glandular": {
+    "group": "domain",
+    "type": "ordinal",
+    "temporal_source": "episode",
+    "columns": [
+      "essdai__glandular_ordinal_score",
+      "eg_glandular_ordinal_score"
+    ],
+    "unit": "ordinal level",
+    "direction": "higher_worse",
+    "levels": [
+      0,
+      1,
+      2,
+      3
+    ]
+  },
+  "articular": {
+    "group": "domain",
+    "type": "ordinal",
+    "temporal_source": "episode",
+    "columns": [
+      "essdai__articular_ordinal_score",
+      "eg_articular_ordinal_score"
+    ],
+    "unit": "ordinal level",
+    "direction": "higher_worse",
+    "levels": [
+      0,
+      1,
+      2,
+      3
+    ]
+  },
+  "cutaneous": {
+    "group": "domain",
+    "type": "ordinal",
+    "temporal_source": "episode",
+    "columns": [
+      "essdai__cutaneous_ordinal_score",
+      "eg_cutaneous_ordinal_score"
+    ],
+    "unit": "ordinal level",
+    "direction": "higher_worse",
+    "levels": [
+      0,
+      1,
+      2,
+      3
+    ]
+  },
+  "pulmonary": {
+    "group": "domain",
+    "type": "ordinal",
+    "temporal_source": "episode",
+    "columns": [
+      "essdai__pulmonary_ordinal_score",
+      "eg_pulmonary_ordinal_score"
+    ],
+    "unit": "ordinal level",
+    "direction": "higher_worse",
+    "levels": [
+      0,
+      1,
+      2,
+      3
+    ]
+  },
+  "renal": {
+    "group": "domain",
+    "type": "ordinal",
+    "temporal_source": "episode",
+    "columns": [
+      "essdai__renal_ordinal_score",
+      "eg_renal_ordinal_score"
+    ],
+    "unit": "ordinal level",
+    "direction": "higher_worse",
+    "levels": [
+      0,
+      1,
+      2,
+      3
+    ]
+  },
+  "muscular": {
+    "group": "domain",
+    "type": "ordinal",
+    "temporal_source": "episode",
+    "columns": [
+      "essdai__muscular_ordinal_score",
+      "eg_muscular_ordinal_score"
+    ],
+    "unit": "ordinal level",
+    "direction": "higher_worse",
+    "levels": [
+      0,
+      1,
+      2,
+      3
+    ]
+  },
+  "pns": {
+    "group": "domain",
+    "type": "ordinal",
+    "temporal_source": "episode",
+    "columns": [
+      "essdai__pns_ordinal_score",
+      "eg_pns_ordinal_score",
+      "eg_neuro_peripheral_ordinal_score"
+    ],
+    "unit": "ordinal level",
+    "direction": "higher_worse",
+    "levels": [
+      0,
+      1,
+      2,
+      3
+    ]
+  },
+  "cns": {
+    "group": "domain",
+    "type": "ordinal",
+    "temporal_source": "episode",
+    "columns": [
+      "essdai__cns_ordinal_score",
+      "eg_cns_ordinal_score"
+    ],
+    "unit": "ordinal level",
+    "direction": "higher_worse",
+    "levels": [
+      0,
+      1,
+      2,
+      3
+    ]
+  },
+  "hematologic": {
+    "group": "domain",
+    "type": "ordinal",
+    "temporal_source": "episode",
+    "columns": [
+      "essdai__hematologic_ordinal_score",
+      "eg_hematologic_ordinal_score"
+    ],
+    "unit": "ordinal level",
+    "direction": "higher_worse",
+    "levels": [
+      0,
+      1,
+      2,
+      3
+    ]
+  },
+  "biological": {
+    "group": "domain",
+    "type": "ordinal",
+    "temporal_source": "episode",
+    "columns": [
+      "essdai__biological_ordinal_score",
+      "eg_biological_ordinal_score"
+    ],
+    "unit": "ordinal level",
+    "direction": "higher_worse",
+    "levels": [
+      0,
+      1,
+      2,
+      3
+    ]
+  },
+  "esr": {
+    "group": "laboratory",
+    "type": "continuous",
+    "temporal_source": "dated_episode_lab",
+    "columns": [],
+    "unit": "",
+    "direction": "not_applicable",
+    "assay": "lab__esr"
+  },
+  "igg": {
+    "group": "laboratory",
+    "type": "continuous",
+    "temporal_source": "dated_episode_lab",
+    "columns": [],
+    "unit": "",
+    "direction": "not_applicable",
+    "assay": "lab__igg"
+  },
+  "protein_total": {
+    "group": "laboratory",
+    "type": "continuous",
+    "temporal_source": "dated_episode_lab",
+    "columns": [],
+    "unit": "",
+    "direction": "not_applicable",
+    "assay": "lab__protein_total"
+  },
+  "mcv": {
+    "group": "laboratory",
+    "type": "continuous",
+    "temporal_source": "dated_episode_lab",
+    "columns": [],
+    "unit": "",
+    "direction": "not_applicable",
+    "assay": "lab__mcv"
+  },
+  "complement_c3": {
+    "group": "laboratory",
+    "type": "continuous",
+    "temporal_source": "dated_episode_lab",
+    "columns": [],
+    "unit": "",
+    "direction": "not_applicable",
+    "assay": "lab__complement_c3"
+  },
+  "complement_c4": {
+    "group": "laboratory",
+    "type": "continuous",
+    "temporal_source": "dated_episode_lab",
+    "columns": [],
+    "unit": "",
+    "direction": "not_applicable",
+    "assay": "lab__complement_c4"
+  },
+  "ssa": {
+    "group": "serology",
+    "type": "binary",
+    "temporal_source": "history_through_anchor",
+    "columns": [
+      "sero__anti_ro_ssa__ever_positive_through_episode"
+    ],
+    "unit": "",
+    "direction": "not_applicable",
+    "positive": [
+      "true",
+      "1",
+      "1.0"
+    ],
+    "negative": [
+      "false",
+      "0",
+      "0.0"
+    ],
+    "unknown": [
+      "unknown",
+      "indeterminate",
+      "not reported"
+    ],
+    "assay": "lab__anti_ro_ssa"
+  },
+  "ssb": {
+    "group": "serology",
+    "type": "binary",
+    "temporal_source": "history_through_anchor",
+    "columns": [
+      "sero__anti_la_ssb__ever_positive_through_episode"
+    ],
+    "unit": "",
+    "direction": "not_applicable",
+    "positive": [
+      "true",
+      "1",
+      "1.0"
+    ],
+    "negative": [
+      "false",
+      "0",
+      "0.0"
+    ],
+    "unknown": [
+      "unknown",
+      "indeterminate",
+      "not reported"
+    ]
+  },
+  "rf": {
+    "group": "serology",
+    "type": "binary",
+    "temporal_source": "history_through_anchor",
+    "columns": [
+      "sero__rf__ever_positive_through_episode"
+    ],
+    "unit": "",
+    "direction": "not_applicable",
+    "positive": [
+      "true",
+      "1",
+      "1.0"
+    ],
+    "negative": [
+      "false",
+      "0",
+      "0.0"
+    ],
+    "unknown": [
+      "unknown",
+      "indeterminate",
+      "not reported"
+    ]
+  },
+  "ana": {
+    "group": "serology",
+    "type": "binary",
+    "temporal_source": "history_through_anchor",
+    "columns": [
+      "sero__ana__ever_positive_through_episode"
+    ],
+    "unit": "",
+    "direction": "not_applicable",
+    "positive": [
+      "true",
+      "1",
+      "1.0"
+    ],
+    "negative": [
+      "false",
+      "0",
+      "0.0"
+    ],
+    "unknown": [
+      "unknown",
+      "indeterminate",
+      "not reported"
+    ]
+  },
+  "cryoglobulinemia": {
+    "group": "serology",
+    "type": "binary",
+    "temporal_source": "history_through_anchor",
+    "columns": [
+      "sero__cryoglobulinemia__ever_positive_through_episode"
+    ],
+    "unit": "",
+    "direction": "not_applicable",
+    "positive": [
+      "true",
+      "1",
+      "1.0"
+    ],
+    "negative": [
+      "false",
+      "0",
+      "0.0"
+    ],
+    "unknown": [
+      "unknown",
+      "indeterminate",
+      "not reported"
+    ]
+  }
+}
