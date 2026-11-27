@@ -41,3 +41,31 @@ def test_prespecified_marker_can_describe_non_discovery_non_anchor_source():
     assert profad.n_observed.sum()==len(baseline) and profad['median'].notna().all()
     assert profad.validation_role.eq('unavailable').all()
     assert profad.inference_scope.eq('observed_baseline_description_not_independent_validation').all()
+
+
+def test_boolean_profiles_preserve_missingness_and_report_prevalence():
+    from src.studies.graph.stage03.s03_profiles import numeric
+    baseline,membership,meta,cfg,roles=clinical_frames()
+    # A numeric manifest can coexist with a true nullable boolean source.
+    source=roles.loc[roles.validation_role.eq('defining') & roles.type.eq('numeric'),'source_column'].iloc[0]
+    baseline[source]=pd.Series([True, False, pd.NA]*(len(baseline)//3)+[True]*(len(baseline)%3),index=baseline.index,dtype='boolean')
+    result=profile_tables(baseline,membership,roles,meta,cfg,2)['baseline']
+    part=result.loc[result.source_column.eq(source)]
+    assert not part.empty
+    assert part.data_type.eq('binary').all()
+    assert part[['median','q25','q75']].isna().all().all()
+    assert (part.n_pos+part.n_neg).eq(part.n_observed).all()
+    assert (part.n_observed+part.n_missing).eq(part.n_patients).all()
+    assert part.n_missing.sum()>0
+    assert np.allclose(part.proportion,part.n_pos/part.n_observed,equal_nan=True)
+    assert numeric(baseline[source]).dtype==np.dtype('float64')
+    assert numeric(baseline[source]).isna().equals(baseline[source].isna())
+
+
+def test_profile_kind_does_not_infer_binary_from_numeric_zero_one_subset():
+    from src.studies.graph.stage03.s03_profiles import numeric, observed_values, profile_value_kind
+    raw=pd.Series([0,1,np.nan])
+    clean=observed_values(raw)
+    assert profile_value_kind(raw,clean,numeric(clean),'numeric')=='numeric'
+    assert profile_value_kind(raw,clean,numeric(clean),'binary')=='binary'
+    assert profile_value_kind(raw,clean,numeric(clean),'categorical')=='categorical'
