@@ -42,6 +42,21 @@ microscopy:
   rare: rare
   many: many
   none seen: none seen
+urine_effective:
+  neg: Negative
+  negative: Negative
+  trace: Trace
+  small: Small
+  mod: Moderate
+  moderate: Moderate
+  large: Large
+  occassional: Occasional
+  occasional: Occasional
+  none seen: None Seen
+  few: Few
+  rare: Rare
+  many: Many
+  mild: Mild
 ana_patterns: [homogeneous, speckled, nucleolar, centromere, cytoplasmic, nuclear dots, dense fine speckled]
 administrative:
   - see below

@@ -120,7 +120,9 @@ Desde la raíz del repositorio autorizado en Biowulf, con recursos ya preparados
 sbatch src/semantic_harmonization/run_harmonization.sbatch
 ```
 
-Con los recursos locales preparados, `python -m src.semantic_harmonization.run_pipeline` ejecuta la misma materialización. El valor predeterminado `model.inference_mode: auto` intenta la inferencia local cuando hay texto residual elegible. Configura `model.inference_mode: disabled` en `configs/local.yaml` para ejecutar solo los parsers y los recursos estructurados. El launcher deja `current_v2.json` intacto. Identifica la publicación por el run ID que aparece en el log.
+Con los recursos locales preparados, `python -m src.semantic_harmonization.run_pipeline` ejecuta la misma actualización de los casos 1–8. Usa el Effective que seleccionan los consumidores y reemplaza ese parquet después de la extracción local y el recálculo de serología. El log muestra la ruta del parquet activo.
+
+Los siguientes artefactos corresponden a publicaciones históricas selladas. Sus manifiestos y CSV describen el parquet previo a la actualización de los casos 1–8.
 
 | Asset en el run analítico | Uso |
 | --- | --- |

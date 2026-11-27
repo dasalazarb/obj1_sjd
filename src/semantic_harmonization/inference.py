@@ -9,9 +9,9 @@ import os
 from pathlib import Path
 import re
 
-from pydantic import ValidationError
+from pydantic import BaseModel, StrictStr, ValidationError
 
-from .parsers import narrative, new_finding, normalize, parse_segment
+from .parsers import ALLELE, hla, narrative, new_finding, normalize, parse_segment
 from .schemas import AnaExtraction, Evidence, Extraction, Finding, HlaExtraction, MorphologyExtraction, Semantic
 from .segmentation import segment
 from .semantic_facts import canonical, coverage, make_fact, part_facts
@@ -40,6 +40,10 @@ class EvidenceError(ValueError):
 
 class InferenceUnavailable(RuntimeError):
     """The optional engine cannot safely be used again in the current run."""
+
+
+class CompactResult(BaseModel):
+    result: StrictStr
 
 
 @dataclass(frozen=True)
@@ -403,7 +407,9 @@ class LocalModel:
                               disable_custom_all_reduce=True)
         except (EngineDeadError, OutOfMemoryError, TimeoutError) as error:
             raise InferenceUnavailable("Local inference engine is unavailable") from error
-        schemas = {"finding": Extraction} | {family: contract[0] for family, contract in PROFILES.items()}
+        schemas = {"finding": Extraction, "compact": CompactResult} | {
+            family: contract[0] for family, contract in PROFILES.items()
+        }
         self.params = {
             name: SamplingParams(temperature=model["temperature"], max_tokens=model["max_output_tokens"],
                                  seed=model["seed"], skip_special_tokens=False,
@@ -477,6 +483,22 @@ class LocalModel:
             {"role": "user", "content": serialize(payload)}
         ]
 
+    def compact_messages(self, row: dict, retrieved: list[dict], ipd: dict) -> list[dict]:
+        """Give the local model the literal result and its assay context."""
+        payload = dict(variable=row["variable"], result=row["raw_text"],
+                       assay_context=json.loads(row["context_json"]),
+                       retrieved_documents=[json.loads(item["snippet"]) for item in retrieved])
+        if row["family"] == "hla":
+            locus = row["concept"].removeprefix("hla_").upper()
+            tokens = re.finditer(rf"(?<![\w:*]){ALLELE.pattern}(?![\w:*])", row["raw_text"], re.I)
+            payload["ipd_nomenclature"] = [
+                {"reported": item.reported, "ipd_match": item.ipd_match}
+                for token in tokens for item in hla(token[0], locus, ipd)
+                if item.ipd_match in {"allele", "g_group", "p_group", "compatible_resolution"}
+            ]
+        return [{"role": "system", "content": self.cfg["prompts"]["compact_system"]},
+                {"role": "user", "content": serialize(payload)}]
+
     def chat(self, messages: list[list[dict]], active: str = "finding") -> list[str | None]:
         """Keep the extraction interface and discard unfinished completions."""
         return [reply.answer for reply in self.chat_completions(messages, active)]
@@ -513,6 +535,33 @@ class LocalModel:
         if len(final) != 1:
             return None
         return "".join(part.text for part in final[0].content if hasattr(part, "text"))
+
+    def extract_compact(self, rows: list[dict], index, ipd: dict) -> list[str]:
+        """Resolve narrative results with the existing batch and retry limits."""
+        settings = self.cfg["model"]
+        batch_size = settings["batch_size"]
+        outcomes = []
+        for start in range(0, len(rows), batch_size):
+            batch = rows[start:start + batch_size]
+            messages = [self.compact_messages(row, index.retrieve(row), ipd) for row in batch]
+            remaining = list(range(len(batch)))
+            answers = {}
+            for _ in range(settings["max_validation_retries"] + 1):
+                replies = self.chat_completions([messages[i] for i in remaining], "compact")
+                for i, reply in zip(remaining, replies, strict=True):
+                    if reply.finish_reason != "stop" or not reply.has_final_channel or not reply.answer:
+                        continue
+                    try:
+                        answers[i] = CompactResult.model_validate_json(reply.answer).result
+                    except ValidationError:
+                        continue
+                remaining = [i for i in remaining if i not in answers]
+                if not remaining:
+                    break
+            if remaining:
+                raise InferenceUnavailable("Compact clinical extraction did not return a complete result")
+            outcomes.extend(answers[i] for i in range(len(batch)))
+        return outcomes
 
     def smoke(self, fixtures=None) -> SmokeResult:
         """Run all required synthetic cases independently with one bounded retry."""

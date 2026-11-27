@@ -1,19 +1,23 @@
 """Apply the semantic dictionary without replacing source columns."""
 from __future__ import annotations
 
+import builtins
 from collections import Counter, defaultdict
 from decimal import Decimal
+from importlib import import_module, util
 import json
+import logging
 import math
 import re
 from pathlib import Path
+import sys
 
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .effective_values import typed_equal
-from .inventory import clean
+from .effective_values import replace_values, typed_equal
+from .inventory import CONTEXT_FIELDS, SOURCE_CONTEXT, clean
 from .schemas import ALLELE, CHILD_LINK, FEATURES, FINDING, MEDICATION, OBSERVATIONS, SEMANTIC
 from .semantic_facts import clinical
 from .settings import KEYS, serialize
@@ -27,6 +31,145 @@ WIDE_FIELDS = {
     "result_availability": pa.string(),
 }
 SEMANTIC_FACTS = [*WIDE_FIELDS, "pattern_terms", "findings", "alleles", "medications"]
+LOG = logging.getLogger(__name__)
+HISTORY_ANALYTES = {
+    "ana_hep2_cytoplasmic_pattern", "ana_hep2_status", "ana_status", "anti_ccp",
+    "anti_dsdna", "anti_dsdna_igg", "anti_endomysial_iga", "anti_jo1", "anti_la_ssb",
+    "anti_rnp", "anti_ro_ssa", "anti_scl70", "anti_sm", "anticardiolipin_igg",
+    "anticardiolipin_igm",
+}
+HLA_ANALYTES = {f"hla_{locus}" for locus in ("a", "b", "c", "dpb", "dqb1", "drb1", "drb")}
+HISTORY_COLUMNS = [f"{name}__ever_positive_through_episode" for name in sorted(HISTORY_ANALYTES)] + [
+    f"{name}__{suffix}" for name in sorted(HLA_ANALYTES)
+    for suffix in ("asof_value", "patient_consensus_value")
+]
+
+
+def _baseline_producer(eda_root: Path):
+    """Load Step 20b with eda_sjd's common module, leaving obj1's imports intact."""
+    source = eda_root / "src"
+    common_spec = util.spec_from_file_location("_eda_sjd_common", source / "common.py")
+    common_module = util.module_from_spec(common_spec)
+    common_spec.loader.exec_module(common_module)
+    spec = util.spec_from_file_location("_eda_sjd_baseline", source / "20b_btris_baseline_labs.py")
+    module = util.module_from_spec(spec)
+
+    def import_dependency(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "common" and level == 0:
+            return common_module
+        return builtins.__import__(name, globals, locals, fromlist, level)
+
+    module.__builtins__ = vars(builtins) | {"__import__": import_dependency}
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        del sys.modules[spec.name]
+    return module
+
+
+def _harmonize_lab_evidence(labs, text):
+    """Clean the original observation strings in memory using their assay context."""
+    fields = ("result_text", "result_raw")
+    requests = {field: [] for field in fields}
+    for row in labs.to_dict("records"):
+        variable = f"lab__{row['lab_id']}__text"
+        metadata = dict.fromkeys(CONTEXT_FIELDS)
+        metadata.update({key: clean(row.get(field)) if isinstance(field, str)
+                         else [clean(row.get(item)) for item in field] for key, field in SOURCE_CONTEXT.items()})
+        metadata["source_system"] = "BTRIS"
+        context = serialize(metadata)
+        for field in fields:
+            value = clean(row[field])
+            requests[field].append((variable, value if isinstance(value, str) else None, context))
+
+    text.resolve(key for column in requests.values() for key in column)
+    cleaned = labs.copy()
+    removed = pd.Series(False, index=labs.index)
+    for field, column in requests.items():
+        for index, key in zip(labs.index, column, strict=True):
+            value = text.values[key]
+            if value != key[1]:
+                cleaned.at[index, field] = value
+                if value == "":
+                    removed.at[index] = True
+    explicitly_empty = removed & cleaned["result_text"].eq("").fillna(False)
+    cleaned.loc[explicitly_empty & cleaned["result_raw"].notna(), "result_raw"] = ""
+    cleaned["_effective_result_removed"] = removed & cleaned[list(fields)].fillna("").eq("").all(axis=1)
+    return cleaned
+
+
+def _episode_history(spine, all_spine, labs, serology):
+    """Use the Step 01 cohort, eligible matches and per-anchor histories."""
+    usable = labs.loc[serology.eligible_matched_labs(labs)].copy()
+    usable["clinical_episode_id"] = usable["matched_clinical_episode_id"]
+    usable["_patient_id_match"] = serology._normalize_patient_id(usable["patient_id"])
+    all_spine["_patient_id_match"] = serology._normalize_patient_id(all_spine["patient_id"])
+    usable = usable.loc[usable["_patient_id_match"].isin(all_spine["_patient_id_match"].dropna())]
+    usable = usable.drop(columns="patient_id").merge(all_spine, on=serology.MATCH_KEY, how="left", validate="many_to_one")
+    if usable["patient_id"].isna().any():
+        raise ValueError("A lab episode is absent from the authoritative Step 01 spine")
+    indexed = spine.set_index(serology.KEY)
+    history = serology.derive_serology_history(indexed, pd.DataFrame(), usable, harmonized=True)
+    return {name: history.get(name, pd.Series(pd.NA, index=indexed.index)) for name in HISTORY_COLUMNS}
+
+
+def recalculate_serology(wide, text, *, eda_root, eda_spine_path, all_spine_path):
+    """Replace only the existing Step 01 serology and Step 20b baseline columns."""
+    serology = import_module("src.block_A.01_serological_profile")
+    labs_path = eda_root / "data_analytic" / "BTRIS" / serology.DEFAULT_LABS.name
+    if not labs_path.is_file():
+        LOG.warning("Se conservaron las 36 derivadas existentes. Falta la fuente %s", labs_path)
+        return wide
+
+    labs = pd.read_parquet(labs_path)
+    spine = wide.select(KEYS + ["clinical_anchor_date"]).to_pandas()
+    patients = serology._normalize_patient_id(spine["patient_id"])
+    labs = labs.loc[serology._normalize_patient_id(labs["patient_id"]).isin(patients)]
+    labs = serology._add_lab_id(labs)
+
+    try:
+        producer = _baseline_producer(eda_root)
+        patient_spine = producer.build_patient_baseline_frame(pd.read_parquet(eda_spine_path))
+        patient_spine = patient_spine.loc[patient_spine["patient_id"].isin(patients)]
+    except FileNotFoundError as error:
+        LOG.warning("Se conservaron las 7 derivadas de baseline. Falta %s", error.filename or error)
+        producer = None
+    if producer is not None and (missing := producer.REQUIRED_LAB_COLUMNS.difference(labs.columns)):
+        LOG.warning("Se conservaron las 7 derivadas de baseline. Faltan columnas en Step 20 %s", sorted(missing))
+        producer = None
+
+    history_labs = labs["lab_id"].isin(HISTORY_ANALYTES | HLA_ANALYTES)
+    baseline_labs = pd.Series(False, index=labs.index)
+    if producer is not None:
+        baseline_concepts = {name for group in producer.STABLE_SOURCES.values() for name in group}
+        baseline_concepts.update(producer.DYNAMIC_SOURCES.values())
+        baseline_labs = labs["canonical_analyte"].isin(baseline_concepts)
+    eligible = (history_labs & serology.eligible_matched_labs(labs)) | (
+        baseline_labs & labs["result_valid_for_analysis"].fillna(False).astype(bool)
+    )
+    labs = _harmonize_lab_evidence(labs.loc[eligible], text)
+    if all_spine_path.is_file():
+        all_spine = pd.read_parquet(all_spine_path, columns=serology.KEY)
+        updates = _episode_history(spine, all_spine, labs.loc[history_labs[eligible]], serology)
+    else:
+        LOG.warning("Se conservaron las 29 derivadas de historia y HLA. Falta %s", all_spine_path)
+        updates = {}
+
+    if producer is not None:
+        baseline_evidence = labs.loc[~labs["_effective_result_removed"]]
+        baseline = (producer.derive_wide(producer.derive_long(baseline_evidence, patient_spine), patient_spine)
+                    if not patient_spine.empty else pd.DataFrame(columns=["patient_id", *serology.BASELINE_FEATURES]))
+        merged = serology.merge_baseline(spine, baseline)
+        updates.update({name: merged[name] for name in serology.BASELINE_FEATURES})
+
+    for name, values in updates.items():
+        column = f"sero__{name}"
+        if column in wide.column_names:
+            replacement = [None if pd.isna(value) or value == "" and not previous.is_valid else value
+                           for value, previous in zip(values, wide[column], strict=True)]
+            wide = replace_values(wide, column, replacement)
+    return wide
 
 
 def write_parquet(path: Path, rows: list[dict], schema: pa.Schema) -> None:

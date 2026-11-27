@@ -945,6 +945,141 @@ def _status_is_positive(value: Any) -> Any:
     return pd.NA
 
 
+def _hla_consensus(evidence: pd.DataFrame, harmonized: bool) -> tuple[Any, bool]:
+    values = {}
+    for _, row in evidence.iterrows():
+        text = _text(row, "result_text")
+        if not text and (not harmonized or pd.isna(row.get("result_text"))):
+            text = _text(row, "result_raw")
+        if text:
+            key = text.casefold()
+            values.setdefault(key, text if harmonized else key)
+    if harmonized and not values and _column(evidence, "_effective_result_removed", False).any():
+        return "", False
+    return (next(iter(values.values())) if len(values) == 1 else pd.NA, len(values) > 1)
+
+
+def derive_serology_history(
+    spine: pd.DataFrame, selected: pd.DataFrame, usable: pd.DataFrame, *, harmonized: bool = False
+) -> dict[str, pd.Series]:
+    """Compute Step 01 history at each anchor and retrospective HLA consensus."""
+    # Include analytes observed only in nonclinical episodes: their dynamic
+    # episode value stays missing, but dated stable/genetic history may still
+    # legitimately become known at a later clinical visit.
+    families = (
+        usable.groupby("lab_id")["lab_family"].first()
+        if not usable.empty
+        else pd.Series(dtype="object")
+    )
+    wide_index = spine.index
+    anchors = pd.to_datetime(spine["clinical_anchor_date"], errors="coerce")
+    lab_dates = pd.to_datetime(usable["lab_date"], errors="coerce")
+    derived_columns: dict[str, pd.Series] = {}
+    for analyte, family in families.items():
+        part = (
+            selected[selected.lab_id.eq(analyte)]
+            if not selected.empty
+            else selected
+        )
+        if part.empty:
+            status_series = pd.Series(pd.NA, index=wide_index, dtype="string")
+        else:
+            status_series = (
+                part.set_index(KEY)["selected_reference_status"]
+                .reindex(wide_index)
+                .astype("string")
+            )
+        derived_columns[f"{analyte}__episode_status"] = status_series
+        evidence = usable[usable.lab_id.eq(analyte)].copy()
+        evidence["_date"] = lab_dates.reindex(evidence.index)
+        evidence["_status"] = evidence.apply(
+            lambda r: pd.NA if harmonized and r.get("_effective_result_removed", False)
+            else _status_is_positive(_reference_status(r)), axis=1
+        )
+        if (
+            pd.notna(family)
+            and family == "stable_autoimmune"
+            and evidence["_status"].notna().any()
+        ):
+            values = []
+            for (pid, _), date in zip(wide_index, anchors):
+                prior = evidence[
+                    evidence.patient_id.eq(pid)
+                    & evidence._date.notna()
+                    & evidence._date.le(date)
+                ]["_status"].dropna()
+                values.append(pd.NA if prior.empty else bool(prior.astype(bool).any()))
+            derived_columns[f"{analyte}__ever_positive_through_episode"] = pd.Series(
+                pd.array(values, dtype="boolean"), index=wide_index
+            )
+        if pd.notna(family) and family == "fixed_genetic":
+            consensus, consensus_conflict = {}, {}
+            for pid, patient in evidence.groupby("patient_id"):
+                consensus[pid], consensus_conflict[pid] = _hla_consensus(patient, harmonized)
+            derived_columns[f"{analyte}__patient_consensus_value"] = pd.Series(
+                [consensus.get(pid, pd.NA) for pid, _ in wide_index],
+                index=wide_index,
+                dtype="string",
+            )
+            derived_columns[f"{analyte}__patient_consensus_conflict"] = pd.Series(
+                pd.array(
+                    [consensus_conflict.get(pid, False) for pid, _ in wide_index],
+                    dtype="boolean",
+                ),
+                index=wide_index,
+            )
+            known = []
+            for (pid, _), date in zip(wide_index, anchors):
+                prior = evidence[
+                    evidence.patient_id.eq(pid)
+                    & evidence._date.notna()
+                    & evidence._date.le(date)
+                ]
+                known.append(bool(len(prior)))
+            derived_columns[f"{analyte}__known_through_episode"] = pd.Series(
+                pd.array(known, dtype="boolean"), index=wide_index
+            )
+            # Unlike the retrospective patient consensus, this value is built
+            # independently at every anchor. Undated and future observations
+            # cannot enter it; a future conflict therefore cannot rewrite the
+            # past. Same-day episodes intentionally share the same date cutoff.
+            asof_values = []
+            for (pid, _), date in zip(wide_index, anchors):
+                prior = evidence[
+                    evidence.patient_id.eq(pid)
+                    & evidence._date.notna()
+                    & evidence._date.le(date)
+                ]
+                asof_values.append(_hla_consensus(prior, harmonized)[0])
+            derived_columns[f"{analyte}__asof_value"] = pd.Series(
+                asof_values, index=wide_index, dtype="string"
+            )
+    return derived_columns
+
+
+def eligible_matched_labs(labs: pd.DataFrame) -> pd.Series:
+    """Select the source observations used by Step 01 episode history."""
+    return (
+        _bool(labs["result_valid_for_analysis"])
+        & labs["matched_clinical_episode_id"].notna()
+        & ~_bool(labs["episode_match_ambiguous"])
+    )
+
+
+def merge_baseline(wide: pd.DataFrame, baseline: pd.DataFrame) -> pd.DataFrame:
+    """Attach patient-level baseline serology to each of the patient's episodes."""
+    columns = ["patient_id", *[name for name in BASELINE_FEATURES if name in baseline]]
+    baseline_for_merge = baseline[columns].rename(columns={"patient_id": "_patient_id_match"})
+    baseline_for_merge["_patient_id_match"] = _normalize_patient_id(baseline_for_merge["_patient_id_match"])
+    if baseline_for_merge["_patient_id_match"].duplicated().any():
+        raise AssertionError("20b baseline has duplicate normalized patient IDs")
+    return (
+        wide.assign(_patient_id_match=_normalize_patient_id(wide["patient_id"]))
+        .merge(baseline_for_merge, on="_patient_id_match", how="left", validate="many_to_one")
+        .drop(columns="_patient_id_match")
+    )
+
+
 def build_wide(
     spine: pd.DataFrame, selected: pd.DataFrame, usable: pd.DataFrame
 ) -> tuple[pd.DataFrame, int]:
@@ -981,105 +1116,7 @@ def build_wide(
         pivot = selected.pivot(index=KEY, columns="lab_id", values=source)
         pivot.columns = [f"{c}__{suffix}" for c in pivot.columns]
         feature_frames.append(pivot.reindex(wide_index))
-    # Include analytes observed only in nonclinical episodes: their dynamic
-    # episode value stays missing, but dated stable/genetic history may still
-    # legitimately become known at a later clinical visit.
-    families = (
-        usable.groupby("lab_id")["lab_family"].first()
-        if not usable.empty
-        else pd.Series(dtype="object")
-    )
-    future_violations = 0
-    anchors = pd.to_datetime(wide_base["clinical_anchor_date"], errors="coerce")
-    lab_dates = pd.to_datetime(usable["lab_date"], errors="coerce")
-    derived_columns: dict[str, pd.Series] = {}
-    for analyte, family in families.items():
-        part = (
-            selected[selected.lab_id.eq(analyte)]
-            if not selected.empty
-            else selected
-        )
-        if part.empty:
-            status_series = pd.Series(pd.NA, index=wide_index, dtype="string")
-        else:
-            status_series = (
-                part.set_index(KEY)["selected_reference_status"]
-                .reindex(wide_index)
-                .astype("string")
-            )
-        derived_columns[f"{analyte}__episode_status"] = status_series
-        evidence = usable[usable.lab_id.eq(analyte)].copy()
-        evidence["_date"] = lab_dates.reindex(evidence.index)
-        evidence["_status"] = evidence.apply(
-            lambda r: _status_is_positive(_reference_status(r)), axis=1
-        )
-        if (
-            pd.notna(family)
-            and family == "stable_autoimmune"
-            and evidence["_status"].notna().any()
-        ):
-            values = []
-            for (pid, _), date in zip(wide_index, anchors):
-                prior = evidence[
-                    evidence.patient_id.eq(pid)
-                    & evidence._date.notna()
-                    & evidence._date.le(date)
-                ]["_status"].dropna()
-                values.append(pd.NA if prior.empty else bool(prior.astype(bool).any()))
-            derived_columns[f"{analyte}__ever_positive_through_episode"] = pd.Series(
-                pd.array(values, dtype="boolean"), index=wide_index
-            )
-        if pd.notna(family) and family == "fixed_genetic":
-            consensus, consensus_conflict = {}, {}
-            for pid, patient in evidence.groupby("patient_id"):
-                vals = {
-                    (_text(r, "result_text") or _text(r, "result_raw")).casefold()
-                    for _, r in patient.iterrows()
-                } - {""}
-                consensus[pid] = next(iter(vals)) if len(vals) == 1 else pd.NA
-                consensus_conflict[pid] = len(vals) > 1
-            derived_columns[f"{analyte}__patient_consensus_value"] = pd.Series(
-                [consensus.get(pid, pd.NA) for pid, _ in wide_index],
-                index=wide_index,
-                dtype="string",
-            )
-            derived_columns[f"{analyte}__patient_consensus_conflict"] = pd.Series(
-                pd.array(
-                    [consensus_conflict.get(pid, False) for pid, _ in wide_index],
-                    dtype="boolean",
-                ),
-                index=wide_index,
-            )
-            known = []
-            for (pid, _), date in zip(wide_index, anchors):
-                prior = evidence[
-                    evidence.patient_id.eq(pid)
-                    & evidence._date.notna()
-                    & evidence._date.le(date)
-                ]
-                known.append(bool(len(prior)))
-            derived_columns[f"{analyte}__known_through_episode"] = pd.Series(
-                pd.array(known, dtype="boolean"), index=wide_index
-            )
-            # Unlike the retrospective patient consensus, this value is built
-            # independently at every anchor. Undated and future observations
-            # cannot enter it; a future conflict therefore cannot rewrite the
-            # past. Same-day episodes intentionally share the same date cutoff.
-            asof_values = []
-            for (pid, _), date in zip(wide_index, anchors):
-                prior = evidence[
-                    evidence.patient_id.eq(pid)
-                    & evidence._date.notna()
-                    & evidence._date.le(date)
-                ]
-                vals = {
-                    (_text(r, "result_text") or _text(r, "result_raw")).casefold()
-                    for _, r in prior.iterrows()
-                } - {""}
-                asof_values.append(next(iter(vals)) if len(vals) == 1 else pd.NA)
-            derived_columns[f"{analyte}__asof_value"] = pd.Series(
-                asof_values, index=wide_index, dtype="string"
-            )
+    derived_columns = derive_serology_history(wide_base, selected, usable)
     derived_frame = (
         pd.DataFrame(derived_columns, index=wide_index)
         if derived_columns
@@ -1094,7 +1131,7 @@ def build_wide(
         axis=1,
     )
     wide = wide.reset_index().copy()
-    return wide, future_violations
+    return wide, 0
 
 
 def _detail(frame: pd.DataFrame, reason: str, spine: pd.DataFrame) -> pd.DataFrame:
@@ -1226,10 +1263,9 @@ def main(argv: list[str] | None = None) -> None:
         raise AssertionError("Clinical spine contains clinical_visit != True")
     labs["lab_date"] = pd.to_datetime(labs.lab_date, errors="coerce")
     mapped = labs.canonical_analyte.notna() & _mapping_valid(labs)
-    valid_result = _bool(labs.result_valid_for_analysis)
     matched = labs.matched_clinical_episode_id.notna()
     ambiguous = _bool(labs.episode_match_ambiguous)
-    eligible = valid_result & matched & ~ambiguous
+    eligible = eligible_matched_labs(labs)
     usable_all = labs[eligible].copy()
     usable_all["clinical_episode_id"] = usable_all.matched_clinical_episode_id
 
@@ -1376,18 +1412,7 @@ def main(argv: list[str] | None = None) -> None:
             "Lab wide accidentally inherited non-structural clinical-spine columns: "
             + ", ".join(leaked_columns[:50])
         )
-    baseline_feature_cols = [c for c in BASELINE_FEATURES if c in baseline]
-    baseline_for_merge = baseline[["_patient_id_match"] + baseline_feature_cols].copy()
-    if baseline_for_merge["_patient_id_match"].duplicated().any():
-        raise AssertionError("20b baseline has duplicate normalized patient IDs")
-    wide["_patient_id_match"] = _normalize_patient_id(wide["patient_id"])
-    wide = wide.merge(
-        baseline_for_merge,
-        on="_patient_id_match",
-        how="left",
-        validate="many_to_one",
-    )
-    wide = wide.drop(columns="_patient_id_match")
+    wide = merge_baseline(wide, baseline)
     wide_keys = pd.MultiIndex.from_frame(wide[KEY])
     missing_keys, extra_keys = (
         clinical_keys.difference(wide_keys),
