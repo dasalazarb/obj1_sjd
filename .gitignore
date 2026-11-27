@@ -12,6 +12,7 @@ node_modules/
 data/analytic/
 data/raw/
 outputs/
+/pharma_deck_outputs.zip
 work/
 dist/
 build/

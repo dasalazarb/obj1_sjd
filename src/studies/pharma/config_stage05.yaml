@@ -1,0 +1,31 @@
+contract_version: clinical_episode_curated_v2
+horizons_years: [1, 2, 5]
+minimum_at_risk_warning: 5
+stability_years: 2
+minimum_classifiable_visits: 2
+minimum_correlation_patients: 10
+minimum_event_patients: 5
+minimum_model_patients: 20
+minimum_treatment_cell: 5
+bootstrap_replicates: 1000
+minimum_bootstrap_success: 0.80
+refit_relative_tolerance: 0.000001
+refit_absolute_tolerance: 0.00000001
+risk_markers: [esr]
+correlation_markers: [esr, igg, protein_total, mcv, complement_c3, complement_c4]
+correlation_clinical_pairs:
+  esr: [biological, hematologic, esspri_total]
+  igg: [biological, hematologic, esspri_total]
+  protein_total: [biological, esspri_total]
+  mcv: [hematologic, fatigue]
+  complement_c3: [biological, hematologic]
+  complement_c4: [biological, hematologic]
+trend_markers: [esr, mcv, protein_total, igg, complement_c3, complement_c4]
+trend_window_years: 2
+minimum_trend_measurements: 3
+# Enable only with a reviewed, date-precise source in the fixed source contract.
+administrative_cutoff: null
+death_date_column: null
+# Eligibility and disclosure parameters remain investigator review decisions.
+specimen_window_years: 1
+disclosure_minimum_cell: null
