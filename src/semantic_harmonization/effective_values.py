@@ -1,4 +1,4 @@
-"""Build and verify the literal, schema-preserving Step 10 representation."""
+"""Materialize Effective values from the Step 10 clinical episode table."""
 from __future__ import annotations
 
 from collections import Counter, defaultdict
@@ -6,22 +6,105 @@ from dataclasses import dataclass
 from decimal import Decimal
 import json
 from pathlib import Path
+import re
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .inventory import protected
-from .parsers import normalize
+from .inventory import CONTEXT_FIELDS, LAB, WIDE_CONTEXT, check_keys, clean, protected, route
+from .parsers import METHOD_OR_COMMENT, PLANNED, format_hla_result, format_urine_result, normalize, standalone_limit
 from .schemas import BOOL, INT, LINEAGE, STR
+from .segmentation import ADMIN, CUTOFF, HEADINGS, HLA_LABEL, PROCESS, SPECIMEN
 from .semantic_facts import clinical, coverage, fact_spans
 from .settings import KEYS, serialize
 from .table_exports import structured
 
 EFFECTIVE = "10_integrated_longitudinal_clinical_episode_effective.parquet"
+REDUNDANT_LAB_TEXT = frozenset("""
+lab__acute_care_panel__anion_gap_blood__text
+lab__acute_care_panel__chloride_blood__text
+lab__acute_care_panel__co2_total_blood__text
+lab__acute_care_panel__potassium_blood__text
+lab__acute_care_panel__sodium_blood__text
+lab__albumin__text
+lab__alkaline_phosphatase__text
+lab__alpha1_globulin__text
+lab__alpha2_globulin__text
+lab__alt__text
+lab__amylase__text
+lab__anc__text
+lab__ast__text
+lab__basophil_absolute__text
+lab__basophil_percent__text
+lab__beta1_globulin__text
+lab__beta2_globulin__text
+lab__beta_globulin__text
+lab__calcium__text
+lab__cbc_diff__variant_lymphocytes_blood__text
+lab__complement_c3__text
+lab__creatine_kinase__text
+lab__creatinine__text
+lab__eosinophil_absolute__text
+lab__eosinophil_percent__text
+lab__esr__text
+lab__estimated_average_glucose__text
+lab__ferritin__text
+lab__gamma_globulin__text
+lab__glucose__text
+lab__hdl_cholesterol__text
+lab__hematocrit__text
+lab__hemoglobin__text
+lab__hemoglobin_a1c__text
+lab__igg__text
+lab__igg_subclass_1__text
+lab__igg_subclass_2__text
+lab__igg_total__text
+lab__igm__text
+lab__immature_granulocyte_absolute__text
+lab__immature_granulocyte_percent__text
+lab__immunofixation_electrophoresis_serum__albumin_ord_electrophoresis_pro_or_ife_blood__text
+lab__iron_saturation__text
+lab__ldl_cholesterol_calculated__text
+lab__lymphocyte_count__text
+lab__lymphocyte_percent__text
+lab__magnesium__text
+lab__mch__text
+lab__mchc__text
+lab__mcv__text
+lab__monocyte_absolute__text
+lab__monocyte_percent__text
+lab__mpv__text
+lab__neutrophil_percent__text
+lab__nucleated_rbc_absolute__text
+lab__nucleated_rbc_percent__text
+lab__phosphorus__text
+lab__platelet_count__text
+lab__protein_total__text
+lab__protein_total_electrophoresis__text
+lab__quantiferon_nil__text
+lab__quantiferon_tb1_minus_nil__text
+lab__quantiferon_tb2_minus_nil__text
+lab__rbc__text
+lab__rdw__text
+lab__serum_iron__text
+lab__total_cholesterol__text
+lab__transferrin__text
+lab__triglycerides__text
+lab__uric_acid__text
+lab__urine_ph__text
+lab__urine_squamous_cells__text
+lab__wbc__text
+""".split())
 RULE = "effective-value-v2"
 ORIGINS = ("current_validated", "previous_validated", "original_fallback", "original_partial",
            "original_unchanged", "original_null")
 CORRECTED = frozenset(ORIGINS[:2])
+EMPTY_RESULTS = {
+    "improperly collected specimen not run", "specimen clotted", "invalid specimen",
+    "insufficient sample", "insufficient specimen", "specimen not run", "not tested",
+    "test canceled", "test cancelled", "canceled", "result pending",
+}
+URINE_PREFIXES = ("urine_", "urinalysis_includes_microscopic__")
 TEXT_TYPES = (pa.types.is_string, pa.types.is_large_string, pa.types.is_string_view)
 RESIDUAL = pa.list_(pa.struct([("source_field", STR), ("start", INT), ("end", INT), ("text", STR), ("role", STR)]))
 EVIDENCE = pa.list_(pa.struct([("fact_id", STR), ("source_field", STR), ("start", INT), ("end", INT),
@@ -121,10 +204,36 @@ def lexical_rules(mapping, rules):
     return {}
 
 
-def choose_effective(raw, dtype, mapping, parts, facts, historical, rules):
-    """Replace an entire raw cell only when a current rule proves same-type equivalence."""
+def choose_effective(raw, dtype, mapping, parts, facts, historical, rules, *, compact=False):
+    """Select the same-type Effective rendering of a source cell."""
     if not raw.is_valid:
         return Decision("original_null", "source null")
+    if compact:
+        text = raw.as_py()
+        token = normalize(text).strip(" .:")
+        if standalone_limit(text.strip()):
+            return Decision("original_unchanged", "literal result", text)
+        if not token:
+            return Decision("original_unchanged" if not text else "current_validated", "empty result", "")
+        attached_comment = ADMIN.match(text.strip()) and any(
+            json.loads(mapping["context_json"]).get(name) for name in ("observation_comment", "observation_note")
+        )
+        if attached_comment:
+            return Decision("original_fallback", "requires clinical extraction")
+        if (token in EMPTY_RESULTS or token in rules["availability"] or token in rules["specimen"]
+                or token in rules["administrative"] or PROCESS.fullmatch(token) or SPECIMEN.fullmatch(token)):
+            return Decision("current_validated", "non-result", "")
+        if mapping["family"] == "hla" and (value := format_hla_result(text)) is not None:
+            return Decision("current_validated", "HLA nomenclature", value)
+        if (METHOD_OR_COMMENT.search(text) or ADMIN.match(text.strip()) or CUTOFF.match(text) or PLANNED.search(text)
+                or any(match.lastgroup in {"reference", "method", "general"} for match in HEADINGS.finditer(text))
+                or mapping["family"] == "hla" and HLA_LABEL.match(text)
+                or re.search(r"[.!?]\s+[A-Za-z]|\n\s*\S", text)
+                or len(text) > 85 or len(text.split()) > 11):
+            return Decision("original_fallback", "requires clinical extraction")
+        value = format_effective_text(text, mapping, rules)
+        return Decision("original_unchanged" if value == text else "current_validated", "concise result", value)
+
     populated = [fact for fact in facts if clinical(fact)]
     if any(check(dtype) for check in TEXT_TYPES):
         text = raw.as_py()
@@ -167,6 +276,96 @@ def choose_effective(raw, dtype, mapping, parts, facts, historical, rules):
             return Decision("original_partial", "supported facts leave source text unresolved")
         return Decision("original_fallback", "supported facts retained separately without a lossless same-type rendering")
     return Decision("original_fallback", "no complete validated correction")
+
+
+def format_effective_text(text, mapping, rules):
+    """Apply orthographic rules to a standalone or freshly extracted result."""
+    if not text.strip():
+        return ""
+    if standalone_limit(text.strip()):
+        return text
+    if mapping["family"] == "hla":
+        formatted = format_hla_result(text)
+        return text if formatted is None else formatted
+    if mapping["concept"].startswith(URINE_PREFIXES):
+        return format_urine_result(text, rules["urine_effective"])
+    return text
+
+
+class EffectiveText:
+    """Reuse the same decisions across episode cells and source observations."""
+
+    def __init__(self, cfg, extract):
+        self.cfg = cfg
+        self.extract = extract
+        self.values = {}
+
+    def resolve(self, requests):
+        """Resolve each variable, original text, and assay context once."""
+        rules = self.cfg["normalization"]
+        pending = {}
+        for key in dict.fromkeys(requests):
+            if key in self.values:
+                continue
+            variable, text, context = key
+            concept, family = route(variable, self.cfg)
+            row = dict(variable=variable, concept=concept, family=family, context_json=context)
+            choice = choose_effective(pa.scalar(text, type=STR), STR, row, (), (), {}, rules, compact=True)
+            if text is not None and choice.value is None:
+                pending[key] = dict(row, raw_text=text)
+            else:
+                self.values[key] = choice.value
+        if pending:
+            for key, row, answer in zip(pending, pending.values(), self.extract(list(pending.values())), strict=True):
+                self.values[key] = format_effective_text(answer, row, rules)
+
+
+def replace_values(table, name, values):
+    """Replace a column using its original Arrow field and physical type."""
+    index = table.schema.get_field_index(name)
+    field = table.schema.field(index)
+    return table.set_column(index, field, pa.array(values, type=field.type))
+
+
+def update_effective(original, active, context, text):
+    """Build the active wide table without republishing historical sidecars."""
+    keys = check_keys(original.select(KEYS).to_pandas(), "Step 10")
+    if not keys.equals(check_keys(active.select(KEYS).to_pandas(), "Effective")):
+        raise ValueError("Effective wide episode keys or row order differ from Step 10")
+    if context is not None:
+        context = context.set_index(KEYS).reindex(keys)
+
+    def context_values(name):
+        if name in original.column_names:
+            return original[name].to_pylist()
+        if context is not None and name in context:
+            return context[name].tolist()
+        return [None] * len(active)
+
+    wide = active.select([name for name in active.column_names if name not in REDUNDANT_LAB_TEXT])
+    metadata = wide.schema.metadata
+    if metadata and b"pandas" in metadata and wide.num_columns != active.num_columns:
+        pandas_schema = json.loads(metadata[b"pandas"])
+        pandas_schema["columns"] = [column for column in pandas_schema["columns"]
+                                    if column["field_name"] in wide.column_names]
+        wide = wide.replace_schema_metadata(metadata | {b"pandas": serialize(pandas_schema).encode()})
+    requests = {}
+    for field in wide.schema:
+        match = LAB.fullmatch(field.name)
+        if not match or match[2] != "text" or not any(check(wire_type(field.type)) for check in TEXT_TYPES):
+            continue
+        column_context = {key: context_values(f"lab__{match[1]}__{suffix}") for key, suffix in WIDE_CONTEXT.items()}
+        requests[field.name] = [
+            (field.name, value, serialize({key: clean(column_context[key][i]) if key in column_context else None
+                                          for key in CONTEXT_FIELDS}))
+            for i, value in enumerate(wide[field.name].to_pylist())
+        ]
+    text.resolve(key for column in requests.values() for key in column)
+    for name, column in requests.items():
+        values = [text.values[key] for key in column]
+        if any(value != key[1] for value, key in zip(values, column, strict=True)):
+            wide = replace_values(wide, name, values)
+    return wide
 
 
 def residual_segments(parts, facts):

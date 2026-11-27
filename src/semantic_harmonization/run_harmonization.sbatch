@@ -75,8 +75,6 @@ mkdir -p \
 test -f "$IMAGE"
 test -x "$PYTHON"
 export APPTAINERENV_SJD_CANONICAL_REPO="$repo"
-read -r image_sha _ < <(sha256sum -- "$IMAGE")
-export APPTAINERENV_SJD_CONTAINER_SHA256="$image_sha"
 
 echo "Starting semantic harmonization"
 echo "Job ID: $SLURM_JOB_ID"

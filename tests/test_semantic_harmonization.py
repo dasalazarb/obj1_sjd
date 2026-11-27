@@ -1462,7 +1462,7 @@ def test_effective_csv_corrupted_before_seal_blocks_publication(tmp_path, cfg, m
     assert not list(Path(cfg["paths"]["output"]).glob("*/run_manifest.json"))
 
 
-def test_cli_publishes_effective_with_no_history_and_keeps_selector(tmp_path, cfg, monkeypatch, capsys):
+def test_cli_updates_active_effective_and_keeps_selector(tmp_path, cfg, monkeypatch, capsys):
     from src.semantic_harmonization import report_existing, report_progress, run_pipeline as pipeline
 
     def unexpected(*args, **kwargs):
@@ -1471,24 +1471,37 @@ def test_cli_publishes_effective_with_no_history_and_keeps_selector(tmp_path, cf
     for name in ("baseline_run", "previous_run", "frozen_references", "generate", "update_report_pointer"):
         monkeypatch.setattr(report_existing, name, unexpected)
     monkeypatch.setattr(report_progress, "selector_blockers", unexpected)
-    resources = with_profile_residuals(tmp_path, cfg)
-    reference = Path(cfg["paths"]["obj1_root"]) / "outputs/tables/qc/semantic_harmonization_reports"
+    monkeypatch.setattr(pipeline, "run", unexpected)
+    monkeypatch.setattr(pipeline.common, "EDA_SJD_ROOT", tmp_path / "missing-eda")
+    root = tmp_path / "obj1"
+    step10 = tmp_path / "step10.parquet"
+    cfg["paths"].update(obj1_root=str(root), integrated=str(step10), context=None)
+    effective = root / "data/analytic/semantic_harmonization/active" / EFFECTIVE
+    effective.parent.mkdir(parents=True)
+    table = pa.table({
+        "patient_id": ["P1", "P1"], "clinical_episode_id": ["E1", "E2"],
+        "lab__wbc__text": pa.array(["", None], type=pa.string()),
+        "lab__wbc__value": [3.1, 4.2],
+        "lab__urine_protein_qualitative__text": ["Trace (10-20 mg/dL)", None],
+        "lab__ana_status__text": [">=1:2560", "HEMOLYZED"],
+    })
+    pq.write_table(table, step10)
+    pq.write_table(table, effective)
+    reference = root / "outputs/tables/qc/semantic_harmonization_reports"
     reference.mkdir(parents=True)
     pointer = reference / "current_v2.json"
     prior = serialize({"target_run_id": "a" * 64, "report_id": "b" * 64})
     pointer.write_text(prior)
-    cfg["paths"]["baseline"] = str(tmp_path / "missing-v1")
-    model = SmokeModel(cfg, {"finding": empty_smoke})
     monkeypatch.setattr(pipeline, "load_config", lambda: cfg)
     monkeypatch.setattr(pipeline.sys, "argv", ["run_pipeline"])
-    monkeypatch.setattr(pipeline, "run", lambda cfg: run(
-        cfg, encoder=Encoder(), model_factory=lambda _: model, resource_verify=lambda _: resources))
     pipeline.main()
     assert pointer.read_text() == prior
     assert list(reference.iterdir()) == [pointer]
-    analytic, = Path(cfg["paths"]["analytic"]).iterdir()
-    assert capsys.readouterr().out.splitlines()[-3:] == [
-        f"Effective Parquet: {analytic / EFFECTIVE}",
-        f"Effective CSV: {(analytic / EFFECTIVE).with_suffix('.csv')}",
-        f"V2 run ID: {analytic.name}",
-    ]
+    assert list(effective.parent.iterdir()) == [effective]
+    assert pq.read_table(step10).equals(table)
+    updated = pq.read_table(effective)
+    assert updated.schema == table.drop(["lab__wbc__text"]).schema
+    assert updated["lab__wbc__value"].equals(table["lab__wbc__value"])
+    assert updated["lab__urine_protein_qualitative__text"].to_pylist() == ["Trace(10-20mg/dL)", None]
+    assert updated["lab__ana_status__text"].to_pylist() == [">=1:2560", ""]
+    assert capsys.readouterr().out.strip() == f"Effective Parquet: {effective}"

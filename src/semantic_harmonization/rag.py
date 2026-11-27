@@ -157,8 +157,10 @@ class KnowledgeIndex:
         self.aliases = [alias for doc in docs for alias in dict.fromkeys(doc["aliases"] or [doc["title"]])]
         self.doc_numbers = np.array([i for i, doc in enumerate(docs) for _ in dict.fromkeys(doc["aliases"] or [doc["title"]])])
         corpus_hash = digest(docs)
+        # Wide-table display spelling does not affect the existing search index.
+        rules = {key: value for key, value in cfg["normalization"].items() if key != "urine_effective"}
         identity = dict(corpus=corpus_hash, encoder=manifest["resources"]["sapbert"]["sha256"],
-                        rules=cfg["normalization"], config=self.cfg)
+                        rules=rules, config=self.cfg)
         identity_key = digest(identity)
         directory.mkdir(parents=True, exist_ok=True)
         store = directory / identity_key

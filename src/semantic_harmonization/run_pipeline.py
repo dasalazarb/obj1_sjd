@@ -1,4 +1,4 @@
-"""Publish the Step 10 Effective dataset and its typed sidecars."""
+"""Materialize the Step 10 Effective dataset."""
 from __future__ import annotations
 
 from collections import Counter, defaultdict
@@ -9,22 +9,25 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 from time import monotonic
 
 if not __package__:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    __package__ = "semantic_harmonization"
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    __package__ = "src.semantic_harmonization"
 
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+import common
+
 from .analytic_representation import materialize, write_readiness
-from .application import apply, validate_original, write_parquet
-from .effective_values import EFFECTIVE, RULE as EFFECTIVE_CONTRACT, build_effective
+from .application import apply, recalculate_serology, validate_original, write_parquet
+from .effective_values import EFFECTIVE, RULE as EFFECTIVE_CONTRACT, EffectiveText, build_effective, update_effective
 from .inference import (EvidenceError, InferenceUnavailable, LocalModel, apply_extraction, empty_extraction,
                         extract_batch, force_offline, profile, routing, skipped_smoke, smoke_cases, validate_extraction,
                         validate_profile)
@@ -462,6 +465,57 @@ def run(cfg: dict, *, encoder=None, model_factory=LocalModel, resource_verify=No
     return analytic_final, out_final
 
 
+def refresh_active(cfg: dict) -> Path:
+    """Refresh the parquet selected by the downstream consumers in place."""
+    paths = cfg["paths"]
+    root = Path(paths["obj1_root"])
+    effective_input = root / common.EFFECTIVE_LONGITUDINAL_PARQUET.relative_to(common.PROJECT_ROOT)
+    target = common.resolve_effective_longitudinal_input(effective_input)
+    if not target.is_file():
+        raise FileNotFoundError(f"No existe el Effective activo en {effective_input}")
+
+    force_offline()
+    model = index = ipd = None
+
+    def extract(rows):
+        nonlocal model, index, ipd
+        if model is None:
+            resources = verify(cfg)
+            ipd = vocabularies(resources)["ipd"]
+            corpus = documents(cfg, resources)
+            index = KnowledgeIndex(cfg, resources, corpus, Path(paths["knowledge_dir"]) / "knowledge_index")
+            model = LocalModel(cfg)
+        return model.extract_compact(rows, index, ipd)
+
+    directory = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(directory, fcntl.LOCK_EX)
+        original = pq.read_table(paths["integrated"])
+        context_path = paths.get("context")
+        context = pd.read_parquet(context_path) if context_path and Path(context_path).is_file() else None
+        text = EffectiveText(cfg, extract)
+        wide = update_effective(original, pq.read_table(target), context, text)
+        wide = recalculate_serology(
+            wide, text, eda_root=common.EDA_SJD_ROOT,
+            eda_spine_path=common.EDA_SJD_CLINICAL_EPISODE_SPINE,
+            all_spine_path=root / common.EPISODE_SPINE_PARQUET.relative_to(common.PROJECT_ROOT),
+        )
+        # Replace the active file only after all transformations have finished.
+        with tempfile.NamedTemporaryFile(dir=target.parent, prefix=".effective-", delete=False) as staging:
+            staged = Path(staging.name)
+            try:
+                pq.write_table(wide, staging)
+                staging.flush()
+                os.fchmod(staging.fileno(), stat.S_IMODE(target.stat().st_mode))
+                os.fsync(staging.fileno())
+                staged.replace(target)
+            finally:
+                staged.unlink(missing_ok=True)
+    finally:
+        os.close(directory)
+    return target
+
+
 def main() -> None:
     """Run using YAML and surface safe error types in scheduler output."""
     if len(sys.argv) != 1:
@@ -472,11 +526,13 @@ def main() -> None:
         # Configuration is resolved before reading clinical inputs.
         raise SystemExit(f"Harmonization configuration is incomplete ({error}).") from None
     try:
-        analytic, out = run(cfg)
+        effective = refresh_active(cfg)
     except PermissionError as error:
         raise SystemExit(f"Harmonization stopped because an input or staging path is inaccessible ({error.filename}).") from None
     except FileNotFoundError as error:
         raise SystemExit(f"Harmonization stopped because a required file is missing ({error}).") from None
+    except InferenceUnavailable as error:
+        raise SystemExit(f"Harmonization stopped before publication ({error}).") from None
     except (ValueError, RuntimeError) as error:
         import traceback
 
@@ -491,9 +547,7 @@ def main() -> None:
         raise SystemExit(
             "Harmonization stopped before publication."
         ) from None
-    print(f"Effective Parquet: {analytic.resolve() / EFFECTIVE}")
-    print(f"Effective CSV: {(analytic.resolve() / EFFECTIVE).with_suffix('.csv')}")
-    print(f"V2 run ID: {out.name}")
+    print(f"Effective Parquet: {effective.resolve()}")
 
 
 if __name__ == "__main__":

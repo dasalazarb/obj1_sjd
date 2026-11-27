@@ -36,6 +36,54 @@ def normalize(text: str) -> str:
     return " ".join(unicodedata.normalize("NFKC", text).casefold().split())
 
 
+URINE_RESULT = re.compile(r"(?P<label>[A-Za-z]+(?:\s+[A-Za-z]+)*|[1-4]\+)\s*(?:\(\s*(?P<amount>[^()]+?)\s*\))?")
+HLA_LEGACY_TOKEN = re.compile(r"\d\*(?:\*|\d{2,3})")
+METHOD_OR_COMMENT = re.compile(
+    r"\b(?:see (?:below|note|comment|report)|note\s*:|method(?:ology)?\s*:|"
+    r"reference (?:range|interval|values?)|performed (?:by|at|using)|"
+    r"laboratory[ -]developed|low\s*/\s*intermediate resolution|"
+    r"specimen (?:clotted|rejected|not processed)|invalid(?:ated)?|"
+    r"not (?:run|performed|calculated)|unable to|cannot be calculated|"
+    r"will be (?:reviewed|reported|repeated)|for (?:research|assay) use)\b", re.I,
+)
+
+
+def standalone_limit(text: str) -> bool:
+    """Recognize literal limits and intervals without rendering their values."""
+    single = SINGLE.fullmatch(text)
+    titer = TITER.fullmatch(text.casefold())
+    return bool(RANGE.fullmatch(text) or single and single["operator"] or titer and titer["op"])
+
+
+def format_urine_result(text: str, aliases: dict) -> str:
+    """Standardize whole grades and descriptors while retaining their measured detail."""
+    match = URINE_RESULT.fullmatch(text.strip())
+    if not match:
+        return text
+    label = normalize(match["label"])
+    canonical = aliases.get(label, label if re.fullmatch(r"[1-4]\+", label) else None)
+    if canonical is None:
+        return text
+    amount = match["amount"]
+    if amount is None:
+        return canonical
+    if not (SINGLE.fullmatch(amount) or RANGE.fullmatch(amount)):
+        return text
+    return f"{canonical}({re.sub(r'\s+', '', amount)})"
+
+
+def format_hla_result(text: str) -> str | None:
+    """Format unambiguous reported tokens without extending their resolution."""
+    parts = [part.strip() for part in re.split(r"[,;|]", text)]
+    if parts in (["*"], ["*", "*"]):
+        return ""
+    if not all(part == "*" or ALLELE.fullmatch(part.upper()) or HLA_LEGACY_TOKEN.fullmatch(part)
+               for part in parts):
+        return None
+    # Only an allele-shaped token can have a lowercase group suffix.
+    return ",".join(part[:-1] + "G" if part.endswith("g") and part.count(":") >= 2 else part for part in parts)
+
+
 def valid_ucum(unit: str, units: set[str]) -> bool:
     """Recognize exact atoms and simple ratios/products of UCUM atoms."""
     if unit in units:
