@@ -20,7 +20,22 @@ def numeric(series):
     values=observed_values(series)
     binary={'positive':1.,'negative':0.,'pos':1.,'neg':0.,'reactive':1.,'nonreactive':0.,'detected':1.,'not detected':0.}
     values=values.map(lambda value: binary.get(str(value).strip().lower(),value))
-    return pd.to_numeric(values,errors='coerce').replace([np.inf,-np.inf],np.nan)
+    return pd.to_numeric(values,errors='coerce').astype('float64').replace([np.inf,-np.inf],np.nan)
+
+
+def profile_value_kind(raw, clean, series, declared_type):
+    """Classify once across the source, not separately in each community."""
+    tokens=clean.dropna().astype('string').str.strip().str.lower()
+    binary_labels={'positive','negative','pos','neg','reactive','nonreactive','detected','not detected'}
+    boolean_dtype=any(pd.api.types.is_bool_dtype(s.dtype) for s in (raw,clean))
+    boolean_objects=bool(len(tokens)) and all(isinstance(v,(bool,np.bool_)) for v in clean.dropna())
+    if declared_type=='binary' or boolean_dtype or boolean_objects or (len(tokens) and set(tokens)<=binary_labels):
+        return 'binary'
+    if declared_type in {'categorical','nominal'}:
+        return 'categorical'
+    if declared_type in {'numeric','ordinal','continuous'} or (series.notna().sum()==clean.notna().sum() and series.notna().any()):
+        return 'numeric'
+    return 'categorical'
 
 
 def effect_interval(x,y,kind,replicates,seed):
@@ -67,23 +82,33 @@ def profile_tables(baseline,membership,roles,manifest,validation,seed):
             column=role.source_column
             if role.validation_role=='unavailable' or column not in frame: continue
             clean=observed_values(frame[column]); series=numeric(clean)
-            numeric_kind=role.type=='numeric' or (series.notna().sum()==clean.notna().sum() and series.notna().any())
+            kind=profile_value_kind(frame[column],clean,series,role.type)
+            binary_kind=kind=='binary'
+            numeric_kind=kind in {'numeric','binary'}
+            if binary_kind:
+                series=series.where(series.isin([0.,1.]))
+            summary_series=series if numeric_kind else clean
             for community,group in frame.groupby('community_id',sort=True):
-                observed=series.loc[group.index].dropna() if numeric_kind else clean.loc[group.index].dropna()
+                observed=summary_series.loc[group.index].dropna()
+                n_positive=int(observed.eq(1).sum()) if binary_kind else np.nan
+                n_negative=int(observed.eq(0).sum()) if binary_kind else np.nan
                 baseline_rows.append({'representation_id':identifier,'community_id':community,'source_column':column,
                     'validation_role':role.validation_role,'n_patients':len(group),'n_observed':len(observed),
-                    'n_missing':len(group)-len(observed),'unit':role.unit,'data_type':'numeric' if numeric_kind else 'categorical',
-                    'median':float(observed.median()) if numeric_kind and len(observed) else np.nan,
-                    'q25':float(observed.quantile(.25)) if numeric_kind and len(observed) else np.nan,
-                    'q75':float(observed.quantile(.75)) if numeric_kind and len(observed) else np.nan,
-                    'category_counts':observed.value_counts().to_json() if not numeric_kind else None})
+                    'n_missing':len(group)-len(observed),'unit':role.unit,'data_type':kind,
+                    'n_pos':n_positive,'n_neg':n_negative,
+                    'proportion':n_positive/len(observed) if binary_kind and len(observed) else np.nan,
+                    'type_consistency_note':'BOOLEAN_SOURCE_DECLARED_NUMERIC' if role.type=='numeric' and pd.api.types.is_bool_dtype(frame[column].dtype) else '',
+                    'median':float(observed.median()) if kind=='numeric' and len(observed) else np.nan,
+                    'q25':float(observed.quantile(.25)) if kind=='numeric' and len(observed) else np.nan,
+                    'q75':float(observed.quantile(.75)) if kind=='numeric' and len(observed) else np.nan,
+                    'category_counts':observed.value_counts().to_json() if kind!='numeric' else None})
                 missing.append({'representation_id':identifier,'community_id':community,'source_column':column,
                     'n_patients':len(group),'n_observed':len(observed),'n_missing':len(group)-len(observed),'missing_fraction':1-len(observed)/len(group)})
                 if role.validation_role not in {'defining','derived_from_defining','independent_baseline_anchor'}: continue
                 row={'representation_id':identifier,'community_id':community,'source_column':column,
                     'validation_role':role.validation_role,'unit':role.unit,'analysis_population':'covered_untied_supported_hard_assignment',
                     'status':'DESCRIPTIVE','reason':'discovery_features_are_not_independent_validation',
-                    'n_group':len(observed),'n_rest':int(series.loc[frame.community_id.ne(community)].notna().sum()),
+                    'n_group':len(observed),'n_rest':int(summary_series.loc[frame.community_id.ne(community)].notna().sum()),
                     'effect':np.nan,'ci_low':np.nan,'ci_high':np.nan,'p_value':np.nan,'q_value':np.nan}
                 if role.validation_role in {'defining','derived_from_defining'} and numeric_kind:
                     x=series.loc[group.index].dropna().to_numpy(float)
@@ -102,11 +127,11 @@ def profile_tables(baseline,membership,roles,manifest,validation,seed):
                     elif not numeric_kind or min(len(x),len(y))<int(validation['minimum_group_patients']):
                         row.update(status='NOT_ESTIMABLE',reason='INSUFFICIENT_OBSERVED_GROUP_OR_REST')
                     else:
-                        binary=set(np.r_[x,y])<={0.,1.}
-                        kind='binary' if binary else 'continuous'
+                        binary=binary_kind
+                        effect_kind='binary' if binary else 'continuous'
                         effect=odds_ratio_2x2(int(x.sum()),len(x)-int(x.sum()),int(y.sum()),len(y)-int(y.sum())) if binary else cliffs_delta(x,y)
                         p=fisher_exact([[int(x.sum()),len(x)-int(x.sum())],[int(y.sum()),len(y)-int(y.sum())]])[1] if binary else mannwhitneyu(x,y,alternative='two-sided').pvalue
-                        lo,hi=effect_interval(x,y,kind,validation['effect_ci_replicates'],seed)
+                        lo,hi=effect_interval(x,y,effect_kind,validation['effect_ci_replicates'],seed)
                         row.update(effect=effect,effect_type='odds_ratio' if binary else 'cliffs_delta',ci_low=lo,ci_high=hi,p_value=float(p),
                             inference_scope='in_sample_exploratory_conditional_on_frozen_labels',community_selection_uncertainty='not_included_conditional_intervals')
                     anchor_rows.append(row.copy())
